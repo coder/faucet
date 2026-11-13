@@ -462,6 +462,7 @@ func TestSubscribeNeverWritesTheSecretAnywhere(t *testing.T) {
 	seen = append(seen, "logs: "+h.logs.String())
 	for _, row := range h.rows() {
 		record("row", row)
+		seen = append(seen, "row secret_enc: "+string(row.SecretEnc))
 	}
 	text := strings.Join(seen, "\n")
 	require.NotEmpty(t, h.logs.String(), "the service logged the subscribe")
