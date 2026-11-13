@@ -113,7 +113,7 @@ func (s *stubStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.Po
 	return page, nil
 }
 
-func (s *stubStore) CursorAt(context.Context, time.Time) (int64, error) { return 7, nil }
+func (*stubStore) CursorAt(context.Context, time.Time) (int64, error) { return 7, nil }
 
 func (s *stubStore) pollCount() int {
 	s.mu.Lock()
@@ -174,7 +174,7 @@ func (b bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(r)
 }
 
-func (s *testServer) connect(t *testing.T, ctx context.Context, token string) *mcp.ClientSession {
+func (s *testServer) connect(ctx context.Context, t *testing.T, token string) *mcp.ClientSession {
 	t.Helper()
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
 	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
@@ -203,7 +203,7 @@ func toolText(t *testing.T, res *mcp.CallToolResult) string {
 	return text.Text
 }
 
-func rawPost(t *testing.T, srv *testServer, header string) (*http.Response, string) {
+func rawPost(t *testing.T, srv *testServer, header string) (status int, wwwAuthenticate, body string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -216,9 +216,9 @@ func rawPost(t *testing.T, srv *testServer, header string) (*http.Response, stri
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	return resp, string(body)
+	return resp.StatusCode, resp.Header.Get("WWW-Authenticate"), string(raw)
 }
 
 func TestMCPRejectsRequestsWithoutAGoodBearerToken(t *testing.T) {
@@ -230,16 +230,16 @@ func TestMCPRejectsRequestsWithoutAGoodBearerToken(t *testing.T) {
 		"Bearer " + strings.Repeat("a", 1025),
 	}
 	for _, header := range malformed {
-		resp, body := rawPost(t, srv, header)
-		require.Equal(t, http.StatusUnauthorized, resp.StatusCode, "%q", header)
-		require.Equal(t, "Bearer", resp.Header.Get("WWW-Authenticate"))
+		status, challenge, body := rawPost(t, srv, header)
+		require.Equal(t, http.StatusUnauthorized, status, "%q", header)
+		require.Equal(t, "Bearer", challenge)
 		require.Equal(t, "unauthorized\n", body)
 	}
 	paths, _ := srv.github.seen()
 	require.Empty(t, paths, "a malformed header must not reach GitHub")
 
-	resp, body := rawPost(t, srv, "Bearer "+staleToken)
-	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	status, _, body := rawPost(t, srv, "Bearer "+staleToken)
+	require.Equal(t, http.StatusUnauthorized, status)
 	require.Equal(t, "unauthorized\n", body, "GitHub's refusal looks like a malformed header")
 	paths, _ = srv.github.seen()
 	require.Equal(t, []string{"/user"}, paths)
@@ -254,8 +254,8 @@ func TestMCPGitHubFailureIsABadGateway(t *testing.T) {
 	srv.github.userErr = http.StatusInternalServerError
 	srv.github.mu.Unlock()
 
-	resp, body := rawPost(t, srv, "Bearer "+aliceToken)
-	require.Equal(t, http.StatusBadGateway, resp.StatusCode)
+	status, _, body := rawPost(t, srv, "Bearer "+aliceToken)
+	require.Equal(t, http.StatusBadGateway, status)
 	require.NotContains(t, body, "500")
 	srv.requireNoToken(t, "a response or the log", body)
 	require.Contains(t, srv.logs.String(), "could not check the GitHub token")
@@ -267,7 +267,7 @@ func TestMCPToolWaitsForAllowedRepoOverHTTP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	srv := newTestServer(t)
-	session := srv.connect(t, ctx, aliceToken)
+	session := srv.connect(ctx, t, aliceToken)
 
 	tools, err := session.ListTools(ctx, nil)
 	require.NoError(t, err)
@@ -298,7 +298,7 @@ func TestMCPToolDeniesARepoTheCallerCannotSee(t *testing.T) {
 	defer cancel()
 	srv := newTestServer(t)
 
-	bob := srv.connect(t, ctx, bobToken)
+	bob := srv.connect(ctx, t, bobToken)
 	res, err := call(ctx, bob, "o/r", nil)
 	require.NoError(t, err)
 	require.True(t, res.IsError)
@@ -306,7 +306,7 @@ func TestMCPToolDeniesARepoTheCallerCannotSee(t *testing.T) {
 	require.Contains(t, denied, "not found or not accessible")
 	require.Nil(t, res.StructuredContent)
 
-	alice := srv.connect(t, ctx, aliceToken)
+	alice := srv.connect(ctx, t, aliceToken)
 	res, err = call(ctx, alice, "o/hidden", nil)
 	require.NoError(t, err)
 	require.True(t, res.IsError)
@@ -322,8 +322,8 @@ func TestMCPEachRequestUsesItsOwnPrincipal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	srv := newTestServer(t)
-	alice := srv.connect(t, ctx, aliceToken)
-	bob := srv.connect(t, ctx, bobToken)
+	alice := srv.connect(ctx, t, aliceToken)
+	bob := srv.connect(ctx, t, bobToken)
 
 	for range 3 {
 		res, err := call(ctx, alice, "o/r", nil)
@@ -342,7 +342,7 @@ func TestMCPWaitStopsWhenTheClientDisconnects(t *testing.T) {
 	defer cancel()
 	srv := newTestServer(t)
 	srv.store.events = nil
-	session := srv.connect(t, ctx, aliceToken)
+	session := srv.connect(ctx, t, aliceToken)
 
 	timers := srv.clock.Trap().NewTimer()
 	defer timers.Close()
@@ -375,7 +375,7 @@ func TestMCPWaitOutlastsTheServerWriteTimeout(t *testing.T) {
 	const serverWriteTimeout = 300 * time.Millisecond
 	srv := newTestServer(t, func(s *httptest.Server) { s.Config.WriteTimeout = serverWriteTimeout })
 	srv.store.events = nil
-	session := srv.connect(t, ctx, aliceToken)
+	session := srv.connect(ctx, t, aliceToken)
 
 	timers := srv.clock.Trap().NewTimer()
 	defer timers.Close()
@@ -468,11 +468,11 @@ func TestLoadConfigGitHubAPIURL(t *testing.T) {
 		require.Equal(t, url, cfg.githubAPI)
 	}
 
-	const password = "hunter2-not-a-real-password"
-	for _, url := range []string{"http://api.github.com", "ftp://x", "api.github.com", "https://u:" + password + "@api.github.com", "https://api.github.com?x=1"} {
+	const userinfo = "hunter2-not-a-real-secret"
+	for _, url := range []string{"http://api.github.com", "ftp://x", "api.github.com", "https://u:" + userinfo + "@api.github.com", "https://api.github.com?x=1"} {
 		_, err = loadConfig(env(url))
 		require.ErrorContains(t, err, envAPIURL, url)
-		require.NotContains(t, err.Error(), password)
+		require.NotContains(t, err.Error(), userinfo)
 		require.NotContains(t, err.Error(), url)
 	}
 }

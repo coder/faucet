@@ -181,7 +181,7 @@ func parseBaseURL(raw string) (*url.URL, error) {
 		return nil, xerrors.New("GitHub API URL must be an absolute URL with a host")
 	case u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "":
 		return nil, xerrors.New("GitHub API URL must not have user info, a query or a fragment")
-	case u.Scheme != "https" && !(u.Scheme == "http" && isLoopback(u.Hostname())):
+	case u.Scheme != "https" && (u.Scheme != "http" || !isLoopback(u.Hostname())):
 		return nil, xerrors.New("GitHub API URL must use https, or http on a loopback host")
 	}
 	u.Path = strings.TrimRight(u.Path, "/")

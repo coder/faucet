@@ -151,11 +151,11 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 
 	req.query.After, err = s.startCursor(ctx, req)
 	if err != nil {
-		return nil, waitOutput{}, s.storeError(ctx, logger, err)
+		return nil, waitOutput{}, storeError(ctx, logger, err)
 	}
 	page, err := s.poll(ctx, req)
 	if err != nil {
-		return nil, waitOutput{}, s.storeError(ctx, logger, err)
+		return nil, waitOutput{}, storeError(ctx, logger, err)
 	}
 
 	out := waitOutput{Events: make([]waitEvent, len(page.Events)), Cursor: page.Next}
@@ -233,7 +233,7 @@ func (s *Service) poll(ctx context.Context, req waitRequest) (PollPage, error) {
 	}
 }
 
-func (s *Service) storeError(ctx context.Context, logger slog.Logger, err error) error {
+func storeError(ctx context.Context, logger slog.Logger, err error) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}

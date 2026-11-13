@@ -239,17 +239,17 @@ func TestTokenAuthorizerValidatesBaseURL(t *testing.T) {
 		require.NoError(t, faucet.TokenAuthorizer{BaseURL: u}.Validate(), u)
 	}
 
-	const password = "hunter2-not-a-real-password"
+	const userinfo = "hunter2-not-a-real-secret"
 	bad := []string{
 		"", "api.github.com", "/relative", "https://", "ftp://api.github.com", "http://api.github.com",
-		"http://127.0.0.1.example.com", "https://user:" + password + "@api.github.com",
+		"http://127.0.0.1.example.com", "https://user:" + userinfo + "@api.github.com",
 		"https://api.github.com?x=1", "https://api.github.com?", "https://api.github.com#frag",
-		"http://" + password + "%zz",
+		"http://" + userinfo + "%zz",
 	}
 	for _, u := range bad {
 		err := faucet.TokenAuthorizer{BaseURL: u}.Validate()
 		require.Error(t, err, u)
-		require.Zero(t, strings.Count(err.Error(), password), "the error must not echo the URL")
+		require.Zero(t, strings.Count(err.Error(), userinfo), "the error must not echo the URL")
 	}
 
 	_, err := faucet.TokenAuthorizer{BaseURL: "http://example.com"}.RepoID(context.Background(), principal(t), "o/r")
