@@ -59,7 +59,9 @@ type waitOutput struct {
 	Cursor int64       `json:"cursor"`
 }
 
-// Register adds the wait_for_github_events tool to srv.
+// Register adds the wait_for_github_events tool and the events/list and
+// events/poll methods of the MCP Events extension to srv. Build srv with
+// ServerCapabilities so that clients learn the server speaks Events.
 //
 // The tool returns the events of one repository that match its filters, as
 // soon as there are any, or none when timeout_s runs out. Either way it
@@ -75,6 +77,7 @@ func (s *Service) Register(srv *mcp.Server) {
 			"call again with that cursor to keep waiting. Event types: " + strings.Join(types, ", ") + ".",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, Title: "Wait for GitHub events"},
 	}, s.waitForEvents)
+	s.registerEvents(srv)
 }
 
 func eventTypes() []string {
@@ -143,7 +146,7 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	}
 	logger := s.logger.With(slog.F("repo", in.Repo))
 
-	repoID, err := s.authorize(ctx, logger, in.Repo)
+	repoID, err := s.authorize(ctx, logger, "wait", in.Repo)
 	if err != nil {
 		return nil, waitOutput{}, err
 	}
@@ -165,20 +168,20 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	return nil, out, nil
 }
 
-func (s *Service) authorize(ctx context.Context, logger slog.Logger, repo string) (int64, error) {
+func (s *Service) authorize(ctx context.Context, logger slog.Logger, op, repo string) (int64, error) {
 	p, err := s.principalFrom(ctx)
 	if err != nil {
-		logger.Info(ctx, "wait without a principal", slog.Error(err))
+		logger.Info(ctx, op+" without a principal", slog.Error(err))
 		return 0, errAuthRequired
 	}
 	logger = logger.With(slog.F("login", p.Login))
 	repoID, err := s.authorizer.RepoID(ctx, p, repo)
 	switch {
 	case xerrors.Is(err, ErrNoAccess):
-		logger.Info(ctx, "wait denied")
+		logger.Info(ctx, op+" denied")
 		return 0, ErrNoAccess
 	case xerrors.Is(err, ErrInvalidToken):
-		logger.Info(ctx, "wait denied, token rejected")
+		logger.Info(ctx, op+" denied, token rejected")
 		return 0, ErrInvalidToken
 	case err != nil:
 		logger.Warn(ctx, "could not verify repository access", slog.Error(err))

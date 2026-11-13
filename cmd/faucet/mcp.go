@@ -34,13 +34,15 @@ func principalFrom(ctx context.Context) (faucet.Principal, error) {
 }
 
 func newMCPHandler(svc *faucet.Service) http.Handler {
-	srv := mcp.NewServer(&mcp.Implementation{Name: mcpServerName, Version: mcpServerVersion}, nil)
+	srv := mcp.NewServer(&mcp.Implementation{Name: mcpServerName, Version: mcpServerVersion}, &mcp.ServerOptions{
+		Capabilities: faucet.ServerCapabilities(),
+	})
 	svc.Register(srv)
-	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{
+	return faucet.RequireEventName(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{
 		Stateless:                    true,
 		JSONResponse:                 true,
 		PropagateRequestCancellation: true,
-	})
+	}))
 }
 
 // longResponse lifts the server's write deadline for requests that can wait
