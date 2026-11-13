@@ -3,14 +3,14 @@ import { execFile, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { parseArgs, promisify } from 'node:util';
 import { runDir, stateFile } from './runstate.mjs';
 
 const execFileAsync = promisify(execFile);
 const FAUCET_STOP_MS = 20_000;
-const POSTGRES_START_ATTEMPTS = 5;
+const DB_PORT = 5432;
+const SOCKET_PATH_MAX = 100;
 
 function log(message) {
   console.error(`faucet-verify: ${message}`);
@@ -44,36 +44,15 @@ function findPostgresBin() {
   return found;
 }
 
-function freePort() {
-  return new Promise((resolvePort, reject) => {
-    const probe = createServer();
-    probe.once('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close(() => resolvePort(port));
-    });
-  });
-}
-
 async function startPostgres(bin, dir, signal) {
-  const dataDir = join(dir, 'pgdata');
-  for (let attempt = 1; ; attempt++) {
-    const port = await freePort();
-    try {
-      await execFileAsync(
-        join(bin, 'pg_ctl'),
-        [
-          'start', '-D', dataDir, '-w', '-t', '60', '-l', join(dir, 'postgres.log'),
-          '-o', `-p ${port} -k '${dir}' -c listen_addresses=127.0.0.1 -c fsync=off`,
-        ],
-        { signal },
-      );
-      return port;
-    } catch (err) {
-      if (attempt === POSTGRES_START_ATTEMPTS || signal.aborted) throw err;
-      log(`postgres did not start on port ${port}, trying another port`);
-    }
-  }
+  await execFileAsync(
+    join(bin, 'pg_ctl'),
+    [
+      'start', '-D', join(dir, 'pgdata'), '-w', '-t', '60', '-l', join(dir, 'postgres.log'),
+      '-o', `-p ${DB_PORT} -k '${dir}' -c listen_addresses='' -c unix_socket_permissions=0700 -c fsync=off`,
+    ],
+    { signal },
+  );
 }
 
 async function stopPostgres(bin, dir) {
@@ -116,6 +95,10 @@ async function main(signal) {
   }
   const bin = findPostgresBin();
   const dir = runDir(port);
+  const socketPath = join(dir, `.s.PGSQL.${DB_PORT}`);
+  if (Buffer.byteLength(socketPath) >= SOCKET_PATH_MAX) {
+    throw new Error(`${socketPath} is too long for a Unix socket; set TMPDIR to a shorter directory`);
+  }
   try {
     mkdirSync(dir, { mode: 0o700 });
   } catch (err) {
@@ -131,21 +114,26 @@ async function main(signal) {
   let faucet;
   let failure;
   try {
-    await execFileAsync(join(bin, 'initdb'), ['-U', 'postgres', '--auth=trust', '--no-sync', '-D', join(dir, 'pgdata')], { signal });
-    const dbPort = await startPostgres(bin, dir, signal);
+    await execFileAsync(
+      join(bin, 'initdb'),
+      ['-U', 'postgres', '--auth-local=trust', '--auth-host=reject', '--no-sync', '-D', join(dir, 'pgdata')],
+      { signal },
+    );
+    await startPostgres(bin, dir, signal);
     postgresStarted = true;
-    log(`postgres listening on 127.0.0.1:${dbPort}`);
+    log(`postgres listening on ${socketPath}`);
 
     const binary = join(dir, 'faucet');
     await execFileAsync('go', ['build', '-o', binary, './cmd/faucet'], { cwd: root, signal });
 
     const secret = randomBytes(32).toString('hex');
     const psql = existsSync(join(bin, 'psql')) ? join(bin, 'psql') : 'psql';
-    writeFileSync(stateFile(port), JSON.stringify({ dbPort, psql, secret }), { mode: 0o600 });
+    writeFileSync(stateFile(port), JSON.stringify({ dbHost: dir, dbPort: DB_PORT, psql, secret, binary }), { mode: 0o600 });
+    const databaseUrl = `postgres://postgres@/postgres?${new URLSearchParams({ host: dir, port: String(DB_PORT), sslmode: 'disable' })}`;
 
     faucet = spawn(binary, [], {
       env: {
-        DATABASE_URL: `postgres://postgres@127.0.0.1:${dbPort}/postgres?sslmode=disable`,
+        DATABASE_URL: databaseUrl,
         GITHUB_WEBHOOK_SECRET: secret,
         PORT: String(port),
       },

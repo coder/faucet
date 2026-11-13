@@ -12,9 +12,9 @@ Read the e2e skill first (`npx e2e guide`, run in `verify/`, prints it). This sk
 Nothing to start by hand. The target's `app.command` runs `node app.mjs --port {port}` on a free port. `app.mjs`:
 
 1. finds the PostgreSQL server binaries: `PG_BIN`, else the `initdb` on `PATH`, else `/usr/lib/postgresql/*/bin`;
-2. runs `initdb` into `$TMPDIR/faucet-verify-<port>/pgdata` and starts that Postgres on a free `127.0.0.1` port (database and user `postgres`, trust auth);
+2. runs `initdb` into `$TMPDIR/faucet-verify-<port>/pgdata` and starts that Postgres on a Unix socket in the private (mode 0700) `$TMPDIR/faucet-verify-<port>` directory, with TCP off (database and user `postgres`, trust auth on the socket only);
 3. runs `go build ./cmd/faucet` in the checkout under test;
-4. generates a webhook secret, writes it with `dbPort` and the `psql` path to `$TMPDIR/faucet-verify-<port>/state.json` (mode 0600), and starts faucet with only `DATABASE_URL`, `GITHUB_WEBHOOK_SECRET` and `PORT`.
+4. generates a webhook secret, writes it with the socket directory, the number that names the socket file (`5432`), the `psql` path and the built binary's path to `$TMPDIR/faucet-verify-<port>/state.json` (mode 0600), and starts faucet with only `DATABASE_URL`, `GITHUB_WEBHOOK_SECRET` and `PORT`.
 
 The runner waits for `GET /healthz` to answer 200. On SIGTERM `app.mjs` stops faucet, stops Postgres and deletes the directory. The secret is random per run and reaches no log, report or output.
 
@@ -50,11 +50,10 @@ Scripted: every feature in [features/](features/README.md) has a test under `ver
 
 All tests share one server and one database. Each test makes its own `newRepoId()` and `newDeliveryId()` and asserts on that repository's rows only, never on table-wide counts. Payload fixtures are in `tests/payloads.ts`. Run one test by `file:line`: `npx e2e run tests/ingest-ping.e2e.ts:4`.
 
-Live, over `e2e mcp` (the e2e plugin's server, or `npx e2e mcp` started in `verify/`): `open_session {config: "<checkout>/verify/e2e.config.ts"}`, then `call {session, tool: "navigate", args: {url: "/healthz"}}` and `observe`. A browser can only GET, so the live lane shows `/healthz` and the 405 page of `GET /webhook/github`. Webhook POSTs go through `run_tests {files: [...]}` or the CLI. To look at the database by hand during a session, read only `dbPort` from `state.json` (the port is in the `open_session` output):
+Live, over `e2e mcp` (the e2e plugin's server, or `npx e2e mcp` started in `verify/`): `open_session {config: "<checkout>/verify/e2e.config.ts"}`, then `call {session, tool: "navigate", args: {url: "/healthz"}}` and `observe`. A browser can only GET, so the live lane shows `/healthz` and the 405 page of `GET /webhook/github`. Webhook POSTs go through `run_tests {files: [...]}` or the CLI. To look at the database by hand during a session, connect through the socket (the app port is in the `open_session` output):
 
 ```sh
-python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dbPort"])' "${TMPDIR:-/tmp}/faucet-verify-<port>/state.json"
-psql -h 127.0.0.1 -p <dbPort> -U postgres -c 'select id, type, repo_id, prs from faucet_events order by id desc limit 5'
+psql -h "${TMPDIR:-/tmp}/faucet-verify-<port>" -p 5432 -U postgres -c 'select id, type, repo_id, prs from faucet_events order by id desc limit 5'
 ```
 
 Never print `state.json`: it holds the secret.
