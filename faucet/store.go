@@ -180,4 +180,38 @@ type Store interface {
 	// DeleteExpiredSubscriptions deletes every subscription that expired at or
 	// before now and returns how many it deleted.
 	DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (int64, error)
+
+	// The rest of the interface is the delivery queue. A subscription's
+	// deliveries end with it: deleting a subscription deletes the deliveries it
+	// holds. A new subscription starts reading the log after its Cursor, and a
+	// refresh of a live one leaves the read position alone.
+
+	// ScanTargets returns the live subscriptions at now that have not read the
+	// log to its head and hold fewer than maxPending unsent deliveries, the
+	// ones furthest behind first, at most limit. The head counts the purge
+	// mark, so a subscription that a purge overtook is a target too.
+	ScanTargets(ctx context.Context, now time.Time, maxPending, limit int) ([]ScanTarget, error)
+	// EnqueueDeliveries queues e.Deliveries and moves the subscription's read
+	// position to e.NewScannedThrough in one transaction, and only if the
+	// subscription is live at now and still at e.ExpectedScannedThrough. It
+	// reports whether it did. A delivery that is already queued stays as it is.
+	// The queued deliveries are due at now.
+	EnqueueDeliveries(ctx context.Context, now time.Time, e Enqueue) (bool, error)
+	// ClaimDelivery takes the due delivery with the earliest due time, of a
+	// subscription that is live at now, and no other caller holds. A delivery
+	// is due when its next attempt time is at or before now, and held while
+	// its lease runs. The call sets the lease to now+lease and raises the
+	// attempt count by one in one step, so no two callers hold one attempt.
+	// ok is false when nothing is due.
+	ClaimDelivery(ctx context.Context, now time.Time, lease time.Duration) (claim DeliveryClaim, ok bool, err error)
+	// FinishDelivery records how the attempt in ref ended. It changes nothing
+	// and reports Accepted=false unless ref.Attempt is the delivery's current
+	// attempt. Delivered and Failure update the subscription's DeliveryStatus
+	// at now: a delivered attempt sets LastDeliveryAt and clears the failure,
+	// and a failure sets LastError and keeps the earlier FailedSince.
+	FinishDelivery(ctx context.Context, ref DeliveryRef, now time.Time, f Finish) (FinishResult, error)
+	// ExpireDeliveries deletes the deliveries of subscriptions that expired at
+	// or before now, except the ones that a claim holds, and returns how many
+	// it deleted.
+	ExpireDeliveries(ctx context.Context, now time.Time) (int64, error)
 }

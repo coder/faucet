@@ -123,15 +123,13 @@ func (s *fakeStore) UpsertSubscription(_ context.Context, sub faucet.Subscriptio
 	if err := sub.Validate(now); err != nil {
 		return faucet.Subscription{}, err
 	}
-	if s.subs == nil {
-		s.subs = map[faucet.SubscriptionKeyHash]faucet.Subscription{}
-	}
+	s.initSubscriptionsLocked()
 	others := 0
 	for key, row := range s.subs {
 		switch {
 		case row.Principal != sub.Principal:
 		case !row.ExpiresAt.After(now):
-			delete(s.subs, key)
+			s.dropSubscriptionLocked(key)
 		case key != sub.KeyHash:
 			others++
 		}
@@ -140,8 +138,11 @@ func (s *fakeStore) UpsertSubscription(_ context.Context, sub faucet.Subscriptio
 		return faucet.Subscription{}, faucet.ErrSubscriptionLimit
 	}
 	sub.CreatedAt, sub.UpdatedAt = now, now
+	sub.Status = faucet.DeliveryStatus{}
 	if row, ok := s.subs[sub.KeyHash]; ok {
-		sub.CreatedAt, sub.Cursor = row.CreatedAt, row.Cursor
+		sub.CreatedAt, sub.Cursor, sub.Status = row.CreatedAt, row.Cursor, row.Status
+	} else {
+		s.scanned[sub.KeyHash] = sub.Cursor
 	}
 	s.subs[sub.KeyHash] = sub
 	return sub, nil
@@ -157,7 +158,7 @@ func (s *fakeStore) DeleteSubscription(_ context.Context, principal string, key 
 	if !ok || row.Principal != principal {
 		return false, nil
 	}
-	delete(s.subs, key)
+	s.dropSubscriptionLocked(key)
 	return true, nil
 }
 
@@ -170,7 +171,7 @@ func (s *fakeStore) DeleteExpiredSubscriptions(_ context.Context, now time.Time)
 	var deleted int64
 	for key, row := range s.subs {
 		if !row.ExpiresAt.After(now) {
-			delete(s.subs, key)
+			s.dropSubscriptionLocked(key)
 			deleted++
 		}
 	}

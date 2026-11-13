@@ -81,7 +81,7 @@ DELETE FROM faucet_subscriptions WHERE principal = sqlc.arg(principal) AND expir
 SELECT COUNT(*)::bigint AS others FROM faucet_subscriptions WHERE principal = sqlc.arg(principal) AND key_hash <> sqlc.arg(key_hash);
 
 -- name: UpsertSubscription :one
-INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at)
+INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, scanned_through, created_at, updated_at, expires_at)
 VALUES (
   sqlc.arg(key_hash),
   sqlc.arg(principal),
@@ -90,6 +90,7 @@ VALUES (
   sqlc.arg(arguments),
   sqlc.arg(repo_id),
   sqlc.arg(secret_enc),
+  sqlc.arg(cursor),
   sqlc.arg(cursor),
   sqlc.arg(now),
   sqlc.arg(now),
