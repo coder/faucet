@@ -1130,3 +1130,97 @@ func TestSubscribeChecksRepositoryAccessAgainOnEveryRenewal(t *testing.T) {
 	h.subscribe(subscribeTo(repoArgs(), callbackURL, newSecret(t, 32)))
 	require.Greater(t, h.rows()[0].ExpiresAt, granted[0].ExpiresAt, "with access back, the renewal is granted again")
 }
+
+func TestSubscribeAndUnsubscribeReadMembersByExactName(t *testing.T) {
+	t.Parallel()
+
+	secret := newSecret(t, 32)
+	url := func(path string) string { return "https://hooks.example.test/" + path }
+	delivery := func(path string) string {
+		return fmt.Sprintf(`{"mode":"webhook","url":%q,"secret":%q}`, url(path), secret)
+	}
+	const repo = `{"repo":"octo/repo"}`
+	body := func(name, arguments, delivery string, extra ...string) json.RawMessage {
+		members := append([]string{`"name":` + name, `"arguments":` + arguments, `"delivery":` + delivery}, extra...)
+		return json.RawMessage("{" + strings.Join(members, ",") + "}")
+	}
+
+	t.Run("a name in another case never changes the event that is stored", func(t *testing.T) {
+		t.Parallel()
+
+		h := newWebhookHarness(t)
+		h.subscribe(&rawParams{Whole: body(`"ci.run_completed"`, repo, delivery("a"), `"NAME":"pr.closed"`, `"Name":"pr.closed"`)})
+		rows := h.rows()
+		require.Len(t, rows, 1)
+		require.Equal(t, "ci.run_completed", rows[0].EventType, "the body acts as RequireEventName saw it")
+	})
+
+	t.Run("a name only in another case is no name", func(t *testing.T) {
+		t.Parallel()
+
+		h := newWebhookHarness(t)
+		for _, spelling := range []string{"Name", "NAME", "nAmE"} {
+			whole := json.RawMessage(fmt.Sprintf(`{%q:"pr.closed","arguments":%s,"delivery":%s}`, spelling, repo, delivery("a")))
+			rpcErr := h.subscribeError(&rawParams{Whole: whole})
+			require.EqualValues(t, codeInvalidParams, rpcErr.Code, spelling)
+			require.Contains(t, rpcErr.Message, "name is required", spelling)
+		}
+		requireNothingStored(t, h, "a name in another case")
+	})
+
+	t.Run("a repeated name is refused", func(t *testing.T) {
+		t.Parallel()
+
+		h := newWebhookHarness(t)
+		for method, whole := range map[string]json.RawMessage{
+			methodSubscribe:   json.RawMessage(`{"name":"ci.run_completed","name":"pr.closed","arguments":` + repo + `,"delivery":` + delivery("a") + `}`),
+			methodUnsubscribe: json.RawMessage(`{"name":"ci.run_completed","name":"pr.closed","arguments":` + repo + `,"delivery":{"url":"` + url("a") + `"}}`),
+		} {
+			require.EqualValues(t, codeInvalidParams, h.callError(method, &rawParams{Whole: whole}).Code, method)
+		}
+		requireNothingStored(t, h, "a repeated name")
+	})
+
+	t.Run("the other members are read by exact name too", func(t *testing.T) {
+		t.Parallel()
+
+		h := newWebhookHarness(t)
+		got := h.subscribe(&rawParams{Whole: json.RawMessage(
+			`{"name":"ci.run_completed","Arguments":{"repo":"octo/other"},"arguments":` + repo +
+				`,"DELIVERY":{"url":"` + url("wrong") + `"},"delivery":{"url":"` + url("a") + `","URL":"` + url("b") + `","Mode":"push","secret":"` + secret + `","Secret":"bad"}` +
+				`,"TTLMS":1,"Cursor":"junk","MaxAgeMs":-5}`)})
+		rows := h.rows()
+		require.Len(t, rows, 1)
+		require.Equal(t, url("a"), rows[0].CallbackURL, "the url member, not URL")
+		require.JSONEq(t, repo, string(rows[0].Arguments), "the arguments member, not Arguments")
+		require.Equal(t, h.clock.Now().Add(10*time.Minute).UTC().Format(time.RFC3339), got.RefreshBefore, "TTLMS is not ttlMs")
+
+		for _, member := range []string{"URL", "Secret", "SECRET"} {
+			whole := json.RawMessage(fmt.Sprintf(`{"name":"ci.run_completed","arguments":%s,"delivery":{%q:"x"}}`, repo, member))
+			rpcErr := h.subscribeError(&rawParams{Whole: whole})
+			require.EqualValues(t, codeInvalidParams, rpcErr.Code, member)
+		}
+		require.Len(t, h.rows(), 1)
+	})
+
+	t.Run("unsubscribe removes the subscription of the name the header names", func(t *testing.T) {
+		t.Parallel()
+
+		h := newWebhookHarness(t)
+		h.subscribe(&rawParams{Whole: body(`"ci.run_completed"`, repo, delivery("a"))})
+		h.subscribe(&rawParams{Whole: body(`"pr.closed"`, repo, delivery("a"))})
+		require.Len(t, h.rows(), 2)
+
+		_, err := h.call(methodUnsubscribe, &rawParams{Whole: json.RawMessage(
+			`{"name":"ci.run_completed","NAME":"pr.closed","arguments":` + repo + `,"delivery":{"url":"` + url("a") + `"}}`)})
+		require.NoError(t, err)
+		rows := h.rows()
+		require.Len(t, rows, 1)
+		require.Equal(t, "pr.closed", rows[0].EventType, "only ci.run_completed was removed")
+
+		rpcErr := h.callError(methodUnsubscribe, &rawParams{Whole: json.RawMessage(
+			`{"Name":"pr.closed","arguments":` + repo + `,"delivery":{"url":"` + url("a") + `"}}`)})
+		require.EqualValues(t, codeInvalidParams, rpcErr.Code)
+		require.Len(t, h.rows(), 1, "a name in another case removes nothing")
+	})
+}
