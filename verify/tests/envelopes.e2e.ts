@@ -76,6 +76,23 @@ describe('control envelopes', () => {
     });
   });
 
+  test('a purge that deleted no event of the subscription\'s repository sends it no gap envelope', async ({ faucet, receiver }) => {
+    await withDeliveryFaucet(faucet, async (started) => {
+      const repoId = newRepoId();
+      const otherRepoId = newRepoId();
+      const quiet = await endpoint(receiver, 'ok');
+      await subscribed(started, paramsFor(repoId, quiet));
+      await storeOld(started, otherRepoId, 9201);
+      await storeOld(started, otherRepoId, 9202);
+      const purged = await purge(started);
+      expect(purged.deleted, 'the purge deleted both runs, which belong to another repository').toBe(2);
+      await storeRun(started, otherRepoId, 9203);
+
+      expect(await deliverDue(started), 'nothing was lost, so nothing is reported').toEqual(counts());
+      expect(await envelopeRequests(receiver, quiet, 'gap')).toEqual([]);
+    });
+  });
+
   test('a gap envelope that the endpoint refuses is counted once and not retried, and the events still flow', async ({ faucet, receiver }) => {
     await withDeliveryFaucet(faucet, async (started, output) => {
       const repoId = newRepoId();

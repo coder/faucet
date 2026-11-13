@@ -42,6 +42,20 @@ func (d *deliverHarness) requireNoCredentialInLogs(ep hookEndpoint) {
 	}
 }
 
+// envelopes are the control envelopes of one type that the endpoint at path got.
+func (r *hookReceiver) envelopesOf(path, kind string) []hookRequest {
+	var out []hookRequest
+	for _, g := range r.requests(path) {
+		var typed struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(g.Body, &typed) == nil && typed.Type == kind {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
 // purgedBeforeRead subscribes at path, stores two events that a purge deletes
 // before any run reads them, and one that survives it. It returns the highest
 // purged event and the survivor.
@@ -72,9 +86,10 @@ func TestDeliverDueSendsOneSignedGapEnvelopeThatResumesWithoutLosingEvents(t *te
 	require.Zero(t, res.GapsFailed)
 	require.Equal(t, 1, res.Delivered, "the event that survived the purge is still delivered")
 
-	requests := d.rcv.requests("/hook")
-	require.Len(t, requests, 2, "one gap envelope and one event")
-	members := d.requireEnvelope(requests[0], "gap", ep.secret, sub.ID)
+	require.Len(t, d.rcv.requests("/hook"), 2, "one gap envelope and one event")
+	gaps := d.rcv.envelopesOf("/hook", "gap")
+	require.Len(t, gaps, 1)
+	members := d.requireEnvelope(gaps[0], "gap", ep.secret, sub.ID)
 	require.Len(t, members, 2, "a gap body has a type and a cursor and nothing else")
 	var cursor string
 	require.NoError(t, json.Unmarshal(members["cursor"], &cursor))
@@ -97,12 +112,7 @@ func TestDeliverDueCountsAGapEnvelopeThatDidNotArrive(t *testing.T) {
 
 	d := newDeliverHarness(t)
 	ep := d.endpoint("/hook")
-	d.rcv.answer("/hook", func(n int) int {
-		if n == 1 {
-			return http.StatusInternalServerError
-		}
-		return http.StatusOK
-	})
+	d.rcv.answerEnvelope("/hook", "gap", func() int { return http.StatusInternalServerError })
 	d.purgedBeforeRead(ep)
 
 	res := d.deliverDue()
@@ -375,11 +385,9 @@ func TestDeliverDueGapEndpointThatStallsDoesNotDelayQueueingOrSendingOtherSubscr
 	started, release := make(chan struct{}, 1), make(chan struct{})
 	var once sync.Once
 	t.Cleanup(func() { once.Do(func() { close(release) }) })
-	d.rcv.answer("/slow", func(n int) int {
-		if n == 1 {
-			started <- struct{}{}
-			<-release
-		}
+	d.rcv.answerEnvelope("/slow", "gap", func() int {
+		started <- struct{}{}
+		<-release
 		return http.StatusOK
 	})
 	fast := d.gappedThenBusy(slow)
@@ -453,4 +461,42 @@ func TestDeliverDueCountsGapsThatItDidNotSend(t *testing.T) {
 		require.Equal(t, 1, res.GapsFailed, "a gap queued before the failure is counted as not sent")
 		require.Zero(t, d.rcv.total())
 	})
+}
+
+func TestDeliverDueSendsNoGapToASubscriptionWhoseRepositoryLostNoEvents(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	quiet := d.endpoint("/quiet")
+	d.subscribeEndpoint(quiet)
+	d.advance(time.Second)
+	d.insert(otherRepoID, "ci.run_completed", "")
+	d.insert(otherRepoID, "ci.run_completed", "")
+	d.advance(5 * time.Minute)
+	d.insert(otherRepoID, "ci.run_completed", "")
+	res, err := d.store.Purge(d.ctx, d.clock.Now().Add(-time.Minute))
+	require.NoError(t, err)
+	require.EqualValues(t, 2, res.Deleted, "the purge deleted events of another repository only")
+
+	got := d.deliverDue()
+	require.Zero(t, got.Gaps, "no event of the subscription's repository was lost")
+	require.Zero(t, d.rcv.total())
+
+	lossy := d.endpoint("/lossy")
+	d.subscribeEndpoint(lossy)
+	d.advance(time.Second)
+	d.newRunEvent()
+	d.advance(5 * time.Minute)
+	d.insert(otherRepoID, "ci.run_completed", "")
+	_, err = d.store.Purge(d.ctx, d.clock.Now().Add(-time.Minute))
+	require.NoError(t, err)
+	d.advance(time.Second)
+	d.insert(otherRepoID, "ci.run_completed", "")
+	_, err = d.store.Purge(d.ctx, d.clock.Now().Add(-time.Second))
+	require.NoError(t, err)
+
+	got = d.deliverDue()
+	require.Equal(t, 1, got.Gaps, "the subscription that lost an event gets its gap, also after a second purge")
+	require.Len(t, d.rcv.requests("/lossy"), 1)
+	require.Empty(t, d.rcv.requests("/quiet"), "the quiet subscription still hears nothing")
 }

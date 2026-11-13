@@ -158,6 +158,9 @@ func (s *Store) Purge(ctx context.Context, before time.Time) (faucet.PurgeResult
 	if err := q.LockPurgeMark(ctx); err != nil {
 		return faucet.PurgeResult{}, xerrors.Errorf("lock purge mark: %w", err)
 	}
+	if _, err := q.AdvanceSubscriptionsThatLostNothing(ctx, before); err != nil {
+		return faucet.PurgeResult{}, xerrors.Errorf("advance subscriptions that lose nothing: %w", err)
+	}
 	deleted, err := q.DeleteEventsBefore(ctx, before)
 	if err != nil {
 		return faucet.PurgeResult{}, xerrors.Errorf("delete events: %w", err)

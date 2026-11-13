@@ -161,6 +161,13 @@ type Store interface {
 	// purge mark to the highest ID it deleted, in one transaction. The mark
 	// never moves down. It needs no insert lock: events commit in ID order, so
 	// no event at or below the mark can appear after the purge.
+	//
+	// In the same transaction it moves every subscription whose read position
+	// is at or above the old mark and below the new one up to the new mark,
+	// unless an event of that subscription's repository and event type lies
+	// above its position and at or below the new mark. What stays below the mark
+	// is then exactly what lost events, so a subscription that had nothing to
+	// read is not reported as a gap.
 	Purge(ctx context.Context, before time.Time) (PurgeResult, error)
 	// UpsertSubscription stores sub and returns the stored row. It calls
 	// sub.Validate(now). A row with the same KeyHash that expires after now is

@@ -63,6 +63,20 @@ WITH deleted AS (
 )
 SELECT COUNT(*)::bigint AS deleted, COALESCE(MAX(id), 0)::bigint AS max_id FROM deleted;
 
+-- name: AdvanceSubscriptionsThatLostNothing :execrows
+WITH doomed AS (
+  SELECT COALESCE(MAX(ev.id), 0)::bigint AS mark FROM faucet_events ev WHERE ev.received_at < sqlc.arg(before)
+)
+UPDATE faucet_subscriptions s
+SET scanned_through = doomed.mark
+FROM doomed
+WHERE s.scanned_through < doomed.mark
+  AND s.scanned_through >= (SELECT purged_through FROM faucet_purge_mark)
+  AND NOT EXISTS (
+    SELECT 1 FROM faucet_events e
+    WHERE e.repo_id = s.repo_id AND e.type = s.event_type AND e.id > s.scanned_through AND e.id <= doomed.mark
+  );
+
 -- name: RaisePurgeMark :one
 UPDATE faucet_purge_mark
 SET purged_through = GREATEST(purged_through, sqlc.arg(through)::bigint)

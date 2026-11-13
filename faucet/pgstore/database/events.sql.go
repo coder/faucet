@@ -14,6 +14,29 @@ import (
 	"github.com/lib/pq"
 )
 
+const advanceSubscriptionsThatLostNothing = `-- name: AdvanceSubscriptionsThatLostNothing :execrows
+WITH doomed AS (
+  SELECT COALESCE(MAX(ev.id), 0)::bigint AS mark FROM faucet_events ev WHERE ev.received_at < $1
+)
+UPDATE faucet_subscriptions s
+SET scanned_through = doomed.mark
+FROM doomed
+WHERE s.scanned_through < doomed.mark
+  AND s.scanned_through >= (SELECT purged_through FROM faucet_purge_mark)
+  AND NOT EXISTS (
+    SELECT 1 FROM faucet_events e
+    WHERE e.repo_id = s.repo_id AND e.type = s.event_type AND e.id > s.scanned_through AND e.id <= doomed.mark
+  )
+`
+
+func (q *Queries) AdvanceSubscriptionsThatLostNothing(ctx context.Context, before time.Time) (int64, error) {
+	result, err := q.db.ExecContext(ctx, advanceSubscriptionsThatLostNothing, before)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const countOtherSubscriptions = `-- name: CountOtherSubscriptions :one
 SELECT COUNT(*)::bigint AS others FROM faucet_subscriptions WHERE principal = $1 AND key_hash <> $2
 `

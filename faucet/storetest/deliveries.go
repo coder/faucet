@@ -37,6 +37,7 @@ var deliverySubtests = []subtest{
 	{"ExpireDeliveriesLeavesLiveSubscriptionsAndHeldClaims", expireDeliveriesLeavesLiveSubscriptionsAndHeldClaims},
 	{"DeletingASubscriptionEndsItsDeliveries", deletingASubscriptionEndsItsDeliveries},
 	{"ScanPositionStartsAtTheCursorAndSurvivesARefresh", scanPositionStartsAtTheCursorAndSurvivesARefresh},
+	{"PurgeLeavesBelowTheMarkOnlyTheSubscriptionsThatLostEvents", purgeLeavesBelowTheMarkOnlyTheSubscriptionsThatLostEvents},
 }
 
 // rig is one subscription of repository 42 at cursor 0, and a log of events.
@@ -691,4 +692,54 @@ func scanPositionStartsAtTheCursorAndSurvivesARefresh(t *testing.T, s faucet.Sto
 	for _, target := range r.targets(lapsedAt, 10) {
 		require.NotEqual(t, started.KeyHash, target.KeyHash, "a replaced row starts at its new cursor, which is the head")
 	}
+}
+
+// purgeLeavesBelowTheMarkOnlyTheSubscriptionsThatLostEvents pins what a gap
+// means: a subscription is left below the purge mark only if the purge deleted
+// an event of its repository and event type that it had not read. A
+// subscription that lost none is moved to the mark, and one that was already
+// below the mark stays there however many later purges pass it.
+func purgeLeavesBelowTheMarkOnlyTheSubscriptionsThatLostEvents(t *testing.T, s faucet.Store) {
+	r := newRig(t, s, 0)
+	quiet := r.sub
+	lossy := subscriptionAt(2, r.now.Add(time.Hour))
+	lossy.RepoID = 77
+	lossy.Cursor = 0
+	_, err := s.UpsertSubscription(r.ctx, lossy, r.now, 10)
+	require.NoError(t, err)
+
+	insert := func(deliveryID string, repoID int64) faucet.Event {
+		t.Helper()
+		ev := newEvent(deliveryID)
+		ev.RepoID = repoID
+		stored, inserted, err := s.InsertEvent(r.ctx, ev)
+		require.NoError(t, err)
+		require.True(t, inserted)
+		time.Sleep(2 * time.Millisecond)
+		return stored
+	}
+	positions := func() map[faucet.SubscriptionKeyHash]int64 {
+		t.Helper()
+		got := map[faucet.SubscriptionKeyHash]int64{}
+		for _, target := range r.targets(r.now, 10) {
+			got[target.KeyHash] = target.ScannedThrough
+		}
+		return got
+	}
+	other1, other2 := insert("other-1", 77), insert("other-2", 77)
+	survivor := insert("survivor", 42)
+	later := insert("later", 99)
+
+	res, err := s.Purge(r.ctx, survivor.ReceivedAt)
+	require.NoError(t, err)
+	require.Equal(t, faucet.PurgeResult{Deleted: 2, PurgedThrough: other2.ID}, res)
+	require.Equal(t, map[faucet.SubscriptionKeyHash]int64{quiet.KeyHash: other2.ID, lossy.KeyHash: 0}, positions(),
+		"the subscription of repository 42 lost nothing and moves to the mark, the one of repository 77 lost events and stays below it")
+	require.Less(t, other1.ID, other2.ID)
+
+	res, err = s.Purge(r.ctx, later.ReceivedAt.Add(time.Hour))
+	require.NoError(t, err)
+	require.Equal(t, faucet.PurgeResult{Deleted: 2, PurgedThrough: later.ID}, res)
+	require.Equal(t, map[faucet.SubscriptionKeyHash]int64{quiet.KeyHash: other2.ID, lossy.KeyHash: 0}, positions(),
+		"the second purge deleted the survivor of repository 42, so that subscription now lost an event, and the first loss of the other is not forgotten")
 }
