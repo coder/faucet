@@ -12,7 +12,6 @@ interface Endpoint {
   url: string;
 }
 
-// endpoint registers a secret at the receiver for a new id and returns the callback URL that has the behavior and the id.
 async function endpoint(receiver: Receiver, behavior: string, opts: { port?: number; registered?: string } = {}): Promise<Endpoint> {
   const id = newMarker();
   const secret = newSecret();

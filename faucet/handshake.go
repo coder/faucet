@@ -33,7 +33,6 @@ const (
 	subscriptionIDHeader = "X-MCP-Subscription-Id"
 )
 
-// HandshakeOptions configure NewCallbackHandshake.
 type HandshakeOptions struct {
 	// Client sends the verification request. Build it with NewHTTPClient: a
 	// client without its checks lets a subscriber aim the request at an

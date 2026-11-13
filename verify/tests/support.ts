@@ -576,7 +576,6 @@ export class Receiver {
     this.#control = receiver.control;
   }
 
-  // callback returns the callback URL for a behavior and id. port replaces the receiver's own port.
   callback(behavior: string, id: string, opts: { port?: number } = {}): string {
     const url = new URL(`${this.#url}/hook/${behavior}/${id}`);
     if (opts.port !== undefined) url.port = String(opts.port);

@@ -38,7 +38,6 @@ type Resolver interface {
 	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
 }
 
-// HTTPClientOptions configure NewHTTPClient.
 type HTTPClientOptions struct {
 	// Resolver looks names up. Nil uses net.DefaultResolver.
 	Resolver Resolver
