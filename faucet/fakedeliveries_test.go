@@ -60,9 +60,12 @@ func (s *fakeStore) headLocked() int64 {
 	return head
 }
 
-func (s *fakeStore) ScanTargets(_ context.Context, now time.Time, maxPending, limit int32) ([]faucet.ScanTarget, error) {
+func (s *fakeStore) ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32) ([]faucet.ScanTarget, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -90,9 +93,12 @@ func (s *fakeStore) ScanTargets(_ context.Context, now time.Time, maxPending, li
 	return targets[:min(len(targets), int(limit))], nil
 }
 
-func (s *fakeStore) EnqueueDeliveries(_ context.Context, now time.Time, e faucet.Enqueue) (bool, error) {
+func (s *fakeStore) EnqueueDeliveries(ctx context.Context, now time.Time, e faucet.Enqueue) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	if s.err != nil {
 		return false, s.err
 	}
@@ -114,9 +120,12 @@ func (s *fakeStore) EnqueueDeliveries(_ context.Context, now time.Time, e faucet
 	return true, nil
 }
 
-func (s *fakeStore) ClaimDelivery(_ context.Context, now time.Time, lease time.Duration) (faucet.DeliveryClaim, bool, error) {
+func (s *fakeStore) ClaimDelivery(ctx context.Context, now time.Time, lease time.Duration) (faucet.DeliveryClaim, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return faucet.DeliveryClaim{}, false, err
+	}
 	if s.err != nil {
 		return faucet.DeliveryClaim{}, false, s.err
 	}
@@ -209,9 +218,12 @@ func (s *fakeStore) FinishDelivery(_ context.Context, ref faucet.DeliveryRef, no
 	return result, nil
 }
 
-func (s *fakeStore) ExpireDeliveries(_ context.Context, now time.Time) (int64, error) {
+func (s *fakeStore) ExpireDeliveries(ctx context.Context, now time.Time) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if s.err != nil {
 		return 0, s.err
 	}

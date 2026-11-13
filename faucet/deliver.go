@@ -133,15 +133,10 @@ func (r *deliveryRun) unlessEnded(ctx context.Context, err error) error {
 
 // enqueue reads the events of the subscriptions that have some, in batches
 // that start with the ones furthest behind. It leaves the sends the time they
-// need: it starts no batch or subscription with less than twice minTimeToStart
-// left.
+// need: it starts no subscription with less than twice minTimeToStart left.
 func (r *deliveryRun) enqueue(ctx context.Context) error {
 	s := r.svc
 	for range maxScanBatches {
-		if ctx.Err() != nil || r.outOfTimeFor(ctx, 2*minTimeToStart) {
-			r.add(func(res *DeliverResult) { res.Incomplete = true })
-			return nil
-		}
 		now := s.clock.Now()
 		targets, err := s.store.ScanTargets(ctx, now, MaxPendingDeliveries, maxScanTargetsPerBatch)
 		if err != nil {
