@@ -79,16 +79,29 @@ func newWebhookState(d WebhookDeps, clock quartz.Clock) (*webhookState, error) {
 	return &webhookState{aead: aead, callbacks: d.Callbacks, allowInsecureLoopback: d.AllowInsecureLoopback, verified: newCallbackCache(clock)}, nil
 }
 
-type eventsSubscribeParams struct {
+// subscriptionParams holds the params of events/subscribe and
+// events/unsubscribe as raw JSON. When the SDK fails to decode params into a
+// typed struct, its error quotes all of them, and these params carry the
+// subscriber secret. The decode here never fails: the handler checks every
+// field and answers with fixed text.
+type subscriptionParams struct {
 	mcp.ParamsBase
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments,omitempty"`
-	// Delivery is parsed by parseDelivery, not by the SDK, because an SDK decode
-	// error could quote the secret.
-	Delivery json.RawMessage `json:"delivery,omitempty"`
-	Cursor   *string         `json:"cursor,omitempty"`
-	MaxAgeMs *int64          `json:"maxAgeMs,omitempty"`
-	TTLMs    json.RawMessage `json:"ttlMs,omitempty"`
+	fields    subscriptionFields
+	malformed bool
+}
+
+type subscriptionFields struct {
+	Name      json.RawMessage `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+	Delivery  json.RawMessage `json:"delivery"`
+	Cursor    json.RawMessage `json:"cursor"`
+	MaxAgeMs  json.RawMessage `json:"maxAgeMs"`
+	TTLMs     json.RawMessage `json:"ttlMs"`
+}
+
+func (p *subscriptionParams) UnmarshalJSON(b []byte) error {
+	p.malformed = json.Unmarshal(b, &p.fields) != nil
+	return nil
 }
 
 type eventsSubscribeResult struct {
@@ -98,13 +111,6 @@ type eventsSubscribeResult struct {
 	RefreshBefore string `json:"refreshBefore"`
 	Cursor        string `json:"cursor"`
 	Truncated     bool   `json:"truncated"`
-}
-
-type eventsUnsubscribeParams struct {
-	mcp.ParamsBase
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments,omitempty"`
-	Delivery  json.RawMessage `json:"delivery,omitempty"`
 }
 
 type eventsUnsubscribeResult struct {
@@ -131,7 +137,7 @@ func (s *Service) requireWebhook() (*webhookState, error) {
 	return s.webhook, nil
 }
 
-func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *eventsSubscribeParams) (*eventsSubscribeResult, error) {
+func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *subscriptionParams) (*eventsSubscribeResult, error) {
 	wh, err := s.requireWebhook()
 	if err != nil {
 		return nil, err
@@ -196,19 +202,19 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 	}, nil
 }
 
-func (s *Service) unsubscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *eventsUnsubscribeParams) (*eventsUnsubscribeResult, error) {
+func (s *Service) unsubscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *subscriptionParams) (*eventsUnsubscribeResult, error) {
 	wh, err := s.requireWebhook()
 	if err != nil {
 		return nil, err
 	}
-	if p == nil {
-		return nil, invalidParams("name is required")
+	if p == nil || p.malformed {
+		return nil, invalidParams("params must be an object")
 	}
-	t, args, err := parseSubscriptionName(p.Name, p.Arguments)
+	t, args, err := parseSubscriptionName(p.fields.Name, p.fields.Arguments)
 	if err != nil {
 		return nil, err
 	}
-	d, err := decodeDelivery(p.Delivery)
+	d, err := decodeDelivery(p.fields.Delivery)
 	if err != nil {
 		return nil, err
 	}
@@ -307,15 +313,15 @@ func subscriptionStoreError(ctx context.Context, logger slog.Logger, err error) 
 	return rpcError(jsonrpc.CodeInternalError, errSubscriptionStore.Error(), nil)
 }
 
-func parseSubscribe(p *eventsSubscribeParams, allowInsecureLoopback bool) (subscribeRequest, error) {
-	if p == nil {
-		return subscribeRequest{}, invalidParams("name is required")
+func parseSubscribe(p *subscriptionParams, allowInsecureLoopback bool) (subscribeRequest, error) {
+	if p == nil || p.malformed {
+		return subscribeRequest{}, invalidParams("params must be an object")
 	}
-	t, args, err := parseSubscriptionName(p.Name, p.Arguments)
+	t, args, err := parseSubscriptionName(p.fields.Name, p.fields.Arguments)
 	if err != nil {
 		return subscribeRequest{}, err
 	}
-	d, err := decodeDelivery(p.Delivery)
+	d, err := decodeDelivery(p.fields.Delivery)
 	if err != nil {
 		return subscribeRequest{}, err
 	}
@@ -328,26 +334,58 @@ func parseSubscribe(p *eventsSubscribeParams, allowInsecureLoopback bool) (subsc
 		return subscribeRequest{}, err
 	}
 	req := subscribeRequest{eventType: t, arguments: args, canonical: canonicalArguments(args), callbackURL: callbackURL, secret: secret}
-	if req.ttl, err = parseTTL(p.TTLMs); err != nil {
+	if req.ttl, err = parseTTL(p.fields.TTLMs); err != nil {
 		return subscribeRequest{}, err
 	}
-	if p.Cursor != nil {
-		id, ok := decodeCursor(*p.Cursor)
+	if !isAbsent(p.fields.Cursor) {
+		var cursor string
+		if json.Unmarshal(p.fields.Cursor, &cursor) != nil {
+			return subscribeRequest{}, invalidParams("cursor must be a string")
+		}
+		id, ok := decodeCursor(cursor)
 		if !ok {
 			return subscribeRequest{}, invalidParams("cursor is not one this server returned")
 		}
 		req.cursor = &id
 	}
-	if p.MaxAgeMs != nil {
-		if *p.MaxAgeMs < 1 {
+	if !isAbsent(p.fields.MaxAgeMs) {
+		ms, err := parseInteger(p.fields.MaxAgeMs)
+		if err != nil {
+			return subscribeRequest{}, invalidParams("maxAgeMs must be an integer")
+		}
+		if ms < 1 {
 			return subscribeRequest{}, invalidParams("maxAgeMs must be positive")
 		}
-		req.maxAge = time.Duration(min(*p.MaxAgeMs, maxAgeLimitMs)) * time.Millisecond
+		req.maxAge = time.Duration(min(ms, maxAgeLimitMs)) * time.Millisecond
 	}
 	return req, nil
 }
 
-func parseSubscriptionName(name string, arguments json.RawMessage) (eventType, pollArguments, error) {
+// isAbsent is true for a field that the request left out or set to null.
+func isAbsent(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
+}
+
+// parseInteger reads a JSON integer. One beyond the int64 range reads as the
+// nearest end of it.
+func parseInteger(raw json.RawMessage) (int64, error) {
+	trimmed := bytes.TrimSpace(raw)
+	n, err := strconv.ParseInt(string(trimmed), 10, 64)
+	if xerrors.Is(err, strconv.ErrRange) {
+		if trimmed[0] == '-' {
+			return math.MinInt64, nil
+		}
+		return math.MaxInt64, nil
+	}
+	return n, err
+}
+
+func parseSubscriptionName(rawName, arguments json.RawMessage) (eventType, pollArguments, error) {
+	var name string
+	if !isAbsent(rawName) && json.Unmarshal(rawName, &name) != nil {
+		return eventType{}, pollArguments{}, invalidParams("name must be a string")
+	}
 	if name == "" {
 		return eventType{}, pollArguments{}, invalidParams("name is required")
 	}
@@ -438,18 +476,11 @@ func isBase64Char(r rune) bool {
 // the cap give the cap, and anything below the floor gives the floor. SEP-3415
 // has no rejection path for TTL values.
 func parseTTL(raw json.RawMessage) (time.Duration, error) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+	if isAbsent(raw) {
 		return maxSubscriptionTTL, nil
 	}
-	ms, err := strconv.ParseInt(string(trimmed), 10, 64)
-	switch {
-	case xerrors.Is(err, strconv.ErrRange):
-		ms = math.MaxInt64
-		if trimmed[0] == '-' {
-			ms = math.MinInt64
-		}
-	case err != nil:
+	ms, err := parseInteger(raw)
+	if err != nil {
 		return 0, invalidParams("ttlMs must be an integer or null")
 	}
 	return max(minSubscriptionTTL, time.Duration(min(ms, maxSubscriptionTTL.Milliseconds()))*time.Millisecond), nil
