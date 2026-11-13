@@ -460,7 +460,41 @@ func TestWaitDeadline(t *testing.T) {
 	require.NotNil(t, res.Events)
 	require.Empty(t, res.Events)
 	require.Equal(t, head.ID, res.Cursor)
-	require.Len(t, h.store.pollQueries(), 4)
+
+	queries := h.store.pollQueries()
+	require.Len(t, queries, 4)
+	require.Zero(t, queries[0].After)
+	for _, q := range queries[1:] {
+		require.Equal(t, head.ID, q.After, "each poll resumes from the cursor of the one before")
+	}
+}
+
+func TestWaitTimeout(t *testing.T) {
+	t.Parallel()
+
+	for name, tt := range map[string]struct {
+		extra   map[string]any
+		seconds int
+	}{
+		"default is 45 seconds": {nil, 45},
+		"explicit 1 second":     {args("timeout_s", 1), 1},
+		"explicit 50 seconds":   {args("timeout_s", 50), 50},
+		"explicit 7 seconds":    {args("timeout_s", 7), 7},
+	} {
+		h := newWaitHarness(t)
+		a := args("repo", testRepo, "types", allTypes, "cursor", 0)
+		for k, v := range tt.extra {
+			a[k] = v
+		}
+		out := h.callAsync(h.ctx, a)
+		for elapsed := 0; elapsed < tt.seconds; {
+			d := min(2, tt.seconds-elapsed)
+			h.step(time.Duration(d) * time.Second)
+			elapsed += d
+		}
+		require.Empty(t, h.await(out).success(t).Events, name)
+		require.Len(t, h.store.pollQueries(), (tt.seconds+1)/2+1, name)
+	}
 }
 
 func TestWaitCursorResumesWhereTheLastWaitStopped(t *testing.T) {
