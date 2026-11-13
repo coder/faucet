@@ -121,6 +121,7 @@ func newWaitHarness(t *testing.T, mutate ...func(*faucet.Deps)) *waitHarness {
 
 	timers := clock.Trap().NewTimer()
 	t.Cleanup(timers.Close)
+	t.Cleanup(cancel)
 	return &waitHarness{t: t, ctx: ctx, store: store, clock: clock, authz: authz, logs: logs, session: session, timers: timers, deps: deps}
 }
 
@@ -208,11 +209,14 @@ func (h *waitHarness) call(args map[string]any) callOutcome {
 func (h *waitHarness) step(want time.Duration, whileParked ...func()) {
 	h.t.Helper()
 	call := h.timers.MustWait(h.ctx)
-	require.Equal(h.t, want, call.Duration)
+	got := call.Duration
 	for _, f := range whileParked {
 		f()
 	}
+	// Released before the assertion: a loop left parked in the trap would make
+	// the session close in cleanup hang instead of failing the test.
 	call.MustRelease(h.ctx)
+	require.Equal(h.t, want, got)
 	h.clock.Advance(want).MustWait(h.ctx)
 }
 
