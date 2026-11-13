@@ -62,7 +62,10 @@ var ErrCallbackRateLimited = xerrors.New("callback verification rate limit reach
 
 // CallbackRequest is what a CallbackVerifier gets for one callback URL. It holds
 // no credential: not the subscriber's GitHub token, and the secret only inside
-// a function that fmt prints as an address.
+// a function that fmt prints as an address. It does hold the URL, which can
+// carry a receiver token: printing the request shows the login only, but a
+// struct that holds a request is printed field by field, URL included, so do
+// not log such a struct.
 type CallbackRequest struct {
 	// Login is the GitHub login of the subscriber.
 	Login string
@@ -84,8 +87,8 @@ func (r CallbackRequest) Sign(id string, timestamp time.Time, body []byte) (http
 	return r.sign(id, timestamp, body)
 }
 
-// Format implements fmt.Formatter so that printing a request shows the login
-// only, because the URL can hold a token.
+// Format implements fmt.Formatter so that printing a request directly shows the
+// login only, because the URL can hold a token.
 func (r CallbackRequest) Format(f fmt.State, _ rune) {
 	_, _ = fmt.Fprintf(f, "CallbackRequest{Login:%q}", r.Login)
 }

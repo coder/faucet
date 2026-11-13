@@ -25,9 +25,11 @@ import (
 )
 
 const (
-	handshakeBurst       = 5
-	handshakeRefill      = 12 * time.Second
-	maxHandshakeHosts    = 10000
+	handshakeLoginBurst  = 5
+	handshakeLoginRefill = 12 * time.Second
+	handshakeHostBurst   = 60
+	handshakeHostRefill  = time.Second
+	maxHandshakeBuckets  = 10000
 	maxHandshakeAnswer   = 1024
 	handshakeNonceBytes  = 32
 	handshakeIDBytes     = 16
@@ -58,11 +60,14 @@ type handshake struct {
 // nonce is random, single-use and never stored or logged. Nothing the endpoint
 // sent reaches a log or an error.
 //
-// Each destination host has a token bucket: 5 handshakes at once, then one every
-// 12 seconds. A handshake spends a token, and an endpoint that answers it
-// correctly gives the token back, because an endpoint that echoes the nonce has
-// agreed to the traffic. When the bucket is empty the verifier returns
-// ErrCallbackRateLimited and sends nothing.
+// Two token buckets limit the requests. Each login has one per destination: 5
+// handshakes at once, then one every 12 seconds. Each destination has one for
+// all logins: 60 at once, then one a second. A login that fails again and again
+// empties only its own bucket and cannot starve another login, and it takes
+// many logins to empty the bucket of a destination. A handshake spends a token
+// of each, and an endpoint that answers it correctly gives them back, because
+// an endpoint that echoes the nonce has agreed to the traffic. When a bucket is
+// empty the verifier returns ErrCallbackRateLimited and sends nothing.
 func NewCallbackHandshake(opts HandshakeOptions) (CallbackVerifier, error) {
 	if opts.Client == nil {
 		return nil, xerrors.New("handshake client is required")
@@ -71,7 +76,7 @@ func NewCallbackHandshake(opts HandshakeOptions) (CallbackVerifier, error) {
 	if clock == nil {
 		clock = quartz.NewReal()
 	}
-	return &handshake{client: opts.Client, clock: clock, hosts: &hostLimiter{clock: clock, buckets: map[string]bucket{}}}, nil
+	return &handshake{client: opts.Client, clock: clock, hosts: newHostLimiter(clock)}, nil
 }
 
 type verificationMessage struct {
@@ -85,7 +90,7 @@ func (h *handshake) VerifyCallback(ctx context.Context, req CallbackRequest) err
 		return xerrors.New("callback URL is not an absolute URL")
 	}
 	host := limiterKey(u.Hostname())
-	if !h.hosts.take(host) {
+	if !h.hosts.take(req.Login, host) {
 		return ErrCallbackRateLimited
 	}
 	nonce, id, err := randomToken(handshakeNonceBytes)
@@ -107,7 +112,7 @@ func (h *handshake) VerifyCallback(ctx context.Context, req CallbackRequest) err
 	if err := checkAnswer(ctx, resp, nonce); err != nil {
 		return err
 	}
-	h.hosts.refund(host)
+	h.hosts.refund(req.Login, host)
 	return nil
 }
 
@@ -247,63 +252,99 @@ type bucket struct {
 	last   time.Time
 }
 
-func (b bucket) refilled(now time.Time) bucket {
-	if n := int(now.Sub(b.last) / handshakeRefill); n > 0 {
-		b.tokens = min(handshakeBurst, b.tokens+n)
-		b.last = b.last.Add(time.Duration(n) * handshakeRefill)
+func (b bucket) refilled(now time.Time, burst int, every time.Duration) bucket {
+	if n := int(now.Sub(b.last) / every); n > 0 {
+		b.tokens = min(burst, b.tokens+n)
+		b.last = b.last.Add(time.Duration(n) * every)
 	}
-	if b.tokens == handshakeBurst {
+	if b.tokens == burst {
 		b.last = now
 	}
 	return b
 }
 
-// hostLimiter keeps one token bucket per destination host. At the size limit it
-// forgets the buckets that are full again, which a new bucket equals, and when
-// none is left it refuses new hosts.
-type hostLimiter struct {
-	clock quartz.Clock
-
-	mu      sync.Mutex
+// tokenBuckets keeps one bucket per key. At the size limit it forgets the
+// buckets that are full again, which a new bucket equals, and when none is left
+// it refuses new keys.
+type tokenBuckets struct {
+	burst   int
+	every   time.Duration
 	buckets map[string]bucket
 }
 
-func (l *hostLimiter) take(host string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	now := l.clock.Now()
-	b, known := l.buckets[host]
+func (t *tokenBuckets) take(key string, now time.Time) bool {
+	b, known := t.buckets[key]
 	if !known {
-		if len(l.buckets) >= maxHandshakeHosts {
-			l.forgetFull(now)
+		if len(t.buckets) >= maxHandshakeBuckets {
+			t.forgetFull(now)
 		}
-		if len(l.buckets) >= maxHandshakeHosts {
+		if len(t.buckets) >= maxHandshakeBuckets {
 			return false
 		}
-		b = bucket{tokens: handshakeBurst, last: now}
+		b = bucket{tokens: t.burst, last: now}
 	}
-	b = b.refilled(now)
+	b = b.refilled(now, t.burst, t.every)
 	granted := b.tokens > 0
 	if granted {
 		b.tokens--
 	}
-	l.buckets[host] = b
+	t.buckets[key] = b
 	return granted
 }
 
-func (l *hostLimiter) refund(host string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if b, ok := l.buckets[host]; ok {
-		b.tokens = min(handshakeBurst, b.tokens+1)
-		l.buckets[host] = b
+func (t *tokenBuckets) refund(key string) {
+	if b, ok := t.buckets[key]; ok {
+		b.tokens = min(t.burst, b.tokens+1)
+		t.buckets[key] = b
 	}
 }
 
-func (l *hostLimiter) forgetFull(now time.Time) {
-	for host, b := range l.buckets {
-		if b.refilled(now).tokens == handshakeBurst {
-			delete(l.buckets, host)
+func (t *tokenBuckets) forgetFull(now time.Time) {
+	for key, b := range t.buckets {
+		if b.refilled(now, t.burst, t.every).tokens == t.burst {
+			delete(t.buckets, key)
 		}
 	}
+}
+
+// hostLimiter limits the handshakes to one destination twice: per login, so that
+// one login cannot use up what another needs, and for all logins together, so
+// that many logins cannot flood a host.
+type hostLimiter struct {
+	clock quartz.Clock
+
+	mu       sync.Mutex
+	perLogin tokenBuckets
+	perHost  tokenBuckets
+}
+
+func newHostLimiter(clock quartz.Clock) *hostLimiter {
+	return &hostLimiter{
+		clock:    clock,
+		perLogin: tokenBuckets{burst: handshakeLoginBurst, every: handshakeLoginRefill, buckets: map[string]bucket{}},
+		perHost:  tokenBuckets{burst: handshakeHostBurst, every: handshakeHostRefill, buckets: map[string]bucket{}},
+	}
+}
+
+func loginHostKey(login, host string) string { return login + "\x00" + host }
+
+func (l *hostLimiter) take(login, host string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.clock.Now()
+	if !l.perLogin.take(loginHostKey(login, host), now) {
+		return false
+	}
+	if !l.perHost.take(host, now) {
+		l.perLogin.refund(loginHostKey(login, host))
+		return false
+	}
+	return true
+}
+
+func (l *hostLimiter) refund(login, host string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.perLogin.refund(loginHostKey(login, host))
+	l.perHost.refund(host)
 }
