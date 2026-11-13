@@ -19,11 +19,11 @@ const (
 	// redeliverEvery is the schedule that the README gives for /cron/redeliver.
 	redeliverEvery = 30 * time.Minute
 	// redeliverLookback is how far back a sweep looks. A delivery is asked for
-	// only while its first attempt is inside this window, and the sweep that
-	// finds the limit of redeliveries reached comes up to
-	// MaxRedeliveriesPerDelivery schedules after that attempt, so the window
-	// reaches back one schedule more. A sweep that runs less often than
-	// redeliverEvery gives up on deliveries that it could still recover.
+	// only while its first attempt is inside this window. The last of the
+	// MaxRedeliveriesPerDelivery requests comes less than that many schedules
+	// after the first attempt, and one schedule more covers a sweep that runs
+	// late or not at all. A sweep that runs less often than redeliverEvery
+	// gives up on deliveries that it could still recover.
 	redeliverLookback = (faucet.MaxRedeliveriesPerDelivery + 1) * redeliverEvery
 	// cronTimeout keeps a run inside the server's write deadline.
 	cronTimeout = 25 * time.Second

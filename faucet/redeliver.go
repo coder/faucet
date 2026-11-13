@@ -75,7 +75,9 @@ type RedeliverResult struct {
 // attempts, with the reason "limit" or "window". It stays lost until someone
 // redelivers it by hand. The window must therefore reach back
 // MaxRedeliveriesPerDelivery+1 times the interval at which the host calls
-// Redeliver. A shorter window lets the first attempt leave it before the
+// Redeliver: the last request comes less than MaxRedeliveriesPerDelivery
+// intervals after the first attempt, and one more covers a call that is late
+// or skipped. A shorter window lets the first attempt leave it before the
 // limit is reached, and a delivery that a later redelivery would have
 // recovered is given up. A host that calls every 30 minutes passes a since
 // that is two hours back.
