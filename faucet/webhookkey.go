@@ -53,8 +53,8 @@ func (k WebhookKey) aead() (cipher.AEAD, error) {
 
 // sealSecret encrypts a subscriber secret for the table. The result is
 // sealVersion, then the nonce, then the AES-256-GCM ciphertext and tag. The
-// nonce is random per call. aad binds the ciphertext to its row. PR 7 reads the
-// same layout.
+// nonce is random per call. aad binds the ciphertext to its row. Whoever reads
+// the table must use the same layout.
 func sealSecret(aead cipher.AEAD, secret subscriberSecret, aad []byte) ([]byte, error) {
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
