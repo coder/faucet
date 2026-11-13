@@ -310,3 +310,9 @@ func TestFakeRedeliveryStoreMatchesContract(t *testing.T) {
 
 	storetest.RunRedelivery(t, func(*testing.T) storetest.RedeliveryStore { return newFakeRedeliveryStore(nil) })
 }
+
+func (s *fakeRedeliveryStore) rowCount() int {
+	s.rmu.Lock()
+	defer s.rmu.Unlock()
+	return len(s.rows)
+}
