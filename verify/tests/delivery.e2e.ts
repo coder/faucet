@@ -201,7 +201,7 @@ describe('webhook delivery', () => {
       expect(log).toMatch(new RegExp(`\\[info\\]\\s+webhook delivered\\s.*subscription=${ok}\\s.*attempt=1\\s.*host=127\\.0\\.0\\.1\\b`));
       expect(log).toMatch(new RegExp(`\\[info\\]\\s+webhook failed, will retry\\s.*subscription=${failing}\\s.*category=http_5xx`));
       expect(log).toMatch(new RegExp(`\\[warn\\]\\s+webhook given up\\s.*subscription=${failing}\\s.*reason=attempts_exhausted`));
-      expect(log).toMatch(new RegExp(`\\[warn\\]\\s+webhook given up\\s.*subscription=${gone}\\s.*reason=endpoint_gone\\s.*category=http_4xx`));
+      expect(log).toMatch(new RegExp(`\\[warn\\]\\s+webhook given up\\s.*subscription=${gone}\\s.*reason=endpoint_gone\\b`));
 
       const answers = replies.join('\n');
       const tables = JSON.stringify([queued, await Promise.all(endpoints.map((at) => started.subscriptions(at.id)))]);

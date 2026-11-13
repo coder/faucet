@@ -117,7 +117,7 @@ describe('webhook delivery, failures and retries', () => {
         expect(await eventRequests(receiver, at), 'one request, and no retry').toHaveLength(1);
         expect(await started.deliveries()).toEqual([]);
         expect(await started.subscriptions(at.id), 'the endpoint ended the delivery, not the subscription').toEqual([before]);
-        expect((await refreshed(started, params)).lastError).toBe('http_4xx');
+        expect((await refreshed(started, params)).lastError, 'a 410 or a 413 leaves the delivery status alone, as SEP-3415 says').toBeNull();
 
         await storeRun(started, repoId, 9402);
         expect(await deliverDue(started), 'the delivery that ended is not queued again').toEqual(counts({ enqueued: 1, claimed: 1, sent: 1, delivered: 1 }));
