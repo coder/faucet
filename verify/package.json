@@ -1,0 +1,15 @@
+{
+  "name": "faucet-verify",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "list": "e2e list",
+    "test": "e2e run"
+  },
+  "devDependencies": {
+    "@e2e-dev/web": "0.16.0",
+    "@types/node": "22.20.5",
+    "e2e": "0.23.1",
+    "typescript": "7.0.2"
+  }
+}
