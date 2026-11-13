@@ -204,7 +204,7 @@ func settleRecoversAStoredDeliveryAndClaimSkipsIt(t *testing.T, s RedeliveryStor
 
 func settleGivesUpAnExpiredDeliveryOnce(t *testing.T, s RedeliveryStore) {
 	lease := acquire(t, s, testHook, t0)
-	apply(t, s, faucet.ScanStep{Epoch: lease.Epoch, Now: t0, Failed: []faucet.FailedAttempt{failedAt("guid-a", 1, t0)}})
+	apply(t, s, faucet.ScanStep{Epoch: lease.Epoch, Now: t0.Add(time.Hour), Failed: []faucet.FailedAttempt{failedAt("guid-a", 1, t0)}})
 
 	deadline := t0.Add(faucet.GitHubDeliveryRetention)
 	require.Empty(t, settle(t, s, deadline.Add(-time.Second)).GaveUp)
