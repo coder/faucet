@@ -108,9 +108,8 @@ describe('app lifecycle', () => {
 
       stack.parent.kill('SIGKILL');
       await waitFor('the run directory to go', TEARDOWN_MS, () => !existsSync(stack.dir));
+      await waitFor('app.mjs and Postgres to exit', TEARDOWN_MS, () => !alive(stack.appPid) && !alive(postgres));
 
-      expect(alive(stack.appPid)).toBe(false);
-      expect(alive(postgres)).toBe(false);
       expect(await healthy(stack.port)).toBe(false);
     } finally {
       await stack.teardown();
@@ -129,8 +128,7 @@ describe('app lifecycle', () => {
 
       process.kill(stack.appPid, 'SIGTERM');
       await waitFor('the run directory to go', TEARDOWN_MS, () => !existsSync(stack.dir));
-      expect(alive(stack.appPid)).toBe(false);
-      expect(alive(postgres)).toBe(false);
+      await waitFor('app.mjs and Postgres to exit', TEARDOWN_MS, () => !alive(stack.appPid) && !alive(postgres));
       expect(await healthy(stack.port)).toBe(false);
     } finally {
       await stack.teardown();
