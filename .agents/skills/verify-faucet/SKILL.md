@@ -18,7 +18,7 @@ Nothing to start by hand. The target's `app.command` runs `node app.mjs --port {
 
 The runner waits for `GET /healthz` to answer 200. On SIGTERM, or once its parent process is gone (a runner killed with SIGKILL), `app.mjs` stops faucet, stops Postgres and deletes the directory within seconds. `--detach` turns the parent watch off. The secret is random per run and reaches no log, report or output.
 
-Needs on the host: Node `^22.22.3 || >=24.8.0` (the `engines` of `e2e` and `@e2e-dev/web`), Go as `go.mod` asks (`GOTOOLCHAIN` and other `GO*` variables pass through), PostgreSQL server binaries and `psql` (written against 18), and network on the first run (`npm ci`, then Playwright downloads Chromium into `~/.cache/ms-playwright`, because the `web()` engine opens a browser context even for API tests; CI uses `npx @e2e-dev/web install chromium --with-deps`). `E2E_TELEMETRY_DISABLED=1` turns off e2e's anonymous telemetry.
+Needs on the host: Node `^22.22.3 || >=24.8.0` (the `engines` of `e2e` and `@e2e-dev/web`), Go as `go.mod` asks (`GOTOOLCHAIN` and other `GO*` variables pass through), PostgreSQL server binaries and `psql` (written against 18), and network on the first run (`npm ci`, then Playwright downloads Chromium into `~/.cache/ms-playwright`, because the `web()` engine opens a browser context even for API tests; CI uses `npx e2e-web install chromium --with-deps`). `E2E_TELEMETRY_DISABLED=1` turns off e2e's anonymous telemetry.
 
 Against a checkout that has no `verify/` (for example another PR's head), run the skill from a checkout that does and point it at the code under test:
 
