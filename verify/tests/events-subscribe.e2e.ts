@@ -398,6 +398,26 @@ describe('events subscribe', () => {
     }
   });
 
+  test('a ttlMs so negative that its nanoseconds overflow gets the floor, never a longer grant', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const marker = newMarker();
+    const url = callbackUrl(marker, '/ttl-overflow');
+
+    for (const ttlMs of [-9_223_372_036_854, -9_223_372_036_855, -9_300_000_000_000, -18_000_000_000_000, -Number.MAX_SAFE_INTEGER]) {
+      const sentAt = Date.now();
+      const result = await subscribed(faucet, subscribeParams(repoId, marker, { delivery: delivery(marker, { url }), ttlMs }));
+      const repliedAt = Date.now();
+      const refreshBefore = Date.parse(result.refreshBefore);
+
+      expect(refreshBefore, `${ttlMs} is not before the floor`).toBeGreaterThanOrEqual(floorSecond(sentAt + MIN_TTL_MS));
+      expect(refreshBefore, `${ttlMs} is not after the floor`).toBeLessThanOrEqual(floorSecond(repliedAt + MIN_TTL_MS));
+    }
+
+    const rows = await faucet.subscriptions(marker);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.expires_at, 'the stored expiry is the floor too').toBeLessThanOrEqual(Date.now() + MIN_TTL_MS);
+  });
+
   test('a parameter that is not valid is refused with the error that names it and writes nothing', async ({ faucet }) => {
     const repoId = newRepoId();
     const marker = newMarker();

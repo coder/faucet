@@ -480,5 +480,6 @@ func parseTTL(raw json.RawMessage) (time.Duration, error) {
 	if err != nil {
 		return 0, invalidParams("ttlMs must be an integer or null")
 	}
-	return max(minSubscriptionTTL, time.Duration(min(ms, maxSubscriptionTTL.Milliseconds()))*time.Millisecond), nil
+	ms = max(minSubscriptionTTL.Milliseconds(), min(ms, maxSubscriptionTTL.Milliseconds()))
+	return time.Duration(ms) * time.Millisecond, nil
 }
