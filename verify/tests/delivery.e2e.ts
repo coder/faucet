@@ -104,6 +104,24 @@ describe('webhook delivery', () => {
     });
   });
 
+  test('a subscription that starts at a cursor gets the events after it and none before it', async ({ faucet, receiver }) => {
+    await withDeliveryFaucet(faucet, async (started) => {
+      const repoId = newRepoId();
+      const at = await endpoint(receiver, 'ok');
+      await storeRun(started, repoId, 9001);
+      const cursor = await pollStart(started, repoId);
+      await storeRun(started, repoId, 9002);
+      await storeRun(started, repoId, 9003);
+
+      const subscription = await subscribed(started, { ...paramsFor(repoId, at), cursor });
+      expect(await deliverDue(started)).toEqual(counts({ enqueued: 2, claimed: 2, sent: 2, delivered: 2 }));
+
+      const requests = await eventRequests(receiver, at);
+      const bodies = requests.map((request) => expectSigned(request, subscription.id));
+      expect(bodies.map((b) => b.data.run_id).sort()).toEqual([9002, 9003]);
+    });
+  });
+
   test('each event type is delivered under its own name with its own data', async ({ faucet, receiver }) => {
     await withDeliveryFaucet(faucet, async (started) => {
       const repoId = newRepoId();

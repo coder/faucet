@@ -147,6 +147,34 @@ describe('webhook delivery, failures and retries', () => {
     });
   }
 
+  test('the cursor of a body stays behind an event that is still unsent, and moves on when it ends', async ({ faucet, receiver }) => {
+    await withDeliveryFaucet(faucet, async (started) => {
+      const repoId = newRepoId();
+      const at = await endpoint(receiver, 'fail-once');
+      const subscription = await subscribed(started, paramsFor(repoId, at));
+      await storeRun(started, repoId, 9901);
+      expect(await deliverDue(started)).toEqual(counts({ enqueued: 1, claimed: 1, sent: 1, retried: 1 }));
+      await storeRun(started, repoId, 9902);
+      expect(await deliverDue(started)).toEqual(counts({ enqueued: 1, claimed: 1, sent: 1, delivered: 1 }));
+      expect(await started.makeDeliveriesDue()).toBe(1);
+      expect(await deliverDue(started)).toEqual(counts({ claimed: 1, sent: 1, delivered: 1 }));
+      await storeRun(started, repoId, 9903);
+      expect(await deliverDue(started)).toEqual(counts({ enqueued: 1, claimed: 1, sent: 1, delivered: 1 }));
+
+      const [first, , third] = (await started.rows(repoId)).map((row) => row.id) as [number, number, number];
+      const cursors = (await eventRequests(receiver, at)).map((request) => {
+        const body = expectSigned(request, subscription.id);
+        return [body.data.run_id, body.cursor];
+      });
+      expect(cursors, 'event 1 failed and was retried, so the cursor of event 2 and of its own retry is behind event 1').toEqual([
+        [9901, `v1.${first - 1}`],
+        [9902, `v1.${first - 1}`],
+        [9901, `v1.${first - 1}`],
+        [9903, `v1.${third - 1}`],
+      ]);
+    });
+  });
+
   test('an endpoint that cannot verify the signature answers 401, and that is a failed attempt', async ({ faucet, receiver }) => {
     await withDeliveryFaucet(faucet, async (started) => {
       const repoId = newRepoId();
