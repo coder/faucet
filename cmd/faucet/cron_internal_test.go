@@ -44,6 +44,10 @@ func (s *cronStore) Purge(_ context.Context, before time.Time) (faucet.PurgeResu
 	return faucet.PurgeResult{Deleted: 3, PurgedThrough: 11}, nil
 }
 
+func (*cronStore) DeleteExpiredSubscriptions(context.Context, time.Time) (int64, error) {
+	return 0, nil
+}
+
 func (s *cronStore) StoredDeliveries(_ context.Context, ids []string) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -63,6 +63,8 @@ type config struct {
 	retention  time.Duration
 	// hookAdmin is nil when redelivery is off.
 	hookAdmin faucet.HookAdmin
+	// webhook is nil when webhook delivery is off.
+	webhook *faucet.WebhookDeps
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -93,6 +95,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	cfg := config{databaseURL: getenv(envDatabaseURL), secret: getenv(envSecret), port: port, githubAPI: githubAPI}
 	if err := loadCronConfig(getenv, &cfg); err != nil {
+		return config{}, err
+	}
+	if err := loadWebhookConfig(getenv, &cfg); err != nil {
 		return config{}, err
 	}
 	return cfg, nil
@@ -191,6 +196,7 @@ func run() error {
 		PrincipalFrom: principalFrom,
 		Clock:         clock,
 		HookAdmin:     cfg.hookAdmin,
+		Webhook:       cfg.webhook,
 	})
 	if err != nil {
 		return xerrors.Errorf("create service: %w", err)
