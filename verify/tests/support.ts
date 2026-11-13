@@ -53,6 +53,24 @@ export interface WaitOutcome extends Reply {
   cursor: number | null;
 }
 
+export interface McpError {
+  code: number;
+  message: string;
+  data?: unknown;
+}
+
+export interface McpReply<R = Record<string, unknown>> extends Reply {
+  id: number | string | null;
+  result: R | null;
+  error: McpError | null;
+}
+
+export interface McpOptions {
+  token?: string | null;
+  name?: string | null;
+  id?: number | string;
+}
+
 export interface Delivery {
   event?: string;
   delivery?: string;
@@ -149,6 +167,48 @@ export class Faucet {
     outcome.events = result.structuredContent?.events ?? null;
     outcome.cursor = result.structuredContent?.cursor ?? null;
     return outcome;
+  }
+
+  // mcp sends one JSON-RPC request to /mcp the way a stateless 2026-07-28
+  // client does. A string token replaces the run's valid GitHub token and null
+  // sends no Authorization header. Mcp-Name defaults to params.name, a string
+  // replaces it and null omits it. A reply that is not JSON-RPC (a 401) has a
+  // null id, result and error.
+  async mcp<R = Record<string, unknown>>(
+    method: string,
+    params: Record<string, unknown> = {},
+    opts: McpOptions = {},
+  ): Promise<McpReply<R>> {
+    const protocolVersion = '2026-07-28';
+    const token = opts.token === undefined ? this.#state.githubToken : opts.token;
+    const name = opts.name === undefined ? (typeof params.name === 'string' ? params.name : null) : opts.name;
+    const headers = new Headers({
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+      'MCP-Protocol-Version': protocolVersion,
+      'Mcp-Method': method,
+    });
+    if (name !== null) headers.set('Mcp-Name', name);
+    if (token !== null) headers.set('Authorization', `Bearer ${token}`);
+    const body = JSON.stringify({
+      jsonrpc: '2.0',
+      id: opts.id ?? 1,
+      method,
+      params: {
+        ...params,
+        _meta: {
+          'io.modelcontextprotocol/protocolVersion': protocolVersion,
+          'io.modelcontextprotocol/clientInfo': { name: 'faucet-verify', version: '0' },
+          'io.modelcontextprotocol/clientCapabilities': {},
+        },
+      },
+    });
+    const reply = await this.request('/mcp', { method: 'POST', headers, body });
+    if (!(reply.headers.get('content-type') ?? '').includes('json')) {
+      return { ...reply, id: null, result: null, error: null };
+    }
+    const parsed = JSON.parse(reply.body) as { id?: number | string; result?: R; error?: McpError };
+    return { ...reply, id: parsed.id ?? null, result: parsed.result ?? null, error: parsed.error ?? null };
   }
 
   async request(path: string, init: RequestInit = {}): Promise<Reply> {
