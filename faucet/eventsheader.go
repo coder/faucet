@@ -60,10 +60,11 @@ type rpcFailure struct {
 	message string
 }
 
-// The fields are read by exact name, because the SDK
-// matches them that way and encoding/json would not. A repeated field fails as
-// well: the SDK keeps an earlier string when a later duplicate is null, and a
-// map here would keep the null.
+// checkEventName fails a body it cannot read as one JSON value, because a body
+// the check skipped could still reach a handler. It reads the fields by exact
+// name, because the SDK matches them that way and encoding/json would not. A
+// repeated field fails as well: the SDK keeps an earlier string when a later
+// duplicate is null, and a map here would keep the null.
 func checkEventName(body []byte, header string) *rpcFailure {
 	if !json.Valid(body) {
 		return &rpcFailure{code: jsonrpc.CodeParseError, message: "request body is not one JSON value"}

@@ -267,6 +267,8 @@ func (s *Service) replayStart(ctx context.Context, cursor int64, maxAge time.Dur
 	return cursor, false, nil
 }
 
+// retentionFloor is where a purge reports the lowest cursor a replay can still
+// start from. Nothing purges yet, so it is zero.
 func (*Service) retentionFloor(context.Context) (int64, error) {
 	return 0, nil
 }
@@ -285,6 +287,8 @@ func newPollResult(events []eventOccurrence, cursor int64, truncated, hasMore bo
 	}
 }
 
+// occurrenceOf adds the pull request numbers and the head SHA to the data,
+// because the store keeps them in columns and the payload schemas list them.
 func occurrenceOf(ev Event) (eventOccurrence, error) {
 	var data map[string]json.RawMessage
 	if err := json.Unmarshal(ev.Data, &data); err != nil || data == nil {
@@ -342,6 +346,8 @@ func invalidParams(format string, args ...any) error {
 	return rpcError(jsonrpc.CodeInvalidParams, fmt.Sprintf(format, args...), nil)
 }
 
+// accessError gives a missing repository and an unreadable one the same
+// Forbidden answer, so a caller cannot tell which repositories exist.
 func accessError(err error) error {
 	if xerrors.Is(err, errVerify) {
 		return rpcError(jsonrpc.CodeInternalError, err.Error(), nil)
