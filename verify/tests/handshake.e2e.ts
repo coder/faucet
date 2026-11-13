@@ -12,11 +12,16 @@ interface Endpoint {
   url: string;
 }
 
-async function endpoint(receiver: Receiver, behavior: string, opts: { port?: number; registered?: string } = {}): Promise<Endpoint> {
+async function endpoint(
+  receiver: Receiver,
+  behavior: string,
+  opts: { port?: number; registered?: string; host?: string } = {},
+): Promise<Endpoint> {
   const id = newMarker();
   const secret = newSecret();
   await receiver.register(id, opts.registered ?? secret);
-  return { id, secret, url: receiver.callback(behavior, id, opts) };
+  const url = receiver.callback(behavior, id, opts);
+  return { id, secret, url: opts.host === undefined ? url : url.replace('127.0.0.1', opts.host) };
 }
 
 function paramsFor(repoId: number, at: Endpoint): Params {
@@ -139,15 +144,16 @@ describe('callback handshake', () => {
     });
   });
 
-  test('the sixth failing handshake to one host answers ResourceExhausted and sends nothing', async ({ faucet, receiver }) => {
+  test('the sixth failing handshake to one address, however it is written, answers ResourceExhausted and sends nothing', async ({ faucet, receiver }) => {
     await withHandshakeFaucet(faucet, async (started) => {
       const repoId = newRepoId();
-      for (let attempt = 1; attempt <= 5; attempt++) {
-        const at = await endpoint(receiver, 'notfound');
+      const spellings = ['127.0.0.1', '[::ffff:127.0.0.1]', '[::ffff:7f00:1]', '[0:0:0:0:0:ffff:7f00:1]', '[0::ffff:7f00:1]'];
+      for (const [index, host] of spellings.entries()) {
+        const at = await endpoint(receiver, 'notfound', { host });
         const reply = await subscribe(started, paramsFor(repoId, at));
-        expect(reply.error?.code, `attempt ${attempt}: ${reply.body}`).toBe(-32027);
+        expect(reply.error?.code, `attempt ${index + 1} at ${host}: ${reply.body}`).toBe(-32027);
       }
-      const limited = await endpoint(receiver, 'echo');
+      const limited = await endpoint(receiver, 'echo', { host: '[::ffff:7f00:0001]' });
       const reply = await subscribe(started, paramsFor(repoId, limited));
       expect(reply.error?.code, reply.body).toBe(-32025);
       expect(reply.error?.data).toEqual({ limit: 'callbackVerifications' });

@@ -49,7 +49,7 @@ type fakeVerifier struct {
 func (v *fakeVerifier) VerifyCallback(_ context.Context, req faucet.CallbackRequest) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.calls = append(v.calls, req.Principal.Login+" "+req.URL)
+	v.calls = append(v.calls, req.Login+" "+req.URL)
 	v.requests = append(v.requests, req)
 	return v.err
 }

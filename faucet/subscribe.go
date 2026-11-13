@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -174,7 +175,13 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 		return nil, accessError(err)
 	}
 	key := NewSubscriptionKeyHash(principal.Login, req.callbackURL, req.eventType.name, req.canonical)
-	verification := CallbackRequest{Principal: principal, URL: req.callbackURL, SubscriptionID: key.ID(), secret: req.secret}
+	secret := req.secret
+	verification := CallbackRequest{
+		Login: principal.Login, URL: req.callbackURL, SubscriptionID: key.ID(),
+		sign: func(id string, timestamp time.Time, body []byte) (http.Header, error) {
+			return SignWebhook(string(secret), id, timestamp, body)
+		},
+	}
 	if err := wh.verifyCallback(ctx, logger, verification); err != nil {
 		return nil, err
 	}
@@ -273,7 +280,7 @@ func (s *Service) subscriber(ctx context.Context, logger slog.Logger, op string)
 }
 
 func (wh *webhookState) verifyCallback(ctx context.Context, logger slog.Logger, req CallbackRequest) error {
-	login := req.Principal.Login
+	login := req.Login
 	if wh.verified.verified(login, req.URL) {
 		return nil
 	}

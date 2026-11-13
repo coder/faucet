@@ -13,7 +13,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -82,7 +84,7 @@ func (h *handshake) VerifyCallback(ctx context.Context, req CallbackRequest) err
 	if err != nil || u.Hostname() == "" {
 		return xerrors.New("callback URL is not an absolute URL")
 	}
-	host := u.Hostname()
+	host := limiterKey(u.Hostname())
 	if !h.hosts.take(host) {
 		return ErrCallbackRateLimited
 	}
@@ -228,6 +230,16 @@ func randomToken(size int) (challenge, id string, err error) {
 		return "", "", xerrors.Errorf("read random bytes: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(buf[:size]), base64.RawURLEncoding.EncodeToString(buf[size:]), nil
+}
+
+// limiterKey names the destination of a request: an IP address by its canonical
+// form, so that no spelling of it gets a bucket of its own, and a host name in
+// lower case without a trailing dot.
+func limiterKey(host string) string {
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return addr.WithZone("").Unmap().String()
+	}
+	return strings.TrimSuffix(strings.ToLower(host), ".")
 }
 
 type bucket struct {

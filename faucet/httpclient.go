@@ -142,9 +142,10 @@ func (g *guard) dialContext(ctx context.Context, _, address string) (net.Conn, e
 	return nil, dialErr
 }
 
-// control runs on the socket, just before it connects. It checks the address
-// that the connection really uses, so a change that dialed a name would fail
-// here instead of reaching a private address.
+// control asserts, on the socket and just before it connects, what dialContext
+// has already guaranteed: the address that connects is permitted. Nothing can
+// reach it through NewHTTPClient, so no test pins it. It stops a later change
+// that dials a name from reaching a private address.
 func (g *guard) control(_, address string, _ syscall.RawConn) error {
 	addrPort, err := netip.ParseAddrPort(address)
 	if err != nil || !g.permits(addrPort.Addr()) {

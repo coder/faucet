@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -114,6 +115,21 @@ func (tg *target) sibling(t *testing.T, handler http.HandlerFunc) *atomic.Int32 
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	return &hits
+}
+
+// refusingPort returns a loopback port that refuses every connection until the test ends. The socket is bound and never
+// listens, so the kernel answers each connect with a refusal, and no other test can be given the port.
+func refusingPort(t *testing.T) string {
+	t.Helper()
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = syscall.Close(fd) })
+	require.NoError(t, syscall.Bind(fd, &syscall.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}))
+	bound, err := syscall.Getsockname(fd)
+	require.NoError(t, err)
+	inet, isInet := bound.(*syscall.SockaddrInet4)
+	require.True(t, isInet)
+	return strconv.Itoa(inet.Port)
 }
 
 func ok(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") }
@@ -345,19 +361,35 @@ func TestGuardedClientGivesUpOnASlowServer(t *testing.T) {
 			}
 		}
 	}
-	for name, handler := range map[string]http.HandlerFunc{"before the headers": stallBeforeHeaders, "inside the body": dripBody} {
+	for name, tc := range map[string]struct {
+		handler http.HandlerFunc
+		inBody  bool
+	}{
+		"before the headers": {stallBeforeHeaders, false},
+		"inside the body":    {dripBody, true},
+	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			tg := newTarget(t, handler)
+			tg := newTarget(t, tc.handler)
+			ctx, cancel := context.WithTimeout(t.Context(), 9*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, tg.url, nil)
+			require.NoError(t, err)
 			start := time.Now()
-			resp, err := get(t, tg.client(&sequenceResolver{answers: []lookup{answer("127.0.0.1")}}), tg.url)
+			resp, err := tg.client(&sequenceResolver{answers: []lookup{answer("127.0.0.1")}}).Do(req) //nolint:bodyclose // readAll closes it.
 			if err == nil {
 				_, err = readAll(t, resp)
 			}
-			var netErr net.Error
-			require.ErrorAs(t, err, &netErr)
-			require.True(t, netErr.Timeout(), "the failure is a timeout")
+			if err != nil {
+				var netErr net.Error
+				require.ErrorAs(t, err, &netErr)
+				require.True(t, netErr.Timeout(), "the failure is a timeout")
+			} else {
+				// When the client gives up it closes the TLS connection, which sends close_notify first. A server that answers
+				// that by ending its response can reach a read that is still waiting, and the read then ends without an error.
+				require.True(t, tc.inBody, "a stall before the headers always fails")
+			}
 			require.Greater(t, time.Since(start), 4*time.Second, "it waited for the limit")
 			require.Less(t, time.Since(start), 9*time.Second, "and not much longer")
 		})

@@ -60,27 +60,34 @@ func (e *CallbackError) Error() string {
 // events/subscribe answers ResourceExhausted and stores nothing.
 var ErrCallbackRateLimited = xerrors.New("callback verification rate limit reached")
 
-// CallbackRequest is what a CallbackVerifier gets for one callback URL.
+// CallbackRequest is what a CallbackVerifier gets for one callback URL. It holds
+// no credential: not the subscriber's GitHub token, and the secret only inside
+// a function that fmt prints as an address.
 type CallbackRequest struct {
-	Principal Principal
+	// Login is the GitHub login of the subscriber.
+	Login string
 	// URL is the callback URL in the canonical form that subscribe stores.
 	URL string
 	// SubscriptionID is the id that events/subscribe returns, which a request
 	// to the endpoint carries in X-MCP-Subscription-Id.
 	SubscriptionID string
-	secret         subscriberSecret
+	sign           func(id string, timestamp time.Time, body []byte) (http.Header, error)
 }
 
 // Sign returns the Standard Webhooks headers for a message to the endpoint,
 // signed with the subscriber's secret. The verifier never holds the secret
 // itself, so it cannot log it.
 func (r CallbackRequest) Sign(id string, timestamp time.Time, body []byte) (http.Header, error) {
-	return SignWebhook(string(r.secret), id, timestamp, body)
+	if r.sign == nil {
+		return nil, xerrors.New("callback request has no secret to sign with")
+	}
+	return r.sign(id, timestamp, body)
 }
 
-// Format implements fmt.Formatter so that no verb can print the secret.
+// Format implements fmt.Formatter so that printing a request shows the login
+// only, because the URL can hold a token.
 func (r CallbackRequest) Format(f fmt.State, _ rune) {
-	_, _ = fmt.Fprintf(f, "CallbackRequest{Login:%q}", r.Principal.Login)
+	_, _ = fmt.Fprintf(f, "CallbackRequest{Login:%q}", r.Login)
 }
 
 // CallbackVerifier proves that the endpoint behind a callback URL agrees to
