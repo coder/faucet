@@ -7,7 +7,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { parseArgs, promisify } from 'node:util';
-import { runDir, stateFile } from './runstate.mjs';
+import { CALLBACK_ORIGIN, runDir, stateFile } from './runstate.mjs';
 
 const execFileAsync = promisify(execFile);
 const FAUCET_STOP_MS = 20_000;
@@ -72,23 +72,30 @@ async function readJson(req) {
 
 // The stub plays GitHub. `token` is the caller's token: GET /user answers
 // verify-user, GET /repos/verify/r<id> answers repository id <id>, and every
-// other repository is 404, like one the token cannot see.
+// other repository is 404, like one the token cannot see. `otherToken` is a
+// second caller: GET /user answers verify-other and it reads the same
+// repositories.
 //
 // It also serves the deliveries API of the org webhook verify/7 to `hookToken`
 // alone, and it plays what GitHub does on a redelivery: it POSTs the stored
 // payload, signed, to the cron faucet. A test sets the deliveries and reads the
 // requests through /__stub/, which needs `control`. The records name the kind
 // of credential each request carried and never the credential.
-async function startGitHubStub({ token, hookToken, control, cronSecret, cronUrl, webhookSecret }) {
+async function startGitHubStub({ token, otherToken, hookToken, control, cronSecret, cronUrl, webhookSecret }) {
   const reply = (res, status, body, headers = {}) => {
     res.writeHead(status, { 'Content-Type': 'application/json', ...headers });
     res.end(JSON.stringify(body));
   };
   const kindOf = (auth) => {
     if (auth === `Bearer ${hookToken}`) return 'hook';
-    if (auth === `Bearer ${token}`) return 'user';
+    if (auth === `Bearer ${token}` || auth === `Bearer ${otherToken}`) return 'user';
     if (auth === `Bearer ${cronSecret}`) return 'cron';
     return auth ? 'other' : 'none';
+  };
+  const loginOf = (auth) => {
+    if (auth === `Bearer ${token}`) return 'verify-user';
+    if (auth === `Bearer ${otherToken}`) return 'verify-other';
+    return null;
   };
   let deliveries = [];
   let pageSize = 100;
@@ -178,8 +185,9 @@ async function startGitHubStub({ token, hookToken, control, cronSecret, cronUrl,
       if (url.pathname.startsWith('/__stub/')) return await handleControl(req, res, url);
       requests.push({ method: req.method, path: url.pathname, query: url.search, auth: kindOf(req.headers.authorization) });
       if (url.pathname.startsWith(HOOK_PATH)) return await hooks(req, res, url);
-      if (req.headers.authorization !== `Bearer ${token}`) return reply(res, 401, { message: 'Bad credentials' });
-      if (url.pathname === '/user') return reply(res, 200, { login: 'verify-user' });
+      const login = loginOf(req.headers.authorization);
+      if (login === null) return reply(res, 401, { message: 'Bad credentials' });
+      if (url.pathname === '/user') return reply(res, 200, { login });
       const repo = /^\/repos\/verify\/r(\d+)$/.exec(url.pathname);
       if (repo) return reply(res, 200, { id: Number(repo[1]) });
       return reply(res, 404, { message: 'Not Found' });
@@ -325,6 +333,8 @@ async function main(abort) {
 
     const secret = randomBytes(32).toString('hex');
     const githubToken = `ghp_${randomBytes(20).toString('hex')}`;
+    const otherToken = `ghp_${randomBytes(20).toString('hex')}`;
+    const webhookKey = randomBytes(32).toString('base64');
     const psql = existsSync(join(bin, 'psql')) ? join(bin, 'psql') : 'psql';
     const cron = {
       port: await freePort(),
@@ -336,6 +346,7 @@ async function main(abort) {
     };
     githubStub = await startGitHubStub({
       token: githubToken,
+      otherToken,
       hookToken: cron.hookToken,
       control: cron.stubControl,
       cronSecret: cron.cronSecret,
@@ -346,7 +357,7 @@ async function main(abort) {
     await createDatabase(psql, dir, CRON_DB);
     writeFileSync(
       stateFile(port),
-      JSON.stringify({ dbHost: dir, dbPort: DB_PORT, psql, secret, githubToken, binary, cron: { ...cron, stubUrl } }),
+      JSON.stringify({ dbHost: dir, dbPort: DB_PORT, psql, secret, githubToken, otherToken, webhookKey, binary, cron: { ...cron, stubUrl } }),
       { mode: 0o600 },
     );
     const databaseUrl = (name) =>
@@ -374,6 +385,8 @@ async function main(abort) {
         GITHUB_WEBHOOK_SECRET: secret,
         PORT: String(port),
         FAUCET_GITHUB_API_URL: stubUrl,
+        FAUCET_WEBHOOK_KEY: webhookKey,
+        FAUCET_WEBHOOK_ALLOWED_ORIGINS: CALLBACK_ORIGIN,
       },
       stdio: ['ignore', 'inherit', 'inherit'],
     });

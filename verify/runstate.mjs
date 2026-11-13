@@ -8,3 +8,6 @@ export function runDir(port) {
 export function stateFile(port) {
   return join(runDir(port), 'state.json');
 }
+
+// The one callback origin the main faucet's allowlist holds. No server answers there: faucet makes no request to a callback URL.
+export const CALLBACK_ORIGIN = 'https://hooks.verify.test';
