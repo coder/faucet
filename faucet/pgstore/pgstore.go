@@ -158,6 +158,9 @@ func (s *Store) Purge(ctx context.Context, before time.Time) (faucet.PurgeResult
 	if err := q.LockPurgeMark(ctx); err != nil {
 		return faucet.PurgeResult{}, xerrors.Errorf("lock purge mark: %w", err)
 	}
+	if _, err := q.AdvanceSubscriptionsThatLostNothing(ctx, before); err != nil {
+		return faucet.PurgeResult{}, xerrors.Errorf("advance subscriptions that lose nothing: %w", err)
+	}
 	deleted, err := q.DeleteEventsBefore(ctx, before)
 	if err != nil {
 		return faucet.PurgeResult{}, xerrors.Errorf("delete events: %w", err)
@@ -205,16 +208,17 @@ func (s *Store) UpsertSubscription(ctx context.Context, sub faucet.Subscription,
 		return faucet.Subscription{}, faucet.ErrSubscriptionLimit
 	}
 	row, err := q.UpsertSubscription(ctx, database.UpsertSubscriptionParams{
-		KeyHash:     sub.KeyHash[:],
-		Principal:   sub.Principal,
-		CallbackUrl: sub.CallbackURL,
-		EventType:   sub.EventType,
-		Arguments:   sub.Arguments,
-		RepoID:      sub.RepoID,
-		SecretEnc:   sub.SecretEnc,
-		Cursor:      sub.Cursor,
-		Now:         now,
-		ExpiresAt:   sub.ExpiresAt,
+		KeyHash:             sub.KeyHash[:],
+		Principal:           sub.Principal,
+		CallbackUrl:         sub.CallbackURL,
+		EventType:           sub.EventType,
+		Arguments:           sub.Arguments,
+		RepoID:              sub.RepoID,
+		SecretEnc:           sub.SecretEnc,
+		Cursor:              sub.Cursor,
+		Now:                 now,
+		ExpiresAt:           sub.ExpiresAt,
+		PreviousSecretUntil: sql.NullTime{Time: now.Add(sub.RotationGrace), Valid: sub.RotationGrace > 0},
 	})
 	if err != nil {
 		return faucet.Subscription{}, xerrors.Errorf("upsert subscription: %w", err)
@@ -233,6 +237,18 @@ func (s *Store) DeleteSubscription(ctx context.Context, principal string, key fa
 	return deleted > 0, nil
 }
 
+func (s *Store) DeleteLiveSubscription(ctx context.Context, principal string, key faucet.SubscriptionKeyHash, now time.Time) (faucet.Subscription, bool, error) {
+	row, err := s.q.DeleteLiveSubscription(ctx, database.DeleteLiveSubscriptionParams{KeyHash: key[:], Principal: principal, Now: now})
+	if xerrors.Is(err, sql.ErrNoRows) {
+		return faucet.Subscription{}, false, nil
+	}
+	if err != nil {
+		return faucet.Subscription{}, false, xerrors.Errorf("delete live subscription: %w", err)
+	}
+	deleted, err := toSubscription(row)
+	return deleted, err == nil, err
+}
+
 func (s *Store) DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (int64, error) {
 	deleted, err := s.q.DeleteExpiredSubscriptions(ctx, now)
 	if err != nil {
@@ -241,23 +257,33 @@ func (s *Store) DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (
 	return deleted, nil
 }
 
+func (s *Store) ClearExpiredPreviousSecrets(ctx context.Context, now time.Time) (int64, error) {
+	cleared, err := s.q.ClearExpiredPreviousSecrets(ctx, now)
+	if err != nil {
+		return 0, xerrors.Errorf("clear expired previous secrets: %w", err)
+	}
+	return cleared, nil
+}
+
 func toSubscription(row database.FaucetSubscription) (faucet.Subscription, error) {
 	key, err := toKeyHash(row.KeyHash)
 	if err != nil {
 		return faucet.Subscription{}, err
 	}
 	return faucet.Subscription{
-		KeyHash:     key,
-		Principal:   row.Principal,
-		CallbackURL: row.CallbackUrl,
-		EventType:   row.EventType,
-		Arguments:   row.Arguments,
-		RepoID:      row.RepoID,
-		SecretEnc:   row.SecretEnc,
-		Cursor:      row.Cursor,
-		CreatedAt:   row.CreatedAt,
-		UpdatedAt:   row.UpdatedAt,
-		ExpiresAt:   row.ExpiresAt,
+		KeyHash:             key,
+		Principal:           row.Principal,
+		CallbackURL:         row.CallbackUrl,
+		EventType:           row.EventType,
+		Arguments:           row.Arguments,
+		RepoID:              row.RepoID,
+		SecretEnc:           row.SecretEnc,
+		PreviousSecretEnc:   row.PreviousSecretEnc,
+		PreviousSecretUntil: row.PreviousSecretUntil.Time,
+		Cursor:              row.Cursor,
+		CreatedAt:           row.CreatedAt,
+		UpdatedAt:           row.UpdatedAt,
+		ExpiresAt:           row.ExpiresAt,
 		Status: faucet.DeliveryStatus{
 			LastDeliveryAt: row.LastDeliveryAt.Time,
 			LastError:      faucet.CallbackReason(row.LastError.String),

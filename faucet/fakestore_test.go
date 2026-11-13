@@ -1,6 +1,7 @@
 package faucet_test
 
 import (
+	"bytes"
 	"context"
 	"maps"
 	"slices"
@@ -81,6 +82,13 @@ func (s *fakeStore) Purge(_ context.Context, before time.Time) (faucet.PurgeResu
 	if s.err != nil {
 		return faucet.PurgeResult{}, s.err
 	}
+	var doomed int64
+	for _, e := range s.events {
+		if e.ReceivedAt.Before(before) {
+			doomed = max(doomed, e.ID)
+		}
+	}
+	s.advanceSubscriptionsThatLoseNothingLocked(doomed)
 	var res faucet.PurgeResult
 	kept := s.events[:0:0]
 	for _, e := range s.events {
@@ -94,6 +102,24 @@ func (s *fakeStore) Purge(_ context.Context, before time.Time) (faucet.PurgeResu
 	s.events = kept
 	res.PurgedThrough = s.purgeMark
 	return res, nil
+}
+
+// advanceSubscriptionsThatLoseNothingLocked moves a subscription that is not
+// below the purge mark yet to the mark that the purge will set (doomed), unless
+// an event of its repository and type above its position, still in the log,
+// lies at or below that mark.
+func (s *fakeStore) advanceSubscriptionsThatLoseNothingLocked(doomed int64) {
+	for key, sub := range s.subs {
+		pos := s.scanned[key]
+		if pos < s.purgeMark || pos >= doomed {
+			continue
+		}
+		if !slices.ContainsFunc(s.events, func(e faucet.Event) bool {
+			return e.RepoID == sub.RepoID && e.Type == sub.EventType && e.ID > pos && e.ID <= doomed
+		}) {
+			s.scanned[key] = doomed
+		}
+	}
 }
 
 func (s *fakeStore) UpsertSubscription(_ context.Context, sub faucet.Subscription, now time.Time, maxLive int) (faucet.Subscription, error) {
@@ -124,8 +150,17 @@ func (s *fakeStore) UpsertSubscription(_ context.Context, sub faucet.Subscriptio
 	}
 	sub.CreatedAt, sub.UpdatedAt = now, now
 	sub.Status = faucet.DeliveryStatus{}
+	sub.PreviousSecretEnc, sub.PreviousSecretUntil = nil, time.Time{}
+	grace := sub.RotationGrace
+	sub.RotationGrace = 0
 	if row, ok := s.subs[sub.KeyHash]; ok {
 		sub.CreatedAt, sub.Cursor, sub.Status = row.CreatedAt, row.Cursor, row.Status
+		switch {
+		case bytes.Equal(row.SecretEnc, sub.SecretEnc):
+			sub.PreviousSecretEnc, sub.PreviousSecretUntil = row.PreviousSecretEnc, row.PreviousSecretUntil
+		case grace > 0:
+			sub.PreviousSecretEnc, sub.PreviousSecretUntil = row.SecretEnc, now.Add(grace)
+		}
 	} else {
 		s.scanned[sub.KeyHash] = sub.Cursor
 	}
@@ -147,6 +182,20 @@ func (s *fakeStore) DeleteSubscription(_ context.Context, principal string, key 
 	return true, nil
 }
 
+func (s *fakeStore) DeleteLiveSubscription(_ context.Context, principal string, key faucet.SubscriptionKeyHash, now time.Time) (faucet.Subscription, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return faucet.Subscription{}, false, s.err
+	}
+	row, ok := s.subs[key]
+	if !ok || row.Principal != principal || !row.ExpiresAt.After(now) {
+		return faucet.Subscription{}, false, nil
+	}
+	s.dropSubscriptionLocked(key)
+	return row, true, nil
+}
+
 func (s *fakeStore) DeleteExpiredSubscriptions(_ context.Context, now time.Time) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -161,6 +210,23 @@ func (s *fakeStore) DeleteExpiredSubscriptions(_ context.Context, now time.Time)
 		}
 	}
 	return deleted, nil
+}
+
+func (s *fakeStore) ClearExpiredPreviousSecrets(_ context.Context, now time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return 0, s.err
+	}
+	var cleared int64
+	for key, row := range s.subs {
+		if row.PreviousSecretEnc != nil && !row.PreviousSecretUntil.After(now) {
+			row.PreviousSecretEnc, row.PreviousSecretUntil = nil, time.Time{}
+			s.subs[key] = row
+			cleared++
+		}
+	}
+	return cleared, nil
 }
 
 func (s *fakeStore) subscriptions() []faucet.Subscription {

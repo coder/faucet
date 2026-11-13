@@ -100,6 +100,7 @@ type cronStore struct {
 	purges  []time.Time
 	claims  []faucet.DeliveryClaim
 	failing error
+	cleared int64
 }
 
 func (s *cronStore) ScanTargets(context.Context, time.Time, int32, int32) ([]faucet.ScanTarget, error) {
@@ -112,6 +113,12 @@ func (s *cronStore) ExpireDeliveries(context.Context, time.Time) (int64, error) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return 0, s.failing
+}
+
+func (s *cronStore) ClearExpiredPreviousSecrets(context.Context, time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cleared, s.failing
 }
 
 func (s *cronStore) ClaimDelivery(context.Context, time.Time, time.Duration) (faucet.DeliveryClaim, bool, error) {
@@ -401,14 +408,15 @@ func TestCronDeliverReportsWhatTheRunDid(t *testing.T) {
 
 	srv := newCronServer(t, cronOptions{secret: testCronSecret, webhook: true})
 	srv.store.claims = []faucet.DeliveryClaim{{Ref: faucet.DeliveryRef{EventID: 4, Attempt: 1}, MessageID: "msg_x", EnqueuedAt: srv.clock.Now()}}
+	srv.store.cleared = 2
 
 	status, _, body := srv.get(t, http.MethodGet, deliverPath, bearer(testCronSecret))
 	require.Equal(t, http.StatusOK, status, body)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal([]byte(body), &got), body)
 	require.Equal(t, map[string]any{
-		"enqueued": 0.0, "gaps": 0.0, "claimed": 1.0, "sent": 0.0, "delivered": 0.0, "retried": 0.0,
-		"gave_up": map[string]any{"event_purged": 1.0}, "superseded": 0.0, "incomplete": false,
+		"enqueued": 0.0, "gaps": 0.0, "gaps_sent": 0.0, "gaps_failed": 0.0, "claimed": 1.0, "sent": 0.0, "delivered": 0.0, "retried": 0.0,
+		"gave_up": map[string]any{"event_purged": 1.0}, "superseded": 0.0, "previous_secrets_cleared": 2.0, "incomplete": false,
 	}, got, "the reply holds counts and reasons, nothing else")
 	srv.requireNoSecrets(t, body)
 }

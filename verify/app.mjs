@@ -73,14 +73,15 @@ async function readJson(req) {
 }
 
 // The stub plays GitHub. It knows two tokens and answers GET /user with the login of the token (verify-user and
-// verify-other) and GET /repos/verify/r<id> with repository id <id> for both. Every other repository is 404.
+// verify-other) and GET /repos/verify/r<id> with repository id <id> for both. Every other repository is 404, like one the
+// token cannot see, and so is one that the receiver's control channel has revoked.
 //
 // It also serves the deliveries API of the org webhook verify/7 to `hookToken` alone, as GitHub does: attempts newest first,
 // 100 at most per page, a Link header with a keyset cursor (v1_<attempt id>), nothing older than 72 hours. A redelivery
 // request makes the stub post the stored payload, signed, to the faucet that the test named, and add the answer as a new
 // attempt. A test sets the attempts and reads the requests through /__stub/, which needs `control`. The request log names
 // the kind of credential each request carried and never the credential.
-async function startGitHubStub({ token, otherToken, hookToken, control }) {
+async function startGitHubStub({ token, otherToken, hookToken, control, revoked }) {
   const reply = (res, status, body, headers = {}) => {
     res.writeHead(status, { 'Content-Type': 'application/json', ...headers });
     res.end(JSON.stringify(body));
@@ -220,7 +221,7 @@ async function startGitHubStub({ token, otherToken, hookToken, control }) {
       if (login === undefined) return reply(res, 401, { message: 'Bad credentials' });
       if (url.pathname === '/user') return reply(res, 200, { login });
       const repo = /^\/repos\/verify\/r(\d+)$/.exec(url.pathname);
-      if (repo) return reply(res, 200, { id: Number(repo[1]) });
+      if (repo && !revoked.has(Number(repo[1]))) return reply(res, 200, { id: Number(repo[1]) });
       return reply(res, 404, { message: 'Not Found' });
     } catch (err) {
       log(`stub: ${err.message}`);
@@ -277,9 +278,10 @@ const EVENT_STATUSES = {
 //   ok 200   gone 410   toolarge 413   fail500 500   fail-once 500, then 200   gone-once 410, then 200   toolarge-once 413, then 200
 //   redirect-events   302 to /hook/internal/<id>
 // The answers to events, except the redirect, have the body ENDPOINT_SAYS, which no log or table of faucet may hold.
-// It records every request. A test registers secrets and reads the records through /__receiver/, which needs `control`.
+// It records every request. A test registers secrets, reads the records and revokes the access of the GitHub stub to a
+// repository (PUT /__receiver/revoked) through /__receiver/, which needs `control`.
 // The records hold the signature headers and never a secret.
-async function startReceiver({ control }) {
+async function startReceiver({ control, revoked }) {
   const secrets = new Map();
   const requests = [];
   const eventRequests = new Map();
@@ -293,6 +295,10 @@ async function startReceiver({ control }) {
     if (req.method === 'PUT' && url.pathname === '/__receiver/secrets') {
       const { id, secret } = JSON.parse(body.toString('utf8'));
       secrets.set(id, secret);
+      return reply(res, 200, '{}', { 'Content-Type': 'application/json' });
+    }
+    if (req.method === 'PUT' && url.pathname === '/__receiver/revoked') {
+      revoked.add(Number(JSON.parse(body.toString('utf8')).repoId));
       return reply(res, 200, '{}', { 'Content-Type': 'application/json' });
     }
     if (req.method === 'GET' && url.pathname === '/__receiver/requests') {
@@ -515,11 +521,12 @@ async function main(abort) {
       hookToken: `ghp_${randomBytes(20).toString('hex')}`,
       stubControl: randomBytes(16).toString('hex'),
     };
-    githubStub = await startGitHubStub({ token: githubToken, otherToken, hookToken: cron.hookToken, control: cron.stubControl });
+    const revoked = new Set();
+    githubStub = await startGitHubStub({ token: githubToken, otherToken, hookToken: cron.hookToken, control: cron.stubControl, revoked });
     const stubUrl = `http://127.0.0.1:${githubStub.address().port}`;
     await createDatabase(psql, dir, CRON_DB);
     const receiverControl = randomBytes(16).toString('hex');
-    receiver = await startReceiver({ control: receiverControl });
+    receiver = await startReceiver({ control: receiverControl, revoked });
     const receiverState = { url: `http://127.0.0.1:${receiver.address().port}`, control: receiverControl };
     writeFileSync(
       stateFile(port),

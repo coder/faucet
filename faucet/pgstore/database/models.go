@@ -67,19 +67,21 @@ type FaucetRedeliveryScan struct {
 }
 
 type FaucetSubscription struct {
-	KeyHash        []byte
-	Principal      string
-	CallbackUrl    string
-	EventType      string
-	Arguments      json.RawMessage
-	RepoID         int64
-	SecretEnc      []byte
-	Cursor         int64
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	ExpiresAt      time.Time
-	ScannedThrough int64
-	LastDeliveryAt sql.NullTime
-	LastError      sql.NullString
-	FailedSince    sql.NullTime
+	KeyHash             []byte
+	Principal           string
+	CallbackUrl         string
+	EventType           string
+	Arguments           json.RawMessage
+	RepoID              int64
+	SecretEnc           []byte
+	Cursor              int64
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	ExpiresAt           time.Time
+	ScannedThrough      int64
+	LastDeliveryAt      sql.NullTime
+	LastError           sql.NullString
+	FailedSince         sql.NullTime
+	PreviousSecretEnc   []byte
+	PreviousSecretUntil sql.NullTime
 }

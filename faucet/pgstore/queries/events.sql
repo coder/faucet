@@ -63,6 +63,20 @@ WITH deleted AS (
 )
 SELECT COUNT(*)::bigint AS deleted, COALESCE(MAX(id), 0)::bigint AS max_id FROM deleted;
 
+-- name: AdvanceSubscriptionsThatLostNothing :execrows
+WITH doomed AS (
+  SELECT COALESCE(MAX(ev.id), 0)::bigint AS mark FROM faucet_events ev WHERE ev.received_at < sqlc.arg(before)
+)
+UPDATE faucet_subscriptions s
+SET scanned_through = doomed.mark
+FROM doomed
+WHERE s.scanned_through < doomed.mark
+  AND s.scanned_through >= (SELECT purged_through FROM faucet_purge_mark)
+  AND NOT EXISTS (
+    SELECT 1 FROM faucet_events e
+    WHERE e.repo_id = s.repo_id AND e.type = s.event_type AND e.id > s.scanned_through AND e.id <= doomed.mark
+  );
+
 -- name: RaisePurgeMark :one
 UPDATE faucet_purge_mark
 SET purged_through = GREATEST(purged_through, sqlc.arg(through)::bigint)
@@ -94,6 +108,15 @@ VALUES (
 )
 ON CONFLICT (key_hash) DO UPDATE SET
   repo_id = EXCLUDED.repo_id,
+  previous_secret_enc = CASE
+    WHEN faucet_subscriptions.secret_enc = EXCLUDED.secret_enc THEN faucet_subscriptions.previous_secret_enc
+    WHEN sqlc.narg(previous_secret_until)::timestamptz IS NULL THEN NULL
+    ELSE faucet_subscriptions.secret_enc
+  END,
+  previous_secret_until = CASE
+    WHEN faucet_subscriptions.secret_enc = EXCLUDED.secret_enc THEN faucet_subscriptions.previous_secret_until
+    ELSE sqlc.narg(previous_secret_until)::timestamptz
+  END,
   secret_enc = EXCLUDED.secret_enc,
   updated_at = EXCLUDED.updated_at,
   expires_at = EXCLUDED.expires_at
@@ -102,5 +125,15 @@ RETURNING *;
 -- name: DeleteSubscription :execrows
 DELETE FROM faucet_subscriptions WHERE key_hash = sqlc.arg(key_hash) AND principal = sqlc.arg(principal);
 
+-- name: DeleteLiveSubscription :one
+DELETE FROM faucet_subscriptions
+WHERE key_hash = sqlc.arg(key_hash) AND principal = sqlc.arg(principal) AND expires_at > sqlc.arg(now)
+RETURNING *;
+
 -- name: DeleteExpiredSubscriptions :execrows
 DELETE FROM faucet_subscriptions WHERE expires_at <= sqlc.arg(now);
+
+-- name: ClearExpiredPreviousSecrets :execrows
+UPDATE faucet_subscriptions
+SET previous_secret_enc = NULL, previous_secret_until = NULL
+WHERE previous_secret_until <= sqlc.arg(now)::timestamptz;

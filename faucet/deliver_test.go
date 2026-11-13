@@ -792,7 +792,7 @@ func TestDeliverDueReportsEventsThatAPurgeDeletedBeforeTheyWereRead(t *testing.T
 	res := d.deliverDue()
 	require.Equal(t, 1, res.Gaps, "the subscription missed events")
 	require.Zero(t, res.Enqueued)
-	require.Zero(t, d.rcv.total())
+	require.Equal(t, 1, d.rcv.total(), "the gap envelope is the only request")
 	require.True(t, d.logsContain(sub.ID))
 
 	d.newRunEvent()
