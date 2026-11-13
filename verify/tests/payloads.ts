@@ -1,3 +1,5 @@
+import type { StubDelivery } from './support';
+
 const HEAD_SHA = '0123456789abcdef0123456789abcdef01234567';
 const MERGE_SHA = 'fedcba9876543210fedcba9876543210fedcba98';
 const BASE_SHA = '00112233445566778899aabbccddeeff00112233';
@@ -163,3 +165,13 @@ export const samples: Record<string, Sample> = {
     },
   },
 };
+
+// stubDelivery is one delivery attempt in the GitHub stub's list of deliveries. It carries a workflow_run payload for the
+// repository, which the stub posts back to the faucet when asked to redeliver.
+export function stubDelivery(
+  repoId: number,
+  delivery: { id: number; guid: string; ageMs: number; status: number },
+): StubDelivery {
+  const sample = samples['workflow_run.completed'];
+  return { ...delivery, event: sample?.event, payload: sample?.payload(repoId) };
+}

@@ -1,6 +1,8 @@
-import { execFile } from 'node:child_process';
-import { createHmac, randomInt, randomUUID } from 'node:crypto';
+import { execFile, spawn } from 'node:child_process';
+import { createHmac, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { test as base } from '@e2e-dev/web';
 import { stateFile } from '../runstate.mjs';
@@ -10,6 +12,16 @@ export { expect } from 'e2e';
 
 const execFileAsync = promisify(execFile);
 
+interface CronState {
+  port: number;
+  db: string;
+  webhookSecret: string;
+  cronSecret: string;
+  hookToken: string;
+  stubControl: string;
+  stubUrl: string;
+}
+
 interface RunState {
   dbHost: string;
   dbPort: number;
@@ -17,6 +29,41 @@ interface RunState {
   secret: string;
   githubToken: string;
   binary: string;
+  cron: CronState;
+}
+
+// A faucet process that the tests can reach: the main one, the one that has cron and hook settings, or one a test starts.
+interface Target {
+  baseUrl: string;
+  webhookSecret: string;
+  database: string;
+}
+
+export interface StubDelivery {
+  id: number;
+  guid: string;
+  ageMs: number;
+  status: number;
+  event?: string;
+  payload?: object;
+}
+
+export interface StubRequest {
+  method: string;
+  path: string;
+  query: string;
+  auth: 'hook' | 'user' | 'cron' | 'other' | 'none';
+}
+
+export interface CronCredentials {
+  authorization?: string;
+  query?: string;
+  body?: string;
+}
+
+export interface CronOptions {
+  method?: string;
+  send?: (secret: string) => CronCredentials;
 }
 
 export interface EventRow {
@@ -51,6 +98,7 @@ export interface WaitOutcome extends Reply {
   text: string;
   events: WaitedEvent[] | null;
   cursor: number | null;
+  truncated: boolean | null;
 }
 
 export interface McpError {
@@ -78,39 +126,131 @@ export interface Delivery {
   signature?: string | null;
 }
 
+function isSecret(value: unknown): value is string {
+  return typeof value === 'string' && value.length >= 16;
+}
+
+function readCronState(value: unknown): CronState {
+  const { port, db, webhookSecret, cronSecret, hookToken, stubControl, stubUrl } = (value ?? {}) as Partial<CronState>;
+  if (
+    typeof port !== 'number' ||
+    typeof db !== 'string' ||
+    !isSecret(webhookSecret) ||
+    !isSecret(cronSecret) ||
+    !isSecret(hookToken) ||
+    !isSecret(stubControl) ||
+    typeof stubUrl !== 'string'
+  ) {
+    throw new Error('the run state written by app.mjs is malformed');
+  }
+  return { port, db, webhookSecret, cronSecret, hookToken, stubControl, stubUrl };
+}
+
 function readState(baseUrl: string): RunState {
   const port = Number(new URL(baseUrl).port);
   const state: unknown = JSON.parse(readFileSync(stateFile(port), 'utf8'));
-  const { dbHost, dbPort, psql, secret, githubToken, binary } = state as Partial<RunState>;
+  const { dbHost, dbPort, psql, secret, githubToken, binary, cron } = state as Partial<RunState>;
   if (
     typeof dbHost !== 'string' ||
     typeof dbPort !== 'number' ||
     typeof psql !== 'string' ||
-    typeof secret !== 'string' ||
-    secret.length < 16 ||
-    typeof githubToken !== 'string' ||
-    githubToken.length < 16 ||
+    !isSecret(secret) ||
+    !isSecret(githubToken) ||
     typeof binary !== 'string'
   ) {
     throw new Error('the run state written by app.mjs is malformed');
   }
-  return { dbHost, dbPort, psql, secret, githubToken, binary };
+  return { dbHost, dbPort, psql, secret, githubToken, binary, cron: readCronState(cron) };
+}
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const address = probe.address();
+      probe.close(() => (address !== null && typeof address === 'object' ? resolve(address.port) : reject(new Error('no port'))));
+    });
+  });
 }
 
 export class Faucet {
   readonly baseUrl: string;
   readonly #state: RunState;
+  readonly #target: Target;
+  readonly #cronSecret: string;
 
-  constructor(baseUrl: string) {
-    this.baseUrl = baseUrl;
-    this.#state = readState(baseUrl);
+  private constructor(state: RunState, target: Target, cronSecret: string) {
+    this.baseUrl = target.baseUrl;
+    this.#state = state;
+    this.#target = target;
+    this.#cronSecret = cronSecret;
+  }
+
+  // main is the server that has no cron or hook settings.
+  static main(appUrl: string): Faucet {
+    const state = readState(appUrl);
+    const target = { baseUrl: appUrl, webhookSecret: state.secret, database: 'postgres' };
+    return new Faucet(state, target, state.cron.cronSecret);
+  }
+
+  // cron is the server that has CRON_SECRET and the settings of the stub's webhook. It has its own database, because a purge
+  // moves the purge mark of the whole table.
+  static cron(appUrl: string): Faucet {
+    const state = readState(appUrl);
+    const target = { baseUrl: `http://127.0.0.1:${state.cron.port}`, webhookSecret: state.cron.webhookSecret, database: state.cron.db };
+    return new Faucet(state, target, state.cron.cronSecret);
   }
 
   get binary(): string {
     return this.#state.binary;
   }
 
-  sign(body: string, secret: string = this.#state.secret): string {
+  // withFaucet starts one more faucet on its own database, runs fn against it and stops it. The new faucet has a random
+  // CRON_SECRET and no hook settings. env adds the rest. fn gets the faucet and a function that returns its output so far.
+  async withFaucet<T>(env: Record<string, string>, fn: (started: Faucet, output: () => string) => Promise<T>): Promise<T> {
+    const database = `faucet_${randomBytes(6).toString('hex')}`;
+    const port = await freePort();
+    const webhookSecret = randomBytes(32).toString('hex');
+    const cronSecret = randomBytes(32).toString('hex');
+    const { dbHost, dbPort, binary, cron } = this.#state;
+    const databaseUrl = `postgres://postgres@/${database}?${new URLSearchParams({ host: dbHost, port: String(dbPort), sslmode: 'disable' })}`;
+
+    await this.sql(`create database ${database}`);
+    const child = spawn(binary, [], {
+      env: {
+        DATABASE_URL: databaseUrl,
+        GITHUB_WEBHOOK_SECRET: webhookSecret,
+        PORT: String(port),
+        FAUCET_GITHUB_API_URL: cron.stubUrl,
+        CRON_SECRET: cronSecret,
+        ...env,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    child.stdout.on('data', (chunk: Buffer) => (output += chunk.toString()));
+    child.stderr.on('data', (chunk: Buffer) => (output += chunk.toString()));
+    const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    const running = (): boolean => child.exitCode === null && child.signalCode === null;
+
+    try {
+      const baseUrl = `http://127.0.0.1:${port}`;
+      for (let waited = 0; !(await isHealthy(baseUrl)); waited += 100) {
+        if (!running() || waited > 20_000) throw new Error(`the started faucet did not become healthy:\n${output}`);
+        await sleep(100);
+      }
+      return await fn(new Faucet(this.#state, { baseUrl, webhookSecret, database }, cronSecret), () => output);
+    } finally {
+      if (running()) child.kill('SIGTERM');
+      await Promise.race([exited, sleep(10_000)]);
+      if (running()) child.kill('SIGKILL');
+      await exited;
+      await this.sql(`drop database ${database} with (force)`);
+    }
+  }
+
+  sign(body: string, secret: string = this.#target.webhookSecret): string {
     return `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`;
   }
 
@@ -122,6 +262,16 @@ export class Faucet {
       headers.set('X-Hub-Signature-256', delivery.signature ?? this.sign(delivery.body));
     }
     return this.request('/webhook/github', { method: 'POST', headers, body: delivery.body });
+  }
+
+  // cronJob calls GET /cron/<job> the way Vercel Cron does, with the run's cron secret as a bearer token. opts.send says
+  // what the request carries instead, as a function of the secret, so that no test names the secret.
+  async cronJob(job: 'purge' | 'redeliver', opts: CronOptions = {}): Promise<Reply> {
+    const send = opts.send ?? ((secret: string): CronCredentials => ({ authorization: `Bearer ${secret}` }));
+    const { authorization, query, body } = send(this.#cronSecret);
+    const headers = new Headers();
+    if (authorization !== undefined) headers.set('Authorization', authorization);
+    return this.request(`/cron/${job}${query === undefined ? '' : `?${query}`}`, { method: opts.method ?? 'GET', headers, body });
   }
 
   // waitForEvents calls the wait_for_github_events tool on /mcp the way a
@@ -152,20 +302,21 @@ export class Faucet {
       },
     });
     const reply = await this.request('/mcp', { method: 'POST', headers, body });
-    const outcome: WaitOutcome = { ...reply, isError: false, text: '', events: null, cursor: null };
+    const outcome: WaitOutcome = { ...reply, isError: false, text: '', events: null, cursor: null, truncated: null };
     if (reply.status !== 200) return outcome;
 
     const { result } = JSON.parse(reply.body) as {
       result: {
         isError?: boolean;
         content: { text: string }[];
-        structuredContent?: { events: WaitedEvent[]; cursor: number };
+        structuredContent?: { events: WaitedEvent[]; cursor: number; truncated: boolean };
       };
     };
     outcome.isError = result.isError === true;
     outcome.text = result.content[0]?.text ?? '';
     outcome.events = result.structuredContent?.events ?? null;
     outcome.cursor = result.structuredContent?.cursor ?? null;
+    outcome.truncated = result.structuredContent?.truncated ?? null;
     return outcome;
   }
 
@@ -219,13 +370,26 @@ export class Faucet {
     return JSON.parse(await this.sql(query)) as EventRow[];
   }
 
+  // backdate makes the stored event look as if it arrived the given number of days ago.
+  async backdate(deliveryId: string, days: number): Promise<void> {
+    if (!/^[0-9a-f-]{36}$/.test(deliveryId)) throw new Error('deliveryId must be a UUID');
+    if (!Number.isInteger(days) || days < 1) throw new Error('days must be a positive integer');
+    const query = `update faucet_events set received_at = now() - interval '${days} days' where delivery_id = '${deliveryId}' returning id`;
+    if ((await this.sql(query)) === '') throw new Error(`no event has the delivery id ${deliveryId}`);
+  }
+
+  // purgeMark is the highest event ID that any purge has deleted.
+  async purgeMark(): Promise<number> {
+    return Number(await this.sql('select purged_through from faucet_purge_mark'));
+  }
+
   async sql(query: string): Promise<string> {
     const { stdout } = await execFileAsync(this.#state.psql, [
       '-X', '-A', '-t', '-q',
       '-h', this.#state.dbHost,
       '-p', String(this.#state.dbPort),
       '-U', 'postgres',
-      '-d', 'postgres',
+      '-d', this.#target.database,
       '-v', 'ON_ERROR_STOP=1',
       '-c', query,
     ]);
@@ -233,13 +397,63 @@ export class Faucet {
   }
 
   leaksSecret(text: string): boolean {
-    return text.includes(this.#state.secret) || text.includes(this.#state.githubToken);
+    const { secret, githubToken, cron } = this.#state;
+    const secrets = [secret, githubToken, cron.webhookSecret, cron.cronSecret, cron.hookToken, cron.stubControl];
+    return [...secrets, this.#target.webhookSecret, this.#cronSecret].some((value) => text.includes(value));
   }
 }
 
-export const test = base.extend<{ faucet: Faucet }>({
+async function isHealthy(baseUrl: string): Promise<boolean> {
+  try {
+    return (await fetch(`${baseUrl}/healthz`)).status === 200;
+  } catch {
+    return false;
+  }
+}
+
+// HookStub reads and sets what the GitHub stub in app.mjs serves for the webhook that the cron server manages. The stub
+// plays GitHub's redelivery too: it posts the stored payload, signed, to the cron server.
+export class HookStub {
+  readonly #url: string;
+  readonly #control: string;
+
+  constructor(appUrl: string) {
+    const { cron } = readState(appUrl);
+    this.#url = cron.stubUrl;
+    this.#control = cron.stubControl;
+  }
+
+  // set replaces the deliveries the stub lists and clears its request log. pageSize caps a page, and redeliveryStatus is
+  // the status of a redelivery request (GitHub answers 202).
+  async set(deliveries: StubDelivery[], opts: { pageSize?: number; redeliveryStatus?: number } = {}): Promise<void> {
+    await this.#call('PUT', '/__stub/deliveries', { deliveries, ...opts });
+  }
+
+  // requests returns every request that the stub got from a faucet since the last set, oldest first.
+  async requests(): Promise<StubRequest[]> {
+    return (await this.#call('GET', '/__stub/requests')) as StubRequest[];
+  }
+
+  async #call(method: string, path: string, body?: object): Promise<unknown> {
+    const response = await fetch(`${this.#url}${path}`, {
+      method,
+      headers: { 'X-Stub-Control': this.#control, 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (response.status !== 200) throw new Error(`the stub answered ${method} ${path} with ${response.status}`);
+    return response.json();
+  }
+}
+
+export const test = base.extend<{ faucet: Faucet; cron: Faucet; hooks: HookStub }>({
   faucet: async ({ app }, use) => {
-    await use(new Faucet(app.baseUrl));
+    await use(Faucet.main(app.baseUrl));
+  },
+  cron: async ({ app }, use) => {
+    await use(Faucet.cron(app.baseUrl));
+  },
+  hooks: async ({ app }, use) => {
+    await use(new HookStub(app.baseUrl));
   },
 });
 
