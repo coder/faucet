@@ -11,6 +11,7 @@ const execFileAsync = promisify(execFile);
 const FAUCET_STOP_MS = 20_000;
 const DB_PORT = 5432;
 const SOCKET_PATH_MAX = 100;
+const PARENT_POLL_MS = 1000;
 
 function log(message) {
   console.error(`faucet-verify: ${message}`);
@@ -74,6 +75,15 @@ async function stopFaucet(child) {
   clearTimeout(timer);
 }
 
+function stopWhenParentExits(abort) {
+  const parent = process.ppid;
+  setInterval(() => {
+    if (process.ppid === parent) return;
+    log('parent process exited, shutting down');
+    abort.abort();
+  }, PARENT_POLL_MS).unref();
+}
+
 function waitForFaucetOrAbort(child, signal) {
   return new Promise((resolveOutcome) => {
     if (signal.aborted) return resolveOutcome({ aborted: true });
@@ -83,12 +93,14 @@ function waitForFaucetOrAbort(child, signal) {
   });
 }
 
-async function main(signal) {
-  const { values } = parseArgs({ options: { port: { type: 'string' } } });
+async function main(abort) {
+  const { signal } = abort;
+  const { values } = parseArgs({ options: { port: { type: 'string' }, detach: { type: 'boolean' } } });
   const port = Number(values.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error('--port must be an integer from 1 to 65535');
   }
+  if (!values.detach) stopWhenParentExits(abort);
   const root = resolve(process.env.FAUCET_ROOT ?? join(import.meta.dirname, '..'));
   if (!existsSync(join(root, 'cmd', 'faucet', 'main.go'))) {
     throw new Error(`${root} is not a faucet checkout: cmd/faucet/main.go is missing`);
@@ -103,14 +115,14 @@ async function main(signal) {
     mkdirSync(dir, { mode: 0o700 });
   } catch (err) {
     if (err.code === 'EEXIST') {
-      throw new Error(
-        `${dir} exists, so an earlier run was killed; stop its Postgres with pg_ctl -D ${dir}/pgdata stop, then delete ${dir}`,
-      );
+      const advice = existsSync(join(dir, 'pgdata'))
+        ? `stop its app.mjs, faucet and Postgres, then delete ${dir} (Cleanup in the verify-faucet skill)`
+        : `it has no pgdata, so there is no Postgres to stop; delete ${dir}`;
+      throw new Error(`${dir} exists, so an earlier run was killed; ${advice}`);
     }
     throw err;
   }
 
-  let postgresStarted = false;
   let faucet;
   let failure;
   try {
@@ -120,7 +132,6 @@ async function main(signal) {
       { signal },
     );
     await startPostgres(bin, dir, signal);
-    postgresStarted = true;
     log(`postgres listening on ${socketPath}`);
 
     const binary = join(dir, 'faucet');
@@ -145,7 +156,7 @@ async function main(signal) {
     if (!signal.aborted) failure = err.message;
   } finally {
     if (faucet) await stopFaucet(faucet);
-    const postgresStopped = !postgresStarted || (await stopPostgres(bin, dir));
+    const postgresStopped = !existsSync(join(dir, 'pgdata', 'postmaster.pid')) || (await stopPostgres(bin, dir));
     if (postgresStopped) rmSync(dir, { recursive: true, force: true });
     else failure ??= `left ${dir} in place because Postgres is still running`;
   }
@@ -155,7 +166,7 @@ async function main(signal) {
 const abort = new AbortController();
 for (const name of ['SIGINT', 'SIGTERM']) process.on(name, () => abort.abort());
 
-main(abort.signal).then(
+main(abort).then(
   () => process.exit(0),
   (err) => {
     log(err.message);
