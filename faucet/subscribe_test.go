@@ -1078,7 +1078,7 @@ func TestSubscribeGrantStaysFromTheFloorToTheCapForAnyInteger(t *testing.T) {
 	t.Parallel()
 
 	const wrapStep = 18446744073709
-	rng := mrand.New(mrand.NewPCG(1, 2))
+	rng := mrand.New(mrand.NewPCG(1, 2)) //nolint:gosec // A fixed seed gives the same sample every run, which is the point.
 	values := []int64{math.MinInt64, math.MaxInt64, 0, 1, -1}
 	for k := range 63 {
 		values = append(values, 1<<k, -(1 << k), 1<<k+1, -(1<<k)-1)
@@ -1089,7 +1089,7 @@ func TestSubscribeGrantStaysFromTheFloorToTheCapForAnyInteger(t *testing.T) {
 		}
 	}
 	for range 300 {
-		values = append(values, int64(rng.Uint64()))
+		values = append(values, int64(rng.Uint64())) //nolint:gosec // Any bit pattern is a wanted integer.
 	}
 
 	h := newWebhookHarness(t)
