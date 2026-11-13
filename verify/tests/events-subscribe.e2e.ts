@@ -485,9 +485,8 @@ describe('events subscribe', () => {
       expect(occurrences(reply.body, secret), reply.body).toBe(0);
     }
     expect(faucet.leaksSecret(log)).toBe(false);
-    for (const [label, value] of [['the secret', secret], ['the rejected secret', badSecret], ['the path and query', marker]]) {
-      expect(occurrences(log, value ?? ''), `${label} in the log`).toBe(0);
-    }
+    const kept: [string, string][] = [['the secret', secret], ['the rejected secret', badSecret], ['the path and query', marker]];
+    for (const [label, value] of kept) expect(occurrences(log, value), `${label} in the log`).toBe(0);
   });
 
   test('a principal holds at most 100 live subscriptions: the next is -32025, a refresh, another principal and a freed slot still work', async ({ faucet }) => {
