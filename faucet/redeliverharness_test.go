@@ -246,7 +246,7 @@ func (s *captureSink) LogEntry(_ context.Context, e slog.SinkEntry) {
 	s.entries = append(s.entries, e)
 }
 
-func (s *captureSink) Sync() {}
+func (*captureSink) Sync() {}
 
 // lines returns the fields of every entry with the message, as strings.
 func (s *captureSink) lines(message string) []map[string]string {
@@ -271,7 +271,7 @@ func (s *captureSink) text() string {
 	defer s.mu.Unlock()
 	var b strings.Builder
 	for _, e := range s.entries {
-		fmt.Fprintf(&b, "%s %v\n", e.Message, e.Fields)
+		_, _ = fmt.Fprintf(&b, "%s %v\n", e.Message, e.Fields)
 	}
 	return b.String()
 }

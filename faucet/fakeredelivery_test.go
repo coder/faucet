@@ -238,9 +238,9 @@ func (s *fakeRedeliveryStore) SettleRedeliveries(_ context.Context, req faucet.S
 			row.state, row.settledAt = fakeRecovered, req.Now
 			res.Recovered = append(res.Recovered, guid)
 		case !row.firstAt.Add(req.Retention).After(req.Now):
-			s.giveUpLocked(&res, guid, row, faucet.GiveUpExpired, req.Now)
+			giveUp(&res, guid, row, faucet.GiveUpExpired, req.Now)
 		case row.asks >= req.MaxAsks && !row.nextAskAt.After(req.Now):
-			s.giveUpLocked(&res, guid, row, faucet.GiveUpLimit, req.Now)
+			giveUp(&res, guid, row, faucet.GiveUpLimit, req.Now)
 		default:
 			res.Pending++
 		}
@@ -248,7 +248,7 @@ func (s *fakeRedeliveryStore) SettleRedeliveries(_ context.Context, req faucet.S
 	return res, nil
 }
 
-func (s *fakeRedeliveryStore) giveUpLocked(res *faucet.SettleResult, guid string, row *fakeRedeliveryRow, reason faucet.GiveUpReason, now time.Time) {
+func giveUp(res *faucet.SettleResult, guid string, row *fakeRedeliveryRow, reason faucet.GiveUpReason, now time.Time) {
 	row.state, row.settledAt = fakeGaveUp, now
 	res.GaveUp = append(res.GaveUp, faucet.GaveUp{GUID: guid, Reason: reason, Asks: row.asks, FirstDeliveredAt: row.firstAt})
 }

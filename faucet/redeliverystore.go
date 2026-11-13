@@ -2,6 +2,7 @@ package faucet
 
 import (
 	"context"
+	"math"
 	"time"
 
 	"golang.org/x/xerrors"
@@ -174,7 +175,7 @@ type SettleRequest struct {
 
 // Validate checks the fields a caller supplies to SettleRedeliveries.
 func (r SettleRequest) Validate() error {
-	if r.Now.IsZero() || r.Retention <= 0 || r.MaxAsks <= 0 {
+	if r.Now.IsZero() || r.Retention <= 0 || r.MaxAsks <= 0 || r.MaxAsks > math.MaxInt32 {
 		return xerrors.New("settle needs a time, a retention and an ask limit")
 	}
 	return nil
@@ -213,7 +214,7 @@ func (r ClaimRequest) Validate() error {
 	switch {
 	case r.Now.IsZero() || r.Retention <= 0:
 		return xerrors.New("claim needs a time and a retention")
-	case r.MaxAsks <= 0 || len(r.Schedule) != r.MaxAsks:
+	case r.MaxAsks <= 0 || r.MaxAsks > math.MaxInt32 || len(r.Schedule) != r.MaxAsks:
 		return xerrors.New("claim needs one schedule entry per ask")
 	}
 	for _, wait := range r.Schedule {

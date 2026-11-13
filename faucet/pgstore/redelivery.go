@@ -108,13 +108,15 @@ func (s *Store) ApplyRedeliveryScan(ctx context.Context, step faucet.ScanStep) (
 
 	var res faucet.ScanResult
 	if len(step.Failed) > 0 {
-		params := database.TrackFailedAttemptsParams{Now: step.Now}
-		for _, f := range step.Failed {
-			params.Guids = append(params.Guids, f.GUID)
-			params.AttemptIds = append(params.AttemptIds, f.AttemptID)
-			params.DeliveredAts = append(params.DeliveredAts, f.DeliveredAt)
+		guids := make([]string, len(step.Failed))
+		attemptIDs := make([]int64, len(step.Failed))
+		deliveredAts := make([]time.Time, len(step.Failed))
+		for i, f := range step.Failed {
+			guids[i], attemptIDs[i], deliveredAts[i] = f.GUID, f.AttemptID, f.DeliveredAt
 		}
-		tracked, err := q.TrackFailedAttempts(ctx, params)
+		tracked, err := q.TrackFailedAttempts(ctx, database.TrackFailedAttemptsParams{
+			Guids: guids, AttemptIds: attemptIDs, DeliveredAts: deliveredAts, Now: step.Now,
+		})
 		if err != nil {
 			return faucet.ScanResult{}, xerrors.Errorf("track failed attempts: %w", err)
 		}
@@ -211,7 +213,7 @@ func (s *Store) SettleRedeliveries(ctx context.Context, req faucet.SettleRequest
 	for _, r := range expired {
 		res.GaveUp = append(res.GaveUp, faucet.GaveUp{GUID: r.Guid, Reason: faucet.GiveUpExpired, Asks: int(r.Asks), FirstDeliveredAt: r.FirstAttemptAt.UTC()})
 	}
-	limited, err := q.SettleLimitedRedeliveries(ctx, database.SettleLimitedRedeliveriesParams{Now: req.Now, MaxAsks: int32(req.MaxAsks)})
+	limited, err := q.SettleLimitedRedeliveries(ctx, database.SettleLimitedRedeliveriesParams{Now: req.Now, MaxAsks: int32(req.MaxAsks)}) //nolint:gosec // Validate bounds MaxAsks.
 	if err != nil {
 		return faucet.SettleResult{}, xerrors.Errorf("settle limited: %w", err)
 	}
@@ -253,7 +255,7 @@ func (s *Store) ClaimRedelivery(ctx context.Context, req faucet.ClaimRequest) (f
 		schedule[i] = wait.Seconds()
 	}
 	row, err := s.q.ClaimRedelivery(ctx, database.ClaimRedeliveryParams{
-		Now: req.Now, NotBefore: req.Now.Add(-req.Retention), MaxAsks: int32(req.MaxAsks), ScheduleSecs: schedule,
+		Now: req.Now, NotBefore: req.Now.Add(-req.Retention), MaxAsks: int32(req.MaxAsks), ScheduleSecs: schedule, //nolint:gosec // Validate bounds MaxAsks.
 	})
 	if xerrors.Is(err, sql.ErrNoRows) {
 		return faucet.RedeliveryClaim{}, false, nil
