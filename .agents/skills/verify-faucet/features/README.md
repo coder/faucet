@@ -18,7 +18,7 @@ One file per user-facing behavior of the faucet server at PR 6, from the point o
 | [Wait tool](wait-tool.md) | `POST /mcp` | `tests/wait-tool.e2e.ts` | tested |
 | [Events list](events-list.md) | `POST /mcp`, `server/discover` and `events/list` | `tests/events-list.e2e.ts` | tested |
 | [Events poll](events-poll.md) | `POST /mcp`, `events/poll` | `tests/events-poll.e2e.ts` | tested |
-| [Events subscribe](events-subscribe.md) | `POST /mcp`, `events/subscribe` | `tests/events-subscribe.e2e.ts` | tested |
+| [Events subscribe](events-subscribe.md) | `POST /mcp`, `events/subscribe` | `tests/events-subscribe.e2e.ts`, `tests/events-subscribe-types.e2e.ts` | tested |
 | [Events unsubscribe](events-unsubscribe.md) | `POST /mcp`, `events/unsubscribe` | `tests/events-unsubscribe.e2e.ts` | tested |
 | [Cron routes](cron-auth.md) | `GET /cron/purge`, `GET /cron/redeliver`, the secret check | `tests/cron-auth.e2e.ts` | tested |
 | [Purge](purge.md) | `GET /cron/purge`, then `events/poll`, the wait tool and the subscriptions table | `tests/purge.e2e.ts` | tested |
