@@ -27,6 +27,23 @@ type Deps struct {
 	// HookAdmin lets Redeliver ask GitHub for failed deliveries again. It is
 	// optional. Without it Redeliver returns ErrNoHookAdmin.
 	HookAdmin HookAdmin
+	// Webhook turns on webhook delivery: events/subscribe, events/unsubscribe
+	// and the webhook mode in events/list. Nil leaves it off, and
+	// events/subscribe then answers Unsupported.
+	Webhook *WebhookDeps
+}
+
+// WebhookDeps are the collaborators of webhook delivery.
+type WebhookDeps struct {
+	// Key seals subscriber secrets in the store.
+	Key WebhookKey
+	// Callbacks verifies a callback URL inside events/subscribe, before
+	// anything is stored. NewCallbackAllowlist is the one that makes no
+	// request.
+	Callbacks CallbackVerifier
+	// AllowInsecureLoopback accepts callback URLs on loopback hosts, over http
+	// too. It exists for tests. Production hosts leave it false.
+	AllowInsecureLoopback bool
 }
 
 // Service turns GitHub webhooks into stored events and serves them to waiters.
@@ -38,6 +55,9 @@ type Service struct {
 	principalFrom func(context.Context) (Principal, error)
 	clock         quartz.Clock
 	hooks         HookAdmin
+	// webhook is nil when webhook delivery is off.
+	webhook *webhookState
+	listed  []eventDescriptor
 }
 
 // New returns a Service for d. It starts no goroutines.
@@ -54,7 +74,7 @@ func New(d Deps) (*Service, error) {
 	case d.Clock == nil:
 		return nil, xerrors.New("clock is required")
 	}
-	return &Service{
+	svc := &Service{
 		store:         d.Store,
 		secret:        bytes.Clone(d.Secret),
 		logger:        d.Logger,
@@ -62,5 +82,14 @@ func New(d Deps) (*Service, error) {
 		principalFrom: d.PrincipalFrom,
 		clock:         d.Clock,
 		hooks:         d.HookAdmin,
-	}, nil
+		listed:        describeEvents([]string{deliveryPoll}),
+	}
+	if d.Webhook != nil {
+		var err error
+		if svc.webhook, err = newWebhookState(*d.Webhook, d.Clock); err != nil {
+			return nil, xerrors.Errorf("webhook: %w", err)
+		}
+		svc.listed = describeEvents([]string{deliveryPoll, deliveryWebhook})
+	}
+	return svc, nil
 }

@@ -92,15 +92,13 @@ type eventsPollResult struct {
 	NextPollMs int               `json:"nextPollMs"`
 }
 
-var listedEvents = describeEvents()
-
-func describeEvents() []eventDescriptor {
+func describeEvents(delivery []string) []eventDescriptor {
 	descriptors := make([]eventDescriptor, len(eventCatalog))
 	for i, t := range eventCatalog {
 		descriptors[i] = eventDescriptor{
 			Name:          t.name,
 			Description:   t.description,
-			Delivery:      []string{deliveryPoll},
+			Delivery:      delivery,
 			InputSchema:   json.RawMessage(pollArgumentsSchema),
 			PayloadSchema: t.payloadSchema,
 		}
@@ -109,19 +107,22 @@ func describeEvents() []eventDescriptor {
 }
 
 func (s *Service) registerEvents(srv *mcp.Server) {
-	if err := mcp.AddReceivingCustomMethod(srv, methodEventsList, listEvents); err != nil {
-		panic(fmt.Sprintf("register %s: %v", methodEventsList, err))
+	registered := func(method string, err error) {
+		if err != nil {
+			panic(fmt.Sprintf("register %s: %v", method, err))
+		}
 	}
-	if err := mcp.AddReceivingCustomMethod(srv, methodEventsPoll, s.pollEventsMethod); err != nil {
-		panic(fmt.Sprintf("register %s: %v", methodEventsPoll, err))
-	}
+	registered(methodEventsList, mcp.AddReceivingCustomMethod(srv, methodEventsList, s.listEvents))
+	registered(methodEventsPoll, mcp.AddReceivingCustomMethod(srv, methodEventsPoll, s.pollEventsMethod))
+	registered(methodEventsSubscribe, mcp.AddReceivingCustomMethod(srv, methodEventsSubscribe, s.subscribeMethod))
+	registered(methodEventsUnsubscribe, mcp.AddReceivingCustomMethod(srv, methodEventsUnsubscribe, s.unsubscribeMethod))
 }
 
-func listEvents(_ context.Context, _ *mcp.ServerSession, p *eventsListParams) (*eventsListResult, error) {
+func (s *Service) listEvents(_ context.Context, _ *mcp.ServerSession, p *eventsListParams) (*eventsListResult, error) {
 	if p != nil && p.Cursor != "" {
 		return nil, invalidParams("cursor is not valid, the event types fit one page")
 	}
-	return &eventsListResult{ResultType: resultComplete, Events: listedEvents}, nil
+	return &eventsListResult{ResultType: resultComplete, Events: s.listed}, nil
 }
 
 type pollRequest struct {
@@ -137,11 +138,9 @@ func parsePoll(p *eventsPollParams) (pollRequest, error) {
 	if p == nil || p.Name == "" {
 		return pollRequest{}, invalidParams("name is required")
 	}
-	t, ok := lookupEventType(p.Name)
-	if !ok {
-		return pollRequest{}, rpcError(codeNotFound,
-			fmt.Sprintf("unknown event type %q, the types are: %s", p.Name, strings.Join(eventTypes(), ", ")),
-			map[string]string{"kind": "event"})
+	t, err := eventByName(p.Name)
+	if err != nil {
+		return pollRequest{}, err
 	}
 	args, err := parsePollArguments(p.Arguments)
 	if err != nil {
@@ -173,6 +172,17 @@ func parsePoll(p *eventsPollParams) (pollRequest, error) {
 		req.maxAge = time.Duration(min(*p.MaxAgeMs, maxAgeLimitMs)) * time.Millisecond
 	}
 	return req, nil
+}
+
+// eventByName finds an event type, or fails with NotFound.
+func eventByName(name string) (eventType, error) {
+	t, ok := lookupEventType(name)
+	if !ok {
+		return eventType{}, rpcError(codeNotFound,
+			fmt.Sprintf("unknown event type %q, the types are: %s", name, strings.Join(eventTypes(), ", ")),
+			map[string]string{"kind": "event"})
+	}
+	return t, nil
 }
 
 func parsePollArguments(raw json.RawMessage) (pollArguments, error) {

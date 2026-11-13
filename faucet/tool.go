@@ -173,11 +173,23 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 }
 
 func (s *Service) authorize(ctx context.Context, logger slog.Logger, op, repo string) (int64, error) {
+	p, err := s.principal(ctx, logger, op)
+	if err != nil {
+		return 0, err
+	}
+	return s.authorizeRepo(ctx, logger, p, op, repo)
+}
+
+func (s *Service) principal(ctx context.Context, logger slog.Logger, op string) (Principal, error) {
 	p, err := s.principalFrom(ctx)
 	if err != nil {
 		logger.Info(ctx, op+" without a principal", slog.Error(err))
-		return 0, errAuthRequired
+		return Principal{}, errAuthRequired
 	}
+	return p, nil
+}
+
+func (s *Service) authorizeRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo string) (int64, error) {
 	logger = logger.With(slog.F("login", p.Login))
 	repoID, err := s.authorizer.RepoID(ctx, p, repo)
 	switch {
