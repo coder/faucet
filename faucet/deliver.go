@@ -488,8 +488,8 @@ func classify(claim DeliveryClaim, now time.Time, status int, category CallbackR
 }
 
 // messageID is the webhook-id of the delivery of one event to one subscription.
-func (w *webhookState) messageID(key SubscriptionKeyHash, eventID int64) string {
-	mac := hmac.New(sha256.New, w.idKey)
+func (wh *webhookState) messageID(key SubscriptionKeyHash, eventID int64) string {
+	mac := hmac.New(sha256.New, wh.idKey)
 	_, _ = mac.Write(key[:])
 	_, _ = mac.Write([]byte(strconv.FormatInt(eventID, 10)))
 	return messageIDPrefix + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:messageIDEntropy])
