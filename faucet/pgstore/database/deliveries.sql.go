@@ -297,7 +297,7 @@ WITH head AS (
   FROM faucet_events
 )
 SELECT
-  s.key_hash, s.event_type, s.arguments, s.repo_id, s.scanned_through,
+  s.key_hash, s.event_type, s.arguments, s.repo_id, s.callback_url, s.secret_enc, s.scanned_through,
   (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash)::int AS pending
 FROM faucet_subscriptions s, head
 WHERE s.expires_at > $1
@@ -325,6 +325,8 @@ type ScanTargetsRow struct {
 	EventType      string
 	Arguments      json.RawMessage
 	RepoID         int64
+	CallbackUrl    string
+	SecretEnc      []byte
 	ScannedThrough int64
 	Pending        int32
 }
@@ -343,6 +345,8 @@ func (q *Queries) ScanTargets(ctx context.Context, arg ScanTargetsParams) ([]Sca
 			&i.EventType,
 			&i.Arguments,
 			&i.RepoID,
+			&i.CallbackUrl,
+			&i.SecretEnc,
 			&i.ScannedThrough,
 			&i.Pending,
 		); err != nil {

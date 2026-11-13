@@ -158,6 +158,8 @@ func scanTargetsListsLiveSubscriptionsBehindTheHead(t *testing.T, s faucet.Store
 	require.Equal(t, "ci.run_completed", first.EventType)
 	require.JSONEq(t, `{"repo":"octo/repo"}`, string(first.Arguments))
 	require.EqualValues(t, 42, first.RepoID)
+	require.Equal(t, r.sub.CallbackURL, first.CallbackURL, "the target carries where a gap envelope goes")
+	require.Equal(t, r.sub.SecretEnc, first.SecretEnc, "and the sealed secret that signs it")
 	require.EqualValues(t, 0, first.ScannedThrough)
 	require.Zero(t, first.Pending)
 

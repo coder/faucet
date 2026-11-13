@@ -81,7 +81,7 @@ func (s *fakeStore) ScanTargets(ctx context.Context, now time.Time, maxPending, 
 		}
 		targets = append(targets, faucet.ScanTarget{
 			KeyHash: key, EventType: sub.EventType, Arguments: slices.Clone(sub.Arguments), RepoID: sub.RepoID,
-			ScannedThrough: s.scanned[key], Pending: pending,
+			CallbackURL: sub.CallbackURL, SecretEnc: slices.Clone(sub.SecretEnc), ScannedThrough: s.scanned[key], Pending: pending,
 		})
 	}
 	slices.SortFunc(targets, func(a, b faucet.ScanTarget) int {

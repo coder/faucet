@@ -1,7 +1,6 @@
 package faucet
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -111,7 +110,7 @@ func (s *Service) DeliverDue(ctx context.Context) (DeliverResult, error) {
 		logger = s.logger.Info
 	}
 	logger(ctx, "deliveries run",
-		slog.F("enqueued", res.Enqueued), slog.F("gaps", res.Gaps), slog.F("claimed", res.Claimed), slog.F("sent", res.Sent),
+		slog.F("enqueued", res.Enqueued), slog.F("gaps", res.Gaps), slog.F("gaps_sent", res.GapsSent), slog.F("gaps_failed", res.GapsFailed), slog.F("claimed", res.Claimed), slog.F("sent", res.Sent),
 		slog.F("delivered", res.Delivered), slog.F("retried", res.Retried), slog.F("gave_up", res.GaveUpTotal()),
 		slog.F("superseded", res.Superseded), slog.F("incomplete", res.Incomplete))
 	return res, err
@@ -203,18 +202,35 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 	if !won {
 		return nil
 	}
-	gap := target.ScannedThrough < page.PurgedThrough
-	if gap {
-		logger.Warn(ctx, "a purge deleted events before the subscription read them",
-			slog.F("scanned_through", target.ScannedThrough), slog.F("purged_through", page.PurgedThrough))
+	r.add(func(res *DeliverResult) { res.Enqueued += len(e.Deliveries) })
+	if target.ScannedThrough < page.PurgedThrough {
+		r.sendGap(ctx, logger, target, page.PurgedThrough)
+	}
+	return nil
+}
+
+// sendGap tells a subscription that a purge deleted events before the run read
+// them: one request, no retry, counted and logged once. The cursor is the
+// purge mark. Every event that still exists lies above it, so a client that
+// resumes from it loses none of them, and every watermark that a later event
+// carries is at or above it.
+func (r *deliveryRun) sendGap(ctx context.Context, logger slog.Logger, target ScanTarget, purgedThrough int64) {
+	failure := r.wh.sendEnvelope(ctx, r.svc.clock.Now(), envelopeGap, target.KeyHash, target.CallbackURL, target.SecretEnc,
+		gapEnvelope{Type: envelopeGap, Cursor: encodeCursor(purgedThrough)})
+	logger = logger.With(slog.F("scanned_through", target.ScannedThrough), slog.F("purged_through", purgedThrough))
+	if failure == "" {
+		logger.Warn(ctx, "a purge deleted events before the subscription read them, the gap envelope was sent")
+	} else {
+		logger.Warn(ctx, "a purge deleted events before the subscription read them, the gap envelope was not delivered", slog.F("reason", failure))
 	}
 	r.add(func(res *DeliverResult) {
-		res.Enqueued += len(e.Deliveries)
-		if gap {
-			res.Gaps++
+		res.Gaps++
+		if failure == "" {
+			res.GapsSent++
+		} else {
+			res.GapsFailed++
 		}
 	})
-	return nil
 }
 
 func (r *deliveryRun) sweepExpired(ctx context.Context) error {
@@ -396,7 +412,7 @@ func (r *deliveryRun) decide(ctx context.Context, claim DeliveryClaim) attemptOu
 	if err != nil {
 		return attemptOutcome{finish: Finish{Kind: FinishDead, Unreadable: claim.SecretEnc}, reason: GiveUpSecretUnreadable}
 	}
-	status, category := r.post(ctx, claim, headers, body)
+	status, category := r.wh.post(ctx, claim.CallbackURL, claim.Ref.Key.ID(), headers, body)
 	if status == 0 && ctx.Err() != nil {
 		return attemptOutcome{abandoned: true}
 	}
@@ -418,28 +434,6 @@ func buildBody(claim DeliveryClaim, ev Event) ([]byte, attemptOutcome, bool) {
 		return nil, giveUp(GiveUpEventTooLarge), false
 	}
 	return body, attemptOutcome{}, true
-}
-
-// post sends one request and returns the status, or the category of the
-// failure. Nothing the endpoint sent is kept, and the error of the client,
-// which quotes the URL, is dropped.
-func (r *deliveryRun) post(ctx context.Context, claim DeliveryClaim, headers http.Header, body []byte) (status int, category CallbackReason) {
-	reqCtx, cancel := context.WithTimeout(ctx, callbackRequestTimeout+time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, claim.CallbackURL, bytes.NewReader(body))
-	if err != nil {
-		return 0, CallbackConnectionRefused
-	}
-	req.Header = headers
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", deliveryAgent)
-	req.Header.Set(subscriptionIDHeader, claim.Ref.Key.ID())
-	resp, err := r.wh.client.Do(req)
-	if err != nil {
-		return 0, deliveryFailureOf(err)
-	}
-	_ = resp.Body.Close()
-	return resp.StatusCode, ""
 }
 
 // deliveryFailureOf maps an error of the client to a category. A response that

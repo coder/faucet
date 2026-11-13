@@ -30,6 +30,8 @@ func (s *Store) ScanTargets(ctx context.Context, now time.Time, maxPending, limi
 			EventType:      row.EventType,
 			Arguments:      row.Arguments,
 			RepoID:         row.RepoID,
+			CallbackURL:    row.CallbackUrl,
+			SecretEnc:      row.SecretEnc,
 			ScannedThrough: row.ScannedThrough,
 			Pending:        row.Pending,
 		}
