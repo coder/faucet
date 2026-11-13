@@ -179,6 +179,7 @@ const (
 	GiveUpEndpointGone            GiveUpReason = "endpoint_gone"
 	GiveUpEndpointPayloadTooLarge GiveUpReason = "endpoint_payload_too_large"
 	GiveUpEventTooLarge           GiveUpReason = "event_too_large"
+	GiveUpEventMalformed          GiveUpReason = "event_malformed"
 	GiveUpAttemptsExhausted       GiveUpReason = "attempts_exhausted"
 	GiveUpWindowExpired           GiveUpReason = "window_expired"
 	GiveUpEventPurged             GiveUpReason = "event_purged"

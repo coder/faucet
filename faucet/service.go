@@ -3,6 +3,7 @@ package faucet
 import (
 	"bytes"
 	"context"
+	"net/http"
 
 	"golang.org/x/xerrors"
 
@@ -43,6 +44,11 @@ type WebhookDeps struct {
 	// AllowInsecureLoopback accepts callback URLs on loopback hosts, over http
 	// too. It exists for tests. Production hosts leave it false.
 	AllowInsecureLoopback bool
+	// Client sends the events that DeliverDue delivers. Build it with
+	// NewHTTPClient: a client without its checks lets a subscriber aim the
+	// request at an address inside your network. Nil uses NewHTTPClient with
+	// AllowInsecureLoopback as set here.
+	Client *http.Client
 }
 
 // Service turns GitHub webhooks into stored events and serves them to waiters.

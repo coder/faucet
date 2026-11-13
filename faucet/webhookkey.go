@@ -63,3 +63,17 @@ func sealSecret(aead cipher.AEAD, secret subscriberSecret, aad []byte) ([]byte, 
 	sealed := append([]byte{sealVersion}, nonce...)
 	return aead.Seal(sealed, nonce, []byte(secret), aad), nil
 }
+
+// openSecret reverses sealSecret. Its errors are fixed text, because the cause
+// of a failure says nothing a caller can use and must not echo the bytes.
+func openSecret(aead cipher.AEAD, sealed, aad []byte) (subscriberSecret, error) {
+	nonceSize := aead.NonceSize()
+	if len(sealed) < 1+nonceSize+aead.Overhead() || sealed[0] != sealVersion {
+		return "", xerrors.New("sealed secret has an unknown layout")
+	}
+	plain, err := aead.Open(nil, sealed[1:1+nonceSize], sealed[1+nonceSize:], aad)
+	if err != nil {
+		return "", xerrors.New("sealed secret does not open under this key")
+	}
+	return subscriberSecret(plain), nil
+}

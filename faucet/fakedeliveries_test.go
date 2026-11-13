@@ -237,3 +237,13 @@ func (s *fakeStore) deliveryRows() map[string]int {
 	}
 	return rows
 }
+
+// tamperSecret flips a byte of the sealed secret, so that it no longer opens.
+func (s *fakeStore) tamperSecret(key faucet.SubscriptionKeyHash) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sub := s.subs[key]
+	sub.SecretEnc = slices.Clone(sub.SecretEnc)
+	sub.SecretEnc[len(sub.SecretEnc)-1] ^= 1
+	s.subs[key] = sub
+}
