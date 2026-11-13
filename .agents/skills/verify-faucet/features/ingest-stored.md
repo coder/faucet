@@ -35,5 +35,5 @@ stored-prs|http|fuzzer|Send workflow_run and check_run deliveries with zero, one
 
 - `data` holds the extracted fields, not the raw payload, so a field the payload carries but faucet does not extract is absent on purpose.
 - `workflow_run` and `check_run` list every pull request GitHub ties to the commit, fork ones included. faucet keeps a number only when the entry's `base.repo.id` equals the payload's `repository.id`. A fixture entry that lacks `base.repo.id` is dropped too, so build entries with `pullRequestRef` in `tests/payloads.ts`.
-- A `pull_request.closed` with `merged: false` stores `merge_commit_sha` as null in `data`.
+- `merge_commit_sha` in a `pull_request.closed` is GitHub's value as sent. Before a merge it is the test-merge commit or null, so a closed pull request with `merged: false` can carry a SHA. Read `merged` to know whether it merged.
 - `received_at` and `id` are assigned by Postgres, so the tests never pin them.
