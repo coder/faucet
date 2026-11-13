@@ -1,5 +1,7 @@
+import { randomBytes } from 'node:crypto';
 import { samples } from './payloads';
 import { describe, expect, newDeliveryId, newRepoId, test, type Faucet } from './support';
+import { CALLBACK_ORIGIN, newMarker, subscribeParams, subscribed } from './subscriptions';
 
 const run = samples['workflow_run.completed'];
 const RUN = run.expected.type;
@@ -153,6 +155,26 @@ describe('purge', () => {
       expect(reply.status).toBe(200);
       expect(JSON.parse(reply.body)).toMatchObject({ deleted: 1 });
       expect(await deliveriesOf(short, repoId)).toEqual([inside]);
+    });
+  });
+
+  test('a purge deletes the subscriptions that have expired and keeps the live ones', async ({ cron }) => {
+    const env = { FAUCET_WEBHOOK_KEY: randomBytes(32).toString('base64'), FAUCET_WEBHOOK_ALLOWED_ORIGINS: CALLBACK_ORIGIN };
+    await cron.withFaucet(env, async (started, output) => {
+      const repoId = newRepoId();
+      const live = newMarker();
+      const lapsed = newMarker();
+      await subscribed(started, subscribeParams(repoId, live));
+      await subscribed(started, subscribeParams(repoId, lapsed));
+      const moved = await started.expireSubscriptions(lapsed);
+
+      const reply = await purge(started);
+
+      expect(moved).toBe(1);
+      expect(reply.deleted).toBe(0);
+      expect(await started.subscriptions(lapsed)).toEqual([]);
+      expect(await started.subscriptions(live)).toHaveLength(1);
+      await expect.poll(() => /events purged\s.*expired_subscriptions_deleted=1\b/.test(output())).toBe(true);
     });
   });
 });

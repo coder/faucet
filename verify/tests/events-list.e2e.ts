@@ -1,7 +1,13 @@
-import { describe, expect, test } from './support';
+import { describe, expect, newRepoId, test } from './support';
+import { newMarker, subscribe, subscribeParams, unsubscribe } from './subscriptions';
 
 const EVENTS_EXTENSION = 'io.modelcontextprotocol/events';
 const eventNames = ['ci.check_completed', 'ci.run_completed', 'pr.closed', 'pr.comment_created', 'pr.review_submitted'];
+const WEBHOOK_UNSUPPORTED = {
+  code: -32026,
+  message: 'webhook delivery is not supported by this server',
+  data: { feature: 'deliveryMode', value: 'webhook' },
+};
 
 interface Schema {
   type: string;
@@ -31,7 +37,7 @@ describe('events list', () => {
     expect(reply.result?.capabilities.extensions?.[EVENTS_EXTENSION]).toEqual({ listChanged: false });
   });
 
-  test('events/list returns the five event types, each with a poll delivery and two schemas', async ({ faucet }) => {
+  test('events/list returns the five event types, each with poll and webhook delivery and two schemas', async ({ faucet }) => {
     const reply = await faucet.mcp<ListResult>('events/list');
     const events = reply.result?.events ?? [];
 
@@ -41,7 +47,7 @@ describe('events list', () => {
     expect(events.map((e) => e.name)).toEqual(eventNames);
     for (const event of events) {
       expect(event.description, `${event.name} description`).not.toBe('');
-      expect(event.delivery, `${event.name} delivery`).toEqual(['poll']);
+      expect(event.delivery, `${event.name} delivery`).toEqual(['poll', 'webhook']);
       expect(event.inputSchema.type, `${event.name} inputSchema`).toBe('object');
       expect(Object.keys(event.inputSchema.properties).sort(), `${event.name} inputSchema properties`).toEqual(['pr', 'repo', 'sha']);
       expect(event.inputSchema.required, `${event.name} inputSchema required`).toEqual(['repo']);
@@ -51,6 +57,26 @@ describe('events list', () => {
       );
       expect(event.payloadSchema.required, `${event.name} payloadSchema required`).toContain('prs');
     }
+  });
+
+  test('with webhook mode off events/list offers poll only, and subscribe and unsubscribe are -32026 and write nothing', async ({ faucet }) => {
+    await faucet.withFaucet({}, async (off) => {
+      const params = subscribeParams(newRepoId(), newMarker());
+
+      const list = await off.mcp<ListResult>('events/list');
+      const subscribed = await subscribe(off, params);
+      const unsubscribed = await unsubscribe(off, params);
+      const invalid = await subscribe(off, { ...params, delivery: null });
+
+      expect(list.result?.events.map((e) => e.name)).toEqual(eventNames);
+      for (const event of list.result?.events ?? []) expect(event.delivery, `${event.name} delivery`).toEqual(['poll']);
+      for (const reply of [subscribed, unsubscribed, invalid]) {
+        expect(reply.status).toBe(200);
+        expect(reply.result).toBeNull();
+        expect(reply.error).toEqual(WEBHOOK_UNSUPPORTED);
+      }
+      expect(await off.sql('select count(*) from faucet_subscriptions')).toBe('0');
+    });
   });
 
   test('events/list needs no Mcp-Name header and ignores one that is sent', async ({ faucet }) => {
