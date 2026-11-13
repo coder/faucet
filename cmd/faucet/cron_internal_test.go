@@ -325,6 +325,94 @@ func TestCronRedeliverAsksGitHubForTheFailedUnstoredDeliveryOnly(t *testing.T) {
 	srv.requireNoSecrets(t, body)
 }
 
+// outageGitHub plays GitHub for a delivery that failed while faucet was down: a redelivery adds an attempt that is
+// flagged as one and dated when it happens, and faucet stores the event only once the outage is over.
+type outageGitHub struct {
+	mu        sync.Mutex
+	clock     quartz.Clock
+	store     *cronStore
+	attempts  []faucet.HookDelivery
+	downUntil time.Time
+}
+
+func (g *outageGitHub) ListDeliveries(context.Context, string) (faucet.DeliveryPage, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var newestFirst []faucet.HookDelivery
+	for i := len(g.attempts) - 1; i >= 0; i-- {
+		newestFirst = append(newestFirst, g.attempts[i])
+	}
+	return faucet.DeliveryPage{Deliveries: newestFirst}, nil
+}
+
+func (g *outageGitHub) Redeliver(context.Context, int64) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.clock.Now()
+	status := http.StatusServiceUnavailable
+	if !now.Before(g.downUntil) {
+		status = http.StatusOK
+		g.store.mu.Lock()
+		g.store.stored = append(g.store.stored, "G")
+		g.store.mu.Unlock()
+	}
+	g.attempts = append(g.attempts, faucet.HookDelivery{ID: int64(len(g.attempts) + 1), GUID: "G", DeliveredAt: now, StatusCode: status, Redelivery: true})
+	return nil
+}
+
+func TestCronRedeliverRecoversADeliveryThatFailedDuringAnOutageAtTheDocumentedSchedule(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		outage    time.Duration
+		recovered bool
+	}{
+		"an outage of 35 minutes is recovered on the third request":  {35 * time.Minute, true},
+		"an outage of 100 minutes is counted and logged as given up": {100 * time.Minute, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			clock := quartz.NewMock(t)
+			store := &cronStore{}
+			logs := &syncBuffer{}
+			logger := slog.Make(sloghuman.Sink(logs))
+			hooks := &outageGitHub{clock: clock, store: store, downUntil: clock.Now().Add(tc.outage - time.Minute)}
+			hooks.attempts = []faucet.HookDelivery{{ID: 1, GUID: "G", DeliveredAt: clock.Now().Add(-time.Minute), StatusCode: http.StatusServiceUnavailable}}
+			svc, err := faucet.New(faucet.Deps{
+				Store: store, Secret: []byte(testSecret), Logger: logger, Clock: clock, HookAdmin: hooks,
+				Authorizer:    faucet.TokenAuthorizer{BaseURL: "http://127.0.0.1:1"},
+				PrincipalFrom: principalFrom,
+			})
+			require.NoError(t, err)
+			cron := cronRoutes{svc: svc, lookback: redeliverLookback, redelivers: true, clock: clock, logger: logger}
+
+			gaveUp := 0
+			for range 8 {
+				rec := httptest.NewRecorder()
+				cron.redeliver(rec, httptest.NewRequest(http.MethodGet, "/cron/redeliver", nil))
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				var got struct {
+					GaveUp int `json:"gave_up"`
+				}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got), rec.Body.String())
+				gaveUp += got.GaveUp
+				clock.Advance(redeliverEvery).MustWait(context.Background())
+			}
+
+			stored, err := store.StoredDeliveries(context.Background(), []string{"G"})
+			require.NoError(t, err)
+			require.Equal(t, tc.recovered, len(stored) == 1, "a sweep every %s with the lookback of /cron/redeliver", redeliverEvery)
+			if tc.recovered {
+				require.Zero(t, gaveUp)
+			} else {
+				require.Positive(t, gaveUp, "the result of /cron/redeliver counts a delivery that is lost")
+				require.Contains(t, logs.String(), "redelivery gave up")
+			}
+		})
+	}
+}
+
 func TestCronRedeliverIs503WithoutHookConfigAfterTheSecretIsChecked(t *testing.T) {
 	t.Parallel()
 

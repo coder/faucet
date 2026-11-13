@@ -17,9 +17,11 @@ const (
 	// MaxRedeliveries is the most redelivery requests one Redeliver call sends.
 	MaxRedeliveries = 50
 	// MaxRedeliveriesPerDelivery is the number of redeliveries after which
-	// Redeliver stops asking for a delivery. Three covers an outage that
-	// outlasts one retry, and a delivery that faucet rejects for its content
-	// costs three requests and then no more.
+	// Redeliver stops asking for a delivery. A host that calls Redeliver every
+	// 30 minutes makes the third request 60 to 90 minutes after the first
+	// failure, so three recovers a delivery that failed in an outage of up to an
+	// hour, and a delivery that faucet rejects for its content costs three
+	// requests and then no more.
 	MaxRedeliveriesPerDelivery = 3
 )
 
@@ -32,9 +34,14 @@ type RedeliverResult struct {
 	Examined int
 	// Pending is the number of deliveries that failed, were not stored, had no
 	// later successful attempt, and that Redeliver may still ask for: their
-	// original attempt is inside the window and they have had fewer than
+	// first attempt is inside the window and they have had fewer than
 	// MaxRedeliveriesPerDelivery redeliveries.
 	Pending int
+	// GaveUp is the number of deliveries that failed, were not stored and had
+	// no later successful attempt, and that Redeliver will not ask for again:
+	// they have had MaxRedeliveriesPerDelivery redeliveries, or their first
+	// attempt is older than the window. Each one is logged.
+	GaveUp int
 	// Requested is the number of redelivery requests GitHub accepted.
 	Requested int
 	// Incomplete is true when a bound stopped the call before it read the whole
@@ -45,12 +52,12 @@ type RedeliverResult struct {
 // Redeliver asks GitHub to deliver again each webhook delivery since the given
 // time that failed, that faucet has not stored, and that has no later
 // successful attempt. A failure is any answer outside 200 to 299, including no
-// answer. Hosts call it on a schedule with a window longer than the schedule,
-// for example the last hour every 30 minutes. GitHub keeps deliveries for three
-// days, so an older window sees no more.
+// answer. GitHub keeps deliveries for three days, so an older window sees no
+// more.
 //
 // One call reads at most MaxRedeliverPages pages and sends at most
-// MaxRedeliveries requests, oldest delivery first. It stops at the first
+// MaxRedeliveries requests, the deliveries with the fewest redeliveries first
+// and then the oldest. It stops at the first
 // request that fails, because a bad token or a wrong hook would fail every
 // request. Two calls at once can request the same delivery twice. The store
 // keeps one event per delivery GUID, so the second delivery is a duplicate.
@@ -58,11 +65,20 @@ type RedeliverResult struct {
 // GitHub records a redelivery as a new attempt with its own, later time, so a
 // delivery that faucet rejects every time, such as a malformed payload, would
 // stay inside any window. Redeliver therefore asks for a delivery only while
-// its original attempt is inside the window and at most
-// MaxRedeliveriesPerDelivery redeliveries of it exist. The deliveries with
-// the fewest redeliveries go first, so a delivery that keeps failing does not
-// use up the requests that a new failure needs. A delivery that Redeliver gave
-// up on is logged and stays lost until someone redelivers it by hand.
+// its first attempt (the one that is not a redelivery) is inside the window
+// and fewer than MaxRedeliveriesPerDelivery redeliveries of it exist. The
+// fewest-redeliveries-first order keeps a delivery that keeps failing from
+// using up the requests that a new failure needs.
+//
+// A delivery that Redeliver will not ask for again is counted in GaveUp and
+// logged as "redelivery gave up" on every call that still sees one of its
+// attempts, with the reason "limit" or "window". It stays lost until someone
+// redelivers it by hand. The window must therefore reach back
+// MaxRedeliveriesPerDelivery+1 times the interval at which the host calls
+// Redeliver. A shorter window lets the first attempt leave it before the
+// limit is reached, and a delivery that a later redelivery would have
+// recovered is given up. A host that calls every 30 minutes passes a since
+// that is two hours back.
 //
 // The method has no auth of its own. The host decides who may call it.
 func (s *Service) Redeliver(ctx context.Context, since time.Time) (RedeliverResult, error) {
@@ -84,8 +100,8 @@ func (s *Service) Redeliver(ctx context.Context, since time.Time) (RedeliverResu
 	if err != nil {
 		return res, xerrors.Errorf("look up stored deliveries: %w", err)
 	}
-	pending := s.redeliverable(ctx, slices.DeleteFunc(failed, func(d HookDelivery) bool { return slices.Contains(stored, d.GUID) }), attempts)
-	res.Pending = len(pending)
+	pending, gaveUp := s.redeliverable(ctx, slices.DeleteFunc(failed, func(d HookDelivery) bool { return slices.Contains(stored, d.GUID) }), attempts)
+	res.Pending, res.GaveUp = len(pending), gaveUp
 
 	for _, d := range pending {
 		if res.Requested == MaxRedeliveries {
@@ -101,7 +117,7 @@ func (s *Service) Redeliver(ctx context.Context, since time.Time) (RedeliverResu
 			slog.F("delivery_id", d.GUID), slog.F("attempt_id", d.ID), slog.F("status", d.StatusCode))
 	}
 	s.logger.Info(ctx, "redelivery sweep done",
-		slog.F("examined", res.Examined), slog.F("pending", res.Pending),
+		slog.F("examined", res.Examined), slog.F("pending", res.Pending), slog.F("gave_up", res.GaveUp),
 		slog.F("requested", res.Requested), slog.F("incomplete", res.Incomplete))
 	return res, nil
 }
@@ -160,36 +176,41 @@ func failedWithoutLaterSuccess(attempts map[string][]HookDelivery) []HookDeliver
 	return out
 }
 
-// redeliverable drops the failed deliveries that Redeliver must not ask for
-// and puts the rest in the order it asks: the fewest redeliveries first, then
-// the oldest first. Each redelivery is a new attempt dated when it happened, so
-// only an attempt that is not a redelivery says how long ago the delivery
-// began. The group of attempts is complete from that attempt on, so the count
-// of redeliveries in it is exact.
-func (s *Service) redeliverable(ctx context.Context, failed []HookDelivery, attempts map[string][]HookDelivery) []HookDelivery {
+// redeliverable splits the failed deliveries into the ones Redeliver asks for,
+// in the order it asks (the fewest redeliveries first, then the oldest first),
+// and the number it gave up on, each of which it logs. Each redelivery is a new
+// attempt dated when it happened, so only an attempt that is not a redelivery
+// says how long ago the delivery began. The group of attempts is complete from
+// that attempt on, so the count of redeliveries in it is exact.
+func (s *Service) redeliverable(ctx context.Context, failed []HookDelivery, attempts map[string][]HookDelivery) (askable []HookDelivery, gaveUp int) {
 	redeliveries := make(map[string]int, len(failed))
-	keep := failed[:0]
 	for _, d := range failed {
-		original := false
+		first := false
 		for _, a := range attempts[d.GUID] {
 			if a.Redelivery {
 				redeliveries[d.GUID]++
 			} else {
-				original = true
+				first = true
 			}
 		}
+		reason := ""
 		switch {
-		case !original:
 		case redeliveries[d.GUID] >= MaxRedeliveriesPerDelivery:
-			s.logger.Warn(ctx, "redelivery limit reached", slog.F("delivery_id", d.GUID), slog.F("redeliveries", redeliveries[d.GUID]))
+			reason = "limit"
+		case !first:
+			reason = "window"
 		default:
-			keep = append(keep, d)
+			askable = append(askable, d)
+			continue
 		}
+		gaveUp++
+		s.logger.Warn(ctx, "redelivery gave up",
+			slog.F("delivery_id", d.GUID), slog.F("redeliveries", redeliveries[d.GUID]), slog.F("reason", reason))
 	}
-	slices.SortStableFunc(keep, func(a, b HookDelivery) int {
+	slices.SortStableFunc(askable, func(a, b HookDelivery) int {
 		return cmp.Or(cmp.Compare(redeliveries[a.GUID], redeliveries[b.GUID]), compareAttempts(a, b))
 	})
-	return keep
+	return askable, gaveUp
 }
 
 func compareAttempts(a, b HookDelivery) int {
