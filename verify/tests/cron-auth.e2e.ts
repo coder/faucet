@@ -42,7 +42,6 @@ async function hookRequests(hooks: HookStub): Promise<string[]> {
   return requests.filter((r) => r.path.startsWith('/orgs/')).map((r) => `${r.method} ${r.path}`);
 }
 
-// expectIdle checks that the job did not purge the old event and did not call the hook API.
 async function expectIdle(cron: Faucet, hooks: HookStub, armed: Armed): Promise<void> {
   expect(await deliveriesOf(cron, armed.repoId), 'the old event must stay').toEqual([armed.old]);
   expect(await hookRequests(hooks), 'GitHub must not be called').toEqual([]);

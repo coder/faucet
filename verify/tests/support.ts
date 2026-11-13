@@ -370,7 +370,6 @@ export class Faucet {
     return JSON.parse(await this.sql(query)) as EventRow[];
   }
 
-  // backdate makes the stored event look as if it arrived the given number of days ago.
   async backdate(deliveryId: string, days: number): Promise<void> {
     if (!/^[0-9a-f-]{36}$/.test(deliveryId)) throw new Error('deliveryId must be a UUID');
     if (!Number.isInteger(days) || days < 1) throw new Error('days must be a positive integer');
@@ -378,7 +377,6 @@ export class Faucet {
     if ((await this.sql(query)) === '') throw new Error(`no event has the delivery id ${deliveryId}`);
   }
 
-  // purgeMark is the highest event ID that any purge has deleted.
   async purgeMark(): Promise<number> {
     return Number(await this.sql('select purged_through from faucet_purge_mark'));
   }
@@ -429,7 +427,6 @@ export class HookStub {
     await this.#call('PUT', '/__stub/deliveries', { deliveries, ...opts });
   }
 
-  // requests returns every request that the stub got from a faucet since the last set, oldest first.
   async requests(): Promise<StubRequest[]> {
     return (await this.#call('GET', '/__stub/requests')) as StubRequest[];
   }
