@@ -24,6 +24,9 @@ type Deps struct {
 	// this request. An error denies the request.
 	PrincipalFrom func(context.Context) (Principal, error)
 	Clock         quartz.Clock
+	// HookAdmin lets Redeliver ask GitHub for failed deliveries again. It is
+	// optional. Without it Redeliver returns ErrNoHookAdmin.
+	HookAdmin HookAdmin
 }
 
 // Service turns GitHub webhooks into stored events and serves them to waiters.
@@ -34,6 +37,7 @@ type Service struct {
 	authorizer    Authorizer
 	principalFrom func(context.Context) (Principal, error)
 	clock         quartz.Clock
+	hooks         HookAdmin
 }
 
 // New returns a Service for d. It starts no goroutines.
@@ -57,5 +61,6 @@ func New(d Deps) (*Service, error) {
 		authorizer:    d.Authorizer,
 		principalFrom: d.PrincipalFrom,
 		clock:         d.Clock,
+		hooks:         d.HookAdmin,
 	}, nil
 }
