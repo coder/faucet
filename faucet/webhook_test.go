@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/xerrors"
@@ -31,6 +32,8 @@ type fakeStore struct {
 	mu     sync.Mutex
 	events []faucet.Event
 	err    error
+	now    func() time.Time
+	polls  []faucet.PollQuery
 }
 
 func (s *fakeStore) InsertEvent(_ context.Context, ev faucet.Event) (faucet.Event, bool, error) {
@@ -48,6 +51,7 @@ func (s *fakeStore) InsertEvent(_ context.Context, ev faucet.Event) (faucet.Even
 		}
 	}
 	ev.ID = int64(len(s.events) + 1)
+	ev.ReceivedAt = s.nowLocked()
 	s.events = append(s.events, ev)
 	return ev, true, nil
 }
@@ -55,6 +59,9 @@ func (s *fakeStore) InsertEvent(_ context.Context, ev faucet.Event) (faucet.Even
 func (s *fakeStore) EventsAfter(_ context.Context, afterID int64, limit int32) ([]faucet.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if limit <= 0 {
+		return nil, xerrors.Errorf("limit must be positive, got %d", limit)
+	}
 	var out []faucet.Event
 	for _, e := range s.events {
 		if e.ID > afterID && len(out) < int(limit) {
