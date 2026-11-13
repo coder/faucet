@@ -1,6 +1,6 @@
 ---
 name: verify-faucet
-description: Launch, check, drive, prove and bug bash the faucet server (cmd/faucet, GitHub webhook ingest into Postgres) over HTTP with e2e. Use before claiming a faucet server change works, to prove a PR against the running server, or to bug bash it.
+description: Launch, check, drive, prove and bug bash the faucet server (cmd/faucet, GitHub webhook ingest into Postgres and the wait_for_github_events MCP tool) over HTTP with e2e. Use before claiming a faucet server change works, to prove a PR against the running server, or to bug bash it.
 ---
 
 # Verify faucet
@@ -14,9 +14,10 @@ Nothing to start by hand. The target's `app.command` runs `node app.mjs --port {
 1. finds the PostgreSQL server binaries: `PG_BIN`, else the `initdb` on `PATH`, else `/usr/lib/postgresql/*/bin`;
 2. runs `initdb` into `$TMPDIR/faucet-verify-<port>/pgdata` and starts that Postgres on a free `127.0.0.1` port (database and user `postgres`, trust auth);
 3. runs `go build ./cmd/faucet` in the checkout under test;
-4. generates a webhook secret, writes it with `dbPort` and the `psql` path to `$TMPDIR/faucet-verify-<port>/state.json` (mode 0600), and starts faucet with only `DATABASE_URL`, `GITHUB_WEBHOOK_SECRET` and `PORT`.
+4. starts a GitHub API stub on a free `127.0.0.1` port. It knows one random token. `GET /user` answers `verify-user`, `GET /repos/verify/r<id>` answers repository id `<id>`, and every other repository is 404;
+5. generates a webhook secret, writes it with the token, `dbPort` and the `psql` path to `$TMPDIR/faucet-verify-<port>/state.json` (mode 0600), and starts faucet with only `DATABASE_URL`, `GITHUB_WEBHOOK_SECRET`, `PORT` and `FAUCET_GITHUB_API_URL` (the stub).
 
-The runner waits for `GET /healthz` to answer 200. On SIGTERM `app.mjs` stops faucet, stops Postgres and deletes the directory. The secret is random per run and reaches no log, report or output.
+The runner waits for `GET /healthz` to answer 200. On SIGTERM `app.mjs` stops faucet, stops Postgres and deletes the directory. The secret and the token are random per run and reach no log, report or output.
 
 Needs on the host: Node 22.22.3 or newer (or 24.8+), Go as `go.mod` asks (`GOTOOLCHAIN` and other `GO*` variables pass through), PostgreSQL server binaries and `psql` (written against 18), and network on the first run (`npm ci`, then Playwright downloads Chromium into `~/.cache/ms-playwright`, because the `web()` engine opens a browser context even for API tests; CI uses `npx @e2e-dev/web install chromium --with-deps`). `E2E_TELEMETRY_DISABLED=1` turns off e2e's anonymous telemetry.
 
@@ -43,14 +44,15 @@ npx e2e run tests/smoke.e2e.ts     # builds and starts faucet and Postgres; exit
 Scripted: every feature in [features/](features/README.md) has a test under `verify/tests/`. They import `test` from `tests/support.ts`, which adds a `faucet` fixture:
 
 - `faucet.deliver({ event, delivery, body, signature? })` posts to `/webhook/github`. It signs `body` with the run's secret unless `signature` is a string (sent as is) or `null` (header omitted).
+- `faucet.waitForEvents(args, token?)` calls the `wait_for_github_events` tool on `/mcp` as a stateless 2026-07-28 client would, with the run's valid GitHub token unless `token` is a string (sent as is) or `null` (no header). It returns the HTTP reply plus `isError`, `text`, `events` and `cursor`.
 - `faucet.request(path, init)` is a plain `fetch` returning `{ status, body, headers }`.
 - `faucet.sign(body, secret?)` returns `sha256=<hex>`.
 - `faucet.rows(repoId)` returns the `faucet_events` rows of one repository through `psql`; `faucet.sql(query)` runs any query.
-- `faucet.leaksSecret(text)` says whether `text` holds the secret, so the secret itself never leaves `support.ts`.
+- `faucet.leaksSecret(text)` says whether `text` holds the webhook secret or the GitHub token, so neither leaves `support.ts`.
 
-All tests share one server and one database. Each test makes its own `newRepoId()` and `newDeliveryId()` and asserts on that repository's rows only, never on table-wide counts. Payload fixtures are in `tests/payloads.ts`. Run one test by `file:line`: `npx e2e run tests/ingest-ping.e2e.ts:4`.
+All tests share one server and one database. Each test makes its own `newRepoId()` and `newDeliveryId()` and asserts on that repository's rows only, never on table-wide counts. The wait tests name their repository `verify/r<newRepoId()>`, so the stub answers with that id and each test waits on events nobody else posted. Payload fixtures are in `tests/payloads.ts`. Run one test by `file:line`: `npx e2e run tests/ingest-ping.e2e.ts:4`.
 
-Live, over `e2e mcp` (the e2e plugin's server, or `npx e2e mcp` started in `verify/`): `open_session {config: "<checkout>/verify/e2e.config.ts"}`, then `call {session, tool: "navigate", args: {url: "/healthz"}}` and `observe`. A browser can only GET, so the live lane shows `/healthz` and the 405 page of `GET /webhook/github`. Webhook POSTs go through `run_tests {files: [...]}` or the CLI. To look at the database by hand during a session, read only `dbPort` from `state.json` (the port is in the `open_session` output):
+Live, over `e2e mcp` (the e2e plugin's server, or `npx e2e mcp` started in `verify/`): `open_session {config: "<checkout>/verify/e2e.config.ts"}`, then `call {session, tool: "navigate", args: {url: "/healthz"}}` and `observe`. A browser can only GET, so the live lane shows `/healthz` and the 405 page of `GET /webhook/github`. Webhook POSTs and `/mcp` calls go through `run_tests {files: [...]}` or the CLI. To look at the database by hand during a session, read only `dbPort` from `state.json` (the port is in the `open_session` output):
 
 ```sh
 python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dbPort"])' "${TMPDIR:-/tmp}/faucet-verify-<port>/state.json"
@@ -61,7 +63,7 @@ Never print `state.json`: it holds the secret.
 
 ## Evidence
 
-Every run writes `.e2e/report.json`, a short `trace.md` per test under `.e2e/results/` (`trace: 'on'` in the config), and the app's own log at `.e2e/logs/app.log`. faucet logs one `webhook stored` line per accepted delivery (`event_id`, `inserted`) and one `webhook rejected` line per refusal (`status`, `reason`). The next run clears `.e2e/results/`, and the app log is appended to across runs. A proof that must outlive them starts a fresh log, runs with its own output directory and keeps the log beside it:
+Every run writes `.e2e/report.json`, a short `trace.md` per test under `.e2e/results/` (`trace: 'on'` in the config), and the app's own log at `.e2e/logs/app.log`. faucet logs one `webhook stored` line per accepted delivery (`event_id`, `inserted`), one `webhook rejected` line per refusal (`status`, `reason`) and one `wait denied` line per tool call for a repository the token cannot see. The next run clears `.e2e/results/`, and the app log is appended to across runs. A proof that must outlive them starts a fresh log, runs with its own output directory and keeps the log beside it:
 
 ```sh
 rm -f .e2e/logs/app.log && npx e2e run --output .e2e/proof/<name> && cp .e2e/logs/app.log .e2e/proof/<name>/app.log
@@ -71,7 +73,7 @@ rm -f .e2e/logs/app.log && npx e2e run --output .e2e/proof/<name> && cp .e2e/log
 
 API tests record no screens, so the trace pages only say pass or fail. The proof of a side effect is the test's own assertion on the `psql` rows, and the report says which ones passed.
 
-Proof standards: drive the real HTTP route with a really signed delivery. Check the response status and body, and the rows in Postgres. A rejected delivery proves its row count is still zero for that delivery's repository. Mock nothing: the secret, the database and the server are the real ones, private to the run.
+Proof standards: drive the real HTTP route with a really signed delivery, or the real `/mcp` route with the token the stub knows. Check the response status and body, and the rows in Postgres. A rejected delivery proves its row count is still zero for that delivery's repository. Mock nothing in faucet: the secret, the database and the server are the real ones, private to the run. The GitHub API is the one thing stubbed, because faucet calls it with the caller's token.
 
 ## Bug bash
 

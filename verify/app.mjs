@@ -3,6 +3,7 @@ import { execFile, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer as createHttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { parseArgs, promisify } from 'node:util';
@@ -53,6 +54,26 @@ function freePort() {
       probe.close(() => resolvePort(port));
     });
   });
+}
+
+// The stub knows one token and answers GET /user and GET /repos/verify/r<id>
+// with repository id <id>. Every other repository is 404, like one the token
+// cannot see.
+async function startGitHubStub(token) {
+  const reply = (res, status, body) => {
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(body));
+  };
+  const stub = createHttpServer((req, res) => {
+    if (req.headers.authorization !== `Bearer ${token}`) return reply(res, 401, { message: 'Bad credentials' });
+    if (req.url === '/user') return reply(res, 200, { login: 'verify-user' });
+    const repo = /^\/repos\/verify\/r(\d+)$/.exec(req.url ?? '');
+    if (repo) return reply(res, 200, { id: Number(repo[1]) });
+    return reply(res, 404, { message: 'Not Found' });
+  });
+  stub.listen(0, '127.0.0.1');
+  await once(stub, 'listening');
+  return stub;
 }
 
 async function startPostgres(bin, dir, signal) {
@@ -129,6 +150,7 @@ async function main(signal) {
 
   let postgresStarted = false;
   let faucet;
+  let githubStub;
   let failure;
   try {
     await execFileAsync(join(bin, 'initdb'), ['-U', 'postgres', '--auth=trust', '--no-sync', '-D', join(dir, 'pgdata')], { signal });
@@ -140,14 +162,17 @@ async function main(signal) {
     await execFileAsync('go', ['build', '-o', binary, './cmd/faucet'], { cwd: root, signal });
 
     const secret = randomBytes(32).toString('hex');
+    const githubToken = `ghp_${randomBytes(20).toString('hex')}`;
+    githubStub = await startGitHubStub(githubToken);
     const psql = existsSync(join(bin, 'psql')) ? join(bin, 'psql') : 'psql';
-    writeFileSync(stateFile(port), JSON.stringify({ dbPort, psql, secret }), { mode: 0o600 });
+    writeFileSync(stateFile(port), JSON.stringify({ dbPort, psql, secret, githubToken }), { mode: 0o600 });
 
     faucet = spawn(binary, [], {
       env: {
         DATABASE_URL: `postgres://postgres@127.0.0.1:${dbPort}/postgres?sslmode=disable`,
         GITHUB_WEBHOOK_SECRET: secret,
         PORT: String(port),
+        FAUCET_GITHUB_API_URL: `http://127.0.0.1:${githubStub.address().port}`,
       },
       stdio: ['ignore', 'inherit', 'inherit'],
     });
@@ -157,6 +182,7 @@ async function main(signal) {
     if (!signal.aborted) failure = err.message;
   } finally {
     if (faucet) await stopFaucet(faucet);
+    githubStub?.close();
     const postgresStopped = !postgresStarted || (await stopPostgres(bin, dir));
     if (postgresStopped) rmSync(dir, { recursive: true, force: true });
     else failure ??= `left ${dir} in place because Postgres is still running`;
