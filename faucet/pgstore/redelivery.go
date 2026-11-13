@@ -135,6 +135,12 @@ func (s *Store) ApplyRedeliveryScan(ctx context.Context, step faucet.ScanStep) (
 	if res.OpenedID, err = moveRange(ctx, q, step); err != nil {
 		return faucet.ScanResult{}, err
 	}
+	if step.Gap != nil {
+		err := q.InsertRedeliveryGap(ctx, database.InsertRedeliveryGapParams{FromAt: step.Gap.From, ToAt: step.Gap.To, Now: step.Now})
+		if err != nil {
+			return faucet.ScanResult{}, xerrors.Errorf("record gap: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return faucet.ScanResult{}, xerrors.Errorf("commit: %w", err)
 	}
@@ -160,14 +166,9 @@ func moveRange(ctx context.Context, q *database.Queries, step faucet.ScanStep) (
 			ID: step.Advance.ID, NewerAt: step.Advance.NewerAt, Cursor: step.Advance.Cursor,
 		})
 		id = step.Advance.ID
-	case step.Close != nil && step.Close.Gap == nil:
-		rows, err = q.FinishRedeliveryRange(ctx, step.Close.ID)
-		id = step.Close.ID
-	case step.Close != nil:
-		rows, err = q.GapRedeliveryRange(ctx, database.GapRedeliveryRangeParams{
-			ID: step.Close.ID, FromAt: step.Close.Gap.From, ToAt: step.Close.Gap.To, Now: step.Now,
-		})
-		id = step.Close.ID
+	case step.CloseID != 0:
+		rows, err = q.FinishRedeliveryRange(ctx, step.CloseID)
+		id = step.CloseID
 	default:
 		return 0, nil
 	}

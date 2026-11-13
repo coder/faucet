@@ -149,30 +149,20 @@ func (q *Queries) FinishRedeliveryRange(ctx context.Context, id int64) (int64, e
 	return result.RowsAffected()
 }
 
-const gapRedeliveryRange = `-- name: GapRedeliveryRange :execrows
-UPDATE faucet_redelivery_ranges
-SET state = 'gap', older_at = $1, newer_at = $2, cursor = '', closed_at = $3::timestamptz
-WHERE id = $4 AND state = 'open'
+const insertRedeliveryGap = `-- name: InsertRedeliveryGap :exec
+INSERT INTO faucet_redelivery_ranges (state, older_at, newer_at, cursor, closed_at)
+VALUES ('gap', $1, $2, '', $3::timestamptz)
 `
 
-type GapRedeliveryRangeParams struct {
+type InsertRedeliveryGapParams struct {
 	FromAt time.Time
 	ToAt   time.Time
 	Now    time.Time
-	ID     int64
 }
 
-func (q *Queries) GapRedeliveryRange(ctx context.Context, arg GapRedeliveryRangeParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, gapRedeliveryRange,
-		arg.FromAt,
-		arg.ToAt,
-		arg.Now,
-		arg.ID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+func (q *Queries) InsertRedeliveryGap(ctx context.Context, arg InsertRedeliveryGapParams) error {
+	_, err := q.db.ExecContext(ctx, insertRedeliveryGap, arg.FromAt, arg.ToAt, arg.Now)
+	return err
 }
 
 const insertRedeliveryRange = `-- name: InsertRedeliveryRange :one

@@ -93,13 +93,6 @@ type RangeAdvance struct {
 	Cursor  string
 }
 
-// RangeClose ends an open range. A nil Gap means every attempt in the range
-// was read. A Gap means part of it expired unread.
-type RangeClose struct {
-	ID  int64
-	Gap *RedeliveryGap
-}
-
 // ScanStep is what one page of the delivery list changes. A store applies it
 // in one transaction, so a position never moves without the attempts that
 // justify it.
@@ -114,10 +107,14 @@ type ScanStep struct {
 	// Top raises the stored top to this time. A zero time, or one that is not
 	// later than the stored top, leaves it.
 	Top time.Time
-	// At most one of Open, Advance and Close is set.
+	// At most one of Open, Advance and CloseID is set. CloseID deletes an open
+	// range that has been read to its end.
 	Open    *RedeliveryRange
 	Advance *RangeAdvance
-	Close   *RangeClose
+	CloseID int64
+	// Gap records a time range that expired before any run read it, as a final
+	// state. It needs no range.
+	Gap *RedeliveryGap
 }
 
 // Validate checks the fields a caller supplies to ApplyRedeliveryScan.
@@ -136,7 +133,7 @@ func (s ScanStep) Validate() error {
 		}
 	}
 	moves := 0
-	for _, set := range []bool{s.Open != nil, s.Advance != nil, s.Close != nil} {
+	for _, set := range []bool{s.Open != nil, s.Advance != nil, s.CloseID != 0} {
 		if set {
 			moves++
 		}
@@ -148,9 +145,9 @@ func (s ScanStep) Validate() error {
 		return xerrors.New("an open range needs a cursor and two times")
 	case s.Advance != nil && (s.Advance.ID <= 0 || s.Advance.Cursor == "" || s.Advance.NewerAt.IsZero()):
 		return xerrors.New("an advanced range needs an ID, a cursor and a time")
-	case s.Close != nil && s.Close.ID <= 0:
+	case s.CloseID < 0:
 		return xerrors.New("a closed range needs an ID")
-	case s.Close != nil && s.Close.Gap != nil && (s.Close.Gap.From.IsZero() || s.Close.Gap.To.Before(s.Close.Gap.From)):
+	case s.Gap != nil && (s.Gap.From.IsZero() || s.Gap.To.Before(s.Gap.From)):
 		return xerrors.New("a gap needs a time range")
 	}
 	return nil

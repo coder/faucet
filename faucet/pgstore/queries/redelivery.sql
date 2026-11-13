@@ -77,10 +77,9 @@ WHERE id = sqlc.arg(id) AND state = 'open';
 -- name: FinishRedeliveryRange :execrows
 DELETE FROM faucet_redelivery_ranges WHERE id = sqlc.arg(id) AND state = 'open';
 
--- name: GapRedeliveryRange :execrows
-UPDATE faucet_redelivery_ranges
-SET state = 'gap', older_at = sqlc.arg(from_at), newer_at = sqlc.arg(to_at), cursor = '', closed_at = sqlc.arg(now)::timestamptz
-WHERE id = sqlc.arg(id) AND state = 'open';
+-- name: InsertRedeliveryGap :exec
+INSERT INTO faucet_redelivery_ranges (state, older_at, newer_at, cursor, closed_at)
+VALUES ('gap', sqlc.arg(from_at), sqlc.arg(to_at), '', sqlc.arg(now)::timestamptz);
 
 -- name: SettleRecoveredRedeliveries :many
 UPDATE faucet_redeliveries r

@@ -333,16 +333,17 @@ func scanPositionSurvivesBetweenRuns(t *testing.T, s RedeliveryStore) {
 		{ID: opened.OpenedID, NewerAt: t0.Add(-3 * time.Hour), OlderAt: t0.Add(-48 * time.Hour), Cursor: "cursor-1b"},
 	}, normalizeRanges(third.Ranges), "ranges come newest first, and an advance moved one cursor")
 
-	apply(t, s, faucet.ScanStep{Epoch: third.Epoch, Now: t0, Close: &faucet.RangeClose{ID: newer.OpenedID}})
+	apply(t, s, faucet.ScanStep{Epoch: third.Epoch, Now: t0, CloseID: newer.OpenedID})
 	gapFrom, gapTo := t0.Add(-48*time.Hour), t0.Add(-40*time.Hour)
-	apply(t, s, faucet.ScanStep{Epoch: third.Epoch, Now: t0.Add(5 * time.Minute), Close: &faucet.RangeClose{ID: opened.OpenedID, Gap: &faucet.RedeliveryGap{From: gapFrom, To: gapTo}}})
+	apply(t, s, faucet.ScanStep{Epoch: third.Epoch, Now: t0.Add(5 * time.Minute), CloseID: opened.OpenedID, Gap: &faucet.RedeliveryGap{From: gapFrom, To: gapTo}})
+	apply(t, s, faucet.ScanStep{Epoch: third.Epoch, Now: t0.Add(5 * time.Minute), Gap: &faucet.RedeliveryGap{From: gapFrom.Add(-time.Hour), To: gapFrom}})
 	require.NoError(t, s.ReleaseRedeliveryLease(ctx, third.Epoch))
 
 	last := acquire(t, s, testHook, t0.Add(10*time.Minute))
 	require.Empty(t, last.Ranges, "a closed range, finished or a gap, is no longer open")
 	deleted, err := s.PurgeRedeliveries(ctx, t0.Add(6*time.Minute))
 	require.NoError(t, err)
-	require.EqualValues(t, 1, deleted, "a gap is kept as a final state until it is purged, and a finished range leaves no row")
+	require.EqualValues(t, 2, deleted, "a gap is kept as a final state until it is purged, whether or not a range held it, and a finished range leaves no row")
 }
 
 func normalizeRanges(ranges []faucet.RedeliveryRange) []faucet.RedeliveryRange {
@@ -423,7 +424,7 @@ func redeliveryInputsAreValidated(t *testing.T, s RedeliveryStore) {
 		"no time":                        {Epoch: lease.Epoch},
 		"an attempt without a GUID":      {Epoch: lease.Epoch, Now: t0, Failed: []faucet.FailedAttempt{failedAt("", 1, t0)}},
 		"an attempt ID of zero":          {Epoch: lease.Epoch, Now: t0, Failed: []faucet.FailedAttempt{failedAt("guid", 0, t0)}},
-		"two range moves":                {Epoch: lease.Epoch, Now: t0, Close: &faucet.RangeClose{ID: 1}, Advance: &faucet.RangeAdvance{ID: 1, NewerAt: t0, Cursor: "c"}},
+		"two range moves":                {Epoch: lease.Epoch, Now: t0, CloseID: 1, Advance: &faucet.RangeAdvance{ID: 1, NewerAt: t0, Cursor: "c"}},
 		"an open range without a cursor": {Epoch: lease.Epoch, Now: t0, Open: &faucet.RedeliveryRange{NewerAt: t0, OlderAt: t0}},
 	} {
 		_, err := s.ApplyRedeliveryScan(ctx, step)

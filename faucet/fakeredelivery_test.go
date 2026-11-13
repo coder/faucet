@@ -149,9 +149,9 @@ func (s *fakeRedeliveryStore) ApplyRedeliveryScan(_ context.Context, step faucet
 		if r := s.openRangeLocked(step.Advance.ID); r == nil {
 			return faucet.ScanResult{}, xerrors.Errorf("range %d is not open", step.Advance.ID)
 		}
-	case step.Close != nil:
-		if r := s.openRangeLocked(step.Close.ID); r == nil {
-			return faucet.ScanResult{}, xerrors.Errorf("range %d is not open", step.Close.ID)
+	case step.CloseID != 0:
+		if r := s.openRangeLocked(step.CloseID); r == nil {
+			return faucet.ScanResult{}, xerrors.Errorf("range %d is not open", step.CloseID)
 		}
 	}
 
@@ -192,13 +192,16 @@ func (s *fakeRedeliveryStore) ApplyRedeliveryScan(_ context.Context, step faucet
 	case step.Advance != nil:
 		r := s.openRangeLocked(step.Advance.ID)
 		r.NewerAt, r.Cursor = step.Advance.NewerAt, step.Advance.Cursor
-	case step.Close != nil:
-		r := s.openRangeLocked(step.Close.ID)
-		if step.Close.Gap == nil {
-			s.ranges = slices.DeleteFunc(s.ranges, func(x *fakeRange) bool { return x == r })
-			break
-		}
-		r.gap, r.closedAt = true, step.Now
+	case step.CloseID != 0:
+		r := s.openRangeLocked(step.CloseID)
+		s.ranges = slices.DeleteFunc(s.ranges, func(x *fakeRange) bool { return x == r })
+	}
+	if step.Gap != nil {
+		s.nextRangeID++
+		s.ranges = append(s.ranges, &fakeRange{
+			RedeliveryRange: faucet.RedeliveryRange{ID: s.nextRangeID, NewerAt: step.Gap.To, OlderAt: step.Gap.From},
+			gap:             true, closedAt: step.Now,
+		})
 	}
 	return res, nil
 }
