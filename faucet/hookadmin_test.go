@@ -76,7 +76,7 @@ func TestGitHubHookAdminListsDeliveriesNewestFirstWithACursor(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []faucet.HookDelivery{
 		{ID: 31, GUID: "guid-b", DeliveredAt: time.Date(2026, 11, 13, 10, 5, 0, 0, time.UTC), StatusCode: 500},
-		{ID: 30, GUID: "guid-a", DeliveredAt: time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC), StatusCode: 200},
+		{ID: 30, GUID: "guid-a", DeliveredAt: time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC), StatusCode: 200, Redelivery: true},
 	}, page.Deliveries)
 	require.Equal(t, "v1_29", page.Next, "the next page is the rel=next cursor, not the rel=prev one")
 

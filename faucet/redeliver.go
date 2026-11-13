@@ -16,6 +16,11 @@ const (
 	MaxRedeliverPages = 10
 	// MaxRedeliveries is the most redelivery requests one Redeliver call sends.
 	MaxRedeliveries = 50
+	// MaxRedeliveriesPerDelivery is the number of redeliveries after which
+	// Redeliver stops asking for a delivery. Three covers an outage that
+	// outlasts one retry, and a delivery that faucet rejects for its content
+	// costs three requests and then no more.
+	MaxRedeliveriesPerDelivery = 3
 )
 
 // ErrNoHookAdmin is what Redeliver returns when Deps had no HookAdmin.
@@ -25,8 +30,10 @@ var ErrNoHookAdmin = xerrors.New("no hook admin is configured")
 type RedeliverResult struct {
 	// Examined is the number of delivery attempts inside the window.
 	Examined int
-	// Pending is the number of deliveries that failed, were not stored and had
-	// no later successful attempt.
+	// Pending is the number of deliveries that failed, were not stored, had no
+	// later successful attempt, and that Redeliver may still ask for: their
+	// original attempt is inside the window and they have had fewer than
+	// MaxRedeliveriesPerDelivery redeliveries.
 	Pending int
 	// Requested is the number of redelivery requests GitHub accepted.
 	Requested int
@@ -48,8 +55,14 @@ type RedeliverResult struct {
 // request. Two calls at once can request the same delivery twice. The store
 // keeps one event per delivery GUID, so the second delivery is a duplicate.
 //
-// A delivery that fails the same way every time, such as a malformed payload,
-// is requested again on each call until it leaves the window.
+// GitHub records a redelivery as a new attempt with its own, later time, so a
+// delivery that faucet rejects every time, such as a malformed payload, would
+// stay inside any window. Redeliver therefore asks for a delivery only while
+// its original attempt is inside the window and at most
+// MaxRedeliveriesPerDelivery redeliveries of it exist. The deliveries with
+// the fewest redeliveries go first, so a delivery that keeps failing does not
+// use up the requests that a new failure needs. A delivery that Redeliver gave
+// up on is logged and stays lost until someone redelivers it by hand.
 //
 // The method has no auth of its own. The host decides who may call it.
 func (s *Service) Redeliver(ctx context.Context, since time.Time) (RedeliverResult, error) {
@@ -71,7 +84,7 @@ func (s *Service) Redeliver(ctx context.Context, since time.Time) (RedeliverResu
 	if err != nil {
 		return res, xerrors.Errorf("look up stored deliveries: %w", err)
 	}
-	pending := slices.DeleteFunc(failed, func(d HookDelivery) bool { return slices.Contains(stored, d.GUID) })
+	pending := s.redeliverable(ctx, slices.DeleteFunc(failed, func(d HookDelivery) bool { return slices.Contains(stored, d.GUID) }), attempts)
 	res.Pending = len(pending)
 
 	for _, d := range pending {
@@ -145,6 +158,38 @@ func failedWithoutLaterSuccess(attempts map[string][]HookDelivery) []HookDeliver
 	}
 	slices.SortFunc(out, compareAttempts)
 	return out
+}
+
+// redeliverable drops the failed deliveries that Redeliver must not ask for
+// and puts the rest in the order it asks: the fewest redeliveries first, then
+// the oldest first. Each redelivery is a new attempt dated when it happened, so
+// only an attempt that is not a redelivery says how long ago the delivery
+// began. The group of attempts is complete from that attempt on, so the count
+// of redeliveries in it is exact.
+func (s *Service) redeliverable(ctx context.Context, failed []HookDelivery, attempts map[string][]HookDelivery) []HookDelivery {
+	redeliveries := make(map[string]int, len(failed))
+	keep := failed[:0]
+	for _, d := range failed {
+		original := false
+		for _, a := range attempts[d.GUID] {
+			if a.Redelivery {
+				redeliveries[d.GUID]++
+			} else {
+				original = true
+			}
+		}
+		switch {
+		case !original:
+		case redeliveries[d.GUID] >= MaxRedeliveriesPerDelivery:
+			s.logger.Warn(ctx, "redelivery limit reached", slog.F("delivery_id", d.GUID), slog.F("redeliveries", redeliveries[d.GUID]))
+		default:
+			keep = append(keep, d)
+		}
+	}
+	slices.SortStableFunc(keep, func(a, b HookDelivery) int {
+		return cmp.Or(cmp.Compare(redeliveries[a.GUID], redeliveries[b.GUID]), compareAttempts(a, b))
+	})
+	return keep
 }
 
 func compareAttempts(a, b HookDelivery) int {

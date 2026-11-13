@@ -462,6 +462,7 @@ func TestSubscribeNeverWritesTheSecretAnywhere(t *testing.T) {
 	seen = append(seen, "logs: "+h.logs.String())
 	for _, row := range h.rows() {
 		record("row", row)
+		seen = append(seen, "row secret_enc: "+string(row.SecretEnc))
 	}
 	text := strings.Join(seen, "\n")
 	require.NotEmpty(t, h.logs.String(), "the service logged the subscribe")
@@ -999,4 +1000,61 @@ func TestPurgeDeletesExpiredSubscriptions(t *testing.T) {
 	_, err = h.svc.Purge(h.ctx, h.clock.Now())
 	require.NoError(t, err)
 	requireNothingStored(t, h, "every subscription has expired")
+}
+
+func TestSubscribeAndUnsubscribeRefuseMistypedParamsWithoutQuotingTheSecret(t *testing.T) {
+	t.Parallel()
+
+	secret := newSecret(t, 32)
+	body := strings.TrimPrefix(secret, "whsec_")
+	delivery := fmt.Sprintf(`{"mode":"webhook","url":%q,"secret":%q}`, callbackURL, secret)
+	withDelivery := func(field string) json.RawMessage {
+		return json.RawMessage(`{"name":"ci.run_completed","arguments":{"repo":"octo/repo"},"delivery":` + delivery + `,` + field + `}`)
+	}
+	cases := map[string]json.RawMessage{
+		"name a number":        json.RawMessage(`{"name":5,"arguments":{"repo":"octo/repo"},"delivery":` + delivery + `}`),
+		"name an object":       json.RawMessage(`{"name":{"n":1},"arguments":{"repo":"octo/repo"},"delivery":` + delivery + `}`),
+		"cursor a number":      withDelivery(`"cursor":12`),
+		"cursor an object":     withDelivery(`"cursor":{"c":1}`),
+		"maxAgeMs a string":    withDelivery(`"maxAgeMs":"1000"`),
+		"maxAgeMs a fraction":  withDelivery(`"maxAgeMs":1.5`),
+		"maxAgeMs a list":      withDelivery(`"maxAgeMs":[1]`),
+		"arguments a number":   json.RawMessage(`{"name":"ci.run_completed","arguments":7,"delivery":` + delivery + `}`),
+		"params a list":        json.RawMessage(`["` + secret + `"]`),
+		"params a string":      json.RawMessage(`"` + secret + `"`),
+		"params a number":      json.RawMessage(`12345`),
+		"params with a secret": json.RawMessage(`{"secret":"` + secret + `","name":[1]}`),
+	}
+	for method, expected := range map[string][]int64{
+		methodSubscribe:   {codeInvalidParams},
+		methodUnsubscribe: {codeInvalidParams, codeNotFound},
+	} {
+		for name, whole := range cases {
+			t.Run(method+" "+name, func(t *testing.T) {
+				t.Parallel()
+
+				h := newWebhookHarness(t)
+				rpcErr := h.callError(method, &rawParams{Whole: whole})
+				require.Contains(t, expected, rpcErr.Code, "unsubscribe has no cursor or maxAgeMs, so it ignores them")
+				text := rpcErr.Message + string(rpcErr.Data)
+				require.NotContains(t, text, secret, "the error quotes the secret")
+				for i := 0; i+12 <= len(body); i += 4 {
+					require.NotContains(t, text, body[i:i+12], "the error quotes a piece of the secret")
+				}
+				requireNothingStored(t, h, "mistyped params")
+			})
+		}
+	}
+}
+
+func TestSubscribeReadsParamsOfEveryValidType(t *testing.T) {
+	t.Parallel()
+
+	h := newWebhookHarness(t)
+	secret := newSecret(t, 32)
+	delivery := fmt.Sprintf(`{"url":%q,"secret":%q}`, callbackURL, secret)
+	ok := json.RawMessage(`{"name":"ci.run_completed","arguments":{"repo":"octo/repo"},"delivery":` + delivery + `,"cursor":null,"maxAgeMs":null,"ttlMs":120000,"_meta":{"x":1}}`)
+	got := h.subscribe(&rawParams{Whole: ok})
+	require.Equal(t, h.clock.Now().Add(2*time.Minute).UTC().Format(time.RFC3339), got.RefreshBefore)
+	require.Len(t, h.rows(), 1)
 }

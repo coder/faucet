@@ -141,8 +141,12 @@ func (s *Store) CursorAt(ctx context.Context, t time.Time) (int64, error) {
 // mark is the highest ID the same statement deleted, so it is exact whatever
 // inserts run alongside: an insert that the statement's snapshot cannot see is
 // not deleted and gets an ID above every ID the snapshot can see. Purge does
-// not take eventsLockKey, so a large delete never holds up a webhook. It locks
-// the mark row first, so concurrent purges queue up instead of deadlocking.
+// not take eventsLockKey, so an insert of a new delivery does not wait for a
+// large delete. An insert of a delivery ID that the purge is deleting does wait
+// for the purge to commit, and it holds eventsLockKey meanwhile, so the inserts
+// behind it wait too. Only a redelivery of an event older than the retention
+// does that. Purge locks the mark row first, so concurrent purges queue up
+// instead of deadlocking.
 func (s *Store) Purge(ctx context.Context, before time.Time) (faucet.PurgeResult, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {

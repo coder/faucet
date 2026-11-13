@@ -52,6 +52,16 @@ type rawParams struct {
 	MaxEvents json.RawMessage `json:"maxEvents,omitempty"`
 	Delivery  json.RawMessage `json:"delivery,omitempty"`
 	TTLMs     json.RawMessage `json:"ttlMs,omitempty"`
+	// Whole replaces the whole params when set, for requests that are not shaped as the fields above.
+	Whole json.RawMessage `json:"-"`
+}
+
+func (p rawParams) MarshalJSON() ([]byte, error) {
+	if p.Whole != nil {
+		return p.Whole, nil
+	}
+	type plain rawParams
+	return json.Marshal(plain(p))
 }
 
 type rawResult struct {

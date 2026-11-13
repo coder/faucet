@@ -36,7 +36,7 @@ func NewSubscriptionKeyHash(principal, callbackURL, eventType string, arguments 
 	return sum
 }
 
-// ID is the handle that subscribe returns and that PR 7's deliveries carry in
+// ID is the handle that subscribe returns and that a delivery carries in
 // X-MCP-Subscription-Id. It routes. It does not authorize anything.
 func (k SubscriptionKeyHash) ID() string {
 	return "sub_" + hex.EncodeToString(k[:8])
