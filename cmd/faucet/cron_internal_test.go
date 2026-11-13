@@ -266,7 +266,7 @@ func TestCronDeliverReportsWhatTheRunDid(t *testing.T) {
 	var got map[string]any
 	require.NoError(t, json.Unmarshal([]byte(body), &got), body)
 	require.Equal(t, map[string]any{
-		"enqueued": 0.0, "gaps": 0.0, "claimed": 1.0, "sent": 0.0, "delivered": 0.0, "retried": 0.0,
+		"enqueued": 0.0, "gaps": 0.0, "gaps_sent": 0.0, "gaps_failed": 0.0, "claimed": 1.0, "sent": 0.0, "delivered": 0.0, "retried": 0.0,
 		"gave_up": map[string]any{"event_purged": 1.0}, "superseded": 0.0, "incomplete": false,
 	}, got, "the reply holds counts and reasons, nothing else")
 	srv.requireNoSecrets(t, body)
