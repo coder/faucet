@@ -7,7 +7,8 @@ An agent finds out which events faucet offers through `server/discover` and `eve
 - A bearer token that GitHub accepts is required. No header, a malformed header, or a token GitHub refuses is 401 with the body `unauthorized` and `WWW-Authenticate: Bearer`. The reply does not depend on which repositories the token can read.
 - `server/discover` advertises the extension: `capabilities.extensions["io.modelcontextprotocol/events"]` is `{"listChanged": false}`.
 - `events/list` returns `resultType` `complete` and `events`, five descriptors sorted by name: `ci.check_completed`, `ci.run_completed`, `pr.closed`, `pr.comment_created`, `pr.review_submitted`.
-- A descriptor has `name`, `description`, `delivery` (`["poll"]` for all five), `inputSchema` and `payloadSchema`. Both schemas are JSON Schema objects. `inputSchema` says what the `arguments` of `events/poll` take: `repo` (required), `sha` and `pr`. `payloadSchema` says what the `data` of an event holds: `prs`, `head_sha` and the fields of that type.
+- A descriptor has `name`, `description`, `delivery` (the same list for all five: `["poll", "webhook"]` when webhook mode is on, which the main faucet has, and `["poll"]` when it is off), `inputSchema` and `payloadSchema`. Both schemas are JSON Schema objects. `inputSchema` says what the `arguments` of `events/poll` take: `repo` (required), `sha` and `pr`. `payloadSchema` says what the `data` of an event holds: `prs`, `head_sha` and the fields of that type.
+- With webhook mode off (neither `FAUCET_WEBHOOK_KEY` nor `FAUCET_WEBHOOK_ALLOWED_ORIGINS` set) the list is `["poll"]`, and `events/subscribe` and `events/unsubscribe` are the error -32026 with `data` `{"feature": "deliveryMode", "value": "webhook"}`, whatever their parameters, and write no row. See [events/subscribe](events-subscribe.md).
 - The method needs no `Mcp-Name` header. One that is sent is ignored.
 - A non-empty `cursor` is the JSON-RPC error -32602, because the five types fit one page. An empty `cursor` counts as none. Other unknown `params` fields are ignored.
 
@@ -17,11 +18,11 @@ An agent's MCP client sends `server/discover`, then `events/list`, to `/mcp` wit
 
 ## Driving it with e2e
 
-`tests/events-list.e2e.ts`. Live: not reachable from a browser, use `run_tests {files: ["tests/events-list.e2e.ts"]}`.
+`tests/events-list.e2e.ts`. The webhook-off case starts its own faucet with `faucet.withFaucet({}, ...)`, which has no webhook variables, and reads `faucet_subscriptions` on its new database. Live: not reachable from a browser, use `run_tests {files: ["tests/events-list.e2e.ts"]}`.
 
 ## Proof
 
-Response: 200 with a JSON-RPC `result`, 400 with the error -32602, or 401 with `unauthorized\n`. The list reads no store, so there are no rows to check. The app log never holds the token or the secret. The last test of `tests/events-poll.e2e.ts` sends `server/discover` and `events/list` with its polls and checks their replies and the log.
+Response: 200 with a JSON-RPC `result`, 400 with the error -32602, or 401 with `unauthorized\n`. The list reads no store. On the faucet with webhook mode off, `select count(*) from faucet_subscriptions` is 0 after a subscribe and an unsubscribe call. The app log never holds the token or the secret. The last test of `tests/events-poll.e2e.ts` sends `server/discover` and `events/list` with its polls and checks their replies and the log.
 
 ## Charters
 
@@ -34,4 +35,4 @@ events-list-input|http|fuzzer|Send server/discover and events/list with odd para
 
 - A JSON-RPC error has an HTTP status of its own. The error -32602 is HTTP 400, not 200, so read the `error` object and not only the status.
 - A field of the wrong type (`cursor` as a number) gives a -32602 message from the SDK. It repeats the whole `params` JSON, `_meta` included. The bearer token is in a header, never in `params`, so this is not a leak.
-- `delivery` is `["poll"]` only. `events/subscribe` is not in the server yet.
+- `delivery` depends on the faucet, not on the caller. The main faucet lists `["poll", "webhook"]`, and a faucet that `withFaucet` starts without the webhook variables lists `["poll"]`.

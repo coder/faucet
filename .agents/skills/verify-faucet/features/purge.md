@@ -1,6 +1,6 @@
 # Purge
 
-`GET /cron/purge` deletes the events that faucet received before `now - retention`, in one transaction, and records the highest ID it deleted as the purge mark. A poller or waiter whose cursor is below the mark learns that events were lost.
+`GET /cron/purge` deletes the events that faucet received before `now - retention`, in one transaction, and records the highest ID it deleted as the purge mark. It also deletes the webhook subscriptions that have expired, whether or not webhook mode is on. A poller or waiter whose cursor is below the mark learns that events were lost.
 
 ## Sub-features
 
@@ -8,6 +8,7 @@
 - The reply is 200 JSON `{"deleted": <rows deleted>, "purged_through": <the mark after the purge>}`. The mark never moves down: a second purge with nothing to delete returns `deleted` 0 and the same mark.
 - `events/poll` and `wait_for_github_events` with a cursor below the mark return `truncated: true`, and the events that remain above the cursor. A cursor at or above the mark is not flagged. The wait tool's `truncated` is new in the structured output.
 - A cursor that a call returns is never below the mark, also when the purge emptied the table. A waiter that passes it back is not flagged again.
+- A subscription whose `expires_at` has passed is deleted by the purge, and one that has not stays. The reply counts events only, and the log line `events purged` adds `expired_subscriptions_deleted`.
 - `CursorAt`, which the poll's `maxAgeMs` and the wait's default start use, is never below the mark either.
 
 ## How to get to it (user POV)
@@ -16,11 +17,11 @@ An operator schedules the route daily. An agent that waits on a repository throu
 
 ## Driving it with e2e
 
-`tests/purge.e2e.ts`, on the cron faucet. A test stores events through `faucet.deliver` and ages them with `faucet.backdate(deliveryId, days)`, which sets `received_at`. `faucet.purgeMark()` reads `faucet_purge_mark`. One test starts its own faucet with `faucet.withFaucet({ FAUCET_RETENTION_DAYS: '2' })`, and another uses one so that the table is empty after the purge. Not reachable from a browser: use `run_tests {files: ["tests/purge.e2e.ts"]}`.
+`tests/purge.e2e.ts`, on the cron faucet. A test stores events through `faucet.deliver` and ages them with `faucet.backdate(deliveryId, days)`, which sets `received_at`. `faucet.purgeMark()` reads `faucet_purge_mark`. One test starts its own faucet with `faucet.withFaucet({ FAUCET_RETENTION_DAYS: '2' })`, and another uses one so that the table is empty after the purge. The subscription test starts a faucet with webhook mode on, subscribes twice, moves the expiry of one row into the past with `faucet.expireSubscriptions(marker)` (the stub cannot move the server's clock), and purges. Not reachable from a browser: use `run_tests {files: ["tests/purge.e2e.ts"]}`.
 
 ## Proof
 
-Response: 200 with the counts. The expected `deleted` and `purged_through` come from Postgres itself (a count and a max over `received_at` older than 30 days, and the mark before the call), never from the reply. Store: the old rows are gone, the newer ones stay, and `faucet_purge_mark.purged_through` equals the reply. Poll and wait: `truncated` for a cursor below the mark, and `false` at the mark and above. The app log holds `events purged` with `deleted`, `purged_through` and `before`.
+Response: 200 with the counts. The expected `deleted` and `purged_through` come from Postgres itself (a count and a max over `received_at` older than 30 days, and the mark before the call), never from the reply. Store: the old rows are gone, the newer ones stay, and `faucet_purge_mark.purged_through` equals the reply. Poll and wait: `truncated` for a cursor below the mark, and `false` at the mark and above. The app log holds `events purged` with `deleted`, `purged_through`, `before` and `expired_subscriptions_deleted`. For subscriptions the proof is the rows: `faucet.subscriptions(marker)` is empty for the expired one and holds the live one.
 
 ## Charters
 
