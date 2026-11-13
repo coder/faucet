@@ -122,6 +122,7 @@ func newWaitHarness(t *testing.T, mutate ...func(*faucet.Deps)) *waitHarness {
 	timers := clock.Trap().NewTimer()
 	t.Cleanup(timers.Close)
 	t.Cleanup(cancel)
+	t.Cleanup(func() { clock.Advance(time.Hour) })
 	return &waitHarness{t: t, ctx: ctx, store: store, clock: clock, authz: authz, logs: logs, session: session, timers: timers, deps: deps}
 }
 

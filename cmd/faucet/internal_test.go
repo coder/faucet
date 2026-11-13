@@ -154,6 +154,7 @@ func newTestServer(t *testing.T, configure ...func(*httptest.Server)) *testServe
 	}
 	srv.Start()
 	t.Cleanup(srv.Close)
+	t.Cleanup(func() { clock.Advance(time.Hour) })
 	return &testServer{Server: srv, github: github, store: store, clock: clock, logs: logs}
 }
 
