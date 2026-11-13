@@ -1,0 +1,10 @@
+version: "2"
+sql:
+  - engine: postgresql
+    schema: faucet/pgstore/migrations
+    queries: faucet/pgstore/queries
+    gen:
+      go:
+        package: database
+        out: faucet/pgstore/database
+        sql_package: database/sql
