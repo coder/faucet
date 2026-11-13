@@ -1,11 +1,11 @@
 ---
 name: verify-faucet
-description: Launch, check, drive, prove and bug bash the faucet server (cmd/faucet, GitHub webhook ingest into Postgres and the wait_for_github_events MCP tool) over HTTP with e2e. Use before claiming a faucet server change works, to prove a PR against the running server, or to bug bash it.
+description: Launch, check, drive, prove and bug bash the faucet server (cmd/faucet, GitHub webhook ingest into Postgres, the wait_for_github_events MCP tool and the events/list and events/poll MCP methods) over HTTP with e2e. Use before claiming a faucet server change works, to prove a PR against the running server, or to bug bash it.
 ---
 
 # Verify faucet
 
-Read the e2e skill first (`npx e2e guide`, run in `verify/`, prints it). This skill only says what is true of faucet. Everything lives in `verify/`: config `verify/e2e.config.ts` (one `web()` target named `http`, tests `tests/**/*.e2e.ts`), the app command `verify/app.mjs`, and the tests. faucet has no UI, so the tests call the server with `fetch` and read Postgres with `psql`. They take no model.
+Read the e2e skill first (`npx e2e guide`, run in `verify/`, prints it). This skill only says what is true of faucet. faucet serves `GET /healthz`, signed webhooks at `POST /webhook/github`, and MCP at `POST /mcp`: the `wait_for_github_events` tool and the `events/list` and `events/poll` methods. Everything lives in `verify/`: config `verify/e2e.config.ts` (one `web()` target named `http`, tests `tests/**/*.e2e.ts`), the app command `verify/app.mjs`, and the tests. faucet has no UI, so the tests call the server with `fetch` and read Postgres with `psql`. They take no model.
 
 ## Launch
 
@@ -45,6 +45,7 @@ Scripted: every feature in [features/](features/README.md) has a test under `ver
 
 - `faucet.deliver({ event, delivery, body, signature? })` posts to `/webhook/github`. It signs `body` with the run's secret unless `signature` is a string (sent as is) or `null` (header omitted).
 - `faucet.waitForEvents(args, token?)` calls the `wait_for_github_events` tool on `/mcp` as a stateless 2026-07-28 client would, with the run's valid GitHub token unless `token` is a string (sent as is) or `null` (no header). It returns the HTTP reply plus `isError`, `text`, `events` and `cursor`.
+- `faucet.mcp(method, params, opts)` sends one JSON-RPC request to `/mcp` as a stateless 2026-07-28 client would, for `server/discover`, `events/list` and `events/poll`. It uses the run's valid GitHub token unless `opts.token` is a string (sent as is) or `null` (no header). `opts.name` sets `Mcp-Name` (default `params.name`, `null` omits it) and `opts.id` sets the request id. It returns the HTTP reply plus `id`, `result` and `error`.
 - `faucet.request(path, init)` is a plain `fetch` returning `{ status, body, headers }`.
 - `faucet.sign(body, secret?)` returns `sha256=<hex>`.
 - `faucet.rows(repoId)` returns the `faucet_events` rows of one repository through `psql`; `faucet.sql(query)` runs any query.
@@ -63,7 +64,7 @@ Never print `state.json`: it holds the secret.
 
 ## Evidence
 
-Every run writes `.e2e/report.json`, a short `trace.md` per test under `.e2e/results/` (`trace: 'on'` in the config), and the app's own log at `.e2e/logs/app.log`. faucet logs one `webhook stored` line per accepted delivery (`event_id`, `inserted`) one `webhook rejected` line per refusal (`status`, `reason`) and one `wait denied` line per tool call for a repository the token cannot see. The next run clears `.e2e/results/`, and the app log is appended to across runs. A proof that must outlive them starts a fresh log, runs with its own output directory and keeps the log beside it:
+Every run writes `.e2e/report.json`, a short `trace.md` per test under `.e2e/results/` (`trace: 'on'` in the config), and the app's own log at `.e2e/logs/app.log`. faucet logs one `webhook stored` line per accepted delivery (`event_id`, `inserted`) one `webhook rejected` line per refusal (`status`, `reason`) and one `wait denied` or `poll denied` line per `wait_for_github_events` or `events/poll` call for a repository the token cannot see (`repo` and `login`, and `event` on a poll). The next run clears `.e2e/results/`, and the app log is appended to across runs. A proof that must outlive them starts a fresh log, runs with its own output directory and keeps the log beside it:
 
 ```sh
 rm -f .e2e/logs/app.log
