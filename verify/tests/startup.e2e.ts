@@ -10,7 +10,6 @@ const FAKE_DB_PASSWORD = 'fake-db-password-7c1f4e';
 const FAKE_SECRET = 'fake-webhook-secret-0123456789abcdef';
 const SHORT_SECRET = 'tiny-7c1f4e';
 const FAKE_CRON_SECRET = 'fake-cron-secret-0123456789abcdef';
-const FAKE_HOOK_TOKEN = 'ghp_fake-hook-token-7c1f4e';
 const ORIGIN_TOKEN = 'h7c1f4e';
 const USERINFO_TOKEN = 'ppass7c1f4e';
 const KEY_NOT_BASE64 = 'not-base64-key-7c1f4e!!';
@@ -70,24 +69,6 @@ describe('startup rejects a bad DATABASE_URL without printing its password', () 
 
 describe('startup configuration', () => {
   const valid = { DATABASE_URL: WELL_FORMED_URL, GITHUB_WEBHOOK_SECRET: FAKE_SECRET };
-  const hook = { FAUCET_HOOK_TOKEN: FAKE_HOOK_TOKEN, FAUCET_HOOK_ORG: 'verify', FAUCET_HOOK_ID: '7' };
-  const hookCases: [string, Record<string, string>, string][] = [
-    ['only FAUCET_HOOK_TOKEN', { FAUCET_HOOK_TOKEN: FAKE_HOOK_TOKEN }, 'redelivery needs FAUCET_HOOK_ID, FAUCET_HOOK_ORG or FAUCET_HOOK_REPO\n'],
-    ['FAUCET_HOOK_ORG and FAUCET_HOOK_ID without a token', { FAUCET_HOOK_ORG: 'verify', FAUCET_HOOK_ID: '7' }, 'redelivery needs FAUCET_HOOK_TOKEN\n'],
-    ['FAUCET_HOOK_ORG and FAUCET_HOOK_REPO together', { ...hook, FAUCET_HOOK_REPO: 'verify/repo' }, 'set only one of FAUCET_HOOK_ORG and FAUCET_HOOK_REPO\n'],
-    ['FAUCET_HOOK_ID=0', { ...hook, FAUCET_HOOK_ID: '0' }, 'FAUCET_HOOK_ID must be a positive integer\n'],
-    ['FAUCET_HOOK_ID=abc', { ...hook, FAUCET_HOOK_ID: 'abc' }, 'FAUCET_HOOK_ID must be a positive integer\n'],
-    [
-      'a FAUCET_HOOK_TOKEN with a space',
-      { ...hook, FAUCET_HOOK_TOKEN: `${FAKE_HOOK_TOKEN} x` },
-      'FAUCET_HOOK_*: hook token must be 1 to 1024 printable ASCII characters without spaces',
-    ],
-    [
-      'a FAUCET_HOOK_ORG that is not an organization name',
-      { ...hook, FAUCET_HOOK_ORG: 'not/an-org' },
-      'FAUCET_HOOK_*: hook org is not a valid organization name',
-    ],
-  ];
   const webhook = { FAUCET_WEBHOOK_KEY: KEY_32, FAUCET_WEBHOOK_ALLOWED_ORIGINS: ORIGIN };
   const KEY_RULE = 'FAUCET_WEBHOOK_KEY must be the standard base64 of exactly 32 bytes';
   const ORIGIN_RULE = 'FAUCET_WEBHOOK_ALLOWED_ORIGINS must be comma-separated https origins written scheme://host[:port]: ';
@@ -156,11 +137,10 @@ describe('startup configuration', () => {
       env: { ...valid, FAUCET_RETENTION_DAYS: days },
       message: 'FAUCET_RETENTION_DAYS must be a whole number of days from 1 to 3650\n',
     })),
-    ...hookCases.map(([name, settings, message]) => ({ name, env: { ...valid, ...settings }, message })),
     ...webhookCases.map(([name, settings, message]) => ({ name, env: { ...valid, ...settings }, message })),
   ];
   const printedNever = [
-    FAKE_DB_PASSWORD, FAKE_SECRET, SHORT_SECRET, FAKE_CRON_SECRET, FAKE_HOOK_TOKEN,
+    FAKE_DB_PASSWORD, FAKE_SECRET, SHORT_SECRET, FAKE_CRON_SECRET,
     KEY_32, KEY_NOT_BASE64, KEY_URL_SAFE, KEY_31_BYTES, KEY_33_BYTES, KEY_ZERO, ORIGIN_TOKEN, USERINFO_TOKEN, VERIFY_UNKNOWN,
   ];
   for (const { name, env, message } of cases) {

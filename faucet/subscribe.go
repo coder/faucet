@@ -97,17 +97,34 @@ type subscriptionParams struct {
 }
 
 type subscriptionFields struct {
-	Name      json.RawMessage `json:"name"`
-	Arguments json.RawMessage `json:"arguments"`
-	Delivery  json.RawMessage `json:"delivery"`
-	Cursor    json.RawMessage `json:"cursor"`
-	MaxAgeMs  json.RawMessage `json:"maxAgeMs"`
-	TTLMs     json.RawMessage `json:"ttlMs"`
+	Name, Arguments, Delivery, Cursor, MaxAgeMs, TTLMs json.RawMessage
 }
 
 func (p *subscriptionParams) UnmarshalJSON(b []byte) error {
-	p.malformed = json.Unmarshal(b, &p.fields) != nil
+	members, ok := decodeMembers(b)
+	p.malformed = !ok
+	p.fields = subscriptionFields{
+		Name:      members["name"],
+		Arguments: members["arguments"],
+		Delivery:  members["delivery"],
+		Cursor:    members["cursor"],
+		MaxAgeMs:  members["maxAgeMs"],
+		TTLMs:     members["ttlMs"],
+	}
 	return nil
+}
+
+// decodeMembers reads a JSON object by exact member name. encoding/json
+// matches a name in any letter case and keeps the last of a repeated name, so
+// one body could say one thing to RequireEventName and another to a handler.
+// Here a repeated name fails and a name in another case is another member,
+// which the handlers ignore, as go-sdk does for the params of events/poll.
+func decodeMembers(raw []byte) (map[string]json.RawMessage, bool) {
+	var members map[string]json.RawMessage
+	if json.Unmarshal(raw, &members) != nil || hasRepeatedKey(raw) {
+		return nil, false
+	}
+	return members, true
 }
 
 type eventsSubscribeResult struct {
@@ -191,7 +208,13 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 		return nil, accessError(err)
 	}
 	key := NewSubscriptionKeyHash(principal.Login, req.callbackURL, req.eventType.name, req.canonical)
-	verification := CallbackRequest{Principal: principal, URL: req.callbackURL, SubscriptionID: key.ID(), secret: req.secret}
+	secret := req.secret
+	verification := CallbackRequest{
+		Login: principal.Login, URL: req.callbackURL, SubscriptionID: key.ID(),
+		sign: func(id string, timestamp time.Time, body []byte) (http.Header, error) {
+			return SignWebhook(string(secret), id, timestamp, body)
+		},
+	}
 	if err := wh.verifyCallback(ctx, logger, verification); err != nil {
 		return nil, err
 	}
@@ -294,7 +317,7 @@ func (s *Service) subscriber(ctx context.Context, logger slog.Logger, op string)
 }
 
 func (wh *webhookState) verifyCallback(ctx context.Context, logger slog.Logger, req CallbackRequest) error {
-	login := req.Principal.Login
+	login := req.Login
 	if wh.verified.verified(login, req.URL) {
 		return nil
 	}
@@ -453,17 +476,27 @@ func canonicalArguments(args pollArguments) json.RawMessage {
 }
 
 type deliveryParams struct {
-	Mode   *string `json:"mode"`
-	URL    *string `json:"url"`
-	Secret *string `json:"secret"`
+	Mode, URL, Secret *string
 }
 
 // decodeDelivery reads the delivery object. Every error is fixed text, so none
 // can quote the secret or the URL.
 func decodeDelivery(raw json.RawMessage) (deliveryParams, error) {
+	bad := invalidParams("delivery must be an object with string fields")
+	members, ok := decodeMembers(raw)
+	if !ok || members == nil {
+		return deliveryParams{}, bad
+	}
 	var d deliveryParams
-	if len(raw) == 0 || json.Unmarshal(raw, &d) != nil || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return deliveryParams{}, invalidParams("delivery must be an object with string fields")
+	for name, member := range map[string]**string{"mode": &d.Mode, "url": &d.URL, "secret": &d.Secret} {
+		if isAbsent(members[name]) {
+			continue
+		}
+		var value string
+		if json.Unmarshal(members[name], &value) != nil {
+			return deliveryParams{}, bad
+		}
+		*member = &value
 	}
 	if d.Mode != nil && *d.Mode != deliveryWebhook {
 		if len(*d.Mode) > maxModeBytes {

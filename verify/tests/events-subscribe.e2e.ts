@@ -19,6 +19,7 @@ import {
   subscribed,
   subscribedLine,
   unsubscribe,
+  unsubscribeParams,
   type Params,
 } from './subscriptions';
 
@@ -475,6 +476,36 @@ describe('events subscribe', () => {
       expect(reply.error?.code).toBe(-32020);
     }
     expect(await faucet.subscriptions(marker)).toEqual([]);
+  });
+
+  test('a name in another letter case never changes the event that the Mcp-Name header names, for subscribe and unsubscribe', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const marker = newMarker();
+    const params = subscribeParams(repoId, marker);
+    const { name: _name, ...withoutName } = params;
+    const eventsOf = async () => (await faucet.subscriptions(marker)).map((r) => r.event_type);
+
+    const shadowed = await subscribe(faucet, { ...params, NAME: 'pr.closed', Name: 'pr.closed' }, { name: EVENT });
+    const upperCaseOnly = await subscribe(faucet, { ...withoutName, NAME: 'pr.closed' }, { name: null });
+    const titleCaseOnly = await subscribe(faucet, { ...withoutName, Name: 'pr.closed' }, { name: 'pr.closed' });
+
+    expect(shadowed.error, shadowed.body).toBeNull();
+    expect(await eventsOf(), 'only the event of the exact name member is stored').toEqual([EVENT]);
+    for (const reply of [upperCaseOnly, titleCaseOnly]) {
+      expect(reply.status).toBe(400);
+      expect(reply.error?.code).toBe(-32602);
+      expect(reply.error?.message).toContain('name is required');
+    }
+
+    await subscribed(faucet, subscribeParams(repoId, marker, { name: 'pr.closed' }));
+    expect((await eventsOf()).sort()).toEqual(['ci.run_completed', 'pr.closed']);
+    const { name: _unsubscribed, ...unsubscribeWithoutName } = unsubscribeParams(params);
+    const noExactName = await faucet.mcp('events/unsubscribe', { ...unsubscribeWithoutName, Name: 'pr.closed' }, { name: 'pr.closed' });
+    const shadowedUnsubscribe = await faucet.mcp('events/unsubscribe', { ...unsubscribeParams(params), NAME: 'pr.closed' }, { name: EVENT });
+
+    expect(noExactName.error?.code).toBe(-32602);
+    expect(shadowedUnsubscribe.error, shadowedUnsubscribe.body).toBeNull();
+    expect(await eventsOf(), 'only the subscription of the exact name member is removed').toEqual(['pr.closed']);
   });
 
   test('the app log holds no secret, no key and no callback URL path or query, for accepted and refused calls', async ({ faucet }) => {

@@ -40,7 +40,6 @@ func Run(t *testing.T, newStore func(t *testing.T) faucet.Store) {
 		{"PollEventsAndCursorAtNeverFallBelowThePurgeMark", pollEventsAndCursorAtNeverFallBelowThePurgeMark},
 		{"PurgeUnderConcurrentInsertsKeepsNewEventsAndAnExactMark", purgeUnderConcurrentInsertsKeepsNewEventsAndAnExactMark},
 		{"PollEventsNeverHidesAConcurrentPurge", pollEventsNeverHidesAConcurrentPurge},
-		{"StoredDeliveriesReturnsOnlyStoredIDs", storedDeliveriesReturnsOnlyStoredIDs},
 		{"UpsertSubscriptionStoresThenRefreshes", upsertSubscriptionStoresThenRefreshes},
 		{"UpsertSubscriptionTreatsAnExpiredRowAsAbsent", upsertSubscriptionTreatsAnExpiredRowAsAbsent},
 		{"DeleteSubscriptionRemovesOnlyTheCallersRow", deleteSubscriptionRemovesOnlyTheCallersRow},
@@ -764,29 +763,6 @@ func pollEventsNeverHidesAConcurrentPurge(t *testing.T, s faucet.Store) {
 		}
 		cursor = events[batch-1].ID
 	}
-}
-
-func storedDeliveriesReturnsOnlyStoredIDs(t *testing.T, s faucet.Store) {
-	ctx := context.Background()
-
-	none, err := s.StoredDeliveries(ctx, nil)
-	require.NoError(t, err)
-	require.Empty(t, none)
-	none, err = s.StoredDeliveries(ctx, []string{"delivery-0"})
-	require.NoError(t, err)
-	require.Empty(t, none, "nothing is stored yet")
-
-	e := insertSpaced(t, s, "delivery", 3)
-
-	got, err := s.StoredDeliveries(ctx, []string{e[0].DeliveryID, "never-stored", e[2].DeliveryID, e[0].DeliveryID, ""})
-	require.NoError(t, err)
-	require.ElementsMatch(t, []string{e[0].DeliveryID, e[2].DeliveryID}, got, "each stored ID once, the unknown and empty IDs not at all")
-
-	_, err = s.Purge(ctx, e[1].ReceivedAt)
-	require.NoError(t, err)
-	got, err = s.StoredDeliveries(ctx, []string{e[0].DeliveryID, e[1].DeliveryID})
-	require.NoError(t, err)
-	require.ElementsMatch(t, []string{e[1].DeliveryID}, got, "a purged event is no longer stored")
 }
 
 var subscriptionBase = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)

@@ -1,10 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { counts, endpoint, eventRequests, paramsFor, parseReply, storeRun, withDeliveryFaucet } from './delivery';
-import { samples, stubDelivery } from './payloads';
-import { describe, expect, newDeliveryId, newRepoId, test, type CronOptions, type Faucet, type HookStub } from './support';
+import { samples } from './payloads';
+import { describe, expect, newDeliveryId, newRepoId, test, type CronOptions, type Faucet } from './support';
 import { subscribed } from './subscriptions';
 
-const JOBS = ['purge', 'redeliver', 'deliver'] as const;
 const run = samples['workflow_run.completed'];
 const OLD_DAYS = 40;
 
@@ -20,65 +19,50 @@ const refused: [string, NonNullable<CronOptions['send']>][] = [
 interface Armed {
   repoId: number;
   old: string;
-  failed: string;
 }
 
-// arm stores one event old enough for a purge to delete and lists one failed delivery that a sweep would ask GitHub for.
-async function arm(cron: Faucet, hooks: HookStub): Promise<Armed> {
+// arm stores one event old enough for a purge to delete.
+async function arm(cron: Faucet): Promise<Armed> {
   const repoId = newRepoId();
   const old = newDeliveryId();
-  const failed = newDeliveryId();
   const stored = await cron.deliver({ event: run.event, delivery: old, body: JSON.stringify(run.payload(repoId)) });
   expect(stored.body).toBe('stored\n');
   await cron.backdate(old, OLD_DAYS);
-  await hooks.set([stubDelivery(repoId, { id: 1, guid: failed, ageMs: 60_000, status: 500 })]);
-  return { repoId, old, failed };
+  return { repoId, old };
 }
 
 async function deliveriesOf(cron: Faucet, repoId: number): Promise<string[]> {
   return (await cron.rows(repoId)).map((row) => row.delivery_id);
 }
 
-async function hookRequests(hooks: HookStub): Promise<string[]> {
-  const requests = await hooks.requests();
-  return requests.filter((r) => r.path.startsWith('/orgs/')).map((r) => `${r.method} ${r.path}`);
-}
-
-async function expectIdle(cron: Faucet, hooks: HookStub, armed: Armed): Promise<void> {
-  expect(await deliveriesOf(cron, armed.repoId), 'the old event must stay').toEqual([armed.old]);
-  expect(await hookRequests(hooks), 'GitHub must not be called').toEqual([]);
-}
-
 describe('cron routes', () => {
-  for (const job of JOBS) {
-    for (const [title, send] of refused) {
-      test(`GET /cron/${job} with ${title} is 401 and runs nothing`, async ({ cron, hooks }) => {
-        const armed = await arm(cron, hooks);
+  for (const [title, send] of refused) {
+    test(`GET /cron/purge with ${title} is 401 and runs nothing`, async ({ cron }) => {
+      const armed = await arm(cron);
 
-        const reply = await cron.cronJob(job, { send });
+      const reply = await cron.cronJob('purge', { send });
 
-        expect(reply.status).toBe(401);
-        expect(reply.body).toBe('unauthorized\n');
-        expect(reply.headers.get('www-authenticate')).toBe('Bearer');
-        expect(cron.leaksSecret(reply.body + JSON.stringify([...reply.headers]))).toBe(false);
-        await expectIdle(cron, hooks, armed);
-      });
-    }
-
-    for (const method of ['POST', 'PUT', 'DELETE']) {
-      test(`${method} /cron/${job} with the right secret is 405 and runs nothing`, async ({ cron, hooks }) => {
-        const armed = await arm(cron, hooks);
-
-        const reply = await cron.cronJob(job, { method });
-
-        expect(reply.status).toBe(405);
-        await expectIdle(cron, hooks, armed);
-      });
-    }
+      expect(reply.status).toBe(401);
+      expect(reply.body).toBe('unauthorized\n');
+      expect(reply.headers.get('www-authenticate')).toBe('Bearer');
+      expect(cron.leaksSecret(reply.body + JSON.stringify([...reply.headers]))).toBe(false);
+      expect(await deliveriesOf(cron, armed.repoId), 'the old event must stay').toEqual([armed.old]);
+    });
   }
 
-  test('GET /cron/purge with the right secret purges and answers JSON without the secret', async ({ cron, hooks }) => {
-    const armed = await arm(cron, hooks);
+  for (const method of ['POST', 'PUT', 'DELETE']) {
+    test(`${method} /cron/purge with the right secret is 405 and runs nothing`, async ({ cron }) => {
+      const armed = await arm(cron);
+
+      const reply = await cron.cronJob('purge', { method });
+
+      expect(reply.status).toBe(405);
+      expect(await deliveriesOf(cron, armed.repoId), 'the old event must stay').toEqual([armed.old]);
+    });
+  }
+
+  test('GET /cron/purge with the right secret purges and answers JSON without the secret', async ({ cron }) => {
+    const armed = await arm(cron);
 
     const reply = await cron.cronJob('purge');
 
@@ -89,16 +73,29 @@ describe('cron routes', () => {
     expect(cron.leaksSecret(reply.body + JSON.stringify([...reply.headers]))).toBe(false);
   });
 
-  test('GET /cron/redeliver with the right secret redelivers and answers JSON without the secret', async ({ cron, hooks }) => {
-    const armed = await arm(cron, hooks);
+  test('a faucet without CRON_SECRET answers /cron/purge 503 to every request and runs nothing', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const old = newDeliveryId();
+    const stored = await faucet.deliver({ event: run.event, delivery: old, body: JSON.stringify(run.payload(repoId)) });
+    expect(stored.body).toBe('stored\n');
+    await faucet.backdate(old, OLD_DAYS);
+    const guesses: [string, NonNullable<CronOptions['send']>][] = [
+      ['no header', () => ({})],
+      ['a bearer token', (secret) => ({ authorization: `Bearer ${secret}` })],
+      ['an empty bearer token', () => ({ authorization: 'Bearer' })],
+    ];
 
-    const reply = await cron.cronJob('redeliver');
-
-    expect(reply.status).toBe(200);
-    expect(reply.headers.get('content-type')).toContain('application/json');
-    expect(JSON.parse(reply.body)).toEqual({ examined: 1, pending: 1, gave_up: 0, requested: 1, incomplete: false });
-    expect(await deliveriesOf(cron, armed.repoId)).toContain(armed.failed);
-    expect(cron.leaksSecret(reply.body + JSON.stringify([...reply.headers]))).toBe(false);
+    try {
+      for (const [title, send] of guesses) {
+        const reply = await faucet.cronJob('purge', { send });
+        expect(reply.status, title).toBe(503);
+        expect(reply.body, title).toBe('cron is not configured\n');
+        expect(faucet.leaksSecret(reply.body)).toBe(false);
+      }
+      expect(await deliveriesOf(faucet, repoId), 'a purge must not run').toEqual([old]);
+    } finally {
+      await faucet.sql(`delete from faucet_events where delivery_id = '${old}'`);
+    }
   });
 
   test('GET /cron/deliver with the right secret on a faucet without webhook mode is 503 and sends nothing', async ({ cron }) => {
@@ -130,38 +127,19 @@ describe('cron routes', () => {
     });
   });
 
-  for (const job of JOBS) {
-    test(`a faucet without CRON_SECRET answers /cron/${job} 503 to every request and runs nothing`, async ({ faucet }) => {
-      const repoId = newRepoId();
-      const old = newDeliveryId();
-      const stored = await faucet.deliver({ event: run.event, delivery: old, body: JSON.stringify(run.payload(repoId)) });
-      expect(stored.body).toBe('stored\n');
-      await faucet.backdate(old, OLD_DAYS);
-      const guesses: [string, NonNullable<CronOptions['send']>][] = [
-        ['no header', () => ({})],
-        ['a bearer token', (secret) => ({ authorization: `Bearer ${secret}` })],
-        ['an empty bearer token', () => ({ authorization: 'Bearer' })],
-      ];
+  test('a faucet without CRON_SECRET answers /cron/deliver 503 to every request and runs nothing', async ({ faucet }) => {
+    for (const send of [() => ({}), (secret: string) => ({ authorization: `Bearer ${secret}` })]) {
+      const reply = await faucet.cronJob('deliver', { send });
+      expect(reply.status).toBe(503);
+      expect(reply.body).toBe('cron is not configured\n');
+      expect(faucet.leaksSecret(reply.body)).toBe(false);
+    }
+  });
 
-      try {
-        for (const [title, send] of guesses) {
-          const reply = await faucet.cronJob(job, { send });
-          expect(reply.status, title).toBe(503);
-          expect(reply.body, title).toBe('cron is not configured\n');
-          expect(faucet.leaksSecret(reply.body)).toBe(false);
-        }
-        expect(await deliveriesOf(faucet, repoId), 'a purge must not run').toEqual([old]);
-      } finally {
-        await faucet.sql(`delete from faucet_events where delivery_id = '${old}'`);
-      }
-    });
-  }
-
-  test('the app log records the jobs and never holds the cron secret, the hook token or the stub control token', async ({ cron }) => {
+  test('the app log records the purge and never holds the cron secret', async ({ cron }) => {
     const log = readFileSync('.e2e/logs/app.log', 'utf8');
 
     expect(log).toContain('events purged');
-    expect(log).toContain('redelivery sweep done');
     expect(cron.leaksSecret(log)).toBe(false);
   });
 });

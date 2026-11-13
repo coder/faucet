@@ -133,37 +133,18 @@ func (a TokenAuthorizer) get(ctx context.Context, token, path string, out any) (
 	if err != nil {
 		return 0, err
 	}
-	resp, err := callGitHub(ctx, a.Client, base, token, http.MethodGet, path, "")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String()+path, nil)
 	if err != nil {
-		return 0, err
+		return 0, xerrors.Errorf("build GitHub request: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxAPIResponseBytes))
-		return resp.StatusCode, nil
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAPIResponseBytes)).Decode(out); err != nil {
-		return 0, xerrors.Errorf("decode GitHub response: %w", err)
-	}
-	return resp.StatusCode, nil
-}
-
-// callGitHub sends the token to base and nowhere else. A redirect is followed
-// only when it keeps the scheme and host of base, so no redirect can carry the
-// token to another host. The caller closes the response body.
-func callGitHub(ctx context.Context, client *http.Client, base *url.URL, token, method, path, rawQuery string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, base.String()+path, nil)
-	if err != nil {
-		return nil, xerrors.Errorf("build GitHub request: %w", err)
-	}
-	req.URL.RawQuery = rawQuery
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("User-Agent", "coder-faucet")
 
-	if client == nil {
-		client = http.DefaultClient
+	client := http.DefaultClient
+	if a.Client != nil {
+		client = a.Client
 	}
 	pinned := *client
 	pinned.CheckRedirect = func(next *http.Request, via []*http.Request) error {
@@ -177,9 +158,17 @@ func callGitHub(ctx context.Context, client *http.Client, base *url.URL, token, 
 	}
 	resp, err := pinned.Do(req)
 	if err != nil {
-		return nil, xerrors.Errorf("call GitHub: %w", err)
+		return 0, xerrors.Errorf("call GitHub: %w", err)
 	}
-	return resp, nil
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxAPIResponseBytes))
+		return resp.StatusCode, nil
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAPIResponseBytes)).Decode(out); err != nil {
+		return 0, xerrors.Errorf("decode GitHub response: %w", err)
+	}
+	return resp.StatusCode, nil
 }
 
 // parseBaseURL never puts raw in an error because it can carry credentials.

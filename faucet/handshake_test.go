@@ -2,6 +2,7 @@ package faucet_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -220,10 +221,7 @@ func TestHandshakeRefusesAnEndpointThatDoesNotEchoTheChallenge(t *testing.T) {
 func TestHandshakeNamesOnlyTheFailureCategory(t *testing.T) {
 	t.Parallel()
 
-	closed, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	_, closedPort, _ := net.SplitHostPort(closed.Addr().String())
-	require.NoError(t, closed.Close())
+	closedPort := refusingPort(t)
 	plain := httptest.NewServer(http.HandlerFunc(ok))
 	t.Cleanup(plain.Close)
 	_, plainPort, _ := net.SplitHostPort(plain.Listener.Addr().String())
@@ -367,7 +365,7 @@ func TestVerifierGetsTheSubscriptionAndASignerButNotTheSecret(t *testing.T) {
 
 	require.Len(t, h.verifier.requests, 1)
 	req := h.verifier.requests[0]
-	require.Equal(t, "octocat", req.Principal.Login)
+	require.Equal(t, "octocat", req.Login)
 	require.Equal(t, callbackURL, req.URL)
 	require.Equal(t, res.ID, req.SubscriptionID)
 
@@ -378,10 +376,14 @@ func TestVerifierGetsTheSubscriptionAndASignerButNotTheSecret(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, verifier.VerifyIgnoringTimestamp(body, headers), "the request signs with the subscriber's secret")
 
+	// An embedder that keeps the request in a field of its own struct is printed by reflection, which skips Format.
+	type embedderState struct{ pending faucet.CallbackRequest }
 	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%x", "%q"} {
-		out := fmt.Sprintf(verb, req)
-		require.NotContains(t, out, strings.TrimPrefix(secret, "whsec_"), verb)
-		require.NotContains(t, out, testToken, verb)
+		for name, value := range map[string]any{"the request": req, "a struct that holds it": embedderState{req}, "a pointer to that": &embedderState{req}} {
+			out := fmt.Sprintf(verb, value)
+			require.NotContains(t, out, strings.TrimPrefix(secret, "whsec_"), "%s of %s", verb, name)
+			require.NotContains(t, out, testToken, "%s of %s", verb, name)
+		}
 	}
 }
 
@@ -412,5 +414,45 @@ func requireRefused(t *testing.T, h *webhookHarness, rpcErr *jsonrpc.Error, reas
 		}
 		require.NotContains(t, answer, needle, "the answer to the caller")
 		require.NotContains(t, h.logs.String(), needle, "the log")
+	}
+}
+
+func TestHandshakeRateLimitCountsOneDestinationOnceWhateverItsSpelling(t *testing.T) {
+	t.Parallel()
+
+	for name, group := range map[string][]string{
+		"an IPv4 address in every notation": {
+			"https://127.0.0.1/a", "https://[::ffff:127.0.0.1]/b", "https://[::ffff:7f00:1]/c", "https://[0::ffff:127.0.0.1]/d",
+			"https://[0:0:0:0:0:ffff:7f00:1]/e", "https://[::ffff:7f00:0001]:8443/f",
+		},
+		"an IPv6 address in every notation": {
+			"https://[2606:4700:4700::1111]/a", "https://[2606:4700:4700:0::1111]/b", "https://[2606:4700:4700:0000:0:0:0:1111]/c",
+			"https://[2606:4700:4700::1111%25eth0]/d", "https://[2606:4700:4700:0:0:0:0:1111]:8443/e", "https://[2606:4700:4700::0:1111]/f",
+		},
+		"a host name in every spelling": {
+			"https://hooks.example.test/a", "https://HOOKS.example.test/b", "https://hooks.example.test./c",
+			"https://Hooks.Example.Test:8443/d", "https://hooks.example.test.:8443/e", "https://hooks.EXAMPLE.test/f",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			verifier, err := faucet.NewCallbackHandshake(faucet.HandshakeOptions{Client: faucet.NewHTTPClient(faucet.HTTPClientOptions{})})
+			require.NoError(t, err)
+
+			// The request has no secret, so a call that gets a token fails to sign and sends nothing.
+			limited := 0
+			for _, url := range append(group, group...) {
+				err := verifier.VerifyCallback(t.Context(), faucet.CallbackRequest{Login: "octocat", URL: url})
+				require.Error(t, err, url)
+				if errors.Is(err, faucet.ErrCallbackRateLimited) {
+					limited++
+				}
+			}
+			require.Equal(t, 2*len(group)-5, limited, "5 calls get a token, whatever the spelling, and every later one is limited")
+
+			err = verifier.VerifyCallback(t.Context(), faucet.CallbackRequest{Login: "octocat", URL: "https://other.example.test/a"})
+			require.NotErrorIs(t, err, faucet.ErrCallbackRateLimited, "another destination has its own bucket")
+		})
 	}
 }
