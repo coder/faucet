@@ -1,6 +1,6 @@
 # Feature map
 
-One file per user-facing behavior of the faucet server at PR 4, from the point of view of its three users: GitHub, which POSTs signed webhooks, an operator who watches `/healthz`, and an agent that waits for, lists or polls events through `/mcp`. Each file names the test that pins it, the proof, and its bug-bash charters. Paths are relative to `verify/`.
+One file per user-facing behavior of the faucet server at PR 5, from the point of view of its four users: GitHub, which POSTs signed webhooks, an operator who watches `/healthz` and schedules the cron routes, a scheduler such as Vercel Cron, and an agent that waits for, lists or polls events through `/mcp`. Each file names the test that pins it, the proof, and its bug-bash charters. Paths are relative to `verify/`.
 
 | Feature | Route | Test | Status |
 | --- | --- | --- | --- |
@@ -18,6 +18,9 @@ One file per user-facing behavior of the faucet server at PR 4, from the point o
 | [Wait tool](wait-tool.md) | `POST /mcp` | `tests/wait-tool.e2e.ts` | tested |
 | [Events list](events-list.md) | `POST /mcp`, `server/discover` and `events/list` | `tests/events-list.e2e.ts` | tested |
 | [Events poll](events-poll.md) | `POST /mcp`, `events/poll` | `tests/events-poll.e2e.ts` | tested |
+| [Cron routes](cron-auth.md) | `GET /cron/purge`, `GET /cron/redeliver`, the secret check | `tests/cron-auth.e2e.ts` | tested |
+| [Purge](purge.md) | `GET /cron/purge`, then `events/poll` and the wait tool | `tests/purge.e2e.ts` | tested |
+| [Redelivery sweep](redeliver.md) | `GET /cron/redeliver` | `tests/redeliver.e2e.ts` | tested |
 
 The webhook handler checks in this order: method, signature header shape, body size, the HMAC, the event and delivery headers, `ping`, then the payload. A rejection earlier in that order wins. A test pins only the first ordering, the signature before the headers. Two more were checked once by hand at PR 2 and are not pinned: an oversize body is 413 before any HMAC, and `ping` needs both headers.
 
