@@ -269,7 +269,7 @@ describe('events subscribe', () => {
     expect(faucet.openSecret(row!)).toBe(secret);
     expect(fails(() => faucet.openSecret(row!, randomBytes(32))), 'a wrong key fails').toBe(true);
     expect(fails(() => faucet.openSecret({ ...row!, key_hash: other!.key_hash })), 'the key_hash of another row fails').toBe(true);
-    expect(sealed.subarray(1, 13).equals(otherSealed.subarray(1, 13)), 'the nonce is fresh for each seal').toBe(false);
+    expect(sealed.subarray(1, 13).equals(otherSealed.subarray(1, 13)), 'two rows that hold the same secret have different nonces').toBe(false);
     expect(faucet.openSecret(other!)).toBe(secret);
   });
 
@@ -300,7 +300,7 @@ describe('events subscribe', () => {
     expect(row?.expires_at).toBeGreaterThan(before!.expires_at);
     expect(faucet.openSecret(row!)).toBe(newerSecret);
     expect(await faucet.secretCopies(oldSecret)).toBe(0);
-    expect(latest?.secret_enc, 'the same secret sealed again is new bytes').not.toBe(row?.secret_enc);
+    expect(latest?.secret_enc, 'the same secret sealed again in the same row is the same bytes, so the renewal is no rotation').toBe(row?.secret_enc);
     expect(faucet.openSecret(latest!)).toBe(newerSecret);
   });
 
