@@ -240,8 +240,8 @@ func (s *Service) unsubscribeMethod(ctx context.Context, _ *mcp.ServerSession, p
 	return &eventsUnsubscribeResult{ResultType: resultComplete}, nil
 }
 
-// subscriber returns the authenticated caller. Subscriptions are keyed by the
-// login, so a principal without one is no principal.
+// subscriber rejects a principal without a login, because subscriptions are
+// keyed by it.
 func (s *Service) subscriber(ctx context.Context, logger slog.Logger, op string) (Principal, error) {
 	p, err := s.principal(ctx, logger, op)
 	if err == nil && p.Login == "" {
@@ -254,8 +254,6 @@ func (s *Service) subscriber(ctx context.Context, logger slog.Logger, op string)
 	return p, nil
 }
 
-// verifyCallback asks the host's verifier unless it accepted this pair in the
-// last callbackVerificationTTL.
 func (wh *webhookState) verifyCallback(ctx context.Context, logger slog.Logger, p Principal, callbackURL string) error {
 	if wh.verified.verified(p.Login, callbackURL) {
 		return nil
@@ -361,7 +359,6 @@ func parseSubscribe(p *subscriptionParams, allowInsecureLoopback bool) (subscrib
 	return req, nil
 }
 
-// isAbsent is true for a field that the request left out or set to null.
 func isAbsent(raw json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(raw)
 	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))

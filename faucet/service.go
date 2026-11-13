@@ -33,7 +33,6 @@ type Deps struct {
 	Webhook *WebhookDeps
 }
 
-// WebhookDeps are the collaborators of webhook delivery.
 type WebhookDeps struct {
 	// Key seals subscriber secrets in the store.
 	Key WebhookKey
@@ -55,9 +54,8 @@ type Service struct {
 	principalFrom func(context.Context) (Principal, error)
 	clock         quartz.Clock
 	hooks         HookAdmin
-	// webhook is nil when webhook delivery is off.
-	webhook *webhookState
-	listed  []eventDescriptor
+	webhook       *webhookState
+	listed        []eventDescriptor
 }
 
 // New returns a Service for d. It starts no goroutines.

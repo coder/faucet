@@ -174,7 +174,6 @@ func parsePoll(p *eventsPollParams) (pollRequest, error) {
 	return req, nil
 }
 
-// eventByName finds an event type, or fails with NotFound.
 func eventByName(name string) (eventType, error) {
 	t, ok := lookupEventType(name)
 	if !ok {

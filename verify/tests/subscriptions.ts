@@ -61,7 +61,6 @@ export function unsubscribe(faucet: Faucet, params: Params, opts: McpOptions = {
   return faucet.mcp('events/unsubscribe', unsubscribeParams(params), opts);
 }
 
-// subscribed makes a subscribe call that must succeed and returns its result.
 export async function subscribed(faucet: Faucet, params: Params, opts: McpOptions = {}): Promise<SubscribeResult> {
   const reply = await subscribe(faucet, params, opts);
   expect(reply.error, reply.body).toBeNull();

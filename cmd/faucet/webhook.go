@@ -14,10 +14,8 @@ const (
 	envWebhookOrigins = "FAUCET_WEBHOOK_ALLOWED_ORIGINS"
 )
 
-// loadWebhookConfig reads the settings of webhook delivery. They go together:
-// the key seals subscriber secrets and the allowlist says which callback
-// origins may receive events. Neither set leaves webhook mode off. Only one set
-// stops the start, so a typo does not turn it off. No error names a value,
+// loadWebhookConfig stops the start when only one of the key and the allowlist
+// is set, so a typo does not turn webhook mode off. No error names a value,
 // because one of them is a key.
 func loadWebhookConfig(getenv func(string) string, cfg *config) error {
 	rawKey, rawOrigins := getenv(envWebhookKey), getenv(envWebhookOrigins)

@@ -412,7 +412,6 @@ export class Faucet {
     return Number(await this.sql('select purged_through from faucet_purge_mark'));
   }
 
-  // subscriptions returns the faucet_subscriptions rows whose callback URL holds marker, oldest first.
   async subscriptions(marker: string): Promise<SubscriptionRow[]> {
     if (!/^[0-9a-z-]{8,}$/.test(marker)) throw new Error('marker must be 8 or more lowercase letters, digits or hyphens');
     const ms = (column: string): string => `floor(extract(epoch from ${column}) * 1000)::bigint as ${column}`;

@@ -16,9 +16,7 @@ import (
 )
 
 const (
-	maxCallbackURLBytes = 2048
-	// callbackVerificationTTL is how long a successful verification covers a
-	// (principal, callback URL) pair.
+	maxCallbackURLBytes     = 2048
 	callbackVerificationTTL = 10 * time.Minute
 	maxVerifiedCallbacks    = 10000
 )
@@ -200,16 +198,12 @@ var nonGlobalPrefixes = func() []netip.Prefix {
 	return out
 }()
 
-// isGlobalAddr reports whether addr is outside every special-purpose range of
-// the IANA IPv4 and IPv6 registries that faucet knows.
 func isGlobalAddr(addr netip.Addr) bool {
 	addr = addr.Unmap()
 	return addr.IsValid() && !slices.ContainsFunc(nonGlobalPrefixes, func(p netip.Prefix) bool { return p.Contains(addr) })
 }
 
-// callbackCache remembers which (principal, callback URL) pairs a verifier
-// accepted. Each success covers callbackVerificationTTL. A failure is not
-// remembered, so a retry can succeed. It is soft state in memory: a restart
+// callbackCache does not remember a failure, so a retry can succeed. A restart
 // verifies again.
 type callbackCache struct {
 	clock quartz.Clock

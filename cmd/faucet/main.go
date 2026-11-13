@@ -63,8 +63,7 @@ type config struct {
 	retention  time.Duration
 	// hookAdmin is nil when redelivery is off.
 	hookAdmin faucet.HookAdmin
-	// webhook is nil when webhook delivery is off.
-	webhook *faucet.WebhookDeps
+	webhook   *faucet.WebhookDeps
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
