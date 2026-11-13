@@ -18,7 +18,10 @@ import (
 	"github.com/coder/faucet/faucet/storetest"
 )
 
-const databaseURLEnv = "FAUCET_TEST_DATABASE_URL"
+const (
+	databaseURLEnv = "FAUCET_TEST_DATABASE_URL"
+	maxTestConns   = 10
+)
 
 func TestStore(t *testing.T) {
 	t.Parallel()
@@ -93,6 +96,8 @@ func createDatabase(t *testing.T, adminURL string) *sql.DB {
 	u.Path = "/" + name
 	db, err := sql.Open("postgres", u.String())
 	require.NoError(t, err)
+	// The subtests run in parallel and several start a dozen callers. Without a cap they can pass the server's 100 connections.
+	db.SetMaxOpenConns(maxTestConns)
 	t.Cleanup(func() {
 		_ = db.Close()
 		dropCtx, dropCancel := context.WithTimeout(context.Background(), 30*time.Second)

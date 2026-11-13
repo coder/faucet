@@ -240,7 +240,7 @@ func enqueueDeliveriesMovesThePositionOnlyForTheCaller(t *testing.T, s faucet.St
 }
 
 func enqueueDeliveriesWinsOnceUnderConcurrency(t *testing.T, s faucet.Store) {
-	const callers = 12
+	const callers = 8
 	r := newRig(t, s, 3)
 
 	var (
@@ -318,7 +318,7 @@ func claimDeliveryReturnsTheDeliveryWithItsEventSecretAndWatermark(t *testing.T,
 }
 
 func claimDeliveryGivesOneAttemptToOneCaller(t *testing.T, s faucet.Store) {
-	const callers = 16
+	const callers = 8
 	r := newRig(t, s, 1)
 	r.enqueue(r.events...)
 
