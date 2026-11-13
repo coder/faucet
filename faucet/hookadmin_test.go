@@ -249,6 +249,46 @@ func TestGitHubHookAdminListErrors(t *testing.T) {
 	}
 }
 
+// rateLimitAnswers are the ways that GitHub says "later", and a 403 that is a denial.
+var rateLimitAnswers = map[string]struct {
+	status    int
+	header    map[string]string
+	body      string
+	rateLimit bool
+}{
+	"429":                      {status: http.StatusTooManyRequests, body: `{"message":"too many"}`, rateLimit: true},
+	"403 with no quota left":   {status: http.StatusForbidden, header: map[string]string{"X-RateLimit-Remaining": "0"}, body: `{"message":"Forbidden"}`, rateLimit: true},
+	"403 with a Retry-After":   {status: http.StatusForbidden, header: map[string]string{"Retry-After": "60"}, body: `{"message":"Forbidden"}`, rateLimit: true},
+	"403 that names the limit": {status: http.StatusForbidden, body: `{"message":"You have exceeded a secondary rate limit."}`, rateLimit: true},
+	"403 that names the abuse": {status: http.StatusForbidden, body: `{"message":"You have triggered an abuse detection mechanism."}`, rateLimit: true},
+	"403 with quota left":      {status: http.StatusForbidden, header: map[string]string{"X-RateLimit-Remaining": "4999"}, body: `{"message":"Resource not accessible by personal access token"}`},
+}
+
+func TestGitHubHookAdminTellsARateLimitFromADenialAndNeverGivesUpOnEither(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range rateLimitAnswers {
+		stub := newHookStub(t, func(w http.ResponseWriter, _ *http.Request) {
+			for k, v := range tc.header {
+				w.Header().Set(k, v)
+			}
+			w.WriteHeader(tc.status)
+			_, _ = fmt.Fprint(w, tc.body)
+		})
+		admin := newHookAdmin(t, stub, orgHook)
+
+		_, listErr := admin.ListDeliveries(context.Background(), "")
+		askErr := admin.Redeliver(context.Background(), 5)
+		for _, err := range []error{listErr, askErr} {
+			require.Error(t, err, name)
+			require.Contains(t, err.Error(), fmt.Sprint(tc.status), name)
+			require.Equal(t, tc.rateLimit, strings.Contains(err.Error(), "rate limit"), "%s: %v", name, err)
+			require.NotContains(t, err.Error(), tc.body, "an error carries the status, not the response body")
+			requireNoHookToken(t, err.Error())
+		}
+	}
+}
+
 func TestGitHubHookAdminErrorsNameNoURLAndNoCursor(t *testing.T) {
 	t.Parallel()
 

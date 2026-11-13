@@ -173,8 +173,7 @@ func (a GitHubHookAdmin) ListDeliveries(ctx context.Context, cursor string) (Del
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxAPIResponseBytes))
-		return DeliveryPage{}, xerrors.Errorf("GitHub answered the delivery list with status %d", resp.StatusCode)
+		return DeliveryPage{}, statusError(resp, "the delivery list")
 	}
 	var raw []deliveryJSON
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAPIResponseBytes)).Decode(&raw); err != nil {
@@ -205,11 +204,24 @@ func (a GitHubHookAdmin) Redeliver(ctx context.Context, attemptID int64) error {
 		return err
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxAPIResponseBytes))
 	if resp.StatusCode != http.StatusAccepted {
-		return xerrors.Errorf("GitHub answered the redelivery request with status %d", resp.StatusCode)
+		return statusError(resp, "the redelivery request")
 	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxAPIResponseBytes))
 	return nil
+}
+
+// statusError is the error for an answer that is not the one that was needed.
+// It names the status and never the body. A rate limit is told from a denial
+// and wraps errRateLimited, so the log names it. A later run repeats the call
+// for either error: no answer from GitHub ends a delivery, and only the ask
+// limit and GitHub's retention do.
+func statusError(resp *http.Response, what string) error {
+	answer, _ := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseBytes))
+	if rateLimited(resp.StatusCode, resp.Header, answer) {
+		return xerrors.Errorf("GitHub answered %s with status %d: %w", what, resp.StatusCode, errRateLimited)
+	}
+	return xerrors.Errorf("GitHub answered %s with status %d", what, resp.StatusCode)
 }
 
 // nextCursor takes the cursor out of the rel="next" link. The link's URL is

@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"cdr.dev/slog/v3"
 	"github.com/coder/faucet/faucet"
 )
 
@@ -274,6 +277,54 @@ func TestAFailedRequestStopsTheAsksButNotTheRunsAfterIt(t *testing.T) {
 	env.gh.askFault = nil
 	res = env.run()
 	require.Equal(t, 2, res.Asked, "the delivery whose request failed spent an ask and waits, the other two go out")
+}
+
+// limitedAdmin lists through the fake GitHub and, while limited is set, asks
+// through a GitHubHookAdmin whose GitHub answers with a rate limit.
+type limitedAdmin struct {
+	*fakeGitHub
+	limited atomic.Bool
+	real    faucet.GitHubHookAdmin
+}
+
+func (a *limitedAdmin) Redeliver(ctx context.Context, attemptID int64) error {
+	if a.limited.Load() {
+		return a.real.Redeliver(ctx, attemptID)
+	}
+	return a.fakeGitHub.Redeliver(ctx, attemptID)
+}
+
+func TestARateLimitedRequestIsNotAFinalStateAndTheScheduleAsksAgain(t *testing.T) {
+	t.Parallel()
+	env := newRedeliveryEnv(t)
+	limit := newHookStub(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = fmt.Fprint(w, `{"message":"You have exceeded a secondary rate limit."}`)
+	})
+	admin := &limitedAdmin{fakeGitHub: env.gh, real: newHookAdmin(t, limit, orgHook)}
+	admin.limited.Store(true)
+	deps := testDeps(env.store)
+	deps.Clock = env.clock
+	deps.Logger = slog.Make(env.logs)
+	deps.Redelivery = &faucet.RedeliveryDeps{Store: env.store, Hooks: admin}
+	svc, err := faucet.New(deps)
+	require.NoError(t, err)
+	env.svc = svc
+	env.gh.record("g1", env.now().Add(-5*time.Minute), 503)
+
+	res, err := env.svc.Redeliver(context.Background())
+	require.ErrorContains(t, err, "rate limit", "the route answers an error, and the log names the limit")
+	require.Zero(t, res.Asked)
+	require.Equal(t, 1, res.Pending)
+	require.Zero(t, res.GaveUpLimit+res.GaveUpExpired, "a rate limit gives nothing up")
+
+	admin.limited.Store(false)
+	require.Zero(t, env.run().Asked, "the refused request spent the first ask, so the second waits for its time")
+	env.advance(cronEvery)
+	require.Equal(t, 1, env.run().Asked)
+	require.True(t, env.stored("g1"))
+	require.Equal(t, 1, env.run().Recovered)
 }
 
 func TestAFailedFirstPageStopsTheAsksButStillSettles(t *testing.T) {
