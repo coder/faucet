@@ -18,7 +18,7 @@ Nothing to start by hand. The target's `app.command` runs `node app.mjs --port {
 
 The runner waits for `GET /healthz` to answer 200. On SIGTERM, or once its parent process is gone (a runner killed with SIGKILL), `app.mjs` stops faucet, stops Postgres and deletes the directory within seconds. `--detach` turns the parent watch off. The secret is random per run and reaches no log, report or output.
 
-Needs on the host: Node 22.22.3 or newer (or 24.8+), Go as `go.mod` asks (`GOTOOLCHAIN` and other `GO*` variables pass through), PostgreSQL server binaries and `psql` (written against 18), and network on the first run (`npm ci`, then Playwright downloads Chromium into `~/.cache/ms-playwright`, because the `web()` engine opens a browser context even for API tests; CI uses `npx @e2e-dev/web install chromium --with-deps`). `E2E_TELEMETRY_DISABLED=1` turns off e2e's anonymous telemetry.
+Needs on the host: Node `^22.22.3 || >=24.8.0` (the `engines` of `e2e` and `@e2e-dev/web`), Go as `go.mod` asks (`GOTOOLCHAIN` and other `GO*` variables pass through), PostgreSQL server binaries and `psql` (written against 18), and network on the first run (`npm ci`, then Playwright downloads Chromium into `~/.cache/ms-playwright`, because the `web()` engine opens a browser context even for API tests; CI uses `npx @e2e-dev/web install chromium --with-deps`). `E2E_TELEMETRY_DISABLED=1` turns off e2e's anonymous telemetry.
 
 Against a checkout that has no `verify/` (for example another PR's head), run the skill from a checkout that does and point it at the code under test:
 
@@ -50,7 +50,7 @@ Scripted: every feature in [features/](features/README.md) has a test under `ver
 
 All tests share one server and one database. Each test makes its own `newRepoId()` and `newDeliveryId()` and asserts on that repository's rows only, never on table-wide counts. Payload fixtures are in `tests/payloads.ts`. Run one test by `file:line`: `npx e2e run tests/ingest-ping.e2e.ts:4`.
 
-Live, over `e2e mcp` (the e2e plugin's server, or `npx e2e mcp` started in `verify/`): `open_session {config: "<checkout>/verify/e2e.config.ts"}`, then `call {session, tool: "navigate", args: {url: "/healthz"}}` and `observe`. A browser can only GET, so the live lane shows `/healthz` and the 405 page of `GET /webhook/github`. Webhook POSTs go through `run_tests {files: [...]}` or the CLI. To look at the database by hand during a session, connect through the socket (the app port is in the `open_session` output):
+Live, over `e2e mcp` (the e2e plugin's server, or `npx e2e mcp` started in `verify/`): `open_session {config: "<checkout>/verify/e2e.config.ts"}`, then `call {session, tool: "navigate", args: {url: "/healthz"}}` and `call {session, tool: "observe"}`, because `navigate` and `observe` are catalog tools reached through `call`. A browser can only GET, so the live lane shows `/healthz` and the 405 page of `GET /webhook/github`. Webhook POSTs go through `run_tests {files: [...]}` or the CLI. To look at the database by hand during a session, connect through the socket (the app port is in the `open_session` output):
 
 ```sh
 psql -h "${TMPDIR:-/tmp}/faucet-verify-<port>" -p 5432 -U postgres -c 'select id, type, repo_id, prs from faucet_events order by id desc limit 5'
@@ -63,8 +63,13 @@ Never print `state.json`: it holds the secret.
 Every run writes `.e2e/report.json`, a short `trace.md` per test under `.e2e/results/` (`trace: 'on'` in the config), and the app's own log at `.e2e/logs/app.log`. faucet logs one `webhook stored` line per accepted delivery (`event_id`, `inserted`) and one `webhook rejected` line per refusal (`status`, `reason`). The next run clears `.e2e/results/`, and the app log is appended to across runs. A proof that must outlive them starts a fresh log, runs with its own output directory and keeps the log beside it:
 
 ```sh
-rm -f .e2e/logs/app.log && npx e2e run --output .e2e/proof/<name> && cp .e2e/logs/app.log .e2e/proof/<name>/app.log
+rm -f .e2e/logs/app.log
+npx e2e run --output .e2e/proof/<name>; status=$?
+mkdir -p .e2e/proof/<name>; cp .e2e/logs/app.log .e2e/proof/<name>/app.log
+(exit $status)
 ```
+
+The copy runs whatever the exit code is, and the last line returns the test's own exit code, so a failed proof keeps its app log.
 
 `run.summary` in the proof's `report.json` holds the counts (`selected`, `passed`, `failed`).
 
