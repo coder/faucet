@@ -492,7 +492,7 @@ describe('events subscribe', () => {
     expect(shadowed.error, shadowed.body).toBeNull();
     expect(await eventsOf(), 'only the event of the exact name member is stored').toEqual([EVENT]);
     for (const reply of [upperCaseOnly, titleCaseOnly]) {
-      expect(reply.status).toBe(200);
+      expect(reply.status).toBe(400);
       expect(reply.error?.code).toBe(-32602);
       expect(reply.error?.message).toContain('name is required');
     }
