@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFile, spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpServer } from 'node:http';
@@ -82,6 +82,110 @@ async function startGitHubStub(token, otherToken) {
   stub.listen(0, '127.0.0.1');
   await once(stub, 'listening');
   return stub;
+}
+
+// checkSignature is an independent reading of Standard Webhooks, written for this stub and sharing nothing with faucet: the
+// key is the base64 decoding of the whsec_ secret, and the signature is v1, and the base64 of the HMAC-SHA256 of
+// "<webhook-id>.<webhook-timestamp>.<body>".
+function checkSignature(secret, headers, body) {
+  if (secret === undefined) return 'unregistered';
+  const id = headers['webhook-id'];
+  const timestamp = headers['webhook-timestamp'];
+  const signatures = headers['webhook-signature'];
+  if (!id || !timestamp || !signatures) return 'missing';
+  const key = Buffer.from(secret.slice('whsec_'.length), 'base64');
+  const expected = createHmac('sha256', key).update(`${id}.${timestamp}.`).update(body).digest();
+  const matches = signatures.split(' ').some((candidate) => {
+    const [version, value] = candidate.split(',');
+    const given = Buffer.from(value ?? '', 'base64');
+    return version === 'v1' && given.length === expected.length && timingSafeEqual(given, expected);
+  });
+  return matches ? 'valid' : 'invalid';
+}
+
+// The receiver plays the endpoint behind a callback URL. A callback URL is /hook/<behavior>/<id>, and the behavior says how
+// the endpoint answers a verification request:
+//   echo      checks the signature with the secret that the test registered for <id> and answers the nonce, or 401
+//   wrong     answers 200 with another nonce
+//   reflect   answers 200 with the request body
+//   error500, notfound   answer that status
+//   redirect  answers 302 to /hook/internal/<id>, which answers the nonce like an internal service would
+//   slow      never answers
+//   large     answers the nonce and then 4 KiB of spaces
+// It records every request. A test registers secrets and reads the records through /__receiver/, which needs `control`.
+// The records hold the signature headers and never a secret.
+async function startReceiver({ control }) {
+  const secrets = new Map();
+  const requests = [];
+  const reply = (res, status, body = '', headers = {}) => {
+    res.writeHead(status, headers);
+    res.end(body);
+  };
+
+  const handleControl = (req, res, url, body) => {
+    if (req.headers['x-stub-control'] !== control) return reply(res, 403, '{}');
+    if (req.method === 'PUT' && url.pathname === '/__receiver/secrets') {
+      const { id, secret } = JSON.parse(body.toString('utf8'));
+      secrets.set(id, secret);
+      return reply(res, 200, '{}', { 'Content-Type': 'application/json' });
+    }
+    if (req.method === 'GET' && url.pathname === '/__receiver/requests') {
+      const id = url.searchParams.get('id');
+      return reply(res, 200, JSON.stringify(requests.filter((r) => r.id === id)), { 'Content-Type': 'application/json' });
+    }
+    return reply(res, 404, '{}');
+  };
+
+  const server = createHttpServer(async (req, res) => {
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const body = Buffer.concat(chunks);
+      const url = new URL(req.url ?? '/', 'http://receiver');
+      if (url.pathname.startsWith('/__receiver/')) return handleControl(req, res, url, body);
+      const [, prefix, behavior, id] = url.pathname.split('/');
+      if (prefix !== 'hook' || !behavior || !id) return reply(res, 404);
+      const text = body.toString('utf8');
+      const signature = checkSignature(secrets.get(id), req.headers, body);
+      requests.push({ id, behavior, method: req.method, path: url.pathname, headers: req.headers, body: text, signature });
+      let challenge = '';
+      try {
+        challenge = JSON.parse(text).challenge ?? '';
+      } catch {
+        // A body that is not JSON has no challenge to answer.
+      }
+      const json = { 'Content-Type': 'application/json' };
+      const answer = JSON.stringify({ challenge });
+      switch (behavior) {
+        case 'echo':
+          return signature === 'valid' ? reply(res, 200, `${answer}\n`, json) : reply(res, 401, '{}', json);
+        case 'internal':
+          return reply(res, 200, answer, json);
+        case 'wrong':
+          return reply(res, 200, JSON.stringify({ challenge: 'A'.repeat(43) }), json);
+        case 'reflect':
+          return reply(res, 200, text, json);
+        case 'error500':
+          return reply(res, 500, '{}', json);
+        case 'notfound':
+          return reply(res, 404, '{}', json);
+        case 'redirect':
+          return reply(res, 302, '', { Location: `/hook/internal/${id}` });
+        case 'large':
+          return reply(res, 200, answer + ' '.repeat(4096), json);
+        case 'slow':
+          return undefined;
+        default:
+          return reply(res, 404);
+      }
+    } catch (err) {
+      log(`receiver: ${err.message}`);
+      return reply(res, 500, '{}');
+    }
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  return server;
 }
 
 async function startPostgres(bin, dir, signal) {
@@ -200,6 +304,7 @@ async function main(abort) {
   let faucet;
   let cronFaucet;
   let githubStub;
+  let receiver;
   let failure;
   try {
     await execFileAsync(
@@ -212,6 +317,10 @@ async function main(abort) {
 
     const binary = join(dir, 'faucet');
     await execFileAsync('go', ['build', '-o', binary, './cmd/faucet'], { cwd: root, signal });
+    // The e2e build lets the callback client reach loopback over http, so the handshake can reach the receiver. Only tests that
+    // start a faucet with it get that. The main faucet and the production binary above do not.
+    const e2eBinary = join(dir, 'faucet-e2e');
+    await execFileAsync('go', ['build', '-tags', 'faucet_e2e', '-o', e2eBinary, './cmd/faucet'], { cwd: root, signal });
 
     const secret = randomBytes(32).toString('hex');
     const githubToken = `ghp_${randomBytes(20).toString('hex')}`;
@@ -227,9 +336,15 @@ async function main(abort) {
     githubStub = await startGitHubStub(githubToken, otherToken);
     const stubUrl = `http://127.0.0.1:${githubStub.address().port}`;
     await createDatabase(psql, dir, CRON_DB);
+    const receiverControl = randomBytes(16).toString('hex');
+    receiver = await startReceiver({ control: receiverControl });
+    const receiverState = { url: `http://127.0.0.1:${receiver.address().port}`, control: receiverControl };
     writeFileSync(
       stateFile(port),
-      JSON.stringify({ dbHost: dir, dbPort: DB_PORT, psql, secret, githubToken, otherToken, webhookKey, binary, cron: { ...cron, stubUrl } }),
+      JSON.stringify({
+        dbHost: dir, dbPort: DB_PORT, psql, secret, githubToken, otherToken, webhookKey, binary, e2eBinary,
+        cron: { ...cron, stubUrl }, receiver: receiverState,
+      }),
       { mode: 0o600 },
     );
     const databaseUrl = (name) =>
@@ -267,6 +382,8 @@ async function main(abort) {
     if (faucet) await stopFaucet(faucet);
     if (cronFaucet) await stopFaucet(cronFaucet);
     githubStub?.close();
+    receiver?.closeAllConnections();
+    receiver?.close();
     const postgresStopped = !postmasterRuns(dir) || (await stopPostgres(bin, dir));
     if (postgresStopped) rmSync(dir, RM_OPTIONS);
     else failure ??= `left ${dir} in place because Postgres is still running`;

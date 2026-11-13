@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -173,7 +174,15 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 	if err != nil {
 		return nil, accessError(err)
 	}
-	if err := wh.verifyCallback(ctx, logger, principal, req.callbackURL); err != nil {
+	key := NewSubscriptionKeyHash(principal.Login, req.callbackURL, req.eventType.name, req.canonical)
+	secret := req.secret
+	verification := CallbackRequest{
+		Login: principal.Login, URL: req.callbackURL, SubscriptionID: key.ID(),
+		sign: func(id string, timestamp time.Time, body []byte) (http.Header, error) {
+			return SignWebhook(string(secret), id, timestamp, body)
+		},
+	}
+	if err := wh.verifyCallback(ctx, logger, verification); err != nil {
 		return nil, err
 	}
 
@@ -182,7 +191,6 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 	if err != nil {
 		return nil, subscriptionStoreError(ctx, logger, err)
 	}
-	key := NewSubscriptionKeyHash(principal.Login, req.callbackURL, req.eventType.name, req.canonical)
 	sealed, err := sealSecret(wh.aead, req.secret, key[:])
 	if err != nil {
 		logger.Error(ctx, "seal subscriber secret", slog.Error(err))
@@ -271,28 +279,33 @@ func (s *Service) subscriber(ctx context.Context, logger slog.Logger, op string)
 	return p, nil
 }
 
-func (wh *webhookState) verifyCallback(ctx context.Context, logger slog.Logger, p Principal, callbackURL string) error {
-	if wh.verified.verified(p.Login, callbackURL) {
+func (wh *webhookState) verifyCallback(ctx context.Context, logger slog.Logger, req CallbackRequest) error {
+	login := req.Login
+	if wh.verified.verified(login, req.URL) {
 		return nil
 	}
-	err := wh.callbacks.VerifyCallback(ctx, p, callbackURL)
+	err := wh.callbacks.VerifyCallback(ctx, req)
 	var cbErr *CallbackError
 	switch {
 	case err == nil:
-		wh.verified.remember(p.Login, callbackURL)
+		wh.verified.remember(login, req.URL)
 		return nil
 	case xerrors.As(err, &cbErr) && cbErr.Reason.valid():
-		logger.Info(ctx, "callback not verified", slog.F("login", p.Login), slog.F("reason", string(cbErr.Reason)))
+		logger.Info(ctx, "callback not verified", slog.F("login", login), slog.F("reason", string(cbErr.Reason)))
 		message := cbErr.Message
 		if message == "" {
 			message = "callback endpoint failed verification"
 		}
 		return rpcError(codeCallbackEndpoint, message, map[string]string{"reason": string(cbErr.Reason)})
+	case xerrors.Is(err, ErrCallbackRateLimited):
+		logger.Info(ctx, "callback verification rate limited", slog.F("login", login))
+		return rpcError(codeResourceExhausted, "too many verification requests for this callback host, try again later",
+			map[string]string{"limit": "callbackVerifications"})
 	default:
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		logger.Warn(ctx, "could not verify the callback", slog.F("login", p.Login), slog.Error(err))
+		logger.Warn(ctx, "could not verify the callback", slog.F("login", login), slog.Error(err))
 		return rpcError(jsonrpc.CodeInternalError, "could not verify the callback endpoint, try again", nil)
 	}
 }
@@ -480,16 +493,23 @@ func (d deliveryParams) subscriberSecret() (subscriberSecret, error) {
 // padded base64 of 24 to 64 bytes. The error names the rule and never the
 // value.
 func parseSecret(s string) (subscriberSecret, error) {
-	bad := invalidParams("delivery.secret must be %s followed by the base64 of %d to %d random bytes", secretPrefix, minSubscriberSecretBytes, maxSubscriberSecretBytes)
+	if _, ok := decodeSecret(s); !ok {
+		return "", invalidParams("delivery.secret must be %s followed by the base64 of %d to %d random bytes", secretPrefix, minSubscriberSecretBytes, maxSubscriberSecretBytes)
+	}
+	return subscriberSecret(s), nil
+}
+
+// decodeSecret returns the HMAC key bytes of a secret that parseSecret accepts.
+func decodeSecret(s string) ([]byte, bool) {
 	encoded, ok := strings.CutPrefix(s, secretPrefix)
 	if !ok || len(s) > maxSecretChars || strings.IndexFunc(encoded, func(r rune) bool { return !isBase64Char(r) }) >= 0 {
-		return "", bad
+		return nil, false
 	}
 	decoded, err := base64.StdEncoding.Strict().DecodeString(encoded)
 	if err != nil || len(decoded) < minSubscriberSecretBytes || len(decoded) > maxSubscriberSecretBytes {
-		return "", bad
+		return nil, false
 	}
-	return subscriberSecret(s), nil
+	return decoded, true
 }
 
 func isBase64Char(r rune) bool {

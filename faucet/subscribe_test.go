@@ -40,15 +40,17 @@ var testWebhookKey = func() []byte {
 }()
 
 type fakeVerifier struct {
-	mu    sync.Mutex
-	calls []string
-	err   error
+	mu       sync.Mutex
+	calls    []string
+	requests []faucet.CallbackRequest
+	err      error
 }
 
-func (v *fakeVerifier) VerifyCallback(_ context.Context, p faucet.Principal, callbackURL string) error {
+func (v *fakeVerifier) VerifyCallback(_ context.Context, req faucet.CallbackRequest) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.calls = append(v.calls, p.Login+" "+callbackURL)
+	v.calls = append(v.calls, req.Login+" "+req.URL)
+	v.requests = append(v.requests, req)
 	return v.err
 }
 

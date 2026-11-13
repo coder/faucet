@@ -1,6 +1,6 @@
 # Feature map
 
-One file per user-facing behavior of the faucet server at PR 6, from the point of view of its four users: GitHub, which POSTs signed webhooks, an operator who watches `/healthz` and schedules the cron route, a scheduler such as Vercel Cron, and an agent that waits for, lists, polls or subscribes to events through `/mcp`. Each file names the test that pins it, the proof, and its bug-bash charters. Paths are relative to `verify/`.
+One file per user-facing behavior of the faucet server at PR 7a, from the point of view of its four users: GitHub, which POSTs signed webhooks, an operator who watches `/healthz` and schedules the cron route, a scheduler such as Vercel Cron, and an agent that waits for, lists, polls or subscribes to events through `/mcp`. Each file names the test that pins it, the proof, and its bug-bash charters. Paths are relative to `verify/`.
 
 | Feature | Route | Test | Status |
 | --- | --- | --- | --- |
@@ -20,6 +20,7 @@ One file per user-facing behavior of the faucet server at PR 6, from the point o
 | [Events poll](events-poll.md) | `POST /mcp`, `events/poll` | `tests/events-poll.e2e.ts` | tested |
 | [Events subscribe](events-subscribe.md) | `POST /mcp`, `events/subscribe` | `tests/events-subscribe.e2e.ts`, `tests/events-subscribe-types.e2e.ts` | tested |
 | [Events unsubscribe](events-unsubscribe.md) | `POST /mcp`, `events/unsubscribe` | `tests/events-unsubscribe.e2e.ts` | tested |
+| [Webhook handshake](webhook-handshake.md) | `POST /mcp`, `events/subscribe` in `handshake` mode, and the request that faucet sends to the callback URL | `tests/handshake.e2e.ts` | tested |
 | [Cron route](cron-auth.md) | `GET /cron/purge`, the secret check | `tests/cron-auth.e2e.ts` | tested |
 | [Purge](purge.md) | `GET /cron/purge`, then `events/poll`, the wait tool and the subscriptions table | `tests/purge.e2e.ts` | tested |
 
@@ -27,10 +28,10 @@ The webhook handler checks in this order: method, signature header shape, body s
 
 ## Later
 
-Planned for PR 7 onward and not in the server yet, so it has no test or feature file. Mark it `tested` here when its file and test land.
+Planned for PR 7b onward and not in the server yet, so it has no test or feature file. Mark it `tested` here when its file and test land.
 
 | Feature | Planned surface | Status |
 | --- | --- | --- |
-| Delivery | signed webhook delivery to the subscriptions that `events/subscribe` stores (PR 7 onward) | untested |
+| Delivery | signed webhook delivery to the subscriptions that `events/subscribe` stores (PR 7b onward) | untested |
 
-Delivery needs more than this harness has: a callback receiver that the test owns, to take the signed deliveries, and an allowlist that holds its origin (`https://hooks.verify.test` does not exist, because PR 6 makes no request to a callback URL). `faucet.mcp` calls any MCP method, so the subscribe calls need no new client. `faucet.subscriptions` and `faucet.openSecret` read the rows and open the sealed secrets that delivery will sign with.
+Delivery has what it needs from PR 7a: a callback receiver that the test owns (`receiver` in `tests/support.ts`, see [Webhook handshake](webhook-handshake.md)), the build with `-tags faucet_e2e` whose client reaches it, and a faucet that `faucet.withFaucet` starts with that build. A delivery test adds the behavior that takes a signed event and the call that runs the sender. `faucet.subscriptions` and `faucet.openSecret` read the rows and open the sealed secrets that delivery signs with.

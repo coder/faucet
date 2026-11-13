@@ -2,6 +2,8 @@ package faucet
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"slices"
@@ -53,15 +55,52 @@ func (e *CallbackError) Error() string {
 	return "callback endpoint failed verification: " + string(e.Reason)
 }
 
+// ErrCallbackRateLimited is what a CallbackVerifier returns when it refuses to
+// contact an endpoint because it already sent too many requests there.
+// events/subscribe answers ResourceExhausted and stores nothing.
+var ErrCallbackRateLimited = xerrors.New("callback verification rate limit reached")
+
+// CallbackRequest is what a CallbackVerifier gets for one callback URL. It holds
+// no credential: not the subscriber's GitHub token, and the secret only inside
+// a function that fmt prints as an address. It does hold the URL, which can
+// carry a receiver token: printing the request shows the login only, but a
+// struct that holds a request is printed field by field, URL included, so do
+// not log such a struct.
+type CallbackRequest struct {
+	// Login is the GitHub login of the subscriber.
+	Login string
+	// URL is the callback URL in the canonical form that subscribe stores.
+	URL string
+	// SubscriptionID is the id that events/subscribe returns, which a request
+	// to the endpoint carries in X-MCP-Subscription-Id.
+	SubscriptionID string
+	sign           func(id string, timestamp time.Time, body []byte) (http.Header, error)
+}
+
+// Sign returns the Standard Webhooks headers for a message to the endpoint,
+// signed with the subscriber's secret. The verifier never holds the secret
+// itself, so it cannot log it.
+func (r CallbackRequest) Sign(id string, timestamp time.Time, body []byte) (http.Header, error) {
+	if r.sign == nil {
+		return nil, xerrors.New("callback request has no secret to sign with")
+	}
+	return r.sign(id, timestamp, body)
+}
+
+// Format implements fmt.Formatter so that printing a request directly shows the
+// login only, because the URL can hold a token.
+func (r CallbackRequest) Format(f fmt.State, _ rune) {
+	_, _ = fmt.Fprintf(f, "CallbackRequest{Login:%q}", r.Login)
+}
+
 // CallbackVerifier proves that the endpoint behind a callback URL agrees to
 // receive a principal's deliveries. SEP-3415 requires this before delivery
 // starts, because a client-supplied secret stops forged deliveries and does not
 // stop a victim from being flooded.
 type CallbackVerifier interface {
 	// VerifyCallback returns nil when the endpoint agrees. A *CallbackError
-	// says why it does not. callbackURL is in the canonical form that
-	// subscribe stores.
-	VerifyCallback(ctx context.Context, p Principal, callbackURL string) error
+	// says why it does not, and ErrCallbackRateLimited that it was not asked.
+	VerifyCallback(ctx context.Context, req CallbackRequest) error
 }
 
 type callbackAllowlist struct {
@@ -89,8 +128,8 @@ func NewCallbackAllowlist(origins []string, allowInsecureLoopback bool) (Callbac
 	return list, nil
 }
 
-func (a callbackAllowlist) VerifyCallback(_ context.Context, _ Principal, callbackURL string) error {
-	u, err := url.Parse(callbackURL)
+func (a callbackAllowlist) VerifyCallback(_ context.Context, req CallbackRequest) error {
+	u, err := url.Parse(req.URL)
 	if err != nil {
 		return xerrors.Errorf("parse callback URL: %w", err)
 	}
@@ -191,16 +230,23 @@ var nonGlobalPrefixes = func() []netip.Prefix {
 		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
 		"192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15",
 		"198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
-		"::/96", "64:ff9b::/96", "100::/64", "2001::/32", "2001:db8::/32", "2002::/16", "fc00::/7", "fe80::/10", "ff00::/8",
+		"::/96", "::ffff:0:0:0/96", "64:ff9b::/96", "64:ff9b:1::/48", "100::/64", "100:0:0:1::/64", "2001::/23",
+		"2001:db8::/32", "2002::/16", "3fff::/20", "5f00::/16", "fc00::/7", "fe80::/10", "fec0::/10", "ff00::/8",
 	} {
 		out = append(out, netip.MustParsePrefix(p))
 	}
 	return out
 }()
 
+// isGlobalAddr reports whether addr is publicly routable. The standard library
+// predicates cross-check the table of prefixes, so a prefix left out of it
+// still cannot let loopback, private, link-local or multicast space through.
 func isGlobalAddr(addr netip.Addr) bool {
-	addr = addr.Unmap()
-	return addr.IsValid() && !slices.ContainsFunc(nonGlobalPrefixes, func(p netip.Prefix) bool { return p.Contains(addr) })
+	addr = addr.WithZone("").Unmap()
+	if !addr.IsValid() || addr.IsUnspecified() || addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsMulticast() {
+		return false
+	}
+	return !slices.ContainsFunc(nonGlobalPrefixes, func(p netip.Prefix) bool { return p.Contains(addr) })
 }
 
 // callbackCache does not remember a failure, so a retry can succeed. A restart

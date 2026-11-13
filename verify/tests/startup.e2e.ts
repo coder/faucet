@@ -18,6 +18,7 @@ const KEY_URL_SAFE = Buffer.alloc(32, 0xfb).toString('base64url');
 const KEY_31_BYTES = Buffer.alloc(31, 0x5a).toString('base64');
 const KEY_33_BYTES = Buffer.alloc(33, 0x5a).toString('base64');
 const KEY_ZERO = Buffer.alloc(32).toString('base64');
+const VERIFY_UNKNOWN = 'dns-7c1f4e';
 const ORIGIN = `https://${ORIGIN_TOKEN}.verify.test`;
 const WELL_FORMED_URL = `postgres://app:${FAKE_DB_PASSWORD}@127.0.0.1:1/faucet?sslmode=disable`;
 const MALFORMED_URLS: Record<string, string> = {
@@ -84,6 +85,10 @@ describe('startup configuration', () => {
     ['an origin with user info', { ...webhook, FAUCET_WEBHOOK_ALLOWED_ORIGINS: `https://user:${USERINFO_TOKEN}@${ORIGIN_TOKEN}.verify.test` }, `${ORIGIN_RULE}allowed origin 1: must not contain user info\n`],
     ['a loopback origin', { ...webhook, FAUCET_WEBHOOK_ALLOWED_ORIGINS: 'https://127.0.0.1' }, `${ORIGIN_RULE}allowed origin 1: host must not be a loopback address\n`],
     ['an empty entry in the origin list', { ...webhook, FAUCET_WEBHOOK_ALLOWED_ORIGINS: `${ORIGIN},` }, `${ORIGIN_RULE}allowed origin 2: must be 1 to 2048 bytes\n`],
+    ['the handshake without a FAUCET_WEBHOOK_KEY', { FAUCET_WEBHOOK_CALLBACK_VERIFICATION: 'handshake' }, 'webhook delivery needs FAUCET_WEBHOOK_KEY\n'],
+    ['the handshake with FAUCET_WEBHOOK_ALLOWED_ORIGINS', { ...webhook, FAUCET_WEBHOOK_CALLBACK_VERIFICATION: 'handshake' }, 'FAUCET_WEBHOOK_ALLOWED_ORIGINS must not be set when FAUCET_WEBHOOK_CALLBACK_VERIFICATION is handshake\n'],
+    ['the allowlist named without origins', { FAUCET_WEBHOOK_KEY: KEY_32, FAUCET_WEBHOOK_CALLBACK_VERIFICATION: 'allowlist' }, 'webhook delivery needs FAUCET_WEBHOOK_ALLOWED_ORIGINS\n'],
+    ['a callback verification that does not exist', { ...webhook, FAUCET_WEBHOOK_CALLBACK_VERIFICATION: VERIFY_UNKNOWN }, 'FAUCET_WEBHOOK_CALLBACK_VERIFICATION must be allowlist or handshake\n'],
   ];
   const cases: { name: string; env: Record<string, string>; message: string }[] = [
     {
@@ -136,7 +141,7 @@ describe('startup configuration', () => {
   ];
   const printedNever = [
     FAKE_DB_PASSWORD, FAKE_SECRET, SHORT_SECRET, FAKE_CRON_SECRET,
-    KEY_32, KEY_NOT_BASE64, KEY_URL_SAFE, KEY_31_BYTES, KEY_33_BYTES, KEY_ZERO, ORIGIN_TOKEN, USERINFO_TOKEN,
+    KEY_32, KEY_NOT_BASE64, KEY_URL_SAFE, KEY_31_BYTES, KEY_33_BYTES, KEY_ZERO, ORIGIN_TOKEN, USERINFO_TOKEN, VERIFY_UNKNOWN,
   ];
   for (const { name, env, message } of cases) {
     test(`${name} exits 1 with a clear message and prints no secret`, async ({ faucet }) => {
