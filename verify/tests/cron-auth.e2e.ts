@@ -127,9 +127,11 @@ describe('cron routes', () => {
     });
   }
 
-  test('the app log never holds the cron secret, the hook token or the stub control token', async ({ cron }) => {
+  test('the app log records the jobs and never holds the cron secret, the hook token or the stub control token', async ({ cron }) => {
     const log = readFileSync('.e2e/logs/app.log', 'utf8');
 
+    expect(log).toContain('events purged');
+    expect(log).toContain('redelivery sweep done');
     expect(cron.leaksSecret(log)).toBe(false);
   });
 });
