@@ -70,3 +70,40 @@ RETURNING purged_through;
 
 -- name: StoredDeliveries :many
 SELECT delivery_id FROM faucet_events WHERE delivery_id = ANY(sqlc.arg(delivery_ids)::text[]);
+
+-- name: LockSubscriptions :exec
+SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg(principal)::text, 0));
+
+-- name: DeleteExpiredSubscriptionsOf :exec
+DELETE FROM faucet_subscriptions WHERE principal = sqlc.arg(principal) AND expires_at <= sqlc.arg(now);
+
+-- name: CountOtherSubscriptions :one
+SELECT COUNT(*)::bigint AS others FROM faucet_subscriptions WHERE principal = sqlc.arg(principal) AND key_hash <> sqlc.arg(key_hash);
+
+-- name: UpsertSubscription :one
+INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at)
+VALUES (
+  sqlc.arg(key_hash),
+  sqlc.arg(principal),
+  sqlc.arg(callback_url),
+  sqlc.arg(event_type),
+  sqlc.arg(arguments),
+  sqlc.arg(repo_id),
+  sqlc.arg(secret_enc),
+  sqlc.arg(cursor),
+  sqlc.arg(now),
+  sqlc.arg(now),
+  sqlc.arg(expires_at)
+)
+ON CONFLICT (key_hash) DO UPDATE SET
+  repo_id = EXCLUDED.repo_id,
+  secret_enc = EXCLUDED.secret_enc,
+  updated_at = EXCLUDED.updated_at,
+  expires_at = EXCLUDED.expires_at
+RETURNING *;
+
+-- name: DeleteSubscription :execrows
+DELETE FROM faucet_subscriptions WHERE key_hash = sqlc.arg(key_hash) AND principal = sqlc.arg(principal);
+
+-- name: DeleteExpiredSubscriptions :execrows
+DELETE FROM faucet_subscriptions WHERE expires_at <= sqlc.arg(now);

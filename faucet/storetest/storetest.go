@@ -4,6 +4,7 @@ package storetest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -38,6 +39,13 @@ func Run(t *testing.T, newStore func(t *testing.T) faucet.Store) {
 		{"PurgeUnderConcurrentInsertsKeepsNewEventsAndAnExactMark", purgeUnderConcurrentInsertsKeepsNewEventsAndAnExactMark},
 		{"PollEventsNeverHidesAConcurrentPurge", pollEventsNeverHidesAConcurrentPurge},
 		{"StoredDeliveriesReturnsOnlyStoredIDs", storedDeliveriesReturnsOnlyStoredIDs},
+		{"UpsertSubscriptionStoresThenRefreshes", upsertSubscriptionStoresThenRefreshes},
+		{"UpsertSubscriptionTreatsAnExpiredRowAsAbsent", upsertSubscriptionTreatsAnExpiredRowAsAbsent},
+		{"DeleteSubscriptionRemovesOnlyTheCallersRow", deleteSubscriptionRemovesOnlyTheCallersRow},
+		{"UpsertSubscriptionEnforcesThePrincipalLimit", upsertSubscriptionEnforcesThePrincipalLimit},
+		{"UpsertSubscriptionLimitHoldsUnderConcurrency", upsertSubscriptionLimitHoldsUnderConcurrency},
+		{"UpsertSubscriptionValidatesInput", upsertSubscriptionValidatesInput},
+		{"DeleteExpiredSubscriptionsDeletesOnlyExpiredRows", deleteExpiredSubscriptionsDeletesOnlyExpiredRows},
 	}
 	for _, st := range subtests {
 		t.Run(st.name, func(t *testing.T) {
@@ -776,4 +784,249 @@ func storedDeliveriesReturnsOnlyStoredIDs(t *testing.T, s faucet.Store) {
 	got, err = s.StoredDeliveries(ctx, []string{e[0].DeliveryID, e[1].DeliveryID})
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{e[1].DeliveryID}, got, "a purged event is no longer stored")
+}
+
+var subscriptionBase = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+func newSubscription(principal, callbackURL string, expiresAt time.Time) faucet.Subscription {
+	const eventType = "ci.run_completed"
+	arguments := json.RawMessage(`{"repo":"octo/repo"}`)
+	return faucet.Subscription{
+		KeyHash:     faucet.NewSubscriptionKeyHash(principal, callbackURL, eventType, arguments),
+		Principal:   principal,
+		CallbackURL: callbackURL,
+		EventType:   eventType,
+		Arguments:   arguments,
+		RepoID:      42,
+		SecretEnc:   []byte("sealed-1"),
+		Cursor:      7,
+		ExpiresAt:   expiresAt,
+	}
+}
+
+func subscriptionAt(n int, expiresAt time.Time) faucet.Subscription {
+	return newSubscription("octocat", fmt.Sprintf("https://hooks.example.test/%d", n), expiresAt)
+}
+
+func upsertSubscriptionStoresThenRefreshes(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	now := subscriptionBase
+	sub := subscriptionAt(1, now.Add(10*time.Minute))
+
+	stored, err := s.UpsertSubscription(ctx, sub, now, 10)
+	require.NoError(t, err)
+	require.Equal(t, sub.KeyHash, stored.KeyHash)
+	require.Equal(t, sub.Principal, stored.Principal)
+	require.Equal(t, sub.CallbackURL, stored.CallbackURL)
+	require.Equal(t, sub.EventType, stored.EventType)
+	require.JSONEq(t, string(sub.Arguments), string(stored.Arguments))
+	require.EqualValues(t, 42, stored.RepoID)
+	require.Equal(t, []byte("sealed-1"), stored.SecretEnc)
+	require.EqualValues(t, 7, stored.Cursor)
+	require.True(t, now.Equal(stored.CreatedAt), "created_at is the call's now, got %s", stored.CreatedAt)
+	require.True(t, now.Equal(stored.UpdatedAt))
+	require.True(t, sub.ExpiresAt.Equal(stored.ExpiresAt))
+
+	later := now.Add(time.Minute)
+	refresh := sub
+	refresh.RepoID = 43
+	refresh.SecretEnc = []byte("sealed-2")
+	refresh.Cursor = 99
+	refresh.ExpiresAt = later.Add(5 * time.Minute)
+	again, err := s.UpsertSubscription(ctx, refresh, later, 10)
+	require.NoError(t, err)
+	require.EqualValues(t, 43, again.RepoID, "a refresh replaces the repository")
+	require.Equal(t, []byte("sealed-2"), again.SecretEnc, "a refresh replaces the sealed secret")
+	require.True(t, refresh.ExpiresAt.Equal(again.ExpiresAt), "a refresh sets the new expiry, even a shorter one")
+	require.True(t, later.Equal(again.UpdatedAt))
+	require.True(t, now.Equal(again.CreatedAt), "a refresh keeps created_at")
+	require.EqualValues(t, 7, again.Cursor, "a refresh of a live subscription keeps the cursor and ignores the supplied one")
+}
+
+func upsertSubscriptionTreatsAnExpiredRowAsAbsent(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	expiresAt := subscriptionBase.Add(10 * time.Minute)
+	sub := subscriptionAt(1, expiresAt)
+	_, err := s.UpsertSubscription(ctx, sub, subscriptionBase, 10)
+	require.NoError(t, err)
+
+	lastLive := expiresAt.Add(-time.Second)
+	live := sub
+	live.Cursor, live.ExpiresAt = 99, lastLive.Add(time.Minute)
+	kept, err := s.UpsertSubscription(ctx, live, lastLive, 10)
+	require.NoError(t, err)
+	require.EqualValues(t, 7, kept.Cursor, "one second before expiry the row is live")
+	require.True(t, subscriptionBase.Equal(kept.CreatedAt))
+
+	lapsedAt := expiresAt.Add(time.Minute)
+	lapsed := live
+	lapsed.ExpiresAt = lapsedAt.Add(10 * time.Minute)
+	replaced, err := s.UpsertSubscription(ctx, lapsed, lapsedAt, 10)
+	require.NoError(t, err)
+	require.EqualValues(t, 99, replaced.Cursor, "an expired row is replaced whole, so the supplied cursor wins")
+	require.True(t, lapsedAt.Equal(replaced.CreatedAt))
+}
+
+func deleteSubscriptionRemovesOnlyTheCallersRow(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	mine := subscriptionAt(1, subscriptionBase.Add(time.Hour))
+	other := subscriptionAt(2, subscriptionBase.Add(time.Hour))
+	for _, sub := range []faucet.Subscription{mine, other} {
+		_, err := s.UpsertSubscription(ctx, sub, subscriptionBase, 10)
+		require.NoError(t, err)
+	}
+
+	deleted, err := s.DeleteSubscription(ctx, "mallory", mine.KeyHash)
+	require.NoError(t, err)
+	require.False(t, deleted, "another principal's key deletes nothing")
+
+	deleted, err = s.DeleteSubscription(ctx, "octocat", faucet.NewSubscriptionKeyHash("octocat", "https://hooks.example.test/unknown", mine.EventType, mine.Arguments))
+	require.NoError(t, err)
+	require.False(t, deleted, "an unknown key deletes nothing")
+
+	deleted, err = s.DeleteSubscription(ctx, "octocat", mine.KeyHash)
+	require.NoError(t, err)
+	require.True(t, deleted, "the owner's delete finds the row that the others left alone")
+	deleted, err = s.DeleteSubscription(ctx, "octocat", mine.KeyHash)
+	require.NoError(t, err)
+	require.False(t, deleted, "the row is gone")
+	deleted, err = s.DeleteSubscription(ctx, "octocat", other.KeyHash)
+	require.NoError(t, err)
+	require.True(t, deleted, "deleting one subscription leaves the principal's others")
+
+	gone := subscriptionAt(3, subscriptionBase.Add(time.Minute))
+	_, err = s.UpsertSubscription(ctx, gone, subscriptionBase, 10)
+	require.NoError(t, err)
+	deleted, err = s.DeleteSubscription(ctx, "octocat", gone.KeyHash)
+	require.NoError(t, err)
+	require.True(t, deleted, "an expired row is deleted too")
+}
+
+func upsertSubscriptionEnforcesThePrincipalLimit(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	const limit = 3
+	soon := subscriptionBase.Add(time.Minute)
+	later := subscriptionBase.Add(time.Hour)
+
+	subs := []faucet.Subscription{subscriptionAt(0, soon), subscriptionAt(1, later), subscriptionAt(2, later)}
+	for _, sub := range subs {
+		_, err := s.UpsertSubscription(ctx, sub, subscriptionBase, limit)
+		require.NoError(t, err)
+	}
+
+	refused := subscriptionAt(3, later)
+	_, err := s.UpsertSubscription(ctx, refused, subscriptionBase, limit)
+	require.ErrorIs(t, err, faucet.ErrSubscriptionLimit)
+	deleted, err := s.DeleteSubscription(ctx, "octocat", refused.KeyHash)
+	require.NoError(t, err)
+	require.False(t, deleted, "a refused subscription writes nothing")
+
+	_, err = s.UpsertSubscription(ctx, subs[1], subscriptionBase, limit)
+	require.NoError(t, err, "refreshing a subscription at the limit is not a new one")
+
+	_, err = s.UpsertSubscription(ctx, newSubscription("hubot", "https://hooks.example.test/0", later), subscriptionBase, limit)
+	require.NoError(t, err, "the limit is per principal")
+
+	afterExpiry := subscriptionBase.Add(2 * time.Minute)
+	refused.ExpiresAt = later
+	_, err = s.UpsertSubscription(ctx, refused, afterExpiry, limit)
+	require.NoError(t, err, "an expired subscription does not count against the limit")
+}
+
+// upsertSubscriptionLimitHoldsUnderConcurrency checks the limit against
+// callers that race. A count taken before the insert, without a lock per
+// principal, lets several of them pass.
+func upsertSubscriptionLimitHoldsUnderConcurrency(t *testing.T, s faucet.Store) {
+	const (
+		limit   = 5
+		callers = 4 * limit
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	var (
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		accepted  int
+		exhausted int
+	)
+	start := make(chan struct{})
+	for n := range callers {
+		wg.Go(func() {
+			<-start
+			_, err := s.UpsertSubscription(ctx, subscriptionAt(n, subscriptionBase.Add(time.Hour)), subscriptionBase, limit)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				accepted++
+			case errors.Is(err, faucet.ErrSubscriptionLimit):
+				exhausted++
+			default:
+				t.Errorf("caller %d: %v", n, err)
+			}
+		})
+	}
+	close(start)
+	wg.Wait()
+	require.Equal(t, limit, accepted)
+	require.Equal(t, callers-limit, exhausted)
+}
+
+func upsertSubscriptionValidatesInput(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	good := subscriptionAt(1, subscriptionBase.Add(time.Hour))
+
+	bad := map[string]func(sub *faucet.Subscription){
+		"empty principal":      func(sub *faucet.Subscription) { sub.Principal = "" },
+		"empty callback URL":   func(sub *faucet.Subscription) { sub.CallbackURL = "" },
+		"empty event type":     func(sub *faucet.Subscription) { sub.EventType = "" },
+		"arguments not object": func(sub *faucet.Subscription) { sub.Arguments = json.RawMessage(`[1]`) },
+		"arguments not JSON":   func(sub *faucet.Subscription) { sub.Arguments = json.RawMessage(`{"repo":`) },
+		"zero repo ID":         func(sub *faucet.Subscription) { sub.RepoID = 0 },
+		"no sealed secret":     func(sub *faucet.Subscription) { sub.SecretEnc = nil },
+		"negative cursor":      func(sub *faucet.Subscription) { sub.Cursor = -1 },
+		"already expired":      func(sub *faucet.Subscription) { sub.ExpiresAt = subscriptionBase },
+		"zero key hash":        func(sub *faucet.Subscription) { sub.KeyHash = faucet.SubscriptionKeyHash{} },
+		"another principal's key hash": func(sub *faucet.Subscription) {
+			sub.KeyHash = faucet.NewSubscriptionKeyHash("mallory", sub.CallbackURL, sub.EventType, sub.Arguments)
+		},
+	}
+	for name, mutate := range bad {
+		sub := good
+		mutate(&sub)
+		_, err := s.UpsertSubscription(ctx, sub, subscriptionBase, 10)
+		require.Error(t, err, name)
+		deleted, err := s.DeleteSubscription(ctx, good.Principal, good.KeyHash)
+		require.NoError(t, err)
+		require.False(t, deleted, "%s writes nothing", name)
+	}
+
+	_, err := s.UpsertSubscription(ctx, good, subscriptionBase, 0)
+	require.Error(t, err, "a limit of zero")
+}
+
+func deleteExpiredSubscriptionsDeletesOnlyExpiredRows(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	soon := subscriptionAt(1, subscriptionBase.Add(time.Minute))
+	later := subscriptionAt(2, subscriptionBase.Add(time.Hour))
+	for _, sub := range []faucet.Subscription{soon, later} {
+		_, err := s.UpsertSubscription(ctx, sub, subscriptionBase, 10)
+		require.NoError(t, err)
+	}
+
+	deleted, err := s.DeleteExpiredSubscriptions(ctx, subscriptionBase.Add(time.Minute-time.Second))
+	require.NoError(t, err)
+	require.Zero(t, deleted, "nothing has expired yet")
+
+	deleted, err = s.DeleteExpiredSubscriptions(ctx, subscriptionBase.Add(time.Minute))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, deleted, "a subscription expires at its expiry")
+
+	found, err := s.DeleteSubscription(ctx, "octocat", soon.KeyHash)
+	require.NoError(t, err)
+	require.False(t, found)
+	found, err = s.DeleteSubscription(ctx, "octocat", later.KeyHash)
+	require.NoError(t, err)
+	require.True(t, found, "the live subscription survived")
 }

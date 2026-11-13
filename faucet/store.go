@@ -165,4 +165,19 @@ type Store interface {
 	// StoredDeliveries returns the members of deliveryIDs that have a stored
 	// event, each once, in no particular order.
 	StoredDeliveries(ctx context.Context, deliveryIDs []string) ([]string, error)
+	// UpsertSubscription stores sub and returns the stored row. It calls
+	// sub.Validate(now). A row with the same KeyHash that expires after now is
+	// live: the call replaces its RepoID, SecretEnc and ExpiresAt and keeps its
+	// CreatedAt and Cursor. A row that has expired counts as absent and is
+	// replaced whole. When the principal already holds maxLive live
+	// subscriptions under other keys it returns ErrSubscriptionLimit and writes
+	// nothing. maxLive must be positive.
+	UpsertSubscription(ctx context.Context, sub Subscription, now time.Time, maxLive int) (Subscription, error)
+	// DeleteSubscription deletes the subscription with this key if it belongs
+	// to principal, live or not, and reports whether it did. Another
+	// principal's subscription is never deleted, whatever key is given.
+	DeleteSubscription(ctx context.Context, principal string, key SubscriptionKeyHash) (bool, error)
+	// DeleteExpiredSubscriptions deletes every subscription that expired at or
+	// before now and returns how many it deleted.
+	DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (int64, error)
 }

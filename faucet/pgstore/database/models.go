@@ -26,3 +26,17 @@ type FaucetPurgeMark struct {
 	ID            bool
 	PurgedThrough int64
 }
+
+type FaucetSubscription struct {
+	KeyHash     []byte
+	Principal   string
+	CallbackUrl string
+	EventType   string
+	Arguments   json.RawMessage
+	RepoID      int64
+	SecretEnc   []byte
+	Cursor      int64
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	ExpiresAt   time.Time
+}

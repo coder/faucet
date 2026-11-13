@@ -14,6 +14,22 @@ import (
 	"github.com/lib/pq"
 )
 
+const countOtherSubscriptions = `-- name: CountOtherSubscriptions :one
+SELECT COUNT(*)::bigint AS others FROM faucet_subscriptions WHERE principal = $1 AND key_hash <> $2
+`
+
+type CountOtherSubscriptionsParams struct {
+	Principal string
+	KeyHash   []byte
+}
+
+func (q *Queries) CountOtherSubscriptions(ctx context.Context, arg CountOtherSubscriptionsParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countOtherSubscriptions, arg.Principal, arg.KeyHash)
+	var others int64
+	err := row.Scan(&others)
+	return others, err
+}
+
 const cursorAt = `-- name: CursorAt :one
 SELECT GREATEST(COALESCE(MAX(id), 0), (SELECT purged_through FROM faucet_purge_mark))::bigint AS cursor
 FROM faucet_events
@@ -44,6 +60,49 @@ func (q *Queries) DeleteEventsBefore(ctx context.Context, before time.Time) (Del
 	var i DeleteEventsBeforeRow
 	err := row.Scan(&i.Deleted, &i.MaxID)
 	return i, err
+}
+
+const deleteExpiredSubscriptions = `-- name: DeleteExpiredSubscriptions :execrows
+DELETE FROM faucet_subscriptions WHERE expires_at <= $1
+`
+
+func (q *Queries) DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteExpiredSubscriptions, now)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const deleteExpiredSubscriptionsOf = `-- name: DeleteExpiredSubscriptionsOf :exec
+DELETE FROM faucet_subscriptions WHERE principal = $1 AND expires_at <= $2
+`
+
+type DeleteExpiredSubscriptionsOfParams struct {
+	Principal string
+	Now       time.Time
+}
+
+func (q *Queries) DeleteExpiredSubscriptionsOf(ctx context.Context, arg DeleteExpiredSubscriptionsOfParams) error {
+	_, err := q.db.ExecContext(ctx, deleteExpiredSubscriptionsOf, arg.Principal, arg.Now)
+	return err
+}
+
+const deleteSubscription = `-- name: DeleteSubscription :execrows
+DELETE FROM faucet_subscriptions WHERE key_hash = $1 AND principal = $2
+`
+
+type DeleteSubscriptionParams struct {
+	KeyHash   []byte
+	Principal string
+}
+
+func (q *Queries) DeleteSubscription(ctx context.Context, arg DeleteSubscriptionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteSubscription, arg.KeyHash, arg.Principal)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const eventsAfter = `-- name: EventsAfter :many
@@ -180,6 +239,15 @@ func (q *Queries) LockPurgeMark(ctx context.Context) error {
 	return err
 }
 
+const lockSubscriptions = `-- name: LockSubscriptions :exec
+SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))
+`
+
+func (q *Queries) LockSubscriptions(ctx context.Context, principal string) error {
+	_, err := q.db.ExecContext(ctx, lockSubscriptions, principal)
+	return err
+}
+
 const pollEvents = `-- name: PollEvents :many
 WITH mark AS (
   SELECT purged_through FROM faucet_purge_mark
@@ -309,4 +377,70 @@ func (q *Queries) StoredDeliveries(ctx context.Context, deliveryIds []string) ([
 		return nil, err
 	}
 	return items, nil
+}
+
+const upsertSubscription = `-- name: UpsertSubscription :one
+INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at)
+VALUES (
+  $1,
+  $2,
+  $3,
+  $4,
+  $5,
+  $6,
+  $7,
+  $8,
+  $9,
+  $9,
+  $10
+)
+ON CONFLICT (key_hash) DO UPDATE SET
+  repo_id = EXCLUDED.repo_id,
+  secret_enc = EXCLUDED.secret_enc,
+  updated_at = EXCLUDED.updated_at,
+  expires_at = EXCLUDED.expires_at
+RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at
+`
+
+type UpsertSubscriptionParams struct {
+	KeyHash     []byte
+	Principal   string
+	CallbackUrl string
+	EventType   string
+	Arguments   json.RawMessage
+	RepoID      int64
+	SecretEnc   []byte
+	Cursor      int64
+	Now         time.Time
+	ExpiresAt   time.Time
+}
+
+func (q *Queries) UpsertSubscription(ctx context.Context, arg UpsertSubscriptionParams) (FaucetSubscription, error) {
+	row := q.db.QueryRowContext(ctx, upsertSubscription,
+		arg.KeyHash,
+		arg.Principal,
+		arg.CallbackUrl,
+		arg.EventType,
+		arg.Arguments,
+		arg.RepoID,
+		arg.SecretEnc,
+		arg.Cursor,
+		arg.Now,
+		arg.ExpiresAt,
+	)
+	var i FaucetSubscription
+	err := row.Scan(
+		&i.KeyHash,
+		&i.Principal,
+		&i.CallbackUrl,
+		&i.EventType,
+		&i.Arguments,
+		&i.RepoID,
+		&i.SecretEnc,
+		&i.Cursor,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
 }
