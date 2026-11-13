@@ -29,4 +29,4 @@ No charter. Every check needs the receiver's records, the cron secret and a purg
 - The purge mark is table-wide, so a test that purges runs on its own faucet (`withDeliveryFaucet`). Events must be stored after the subscription, or the subscription starts above them.
 - The receiver answers an envelope like an event: the behavior `ok` needs a valid signature and answers 200, `fail500` answers 500.
 - `Service.Terminations()` has no route. The e2e test checks the log line for a failed `terminated`, and the Go test checks the counter.
-- A GitHub 403 counts as no access, so a rate limit would end a subscription at its next renewal. Not reachable from the stub, so pinned by no test.
+- A GitHub rate limit (429, or 403 with no quota left, `Retry-After` or a message that names the limit) is a failed check and ends nothing, while any other 403 is no access. The stub cannot make GitHub's limiter answer, so only the Go tests (`TestTokenAuthorizerRepoID`, `TestRenewalDuringAGitHubRateLimit...`) pin it.
