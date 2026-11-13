@@ -68,7 +68,7 @@ The two variables go together. When only one is set, or a value is invalid, the 
 - `delivery.secret` is `whsec_` followed by the standard base64 of 24 to 64 random bytes, as Standard Webhooks defines. The client makes it. Faucet seals it with AES-256-GCM and never returns or logs it.
 - `delivery.url` must be `https`, with a public host name or address, no user info and no fragment, and its origin must be on the allowlist. Faucet makes no request to it in PR 6. An origin that is not allowed gives `CallbackEndpointError` with reason `challenge_failed`.
 - A subscription is the tuple (login, callback URL, event name, arguments). Subscribing again with the same tuple renews it: same `id`, the secret is replaced, and the expiry is granted again. Another tuple, or another login, is another subscription.
-- The grant is the shorter of `ttlMs` and 10 minutes, and at least 30 seconds. Renew before `refreshBefore`. A login can hold 100 live subscriptions, then `ResourceExhausted`.
+- The grant is `ttlMs`, never more than 10 minutes and never less than 30 seconds. A missing or `null` `ttlMs`, or any value above 10 minutes, gives 10 minutes. Zero, a negative value of any size, or any value below 30 seconds gives 30 seconds. A `ttlMs` that is not an integer is `InvalidParams`. Renew before `refreshBefore`. A login can hold 100 live subscriptions, then `ResourceExhausted`.
 - A call that is refused stores nothing.
 
 `events/unsubscribe` takes `name`, `arguments` and `delivery.url`. It deletes the caller's own subscription and answers `NotFound` for any other, whoever owns it. It needs no repository access.
