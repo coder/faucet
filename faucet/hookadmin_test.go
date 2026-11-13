@@ -249,6 +249,20 @@ func TestGitHubHookAdminListErrors(t *testing.T) {
 	}
 }
 
+func TestGitHubHookAdminErrorsNameNoURLAndNoCursor(t *testing.T) {
+	t.Parallel()
+
+	stub := newHookStub(t, reply(http.StatusOK, `[]`))
+	admin := newHookAdmin(t, stub, orgHook)
+	stub.Close()
+
+	_, err := admin.ListDeliveries(context.Background(), "cursor-abc123")
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "cursor-abc123", "a cursor is GitHub's opaque value and stays out of errors, which are logged")
+	require.NotContains(t, err.Error(), "/orgs/octo-org", "the request URL stays out of errors")
+	requireNoHookToken(t, err.Error())
+}
+
 func TestGitHubHookAdminSendsTheTokenOnlyToBaseURL(t *testing.T) {
 	t.Parallel()
 

@@ -64,14 +64,20 @@ func newFakeRedeliveryStore(clock func() time.Time) *fakeRedeliveryStore {
 	}
 }
 
-func (s *fakeRedeliveryStore) InsertEvent(ctx context.Context, ev faucet.Event) (faucet.Event, bool, error) {
-	stored, inserted, err := s.fakeStore.InsertEvent(ctx, ev)
-	if err == nil {
-		s.rmu.Lock()
-		s.stored[stored.DeliveryID] = true
-		s.rmu.Unlock()
+// InsertEvent only remembers the delivery ID, which is all that redelivery
+// reads, so that a test with tens of thousands of deliveries stays fast.
+func (s *fakeRedeliveryStore) InsertEvent(_ context.Context, ev faucet.Event) (faucet.Event, bool, error) {
+	if err := ev.Validate(); err != nil {
+		return faucet.Event{}, false, err
 	}
-	return stored, inserted, err
+	s.rmu.Lock()
+	defer s.rmu.Unlock()
+	if s.stored[ev.DeliveryID] {
+		return ev, false, nil
+	}
+	s.stored[ev.DeliveryID] = true
+	ev.ID = int64(len(s.stored))
+	return ev, true, nil
 }
 
 func (s *fakeRedeliveryStore) AcquireRedeliveryLease(_ context.Context, hook string, now time.Time, ttl time.Duration) (faucet.RedeliveryScan, bool, error) {

@@ -177,6 +177,11 @@ func callGitHub(ctx context.Context, client *http.Client, base *url.URL, token, 
 	}
 	resp, err := pinned.Do(req)
 	if err != nil {
+		// A *url.Error quotes the request URL, which can carry a cursor.
+		var urlErr *url.Error
+		if xerrors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
 		return nil, xerrors.Errorf("call GitHub: %w", err)
 	}
 	return resp, nil
