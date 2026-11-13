@@ -123,7 +123,7 @@ describe('app lifecycle', () => {
   test('SIGKILL of the parent while initdb runs still removes the run directory', async () => {
     const stack = await Stack.launch([]);
     try {
-      await waitFor('initdb to start', READY_MS, () => existsSync(`${stack.dir}/pgdata`));
+      await waitFor('initdb to bootstrap', READY_MS, () => existsSync(`${stack.dir}/pgdata/postmaster.pid`));
 
       stack.parent.kill('SIGKILL');
       await waitFor('the run directory to go', TEARDOWN_MS, () => !existsSync(stack.dir));
