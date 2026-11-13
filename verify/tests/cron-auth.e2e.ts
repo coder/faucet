@@ -94,7 +94,7 @@ describe('cron routes', () => {
 
     expect(reply.status).toBe(200);
     expect(reply.headers.get('content-type')).toContain('application/json');
-    expect(JSON.parse(reply.body)).toEqual({ examined: 1, pending: 1, requested: 1, incomplete: false });
+    expect(JSON.parse(reply.body)).toEqual({ examined: 1, pending: 1, gave_up: 0, requested: 1, incomplete: false });
     expect(await deliveriesOf(cron, armed.repoId)).toContain(armed.failed);
     expect(cron.leaksSecret(reply.body + JSON.stringify([...reply.headers]))).toBe(false);
   });

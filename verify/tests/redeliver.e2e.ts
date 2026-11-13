@@ -12,6 +12,7 @@ const MAX_REDELIVERIES_PER_DELIVERY = 3;
 interface Sweep {
   examined: number;
   pending: number;
+  gave_up: number;
   requested: number;
   incomplete: boolean;
 }
@@ -56,6 +57,7 @@ describe('redelivery sweep', () => {
       delivered: newDeliveryId(),
       twice: newDeliveryId(),
       silent: newDeliveryId(),
+      late: newDeliveryId(),
       tooOld: newDeliveryId(),
     };
     const attempt = (id: number, guid: string, ageMin: number, status: number): StubDelivery =>
@@ -70,7 +72,8 @@ describe('redelivery sweep', () => {
       attempt(106, guid.twice, 50, 500),
       attempt(107, guid.twice, 40, 503),
       attempt(109, guid.silent, 5, 0),
-      attempt(110, guid.tooOld, 65, 500),
+      attempt(111, guid.late, 100, 500),
+      attempt(110, guid.tooOld, 125, 500),
     ]);
 
     const first = await sweep(cron);
@@ -78,11 +81,11 @@ describe('redelivery sweep', () => {
     const rows = await cron.rows(repoId);
     const second = await sweep(cron);
 
-    expect(first).toEqual({ examined: 8, pending: 3, requested: 3, incomplete: false });
-    expect(requests, 'the newest failed attempt of each delivery, oldest first').toEqual([107, 101, 109]);
-    expect(rows.map((r) => r.delivery_id).sort()).toEqual([guid.failed, guid.silent, guid.stored, guid.twice].sort());
-    expect(second).toEqual({ examined: 11, pending: 0, requested: 0, incomplete: false });
-    expect(await cron.rows(repoId)).toHaveLength(4);
+    expect(first).toEqual({ examined: 9, pending: 4, gave_up: 0, requested: 4, incomplete: false });
+    expect(requests, 'the newest failed attempt of each delivery, oldest first').toEqual([111, 107, 101, 109]);
+    expect(rows.map((r) => r.delivery_id).sort()).toEqual([guid.failed, guid.late, guid.silent, guid.stored, guid.twice].sort());
+    expect(second).toEqual({ examined: 13, pending: 0, gave_up: 0, requested: 0, incomplete: false });
+    expect(await cron.rows(repoId)).toHaveLength(5);
   });
 
   test('gives up on a delivery that the faucet keeps rejecting after 3 redeliveries', async ({ cron, hooks }) => {
@@ -94,10 +97,10 @@ describe('redelivery sweep', () => {
     for (let i = 0; i < MAX_REDELIVERIES_PER_DELIVERY + 2; i++) sweeps.push(await sweep(cron));
     const requests = await asked(hooks);
 
-    expect(sweeps.map((r) => [r.pending, r.requested])).toEqual([[1, 1], [1, 1], [1, 1], [0, 0], [0, 0]]);
+    expect(sweeps.map((r) => [r.pending, r.gave_up, r.requested])).toEqual([[1, 0, 1], [1, 0, 1], [1, 0, 1], [0, 1, 0], [0, 1, 0]]);
     expect(requests, 'the first attempt, then each redelivery').toEqual([201, 202, 203]);
     expect(await cron.rows(repoId)).toEqual([]);
-    expect(readFileSync('.e2e/logs/app.log', 'utf8')).toMatch(new RegExp(`redelivery limit reached\\s+delivery_id=${guid}`));
+    expect(readFileSync('.e2e/logs/app.log', 'utf8')).toMatch(new RegExp(`redelivery gave up\\s+delivery_id=${guid}\\s+redeliveries=3\\s+reason=limit`));
   });
 
   test('sends at most 50 redelivery requests per run, oldest first, and the next run goes on', async ({ cron, hooks }) => {
@@ -113,7 +116,7 @@ describe('redelivery sweep', () => {
     const second = await sweep(cron);
     const third = await sweep(cron);
 
-    expect(first).toEqual({ examined: total, pending: total, requested: MAX_REQUESTS, incomplete: true });
+    expect(first).toEqual({ examined: total, pending: total, gave_up: 0, requested: MAX_REQUESTS, incomplete: true });
     expect(firstAsked).toEqual(Array.from({ length: MAX_REQUESTS }, (_, i) => 1000 + i));
     expect(second).toMatchObject({ pending: 10, requested: 10, incomplete: false });
     expect(third).toMatchObject({ pending: 0, requested: 0, incomplete: false });
@@ -131,7 +134,7 @@ describe('redelivery sweep', () => {
     const result = await sweep(cron);
     const lists = await listCalls(hooks);
 
-    expect(result).toEqual({ examined: MAX_PAGES * pageSize, pending: 0, requested: 0, incomplete: true });
+    expect(result).toEqual({ examined: MAX_PAGES * pageSize, pending: 0, gave_up: 0, requested: 0, incomplete: true });
     expect(lists).toHaveLength(MAX_PAGES);
     expect(new Set(lists).size, 'each call asks for a new page').toBe(MAX_PAGES);
   });
