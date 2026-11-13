@@ -64,6 +64,8 @@ type webhookState struct {
 	callbacks             CallbackVerifier
 	allowInsecureLoopback bool
 	verified              *callbackCache
+	client                *http.Client
+	idKey                 []byte
 }
 
 func newWebhookState(d WebhookDeps, clock quartz.Clock) (*webhookState, error) {
@@ -77,7 +79,11 @@ func newWebhookState(d WebhookDeps, clock quartz.Clock) (*webhookState, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &webhookState{aead: aead, callbacks: d.Callbacks, allowInsecureLoopback: d.AllowInsecureLoopback, verified: newCallbackCache(clock)}, nil
+	client := d.Client
+	if client == nil {
+		client = NewHTTPClient(HTTPClientOptions{AllowInsecureLoopback: d.AllowInsecureLoopback})
+	}
+	return &webhookState{aead: aead, callbacks: d.Callbacks, allowInsecureLoopback: d.AllowInsecureLoopback, verified: newCallbackCache(clock), client: client, idKey: d.Key.messageIDKey()}, nil
 }
 
 // subscriptionParams holds the params of events/subscribe and
@@ -129,6 +135,34 @@ type eventsSubscribeResult struct {
 	RefreshBefore string `json:"refreshBefore"`
 	Cursor        string `json:"cursor"`
 	Truncated     bool   `json:"truncated"`
+	// DeliveryStatus is set when the call refreshed a subscription that
+	// existed.
+	DeliveryStatus *deliveryStatusResult `json:"deliveryStatus,omitempty"`
+}
+
+// deliveryStatusResult is the deliveryStatus object of SEP-3415. LastError is
+// one of its categories and never anything the endpoint sent. Active is
+// always true, because faucet never suspends a subscription.
+type deliveryStatusResult struct {
+	Active         bool    `json:"active"`
+	LastDeliveryAt string  `json:"lastDeliveryAt,omitempty"`
+	LastError      *string `json:"lastError"`
+	FailedSince    string  `json:"failedSince,omitempty"`
+}
+
+func newDeliveryStatusResult(st DeliveryStatus) *deliveryStatusResult {
+	res := &deliveryStatusResult{Active: true}
+	if !st.LastDeliveryAt.IsZero() {
+		res.LastDeliveryAt = st.LastDeliveryAt.UTC().Format(time.RFC3339)
+	}
+	if st.LastError != "" {
+		lastError := string(st.LastError)
+		res.LastError = &lastError
+	}
+	if !st.FailedSince.IsZero() {
+		res.FailedSince = st.FailedSince.UTC().Format(time.RFC3339)
+	}
+	return res
 }
 
 type eventsUnsubscribeResult struct {
@@ -217,14 +251,18 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 	}
 	logger.Info(ctx, "subscribed",
 		slog.F("login", principal.Login), slog.F("subscription", key.ID()), slog.F("expires_at", row.ExpiresAt))
-	return &eventsSubscribeResult{
+	result := &eventsSubscribeResult{
 		ResultType:    resultComplete,
 		ID:            key.ID(),
 		RefreshBefore: row.ExpiresAt.UTC().Format(time.RFC3339),
 		Cursor:        encodeCursor(row.Cursor),
 		// A row that kept its own cursor did not restart, so nothing was skipped.
 		Truncated: truncated && row.Cursor == start,
-	}, nil
+	}
+	if row.UpdatedAt.After(row.CreatedAt) {
+		result.DeliveryStatus = newDeliveryStatusResult(row.Status)
+	}
+	return result, nil
 }
 
 func (s *Service) unsubscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *subscriptionParams) (*eventsUnsubscribeResult, error) {

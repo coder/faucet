@@ -25,7 +25,9 @@ type cronRoutes struct {
 	secret    []byte
 	svc       *faucet.Service
 	retention time.Duration
-	// redelivers says whether the service has redelivery.
+	// delivers and redelivers say whether the service has webhook delivery and
+	// redelivery.
+	delivers   bool
 	redelivers bool
 	clock      quartz.Clock
 	logger     slog.Logger
@@ -33,6 +35,7 @@ type cronRoutes struct {
 
 func (c cronRoutes) mount(r chi.Router) {
 	r.Get("/cron/purge", c.guard(c.purge))
+	r.Get("/cron/deliver", c.guard(c.deliver))
 	r.Get("/cron/redeliver", c.guard(c.redeliver))
 }
 
@@ -70,6 +73,30 @@ func (c cronRoutes) purge(w http.ResponseWriter, r *http.Request) {
 		Deleted       int64 `json:"deleted"`
 		PurgedThrough int64 `json:"purged_through"`
 	}{res.Deleted, res.PurgedThrough})
+}
+
+func (c cronRoutes) deliver(w http.ResponseWriter, r *http.Request) {
+	if !c.delivers {
+		http.Error(w, "delivery is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	res, err := c.svc.DeliverDue(r.Context())
+	if err != nil {
+		c.logger.Error(r.Context(), "cron delivery failed", slog.Error(err))
+		http.Error(w, "delivery failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, struct {
+		Enqueued   int                         `json:"enqueued"`
+		Gaps       int                         `json:"gaps"`
+		Claimed    int                         `json:"claimed"`
+		Sent       int                         `json:"sent"`
+		Delivered  int                         `json:"delivered"`
+		Retried    int                         `json:"retried"`
+		GaveUp     map[faucet.GiveUpReason]int `json:"gave_up"`
+		Superseded int                         `json:"superseded"`
+		Incomplete bool                        `json:"incomplete"`
+	}{res.Enqueued, res.Gaps, res.Claimed, res.Sent, res.Delivered, res.Retried, res.GaveUp, res.Superseded, res.Incomplete})
 }
 
 func (c cronRoutes) redeliver(w http.ResponseWriter, r *http.Request) {

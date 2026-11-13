@@ -248,7 +248,7 @@ func (s *fakeRedeliveryStore) SettleRedeliveries(_ context.Context, req faucet.S
 	return res, nil
 }
 
-func giveUp(res *faucet.SettleResult, guid string, row *fakeRedeliveryRow, reason faucet.GiveUpReason, now time.Time) {
+func giveUp(res *faucet.SettleResult, guid string, row *fakeRedeliveryRow, reason faucet.RedeliveryGiveUpReason, now time.Time) {
 	row.state, row.settledAt = fakeGaveUp, now
 	res.GaveUp = append(res.GaveUp, faucet.GaveUp{GUID: guid, Reason: reason, Asks: row.asks, FirstDeliveredAt: row.firstAt})
 }

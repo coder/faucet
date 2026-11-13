@@ -7,7 +7,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { parseArgs, promisify } from 'node:util';
-import { CALLBACK_ORIGIN, runDir, stateFile } from './runstate.mjs';
+import { CALLBACK_ORIGIN, ENDPOINT_SAYS, runDir, stateFile } from './runstate.mjs';
 
 const execFileAsync = promisify(execFile);
 const FAUCET_STOP_MS = 20_000;
@@ -252,6 +252,16 @@ function checkSignature(secret, headers, body) {
   return matches ? 'valid' : 'invalid';
 }
 
+const EVENT_STATUSES = {
+  ok: [200],
+  gone: [410],
+  toolarge: [413],
+  fail500: [500],
+  'fail-once': [500, 200],
+  'gone-once': [410, 200],
+  'toolarge-once': [413, 200],
+};
+
 // The receiver plays the endpoint behind a callback URL. A callback URL is /hook/<behavior>/<id>, and the behavior says how
 // the endpoint answers a verification request:
 //   echo      checks the signature with the secret that the test registered for <id> and answers the nonce, or 401
@@ -261,11 +271,18 @@ function checkSignature(secret, headers, body) {
 //   redirect  answers 302 to /hook/internal/<id>, which answers the nonce like an internal service would
 //   slow      never answers
 //   large     answers the nonce and then 4 KiB of spaces
+// The delivery behaviors answer a verification request like echo, and answer an event request (a body with no type) by the
+// statuses of the behavior, one per request for the callback id, the last one for every request after that. A 200 needs a
+// valid signature and is 401 without one:
+//   ok 200   gone 410   toolarge 413   fail500 500   fail-once 500, then 200   gone-once 410, then 200   toolarge-once 413, then 200
+//   redirect-events   302 to /hook/internal/<id>
+// The answers to events, except the redirect, have the body ENDPOINT_SAYS, which no log or table of faucet may hold.
 // It records every request. A test registers secrets and reads the records through /__receiver/, which needs `control`.
 // The records hold the signature headers and never a secret.
 async function startReceiver({ control }) {
   const secrets = new Map();
   const requests = [];
+  const eventRequests = new Map();
   const reply = (res, status, body = '', headers = {}) => {
     res.writeHead(status, headers);
     res.end(body);
@@ -298,16 +315,30 @@ async function startReceiver({ control }) {
       const signature = checkSignature(secrets.get(id), req.headers, body);
       requests.push({ id, behavior, method: req.method, path: url.pathname, headers: req.headers, body: text, signature });
       let challenge = '';
+      let verification = false;
       try {
-        challenge = JSON.parse(text).challenge ?? '';
+        const parsed = JSON.parse(text);
+        challenge = parsed.challenge ?? '';
+        verification = parsed.type === 'verification';
       } catch {
         // A body that is not JSON has no challenge to answer.
       }
       const json = { 'Content-Type': 'application/json' };
       const answer = JSON.stringify({ challenge });
+      const echo = () => (signature === 'valid' ? reply(res, 200, `${answer}\n`, json) : reply(res, 401, '{}', json));
+      const statuses = Object.hasOwn(EVENT_STATUSES, behavior) ? EVENT_STATUSES[behavior] : undefined;
+      if (statuses !== undefined || behavior === 'redirect-events') {
+        if (verification) return echo();
+        if (behavior === 'redirect-events') return reply(res, 302, '', { Location: `/hook/internal/${id}` });
+        const seen = eventRequests.get(id) ?? 0;
+        eventRequests.set(id, seen + 1);
+        const status = statuses[Math.min(seen, statuses.length - 1)];
+        const said = JSON.stringify({ said: ENDPOINT_SAYS });
+        return status === 200 && signature !== 'valid' ? reply(res, 401, said, json) : reply(res, status, said, json);
+      }
       switch (behavior) {
         case 'echo':
-          return signature === 'valid' ? reply(res, 200, `${answer}\n`, json) : reply(res, 401, '{}', json);
+          return echo();
         case 'internal':
           return reply(res, 200, answer, json);
         case 'wrong':

@@ -41,6 +41,8 @@ type fakeStore struct {
 	lastID        int64
 	purgeMark     int64
 	subs          map[faucet.SubscriptionKeyHash]faucet.Subscription
+	scanned       map[faucet.SubscriptionKeyHash]int64
+	deliveries    map[fakeDeliveryKey]*fakeDelivery
 }
 
 func (s *fakeStore) InsertEvent(_ context.Context, ev faucet.Event) (faucet.Event, bool, error) {

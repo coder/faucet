@@ -16,14 +16,16 @@ import (
 	"github.com/coder/faucet/faucet"
 )
 
+type subtest struct {
+	name string
+	run  func(t *testing.T, s faucet.Store)
+}
+
 // Run runs the contract against stores returned by newStore. Every call to
 // newStore must return an empty store that does not share state with the
 // others, because the subtests run in parallel.
 func Run(t *testing.T, newStore func(t *testing.T) faucet.Store) {
-	subtests := []struct {
-		name string
-		run  func(t *testing.T, s faucet.Store)
-	}{
+	subtests := []subtest{
 		{"InsertEventIsIdempotentPerDelivery", insertEventIsIdempotentPerDelivery},
 		{"InsertEventValidatesInput", insertEventValidatesInput},
 		{"EventsAfterReturnsIDOrderAndLimit", eventsAfterReturnsIDOrderAndLimit},
@@ -46,6 +48,7 @@ func Run(t *testing.T, newStore func(t *testing.T) faucet.Store) {
 		{"UpsertSubscriptionValidatesInput", upsertSubscriptionValidatesInput},
 		{"DeleteExpiredSubscriptionsDeletesOnlyExpiredRows", deleteExpiredSubscriptionsDeletesOnlyExpiredRows},
 	}
+	subtests = append(subtests, deliverySubtests...)
 	for _, st := range subtests {
 		t.Run(st.name, func(t *testing.T) {
 			t.Parallel()

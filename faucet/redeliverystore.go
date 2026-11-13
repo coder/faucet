@@ -16,18 +16,18 @@ const GitHubDeliveryRetention = 72 * time.Hour
 // a lease that another run has replaced. The run must stop.
 var ErrRedeliveryLeaseLost = xerrors.New("redelivery lease lost")
 
-// GiveUpReason says why Service.Redeliver stopped working on something it
+// RedeliveryGiveUpReason says why Service.Redeliver stopped working on something it
 // could not recover.
-type GiveUpReason string
+type RedeliveryGiveUpReason string
 
 const (
 	// GiveUpLimit means every ask was spent and the delivery was still not stored.
-	GiveUpLimit GiveUpReason = "limit"
+	GiveUpLimit RedeliveryGiveUpReason = "limit"
 	// GiveUpExpired means GitHub's retention ended before the delivery was stored.
-	GiveUpExpired GiveUpReason = "expired"
+	GiveUpExpired RedeliveryGiveUpReason = "expired"
 	// GiveUpGap means a time range of attempts expired before any run read it.
 	// It names no delivery, because the attempts were never read.
-	GiveUpGap GiveUpReason = "gap"
+	GiveUpGap RedeliveryGiveUpReason = "gap"
 )
 
 // FailedAttempt is one attempt of GitHub to deliver an event that faucet
@@ -184,7 +184,7 @@ func (r SettleRequest) Validate() error {
 // GaveUp is a delivery that a settle ended without a recovery.
 type GaveUp struct {
 	GUID             string
-	Reason           GiveUpReason
+	Reason           RedeliveryGiveUpReason
 	Asks             int
 	FirstDeliveredAt time.Time
 }

@@ -156,6 +156,18 @@ export interface SubscriptionRow {
   expires_at: number;
 }
 
+// DeliveryRow is a faucet_deliveries row as Postgres holds it: a delivery that has not ended. Times are epoch milliseconds
+// and lease_until is null while no run holds the delivery. The table has no column for a secret or a URL.
+export interface DeliveryRow {
+  key_hash: string;
+  event_id: number;
+  message_id: string;
+  enqueued_at: number;
+  next_attempt_at: number;
+  attempts: number;
+  lease_until: number | null;
+}
+
 export interface Delivery {
   event?: string;
   delivery?: string;
@@ -335,7 +347,7 @@ export class Faucet {
 
   // cronJob calls GET /cron/<job> the way Vercel Cron does, with the run's cron secret as a bearer token. opts.send says
   // what the request carries instead, as a function of the secret, so that no test names the secret.
-  async cronJob(job: 'purge' | 'redeliver', opts: CronOptions = {}): Promise<Reply> {
+  async cronJob(job: 'purge' | 'deliver' | 'redeliver', opts: CronOptions = {}): Promise<Reply> {
     const send = opts.send ?? ((secret: string): CronCredentials => ({ authorization: `Bearer ${secret}` }));
     const { authorization, query, body } = send(this.#cronSecret);
     const headers = new Headers();
@@ -481,6 +493,34 @@ export class Faucet {
     return Number(await this.sql(query));
   }
 
+  async deliveries(): Promise<DeliveryRow[]> {
+    const ms = (column: string): string => `floor(extract(epoch from ${column}) * 1000)::bigint as ${column}`;
+    const query = `select coalesce(json_agg(t order by event_id, key_hash), '[]') from (
+      select encode(key_hash, 'hex') as key_hash, event_id, message_id, ${ms('enqueued_at')}, ${ms('next_attempt_at')},
+        attempts, ${ms('lease_until')}
+      from faucet_deliveries) t`;
+    return JSON.parse(await this.sql(query)) as DeliveryRow[];
+  }
+
+  // makeDeliveriesDue moves the next attempt of every queued delivery into the past and ends its lease, which is how a test
+  // gets past a backoff of 15 seconds to 6 minutes that it cannot wait out. It returns how many rows it changed.
+  async makeDeliveriesDue(): Promise<number> {
+    const query = `with moved as (update faucet_deliveries set next_attempt_at = now() - interval '1 second', lease_until = null
+      returning 1) select count(*) from moved`;
+    return Number(await this.sql(query));
+  }
+
+  // leaseDeliveries plays a run that claimed every queued delivery and then died before it recorded a result: the lease
+  // ends `seconds` from now (a negative number puts it in the past) and attempts is what the claim left. It returns how many
+  // rows it changed.
+  async leaseDeliveries(seconds: number, attempts: number): Promise<number> {
+    if (!Number.isInteger(seconds)) throw new Error('seconds must be an integer');
+    if (!Number.isInteger(attempts) || attempts < 0) throw new Error('attempts must be a non-negative integer');
+    const query = `with moved as (update faucet_deliveries
+      set lease_until = now() + interval '${seconds} seconds', attempts = ${attempts} returning 1) select count(*) from moved`;
+    return Number(await this.sql(query));
+  }
+
   // openSecret opens the sealed secret of a row with this server's key, or with key when given. It throws when the key or the
   // row's key_hash is not the one that sealed it.
   openSecret(row: SubscriptionRow, key?: Buffer): string {
@@ -562,9 +602,10 @@ export class Receiver {
     this.#control = receiver.control;
   }
 
-  callback(behavior: string, id: string, opts: { port?: number } = {}): string {
+  callback(behavior: string, id: string, opts: { port?: number; query?: string } = {}): string {
     const url = new URL(`${this.#url}/hook/${behavior}/${id}`);
     if (opts.port !== undefined) url.port = String(opts.port);
+    if (opts.query !== undefined) url.search = opts.query;
     return url.toString();
   }
 

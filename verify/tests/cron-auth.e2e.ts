@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
+import { counts, endpoint, eventRequests, paramsFor, parseReply, storeRun, withDeliveryFaucet } from './delivery';
 import { samples } from './payloads';
 import { describe, expect, newDeliveryId, newRepoId, test, type CronOptions, type Faucet } from './support';
+import { subscribed } from './subscriptions';
 
 const run = samples['workflow_run.completed'];
 const OLD_DAYS = 40;
@@ -135,6 +137,44 @@ describe('cron routes', () => {
     expect(right.body).toBe('redelivery is not configured\n');
     expect(purge.status, 'purge does not need the hook settings').toBe(200);
     expect(cron.leaksSecret(right.body)).toBe(false);
+  });
+
+  test('GET /cron/deliver with the right secret on a faucet without webhook mode is 503 and sends nothing', async ({ cron }) => {
+    const reply = await cron.cronJob('deliver');
+
+    expect(reply.status).toBe(503);
+    expect(reply.body).toBe('delivery is not configured\n');
+    expect(cron.leaksSecret(reply.body + JSON.stringify([...reply.headers]))).toBe(false);
+  });
+
+  test('GET /cron/deliver on a faucet with webhook mode sends nothing for a refused request, and what waited for the right secret', async ({ faucet, receiver }) => {
+    await withDeliveryFaucet(faucet, async (started) => {
+      const repoId = newRepoId();
+      const at = await endpoint(receiver, 'ok');
+      await subscribed(started, paramsFor(repoId, at));
+      await storeRun(started, repoId, 9001);
+
+      for (const [title, send] of refused) {
+        const reply = await started.cronJob('deliver', { send });
+        expect(reply.status, title).toBe(401);
+        expect(reply.body, title).toBe('unauthorized\n');
+        expect(started.leaksSecret(reply.body)).toBe(false);
+      }
+      expect(await eventRequests(receiver, at), 'no refused request sent a webhook').toEqual([]);
+      expect(await started.deliveries(), 'and none queued one').toEqual([]);
+
+      expect(parseReply(await started.cronJob('deliver'))).toEqual(counts({ enqueued: 1, claimed: 1, sent: 1, delivered: 1 }));
+      expect(await eventRequests(receiver, at)).toHaveLength(1);
+    });
+  });
+
+  test('a faucet without CRON_SECRET answers /cron/deliver 503 to every request and runs nothing', async ({ faucet }) => {
+    for (const send of [() => ({}), (secret: string) => ({ authorization: `Bearer ${secret}` })]) {
+      const reply = await faucet.cronJob('deliver', { send });
+      expect(reply.status).toBe(503);
+      expect(reply.body).toBe('cron is not configured\n');
+      expect(faucet.leaksSecret(reply.body)).toBe(false);
+    }
   });
 
   test('the app log records the purge and never holds the cron secret', async ({ cron }) => {
