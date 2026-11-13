@@ -53,6 +53,8 @@ export async function storeRun(started: Faucet, repoId: number, runId: number): 
 export interface DeliverReply {
   enqueued: number;
   gaps: number;
+  gaps_sent: number;
+  gaps_failed: number;
   claimed: number;
   sent: number;
   delivered: number;
@@ -64,7 +66,7 @@ export interface DeliverReply {
 
 // counts is the reply of a run that did what over says and nothing else.
 export function counts(over: Partial<DeliverReply> = {}): DeliverReply {
-  return { enqueued: 0, gaps: 0, claimed: 0, sent: 0, delivered: 0, retried: 0, gave_up: {}, superseded: 0, incomplete: false, ...over };
+  return { enqueued: 0, gaps: 0, gaps_sent: 0, gaps_failed: 0, claimed: 0, sent: 0, delivered: 0, retried: 0, gave_up: {}, superseded: 0, incomplete: false, ...over };
 }
 
 export function parseReply(reply: Reply): DeliverReply {
@@ -85,10 +87,36 @@ export interface WebhookBody {
   cursor: string;
 }
 
-// eventRequests are the requests that the endpoint got for events, without the verification request of the handshake.
+// eventRequests are the requests that the endpoint got for events: the ones whose body has no type, which leaves out the
+// verification request of the handshake and the control envelopes.
 export async function eventRequests(receiver: Receiver, at: Endpoint): Promise<ReceivedRequest[]> {
   const all = await receiver.requests(at.id);
-  return all.filter((r) => (JSON.parse(r.body) as { type?: string }).type !== 'verification');
+  return all.filter((r) => (JSON.parse(r.body) as { type?: string }).type === undefined);
+}
+
+// envelopeRequests are the requests that the endpoint got for control envelopes of one type.
+export async function envelopeRequests(receiver: Receiver, at: Endpoint, type: 'gap' | 'terminated'): Promise<ReceivedRequest[]> {
+  const all = await receiver.requests(at.id);
+  return all.filter((r) => (JSON.parse(r.body) as { type?: string }).type === type);
+}
+
+// expectSignedEnvelope checks what every control envelope owes the receiver and returns its body: a signature that Node
+// verified, the headers of Standard Webhooks with a webhook-id of the form msg_<type>_<random>, the subscription's ID and no
+// credential.
+export function expectSignedEnvelope(request: ReceivedRequest, type: 'gap' | 'terminated', subscriptionId: string): Record<string, unknown> {
+  const { headers } = request;
+  expect(request.method).toBe('POST');
+  expect(request.signature, 'the receiver verified the HMAC with Node crypto, with the subscriber secret').toBe('valid');
+  expect(headers['content-type']).toBe('application/json');
+  expect(headers['webhook-id']).toMatch(new RegExp(`^msg_${type}_[A-Za-z0-9_-]{22}$`));
+  expect(Math.abs(Number(headers['webhook-timestamp']) - Date.now() / 1000)).toBeLessThan(60);
+  expect(headers['webhook-signature']).toMatch(SIGNATURE);
+  expect(headers['x-mcp-subscription-id']).toBe(subscriptionId);
+  expect(headers.authorization).toBeUndefined();
+  expect(headers.cookie).toBeUndefined();
+  const body = JSON.parse(request.body) as Record<string, unknown>;
+  expect(body.type).toBe(type);
+  return body;
 }
 
 // expectSigned checks what every request of an event owes the receiver and returns its body: a signature that Node verified,

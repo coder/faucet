@@ -158,6 +158,9 @@ func (s *Store) Purge(ctx context.Context, before time.Time) (faucet.PurgeResult
 	if err := q.LockPurgeMark(ctx); err != nil {
 		return faucet.PurgeResult{}, xerrors.Errorf("lock purge mark: %w", err)
 	}
+	if _, err := q.AdvanceSubscriptionsThatLostNothing(ctx, before); err != nil {
+		return faucet.PurgeResult{}, xerrors.Errorf("advance subscriptions that lose nothing: %w", err)
+	}
 	deleted, err := q.DeleteEventsBefore(ctx, before)
 	if err != nil {
 		return faucet.PurgeResult{}, xerrors.Errorf("delete events: %w", err)
@@ -231,6 +234,18 @@ func (s *Store) DeleteSubscription(ctx context.Context, principal string, key fa
 		return false, xerrors.Errorf("delete subscription: %w", err)
 	}
 	return deleted > 0, nil
+}
+
+func (s *Store) DeleteLiveSubscription(ctx context.Context, principal string, key faucet.SubscriptionKeyHash, now time.Time) (faucet.Subscription, bool, error) {
+	row, err := s.q.DeleteLiveSubscription(ctx, database.DeleteLiveSubscriptionParams{KeyHash: key[:], Principal: principal, Now: now})
+	if xerrors.Is(err, sql.ErrNoRows) {
+		return faucet.Subscription{}, false, nil
+	}
+	if err != nil {
+		return faucet.Subscription{}, false, xerrors.Errorf("delete live subscription: %w", err)
+	}
+	deleted, err := toSubscription(row)
+	return deleted, err == nil, err
 }
 
 func (s *Store) DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (int64, error) {

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -66,6 +67,7 @@ type webhookState struct {
 	verified              *callbackCache
 	client                *http.Client
 	idKey                 []byte
+	terminated            struct{ sent, failed atomic.Uint64 }
 }
 
 func newWebhookState(d WebhookDeps, clock quartz.Clock) (*webhookState, error) {
@@ -206,6 +208,9 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 	}
 	repoID, err := s.authorizeRepo(ctx, logger, principal, "subscribe", req.arguments.Repo)
 	if err != nil {
+		if xerrors.Is(err, ErrNoAccess) {
+			s.endRevokedSubscription(ctx, logger, wh, principal, req)
+		}
 		return nil, accessError(err)
 	}
 	key := NewSubscriptionKeyHash(principal.Login, req.callbackURL, req.eventType.name, req.canonical)

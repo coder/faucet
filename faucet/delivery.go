@@ -46,6 +46,10 @@ type ScanTarget struct {
 	Arguments json.RawMessage
 	// RepoID is the repository the principal could read at the last subscribe.
 	RepoID int64
+	// CallbackURL and SecretEnc are the subscription's, for the gap envelope.
+	// SecretEnc is the sealed secret, never the plaintext.
+	CallbackURL string
+	SecretEnc   []byte
 	// ScannedThrough is the highest event ID the enqueue has read for it.
 	ScannedThrough int64
 	// Pending is the number of deliveries it holds that have not ended.
@@ -198,8 +202,12 @@ type DeliverResult struct {
 	// Enqueued is the deliveries queued for events that the run read.
 	Enqueued int
 	// Gaps is the subscriptions that missed events because a purge deleted
-	// them before the run read them.
-	Gaps int
+	// them before the run read them. Each one gets a gap envelope, once:
+	// GapsSent is the envelopes the endpoint answered with 2xx, and GapsFailed
+	// the ones it did not, with no retry. Gaps is the sum of the two.
+	Gaps       int
+	GapsSent   int
+	GapsFailed int
 	// Claimed is the attempts that the run took. Sent is how many of them made
 	// a request.
 	Claimed int

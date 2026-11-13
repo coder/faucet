@@ -1111,24 +1111,23 @@ func TestSubscribeGrantStaysFromTheFloorToTheCapForAnyInteger(t *testing.T) {
 func TestSubscribeChecksRepositoryAccessAgainOnEveryRenewal(t *testing.T) {
 	t.Parallel()
 
-	h := newWebhookHarness(t)
-	h.subscribe(subscribeTo(repoArgs(), callbackURL, newSecret(t, 32)))
-	granted := h.rows()
+	d := newDeliverHarness(t)
+	ep := d.endpoint("/hook")
+	d.subscribeEndpoint(ep)
+	granted := d.rows()
 
-	h.authz.mu.Lock()
-	delete(h.authz.repos, testRepo)
-	h.authz.mu.Unlock()
-	h.clock.Advance(2 * time.Minute)
+	d.revoke()
+	d.advance(2 * time.Minute)
 
-	rpcErr := h.subscribeError(subscribeTo(repoArgs(), callbackURL, newSecret(t, 32)))
+	rpcErr := d.subscribeError(d.renewalParams(ep, newSecret(t, 32)))
 	require.EqualValues(t, codeForbidden, rpcErr.Code, "a renewal does not reuse the grant of the first subscribe")
-	require.Equal(t, granted, h.rows(), "a refused renewal changes nothing: same expiry, same sealed secret")
+	require.Empty(t, d.rows(), "a renewal that lost access ends the subscription instead of leaving the grant to run out")
 
-	h.authz.mu.Lock()
-	h.authz.repos[testRepo] = repoID
-	h.authz.mu.Unlock()
-	h.subscribe(subscribeTo(repoArgs(), callbackURL, newSecret(t, 32)))
-	require.Greater(t, h.rows()[0].ExpiresAt, granted[0].ExpiresAt, "with access back, the renewal is granted again")
+	d.authz.mu.Lock()
+	d.authz.repos[testRepo] = repoID
+	d.authz.mu.Unlock()
+	d.subscribeEndpoint(ep)
+	require.Greater(t, d.rows()[0].ExpiresAt, granted[0].ExpiresAt, "with access back, the subscribe is granted again")
 }
 
 func TestSubscribeAndUnsubscribeReadMembersByExactName(t *testing.T) {

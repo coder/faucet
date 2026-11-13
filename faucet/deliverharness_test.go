@@ -37,6 +37,8 @@ type hookReceiver struct {
 	respond map[string]func(n int) int
 	delay   time.Duration
 	padded  map[string]bool
+	// envelopes answers a control envelope by path and type, ahead of respond.
+	envelopes map[string]func() int
 }
 
 func newHookReceiver(t *testing.T) *hookReceiver {
@@ -62,6 +64,11 @@ func (r *hookReceiver) serve(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	respond, delay, padded := r.respond[req.URL.Path], r.delay, r.padded[req.URL.Path]
+	var typed struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(body, &typed)
+	envelope := r.envelopes[req.URL.Path+" "+typed.Type]
 	r.mu.Unlock()
 	time.Sleep(delay)
 	if padded {
@@ -69,7 +76,10 @@ func (r *hookReceiver) serve(w http.ResponseWriter, req *http.Request) {
 	}
 
 	status := http.StatusOK
-	if respond != nil {
+	switch {
+	case envelope != nil:
+		status = envelope()
+	case respond != nil:
 		status = respond(n)
 	}
 	if status == http.StatusMovedPermanently {
@@ -84,6 +94,17 @@ func (r *hookReceiver) answer(path string, respond func(n int) int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.respond[path] = respond
+}
+
+// answerEnvelope answers the control envelopes of one type at path, and nothing
+// else, with what respond returns. respond may block.
+func (r *hookReceiver) answerEnvelope(path, kind string, respond func() int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.envelopes == nil {
+		r.envelopes = map[string]func() int{}
+	}
+	r.envelopes[path+" "+kind] = respond
 }
 
 func (r *hookReceiver) padHeaders(path string) {

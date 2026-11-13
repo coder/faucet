@@ -1,7 +1,6 @@
 package faucet
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -85,6 +84,13 @@ type webhookBody struct {
 // the subscription. Every delivery that ends in the call is in the result,
 // delivered or with its reason.
 //
+// A subscription that a purge overtook, one whose unread events were deleted,
+// gets one gap envelope when the call queues its next events. The queueing
+// makes no request: the envelope goes out in the send phase, ahead of the
+// deliveries, on the same workers and under the same deadline. It is one
+// attempt with no retry, and the result counts it as sent or failed. A call
+// that ends before it sends the envelope counts it as failed.
+//
 // Calls may overlap, in one process or in several. A claim gives an attempt to
 // one caller for 30 seconds, and a caller whose claim lapsed records nothing.
 // A call that dies between a claim and its result leaves the delivery to the
@@ -99,9 +105,11 @@ func (s *Service) DeliverDue(ctx context.Context) (DeliverResult, error) {
 	}
 	run := &deliveryRun{svc: s, wh: s.webhook, result: DeliverResult{GaveUp: map[GiveUpReason]int{}}}
 	if err := run.enqueue(ctx); err != nil {
+		run.abandonUnsentGaps(ctx, gapRunFailed)
 		return run.result, run.unlessEnded(ctx, err)
 	}
 	if err := run.sweepExpired(ctx); err != nil {
+		run.abandonUnsentGaps(ctx, gapRunFailed)
 		return run.result, run.unlessEnded(ctx, err)
 	}
 	err := run.send(ctx)
@@ -111,7 +119,7 @@ func (s *Service) DeliverDue(ctx context.Context) (DeliverResult, error) {
 		logger = s.logger.Info
 	}
 	logger(ctx, "deliveries run",
-		slog.F("enqueued", res.Enqueued), slog.F("gaps", res.Gaps), slog.F("claimed", res.Claimed), slog.F("sent", res.Sent),
+		slog.F("enqueued", res.Enqueued), slog.F("gaps", res.Gaps), slog.F("gaps_sent", res.GapsSent), slog.F("gaps_failed", res.GapsFailed), slog.F("claimed", res.Claimed), slog.F("sent", res.Sent),
 		slog.F("delivered", res.Delivered), slog.F("retried", res.Retried), slog.F("gave_up", res.GaveUpTotal()),
 		slog.F("superseded", res.Superseded), slog.F("incomplete", res.Incomplete))
 	return res, err
@@ -123,6 +131,18 @@ type deliveryRun struct {
 
 	mu     sync.Mutex
 	result DeliverResult
+	// gaps are the gap envelopes to send, in the order the enqueue found them.
+	// The enqueue appends and the send phase takes them, so nothing reads the
+	// slice while the other writes it. nextGap is the first one not yet taken.
+	gaps    []queuedGap
+	nextGap atomic.Int64
+}
+
+// queuedGap is a subscription whose enqueue was won and whose read position
+// was below the purge mark. Its envelope is the one that the send phase owes.
+type queuedGap struct {
+	target        ScanTarget
+	purgedThrough int64
 }
 
 func (r *deliveryRun) add(update func(*DeliverResult)) {
@@ -204,17 +224,74 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 		return nil
 	}
 	gap := target.ScannedThrough < page.PurgedThrough
-	if gap {
-		logger.Warn(ctx, "a purge deleted events before the subscription read them",
-			slog.F("scanned_through", target.ScannedThrough), slog.F("purged_through", page.PurgedThrough))
-	}
 	r.add(func(res *DeliverResult) {
 		res.Enqueued += len(e.Deliveries)
 		if gap {
 			res.Gaps++
+			r.gaps = append(r.gaps, queuedGap{target: target, purgedThrough: page.PurgedThrough})
 		}
 	})
 	return nil
+}
+
+const (
+	gapRunEnded  = "run_ended"
+	gapRunFailed = "run_failed"
+)
+
+func (r *deliveryRun) gapLogger(g queuedGap) slog.Logger {
+	return r.svc.logger.With(slog.F("subscription", g.target.KeyHash.ID()),
+		slog.F("scanned_through", g.target.ScannedThrough), slog.F("purged_through", g.purgedThrough))
+}
+
+// sendGaps takes queued gaps until none is left or the run is out of time.
+func (r *deliveryRun) sendGaps(ctx context.Context) {
+	for ctx.Err() == nil && !r.outOfTime(ctx) {
+		i := int(r.nextGap.Add(1)) - 1
+		if i >= len(r.gaps) {
+			return
+		}
+		r.sendGap(ctx, r.gaps[i])
+	}
+}
+
+// sendGap tells a subscription that a purge deleted events before the run read
+// them: one request, no retry, counted and logged once. The cursor is the
+// purge mark. Every event that still exists lies above it, so a client that
+// resumes from it loses none of them, and every watermark that a later event
+// carries is at or above it.
+func (r *deliveryRun) sendGap(ctx context.Context, g queuedGap) {
+	failure := r.wh.sendEnvelope(ctx, r.svc.clock.Now(), envelopeGap, g.target.KeyHash, g.target.CallbackURL, g.target.SecretEnc,
+		gapEnvelope{Type: envelopeGap, Cursor: encodeCursor(g.purgedThrough)})
+	logger := r.gapLogger(g)
+	if failure == "" {
+		logger.Warn(ctx, "a purge deleted events before the subscription read them, the gap envelope was sent")
+	} else {
+		logger.Warn(ctx, "a purge deleted events before the subscription read them, the gap envelope was not delivered", slog.F("reason", failure))
+	}
+	r.add(func(res *DeliverResult) {
+		if failure == "" {
+			res.GapsSent++
+		} else {
+			res.GapsFailed++
+		}
+	})
+}
+
+// abandonUnsentGaps counts the gaps that no worker took as failed, one log line
+// each. Their enqueue is won and moved the read position past the purge mark,
+// so no later run finds them: they are never dropped silently.
+func (r *deliveryRun) abandonUnsentGaps(ctx context.Context, reason string) {
+	first := min(int(r.nextGap.Swap(int64(len(r.gaps)))), len(r.gaps))
+	for _, g := range r.gaps[first:] {
+		r.gapLogger(g).Warn(ctx, "a purge deleted events before the subscription read them, the gap envelope was not sent", slog.F("reason", reason))
+	}
+	if first < len(r.gaps) {
+		r.add(func(res *DeliverResult) {
+			res.GapsFailed += len(r.gaps) - first
+			res.Incomplete = true
+		})
+	}
 }
 
 func (r *deliveryRun) sweepExpired(ctx context.Context) error {
@@ -247,6 +324,7 @@ func (r *deliveryRun) send(ctx context.Context) error {
 	}
 	for range deliverWorkers {
 		wg.Go(func() {
+			r.sendGaps(ctx)
 			for !stopped.Load() {
 				if ctx.Err() != nil || r.outOfTime(ctx) {
 					r.add(func(res *DeliverResult) { res.Incomplete = true })
@@ -274,6 +352,7 @@ func (r *deliveryRun) send(ctx context.Context) error {
 		})
 	}
 	wg.Wait()
+	r.abandonUnsentGaps(ctx, gapRunEnded)
 	return firstErr
 }
 
@@ -396,7 +475,7 @@ func (r *deliveryRun) decide(ctx context.Context, claim DeliveryClaim) attemptOu
 	if err != nil {
 		return attemptOutcome{finish: Finish{Kind: FinishDead, Unreadable: claim.SecretEnc}, reason: GiveUpSecretUnreadable}
 	}
-	status, category := r.post(ctx, claim, headers, body)
+	status, category := r.wh.post(ctx, claim.CallbackURL, claim.Ref.Key.ID(), headers, body)
 	if status == 0 && ctx.Err() != nil {
 		return attemptOutcome{abandoned: true}
 	}
@@ -418,28 +497,6 @@ func buildBody(claim DeliveryClaim, ev Event) ([]byte, attemptOutcome, bool) {
 		return nil, giveUp(GiveUpEventTooLarge), false
 	}
 	return body, attemptOutcome{}, true
-}
-
-// post sends one request and returns the status, or the category of the
-// failure. Nothing the endpoint sent is kept, and the error of the client,
-// which quotes the URL, is dropped.
-func (r *deliveryRun) post(ctx context.Context, claim DeliveryClaim, headers http.Header, body []byte) (status int, category CallbackReason) {
-	reqCtx, cancel := context.WithTimeout(ctx, callbackRequestTimeout+time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, claim.CallbackURL, bytes.NewReader(body))
-	if err != nil {
-		return 0, CallbackConnectionRefused
-	}
-	req.Header = headers
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", deliveryAgent)
-	req.Header.Set(subscriptionIDHeader, claim.Ref.Key.ID())
-	resp, err := r.wh.client.Do(req)
-	if err != nil {
-		return 0, deliveryFailureOf(err)
-	}
-	_ = resp.Body.Close()
-	return resp.StatusCode, ""
 }
 
 // deliveryFailureOf maps an error of the client to a category. A response that
