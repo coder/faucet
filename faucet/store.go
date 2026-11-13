@@ -31,6 +31,11 @@ type Event struct {
 
 // Validate checks the fields a caller supplies to Store.InsertEvent.
 // ID and ReceivedAt are ignored because the store assigns them.
+//
+// Validate accepts any valid JSON without NUL characters. Postgres jsonb
+// rejects a few other values, such as numbers beyond the float64 range or lone
+// UTF-16 surrogates. Data built with encoding/json never contains them, and
+// InsertEvent returns the database error if a caller sends one anyway.
 func (e Event) Validate() error {
 	switch {
 	case e.Source == "":
