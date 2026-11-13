@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"golang.org/x/xerrors"
@@ -32,8 +31,8 @@ func SignWebhook(secret, id string, timestamp time.Time, body []byte) (http.Head
 	}
 	seconds := strconv.FormatInt(timestamp.Unix(), 10)
 	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(id + "." + seconds + "."))
-	mac.Write(body)
+	_, _ = mac.Write([]byte(id + "." + seconds + "."))
+	_, _ = mac.Write(body)
 
 	headers := http.Header{}
 	headers.Set("webhook-id", id)
@@ -43,7 +42,15 @@ func SignWebhook(secret, id string, timestamp time.Time, body []byte) (http.Head
 }
 
 func validMessageID(id string) bool {
-	return id != "" && len(id) <= maxMessageIDBytes && !strings.ContainsFunc(id, func(r rune) bool {
-		return !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-')
-	})
+	if id == "" || len(id) > maxMessageIDBytes {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }

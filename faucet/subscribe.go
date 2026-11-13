@@ -156,7 +156,9 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 	if err != nil {
 		return nil, accessError(err)
 	}
-	if err := wh.verifyCallback(ctx, logger, principal, req.callbackURL); err != nil {
+	key := NewSubscriptionKeyHash(principal.Login, req.callbackURL, req.eventType.name, req.canonical)
+	verification := CallbackRequest{Principal: principal, URL: req.callbackURL, SubscriptionID: key.ID(), secret: req.secret}
+	if err := wh.verifyCallback(ctx, logger, verification); err != nil {
 		return nil, err
 	}
 
@@ -165,7 +167,6 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 	if err != nil {
 		return nil, subscriptionStoreError(ctx, logger, err)
 	}
-	key := NewSubscriptionKeyHash(principal.Login, req.callbackURL, req.eventType.name, req.canonical)
 	sealed, err := sealSecret(wh.aead, req.secret, key[:])
 	if err != nil {
 		logger.Error(ctx, "seal subscriber secret", slog.Error(err))
@@ -254,28 +255,33 @@ func (s *Service) subscriber(ctx context.Context, logger slog.Logger, op string)
 	return p, nil
 }
 
-func (wh *webhookState) verifyCallback(ctx context.Context, logger slog.Logger, p Principal, callbackURL string) error {
-	if wh.verified.verified(p.Login, callbackURL) {
+func (wh *webhookState) verifyCallback(ctx context.Context, logger slog.Logger, req CallbackRequest) error {
+	login := req.Principal.Login
+	if wh.verified.verified(login, req.URL) {
 		return nil
 	}
-	err := wh.callbacks.VerifyCallback(ctx, p, callbackURL)
+	err := wh.callbacks.VerifyCallback(ctx, req)
 	var cbErr *CallbackError
 	switch {
 	case err == nil:
-		wh.verified.remember(p.Login, callbackURL)
+		wh.verified.remember(login, req.URL)
 		return nil
 	case xerrors.As(err, &cbErr) && cbErr.Reason.valid():
-		logger.Info(ctx, "callback not verified", slog.F("login", p.Login), slog.F("reason", string(cbErr.Reason)))
+		logger.Info(ctx, "callback not verified", slog.F("login", login), slog.F("reason", string(cbErr.Reason)))
 		message := cbErr.Message
 		if message == "" {
 			message = "callback endpoint failed verification"
 		}
 		return rpcError(codeCallbackEndpoint, message, map[string]string{"reason": string(cbErr.Reason)})
+	case xerrors.Is(err, ErrCallbackRateLimited):
+		logger.Info(ctx, "callback verification rate limited", slog.F("login", login))
+		return rpcError(codeResourceExhausted, "too many verification requests for this callback host, try again later",
+			map[string]string{"limit": "callbackVerifications"})
 	default:
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		logger.Warn(ctx, "could not verify the callback", slog.F("login", p.Login), slog.Error(err))
+		logger.Warn(ctx, "could not verify the callback", slog.F("login", login), slog.Error(err))
 		return rpcError(jsonrpc.CodeInternalError, "could not verify the callback endpoint, try again", nil)
 	}
 }

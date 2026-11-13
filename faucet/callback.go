@@ -2,6 +2,8 @@ package faucet
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"slices"
@@ -53,15 +55,42 @@ func (e *CallbackError) Error() string {
 	return "callback endpoint failed verification: " + string(e.Reason)
 }
 
+// ErrCallbackRateLimited is what a CallbackVerifier returns when it refuses to
+// contact an endpoint because it already sent too many requests there.
+// events/subscribe answers ResourceExhausted and stores nothing.
+var ErrCallbackRateLimited = xerrors.New("callback verification rate limit reached")
+
+// CallbackRequest is what a CallbackVerifier gets for one callback URL.
+type CallbackRequest struct {
+	Principal Principal
+	// URL is the callback URL in the canonical form that subscribe stores.
+	URL string
+	// SubscriptionID is the id that events/subscribe returns, which a request
+	// to the endpoint carries in X-MCP-Subscription-Id.
+	SubscriptionID string
+	secret         subscriberSecret
+}
+
+// Sign returns the Standard Webhooks headers for a message to the endpoint,
+// signed with the subscriber's secret. The verifier never holds the secret
+// itself, so it cannot log it.
+func (r CallbackRequest) Sign(id string, timestamp time.Time, body []byte) (http.Header, error) {
+	return SignWebhook(string(r.secret), id, timestamp, body)
+}
+
+// Format implements fmt.Formatter so that no verb can print the secret.
+func (r CallbackRequest) Format(f fmt.State, _ rune) {
+	_, _ = fmt.Fprintf(f, "CallbackRequest{Login:%q}", r.Principal.Login)
+}
+
 // CallbackVerifier proves that the endpoint behind a callback URL agrees to
 // receive a principal's deliveries. SEP-3415 requires this before delivery
 // starts, because a client-supplied secret stops forged deliveries and does not
 // stop a victim from being flooded.
 type CallbackVerifier interface {
 	// VerifyCallback returns nil when the endpoint agrees. A *CallbackError
-	// says why it does not. callbackURL is in the canonical form that
-	// subscribe stores.
-	VerifyCallback(ctx context.Context, p Principal, callbackURL string) error
+	// says why it does not, and ErrCallbackRateLimited that it was not asked.
+	VerifyCallback(ctx context.Context, req CallbackRequest) error
 }
 
 type callbackAllowlist struct {
@@ -89,8 +118,8 @@ func NewCallbackAllowlist(origins []string, allowInsecureLoopback bool) (Callbac
 	return list, nil
 }
 
-func (a callbackAllowlist) VerifyCallback(_ context.Context, _ Principal, callbackURL string) error {
-	u, err := url.Parse(callbackURL)
+func (a callbackAllowlist) VerifyCallback(_ context.Context, req CallbackRequest) error {
+	u, err := url.Parse(req.URL)
 	if err != nil {
 		return xerrors.Errorf("parse callback URL: %w", err)
 	}
