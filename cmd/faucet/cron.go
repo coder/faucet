@@ -16,9 +16,15 @@ import (
 )
 
 const (
-	// redeliverLookback is how far back a sweep looks for failed deliveries. The
-	// cron schedule must be shorter, or a failure between two sweeps goes unseen.
-	redeliverLookback = time.Hour
+	// redeliverEvery is the schedule that the README gives for /cron/redeliver.
+	redeliverEvery = 30 * time.Minute
+	// redeliverLookback is how far back a sweep looks. A delivery is asked for
+	// only while its first attempt is inside this window. The last of the
+	// MaxRedeliveriesPerDelivery requests comes less than that many schedules
+	// after the first attempt, and one schedule more covers a sweep that runs
+	// late or not at all. A sweep that runs less often than redeliverEvery
+	// gives up on deliveries that it could still recover.
+	redeliverLookback = (faucet.MaxRedeliveriesPerDelivery + 1) * redeliverEvery
 	// cronTimeout keeps a run inside the server's write deadline.
 	cronTimeout = 25 * time.Second
 )
@@ -92,9 +98,10 @@ func (c cronRoutes) redeliver(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, struct {
 		Examined   int  `json:"examined"`
 		Pending    int  `json:"pending"`
+		GaveUp     int  `json:"gave_up"`
 		Requested  int  `json:"requested"`
 		Incomplete bool `json:"incomplete"`
-	}{res.Examined, res.Pending, res.Requested, res.Incomplete})
+	}{res.Examined, res.Pending, res.GaveUp, res.Requested, res.Incomplete})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

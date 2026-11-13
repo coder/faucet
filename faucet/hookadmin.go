@@ -36,7 +36,12 @@ type HookDelivery struct {
 	StatusCode int
 	// Redelivery is true when this attempt answers a redelivery request. Such
 	// an attempt has its own, later DeliveredAt, so only the attempts with
-	// Redelivery false carry the time at which the event first happened.
+	// Redelivery false carry the time at which the event first happened. A
+	// HookAdmin must set it: Redeliver reads it to find a delivery's first
+	// attempt and to count its redeliveries. When every attempt has Redelivery
+	// false, each one looks like a first attempt, and the limit of
+	// MaxRedeliveriesPerDelivery does not hold, so a delivery that faucet
+	// always rejects is requested again on every call.
 	Redelivery bool
 }
 
@@ -52,8 +57,10 @@ type DeliveryPage struct {
 // A token that can call these two methods can usually also edit or delete the
 // webhook, so an implementation must call nothing else.
 type HookAdmin interface {
-	// ListDeliveries returns one page of delivery attempts, newest first.
-	// cursor is empty for the first page and a DeliveryPage.Next after that.
+	// ListDeliveries returns one page of delivery attempts, newest first. It
+	// must set HookDelivery.Redelivery from the redelivery field that GitHub
+	// returns for each attempt. cursor is empty for the first page and a
+	// DeliveryPage.Next after that.
 	ListDeliveries(ctx context.Context, cursor string) (DeliveryPage, error)
 	// Redeliver asks GitHub to send the attempt with this ID again.
 	Redeliver(ctx context.Context, attemptID int64) error

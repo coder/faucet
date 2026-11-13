@@ -1,11 +1,13 @@
 package faucet_test
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/xerrors"
 
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/sloghuman"
 	"github.com/coder/faucet/faucet"
 	"github.com/coder/quartz"
 )
@@ -311,6 +315,7 @@ func TestRedeliverAsksForADeliveryOnlyWhileItsOriginalIsInTheWindowAndItHasFewRe
 	require.Equal(t, []int64{101, 204}, h.hooks.requested(),
 		"a delivery that has had fewer than MaxRedeliveriesPerDelivery redeliveries is asked for, and the ones with the most are asked for last")
 	require.Equal(t, 2, res.Pending, "a delivery that faucet must not ask for is not pending")
+	require.Equal(t, 2, res.GaveUp, "the delivery with three redeliveries and the one whose first attempt left the window")
 }
 
 func TestRedeliverAsksForDeliveriesThatWereNotRedeliveredBeforeTheOnesThatWere(t *testing.T) {
@@ -339,16 +344,25 @@ func TestRedeliverAsksForDeliveriesThatWereNotRedeliveredBeforeTheOnesThatWere(t
 		"deliveries nobody has redelivered come first, or deliveries that keep failing use up every run")
 }
 
-// githubLike plays GitHub more closely than fakeHookAdmin. It lists the attempts newest first, and a redelivery
-// request adds an attempt with the same GUID, flagged as a redelivery and dated when it happens. The attempt succeeds,
-// and faucet stores the event, only for the GUIDs in fixable.
+const (
+	documentedEvery = 30 * time.Minute
+	// documentedWindow is how far back a host that calls Redeliver every documentedEvery looks.
+	documentedWindow = (faucet.MaxRedeliveriesPerDelivery + 1) * documentedEvery
+)
+
+// githubLike plays GitHub more closely than fakeHookAdmin. It lists the attempts that have happened, newest first,
+// and a redelivery request adds an attempt with the same GUID, flagged as a redelivery and dated when it happens.
+// Faucet answers 503 and stores nothing until downUntil. After that the attempt succeeds, and faucet stores the event,
+// for the GUIDs in fixable. Faucet answers 400 for the others, as it does for a payload it cannot read.
 type githubLike struct {
-	mu       sync.Mutex
-	clock    quartz.Clock
-	store    *fakeStore
-	attempts []faucet.HookDelivery
-	fixable  map[string]bool
-	asked    map[string]int
+	mu        sync.Mutex
+	clock     quartz.Clock
+	store     *fakeStore
+	attempts  []faucet.HookDelivery
+	fixable   map[string]bool
+	downUntil time.Time
+	asked     map[string]int
+	logs      *bytes.Buffer
 }
 
 func (g *githubLike) add(guid string, at time.Time, status int, redelivery bool) {
@@ -360,7 +374,12 @@ func (g *githubLike) add(guid string, at time.Time, status int, redelivery bool)
 func (g *githubLike) ListDeliveries(_ context.Context, cursor string) (faucet.DeliveryPage, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	sorted := slices.Clone(g.attempts)
+	var sorted []faucet.HookDelivery
+	for _, d := range g.attempts {
+		if !d.DeliveredAt.After(g.clock.Now()) {
+			sorted = append(sorted, d)
+		}
+	}
 	slices.SortFunc(sorted, func(a, b faucet.HookDelivery) int {
 		return cmp.Or(b.DeliveredAt.Compare(a.DeliveredAt), cmp.Compare(b.ID, a.ID))
 	})
@@ -389,56 +408,71 @@ func (g *githubLike) Redeliver(ctx context.Context, attemptID int64) error {
 			continue
 		}
 		g.asked[d.GUID]++
-		if !g.fixable[d.GUID] {
-			g.add(d.GUID, g.clock.Now(), 400, true)
-			return nil
+		now := g.clock.Now()
+		switch {
+		case now.Before(g.downUntil):
+			g.add(d.GUID, now, 503, true)
+		case !g.fixable[d.GUID]:
+			g.add(d.GUID, now, 400, true)
+		default:
+			_, _, err := g.store.InsertEvent(ctx, faucet.Event{
+				Source: "github", DeliveryID: d.GUID, Type: "pr.closed", RepoID: repoID, Data: []byte(`{"merged":true}`),
+			})
+			if err != nil {
+				return err
+			}
+			g.add(d.GUID, now, 200, true)
 		}
-		_, _, err := g.store.InsertEvent(ctx, faucet.Event{
-			Source: "github", DeliveryID: d.GUID, Type: "pr.closed", RepoID: repoID, Data: []byte(`{"merged":true}`),
-		})
-		if err != nil {
-			return err
-		}
-		g.add(d.GUID, g.clock.Now(), 200, true)
 		return nil
 	}
 	return xerrors.Errorf("no attempt %d", attemptID)
+}
+
+func (g *githubLike) stored(t *testing.T, guid string) bool {
+	t.Helper()
+	stored, err := g.store.StoredDeliveries(context.Background(), []string{guid})
+	require.NoError(t, err)
+	return len(stored) == 1
 }
 
 func newGitHubLike(t *testing.T) (*faucet.Service, *githubLike, *quartz.Mock) {
 	t.Helper()
 	clock := quartz.NewMock(t)
 	store := &fakeStore{now: func() time.Time { return clock.Now() }}
-	hooks := &githubLike{clock: clock, store: store, fixable: map[string]bool{}, asked: map[string]int{}}
+	logs := &bytes.Buffer{}
+	hooks := &githubLike{clock: clock, store: store, fixable: map[string]bool{}, asked: map[string]int{}, logs: logs}
 	deps := testDeps(store)
 	deps.Clock = clock
 	deps.HookAdmin = hooks
+	deps.Logger = slog.Make(sloghuman.Sink(logs))
 	svc, err := faucet.New(deps)
 	require.NoError(t, err)
 	return svc, hooks, clock
 }
 
-func sweepEvery(t *testing.T, svc *faucet.Service, clock *quartz.Mock, every, until time.Duration, before func(elapsed time.Duration)) {
+// sweepEvery calls Redeliver with the given window every `every` for `count` calls, and returns the results. before runs
+// ahead of each call with its number.
+func sweepEvery(t *testing.T, svc *faucet.Service, clock *quartz.Mock, every, window time.Duration, count int, before func(i int)) []faucet.RedeliverResult {
 	t.Helper()
-	for elapsed := time.Duration(0); elapsed <= until; elapsed += every {
+	results := make([]faucet.RedeliverResult, 0, count)
+	for i := range count {
 		if before != nil {
-			before(elapsed)
+			before(i)
 		}
-		_, err := svc.Redeliver(context.Background(), clock.Now().Add(-time.Hour))
+		res, err := svc.Redeliver(context.Background(), clock.Now().Add(-window))
 		require.NoError(t, err)
+		results = append(results, res)
 		clock.Advance(every).MustWait(context.Background())
 	}
+	return results
 }
 
 func TestRedeliverStopsAskingForADeliveryThatFaucetKeepsRejecting(t *testing.T) {
 	t.Parallel()
 
-	for name, tc := range map[string]struct {
-		every time.Duration
-		asks  int
-	}{
-		"a sweep every 5 minutes asks as many times as the limit":                  {5 * time.Minute, faucet.MaxRedeliveriesPerDelivery},
-		"a sweep every 30 minutes asks until the original attempt leaves the hour": {30 * time.Minute, 2},
+	for name, every := range map[string]time.Duration{
+		"a sweep every 5 minutes":  5 * time.Minute,
+		"a sweep every 30 minutes": documentedEvery,
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -446,11 +480,93 @@ func TestRedeliverStopsAskingForADeliveryThatFaucetKeepsRejecting(t *testing.T) 
 			svc, hooks, clock := newGitHubLike(t)
 			hooks.add("always-400", clock.Now().Add(-5*time.Minute), 400, false)
 
-			sweepEvery(t, svc, clock, tc.every, 6*time.Hour, nil)
+			sweepEvery(t, svc, clock, every, documentedWindow, int(6*time.Hour/every), nil)
 
-			require.Equal(t, tc.asks, hooks.asked["always-400"], "each redelivery is a new attempt with a new time, so the window alone never ends it")
+			require.Equal(t, faucet.MaxRedeliveriesPerDelivery, hooks.asked["always-400"],
+				"each redelivery is a new attempt with a new time, so the window alone never ends it")
 		})
 	}
+}
+
+func TestRedeliverCountsAndLogsEveryGiveUpAtTheDocumentedSchedule(t *testing.T) {
+	t.Parallel()
+
+	svc, hooks, clock := newGitHubLike(t)
+	hooks.add("always-400", clock.Now().Add(-5*time.Minute), 400, false)
+
+	results := sweepEvery(t, svc, clock, documentedEvery, documentedWindow, 8, nil)
+
+	type counts struct{ pending, gaveUp, requested int }
+	var got []counts
+	for _, r := range results {
+		got = append(got, counts{r.Pending, r.GaveUp, r.Requested})
+	}
+	require.Equal(t, []counts{
+		{1, 0, 1}, {1, 0, 1}, {1, 0, 1}, // three redeliveries
+		{0, 1, 0}, // the limit is reached while the first attempt is inside the window
+		{0, 1, 0}, // the first attempt has left the window, and the three redeliveries are still in it
+		{0, 1, 0}, // the first redelivery has left the window too, so fewer than three remain
+		{0, 1, 0},
+		{0, 0, 0}, // no attempt is inside the window any more
+	}, got, "a delivery is asked for, then counted as given up for as long as an attempt of it is visible, and never dropped silently")
+	require.Equal(t, 4, strings.Count(hooks.logs.String(), "redelivery gave up"))
+	require.Contains(t, hooks.logs.String(), "reason=limit")
+	require.Contains(t, hooks.logs.String(), "reason=window")
+}
+
+func TestRedeliverRecoversADeliveryThatFailedDuringAnOutage(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		outage    time.Duration
+		recovered bool
+	}{
+		"an outage of 35 minutes recovers on the third request":        {35 * time.Minute, true},
+		"an outage of 100 minutes is given up on after three requests": {100 * time.Minute, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, hooks, clock := newGitHubLike(t)
+			t0 := clock.Now()
+			hooks.fixable["G"] = true
+			hooks.downUntil = t0.Add(tc.outage - time.Minute)
+			hooks.add("G", t0.Add(-time.Minute), 503, false)
+
+			results := sweepEvery(t, svc, clock, documentedEvery, documentedWindow, 8, nil)
+
+			require.Equal(t, 3, hooks.asked["G"])
+			require.Equal(t, tc.recovered, hooks.stored(t, "G"))
+			gaveUp := 0
+			for _, r := range results {
+				gaveUp += r.GaveUp
+			}
+			if tc.recovered {
+				require.Zero(t, gaveUp)
+				require.NotContains(t, hooks.logs.String(), "redelivery gave up")
+			} else {
+				require.Positive(t, gaveUp, "a delivery that is lost is counted")
+				require.Contains(t, hooks.logs.String(), "redelivery gave up")
+			}
+		})
+	}
+}
+
+func TestRedeliverCountsAGiveUpWhenTheFirstAttemptLeftTheWindow(t *testing.T) {
+	t.Parallel()
+
+	svc, hooks, clock := newGitHubLike(t)
+	t0 := clock.Now()
+	hooks.fixable["G"] = true
+	hooks.downUntil = t0.Add(34 * time.Minute)
+	hooks.add("G", t0.Add(-time.Minute), 503, false)
+
+	results := sweepEvery(t, svc, clock, documentedEvery, time.Hour, 3, nil)
+
+	require.Equal(t, 0, results[0].GaveUp)
+	require.Equal(t, 1, results[2].GaveUp, "at t0+60m the first attempt is an hour old and G has had two redeliveries")
+	require.False(t, hooks.stored(t, "G"))
+	require.Contains(t, hooks.logs.String(), "reason=window")
 }
 
 func TestRedeliverRecoversAnOrdinaryFailureBesideDeliveriesThatFaucetKeepsRejecting(t *testing.T) {
@@ -464,16 +580,52 @@ func TestRedeliverRecoversAnOrdinaryFailureBesideDeliveriesThatFaucetKeepsReject
 	}
 	hooks.fixable["ordinary"] = true
 
-	sweepEvery(t, svc, clock, 30*time.Minute, 3*time.Hour, func(elapsed time.Duration) {
-		if elapsed == time.Hour {
+	sweepEvery(t, svc, clock, documentedEvery, documentedWindow, 7, func(i int) {
+		if i == 2 {
 			hooks.add("ordinary", clock.Now().Add(-20*time.Minute), 500, false)
 		}
 	})
 
-	stored, err := hooks.store.StoredDeliveries(context.Background(), []string{"ordinary"})
-	require.NoError(t, err)
-	require.Equal(t, []string{"ordinary"}, stored, "a delivery that faucet rejects must not use up the requests that an ordinary failure needs")
+	require.True(t, hooks.stored(t, "ordinary"), "a delivery that faucet rejects must not use up the requests that an ordinary failure needs")
 	for guid, asks := range hooks.asked {
 		require.LessOrEqual(t, asks, faucet.MaxRedeliveriesPerDelivery, guid)
+	}
+}
+
+// A run reads the newest MaxRedeliverPages*100 attempts and keeps no state. The n-th request for a delivery needs its
+// first attempt among them, and it comes less than n sweeps after that attempt. So the third request is safe while the
+// hook records at most 1000 / (3 * 30 minutes) = 666 attempts an hour, and the first request while it records at most
+// 1000 / 30 minutes = 2000 an hour.
+func TestRedeliverNeedsTheFirstAttemptAmongTheNewestThousand(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		perHour   int
+		recovered bool
+	}{
+		"600 attempts an hour, below 666":  {600, true},
+		"1500 attempts an hour, above 666": {1500, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, hooks, clock := newGitHubLike(t)
+			t0 := clock.Now()
+			spacing := time.Hour / time.Duration(tc.perHour)
+			for i := range 4 * tc.perHour {
+				hooks.add(fmt.Sprintf("ok-%d", i), t0.Add(-time.Hour).Add(time.Duration(i)*spacing), 200, false)
+			}
+			hooks.fixable["G"] = true
+			hooks.downUntil = t0.Add(34 * time.Minute)
+			hooks.add("G", t0.Add(-time.Minute), 503, false)
+
+			results := sweepEvery(t, svc, clock, documentedEvery, documentedWindow, 4, nil)
+
+			require.Equal(t, tc.recovered, hooks.stored(t, "G"))
+			require.True(t, results[2].Incomplete, "at t0+60m the window holds more than 1000 attempts, and the result says that it was not read to its end")
+			if !tc.recovered {
+				require.Contains(t, hooks.logs.String(), "redelivery gave up", "a delivery that falls out of view is counted as given up, not dropped silently")
+			}
+		})
 	}
 }
