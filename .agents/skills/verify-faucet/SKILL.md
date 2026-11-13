@@ -96,7 +96,7 @@ The runner stops the app it started, and `close_session` stops the one a session
 
 Wait ten seconds after a kill, then run `ls -d "${TMPDIR:-/tmp}"/faucet-verify-*`. A directory you know is yours (the port is in its name) that is still listed, `<dir>` below, needs these steps in order, with `ps -eo pid,args | grep -F '<text>' | grep -v grep` to find a pid:
 
-1. Find `node app.mjs --port <port>` and send that pid SIGTERM (`kill <pid>`). It tears the stack down itself.
+1. Find `node app.mjs --port <port>` and send that pid SIGTERM (`kill <pid>`). It tears the stack down itself. A stack started with `--detach` outlives its launcher by design, so this is also how it stops.
 2. Only when no such process is left: find `<dir>/faucet` and `kill` that pid, run `pg_ctl -D <dir>/pgdata stop -m fast` (from the PostgreSQL bin directory), then delete that one directory.
 
 Keep `.e2e/report.json`, `.e2e/results/`, `.e2e/proof/` and `.e2e/logs/app.log`. That is the proof, and all of it is gitignored.
