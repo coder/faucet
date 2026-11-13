@@ -112,6 +112,33 @@ func TestDeliverDueMatchesTheSHAWhateverItsCase(t *testing.T) {
 	require.Empty(t, d.rcv.requests("/other"), "another SHA matches nothing")
 }
 
+func TestDeliverDueGivesAReplayOfAnEventTheMessageIDItHadBefore(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	ep := d.endpoint("/hook")
+	d.subscribeEndpoint(ep)
+	d.advance(time.Second)
+	ev := d.newRunEvent(7)
+	require.Equal(t, 1, d.deliverDue().Delivered)
+
+	d.advance(time.Second)
+	require.Nil(t, d.unsubscribe(ep.args, d.rcv.url(ep.path)))
+	d.advance(time.Second)
+	again := subscribeTo(ep.args, d.rcv.url(ep.path), ep.secret)
+	again.Cursor = cursorOf(fmt.Sprintf("v1.%d", ev.ID-1))
+	d.subscribe(again)
+	d.advance(time.Second)
+	require.Equal(t, 1, d.deliverDue().Delivered, "a subscribe from an older cursor sends the event again")
+
+	requests := d.rcv.requests("/hook")
+	require.Len(t, requests, 2)
+	require.Equal(t, requests[0].messageID(), requests[1].messageID(),
+		"the same subscription and event keep one webhook-id, so a receiver that deduplicates on it drops the replay")
+	require.Equal(t, requests[0].body(t).EventID, requests[1].body(t).EventID)
+	require.True(t, requests[1].signatureValid(ep.secret))
+}
+
 func TestDeliverDueBodyCursorIsTheWatermark(t *testing.T) {
 	t.Parallel()
 
@@ -277,6 +304,24 @@ func TestDeliverDueRetriesTheOtherAnswersAndFollowsNoRedirect(t *testing.T) {
 			require.Equal(t, tc.category, *refreshed.LastError, "the category of the failure, and nothing the hookEndpoint sent")
 		})
 	}
+}
+
+func TestDeliverDueCountsAnAnswerWithOversizedHeadersAsAServerError(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	ep := d.endpoint("/hook")
+	d.subscribeEndpoint(ep)
+	d.advance(time.Second)
+	d.rcv.padHeaders(ep.path)
+
+	d.newRunEvent()
+	res := d.deliverDue()
+	require.Equal(t, 1, res.Retried, "the client refuses headers past 16 KiB, so the attempt fails")
+	d.advance(time.Second)
+	status := d.refreshStatus(ep)
+	require.NotNil(t, status)
+	require.Equal(t, "http_5xx", *status.LastError, "and the category blames the endpoint, as it does for a body that is too large")
 }
 
 func TestDeliverDueGivesUpWhenTheWindowHasPassed(t *testing.T) {
@@ -581,6 +626,25 @@ func TestDeliverDueQueuesNoMoreThanTheCapAndLosesNothing(t *testing.T) {
 		ok[g.messageID()] = true
 	}
 	require.Len(t, ok, events, "every event reached the hookEndpoint")
+}
+
+func TestDeliverDueFillsOnlyTheSlotsThatAreLeftUnderTheCap(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	d.subscribeEndpoint(d.endpoint("/hook"))
+	d.advance(time.Second)
+	d.rcv.answer("/hook", always(http.StatusInternalServerError))
+	for range faucet.MaxPendingDeliveries - 1 {
+		d.newRunEvent()
+	}
+	require.Equal(t, faucet.MaxPendingDeliveries-1, d.deliverDue().Enqueued)
+
+	for range 3 {
+		d.newRunEvent()
+	}
+	d.advance(time.Second)
+	require.Equal(t, 1, d.deliverDue().Enqueued, "99 are waiting, so one more event fits and the other two stay in the log")
 }
 
 func TestDeliverDueStopsAtItsLimits(t *testing.T) {

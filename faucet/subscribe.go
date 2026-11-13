@@ -65,6 +65,7 @@ type webhookState struct {
 	allowInsecureLoopback bool
 	verified              *callbackCache
 	client                *http.Client
+	idKey                 []byte
 }
 
 func newWebhookState(d WebhookDeps, clock quartz.Clock) (*webhookState, error) {
@@ -82,7 +83,7 @@ func newWebhookState(d WebhookDeps, clock quartz.Clock) (*webhookState, error) {
 	if client == nil {
 		client = NewHTTPClient(HTTPClientOptions{AllowInsecureLoopback: d.AllowInsecureLoopback})
 	}
-	return &webhookState{aead: aead, callbacks: d.Callbacks, allowInsecureLoopback: d.AllowInsecureLoopback, verified: newCallbackCache(clock), client: client}, nil
+	return &webhookState{aead: aead, callbacks: d.Callbacks, allowInsecureLoopback: d.AllowInsecureLoopback, verified: newCallbackCache(clock), client: client, idKey: d.Key.messageIDKey()}, nil
 }
 
 // subscriptionParams holds the params of events/subscribe and

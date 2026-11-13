@@ -36,11 +36,12 @@ type hookReceiver struct {
 	got     []hookRequest
 	respond map[string]func(n int) int
 	delay   time.Duration
+	padded  map[string]bool
 }
 
 func newHookReceiver(t *testing.T) *hookReceiver {
 	t.Helper()
-	r := &hookReceiver{t: t, respond: map[string]func(int) int{}}
+	r := &hookReceiver{t: t, respond: map[string]func(int) int{}, padded: map[string]bool{}}
 	r.server = httptest.NewServer(http.HandlerFunc(r.serve))
 	t.Cleanup(r.server.Close)
 	return r
@@ -60,9 +61,12 @@ func (r *hookReceiver) serve(w http.ResponseWriter, req *http.Request) {
 			n++
 		}
 	}
-	respond, delay := r.respond[req.URL.Path], r.delay
+	respond, delay, padded := r.respond[req.URL.Path], r.delay, r.padded[req.URL.Path]
 	r.mu.Unlock()
 	time.Sleep(delay)
+	if padded {
+		w.Header().Set("X-Padding", strings.Repeat("x", 20<<10))
+	}
 
 	status := http.StatusOK
 	if respond != nil {
@@ -80,6 +84,12 @@ func (r *hookReceiver) answer(path string, respond func(n int) int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.respond[path] = respond
+}
+
+func (r *hookReceiver) padHeaders(path string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.padded[path] = true
 }
 
 func always(status int) func(int) int { return func(int) int { return status } }

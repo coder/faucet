@@ -420,6 +420,8 @@ func finishDeliveryNeedsTheCurrentAttempt(t *testing.T, s faucet.Store) {
 		res := r.finish(stale, r.now, faucet.Finish{Kind: faucet.FinishDelivered})
 		require.False(t, res.Accepted, "attempt %d is not the current one", attempt)
 		require.Zero(t, res.Removed)
+		res = r.finish(stale, r.now, faucet.Finish{Kind: faucet.FinishRetry, RetryAt: r.now.Add(time.Hour), Failure: faucet.CallbackTimeout})
+		require.False(t, res.Accepted, "a late retry of attempt %d does not move the lease or the next attempt", attempt)
 	}
 	unclaimed := claim.Ref
 	unclaimed.Attempt = 0

@@ -3,11 +3,13 @@ package faucet
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,6 +53,15 @@ var ErrNoWebhook = xerrors.New("webhook delivery is not configured")
 // of the delivery, not the GitHub delivery ID that events/poll uses, so a
 // receiver can deduplicate on either and a delivery to two subscriptions has
 // two IDs. cursor is the watermark that SEP-3415 describes.
+//
+// The webhook-id of a subscription and an event is an HMAC under a key that
+// the operator holds, over the subscription's key hash and the event's stored
+// ID. It has the entropy that SEP-3415 asks for and is the same on every retry,
+// as the SEP requires. It is also the same when a subscription lapses and is
+// made again and the event is sent anew, so a receiver that deduplicates on it
+// drops what it already processed. It is not derived from the upstream eventId,
+// which the SEP forbids, and nobody without the key can compute it. An
+// operator who changes the key gives up the replay match once.
 type webhookBody struct {
 	EventID   string          `json:"eventId"`
 	Name      string          `json:"name"`
@@ -183,11 +194,7 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 	}
 	e := Enqueue{Key: target.KeyHash, ExpectedScannedThrough: target.ScannedThrough, NewScannedThrough: page.Next}
 	for _, ev := range page.Events {
-		id, err := newMessageID()
-		if err != nil {
-			return err
-		}
-		e.Deliveries = append(e.Deliveries, NewDelivery{EventID: ev.ID, MessageID: id})
+		e.Deliveries = append(e.Deliveries, NewDelivery{EventID: ev.ID, MessageID: r.wh.messageID(target.KeyHash, ev.ID)})
 	}
 	won, err := s.store.EnqueueDeliveries(ctx, now, e)
 	if err != nil {
@@ -208,14 +215,6 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 		}
 	})
 	return nil
-}
-
-func newMessageID() (string, error) {
-	b := make([]byte, messageIDEntropy)
-	if _, err := rand.Read(b); err != nil {
-		return "", xerrors.Errorf("read random bytes: %w", err)
-	}
-	return messageIDPrefix + base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 func (r *deliveryRun) sweepExpired(ctx context.Context) error {
@@ -444,10 +443,12 @@ func (r *deliveryRun) post(ctx context.Context, claim DeliveryClaim, headers htt
 }
 
 // deliveryFailureOf maps an error of the client to a category. A response that
-// the client refuses to read is the endpoint's fault, so it counts as a server
-// error.
+// the client refuses to read, one with a body past 64 KiB or headers past 16
+// KiB, is the endpoint's fault, so it counts as a server error. The transport
+// has no error value for the headers, so the check reads its text and keeps
+// nothing of it.
 func deliveryFailureOf(err error) CallbackReason {
-	if xerrors.Is(err, ErrResponseTooLarge) {
+	if xerrors.Is(err, ErrResponseTooLarge) || strings.Contains(err.Error(), "response headers exceeded") {
 		return CallbackHTTP5xx
 	}
 	return callbackReasonOf(err)
@@ -484,4 +485,12 @@ func classify(claim DeliveryClaim, now time.Time, status int, category CallbackR
 		out.finish = Finish{Kind: FinishRetry, RetryAt: retryAt, Failure: out.category}
 	}
 	return out
+}
+
+// messageID is the webhook-id of the delivery of one event to one subscription.
+func (w *webhookState) messageID(key SubscriptionKeyHash, eventID int64) string {
+	mac := hmac.New(sha256.New, w.idKey)
+	_, _ = mac.Write(key[:])
+	_, _ = mac.Write([]byte(strconv.FormatInt(eventID, 10)))
+	return messageIDPrefix + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:messageIDEntropy])
 }

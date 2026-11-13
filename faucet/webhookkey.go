@@ -3,7 +3,9 @@ package faucet
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 
 	"golang.org/x/xerrors"
@@ -37,6 +39,14 @@ func NewWebhookKey(b []byte) (WebhookKey, error) {
 // Format implements fmt.Formatter so that no verb can print the key.
 func (WebhookKey) Format(f fmt.State, _ rune) {
 	_, _ = fmt.Fprint(f, "WebhookKey{}")
+}
+
+// messageIDKey is the key of the webhook-ids, kept apart from the key that seals
+// secrets.
+func (k WebhookKey) messageIDKey() []byte {
+	mac := hmac.New(sha256.New, k.key[:])
+	_, _ = mac.Write([]byte("faucet webhook-id v1"))
+	return mac.Sum(nil)
 }
 
 func (k WebhookKey) aead() (cipher.AEAD, error) {
