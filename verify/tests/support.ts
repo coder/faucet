@@ -68,6 +68,10 @@ export class Faucet {
     this.#state = readState(baseUrl);
   }
 
+  get binary(): string {
+    return this.#state.binary;
+  }
+
   sign(body: string, secret: string = this.#state.secret): string {
     return `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`;
   }

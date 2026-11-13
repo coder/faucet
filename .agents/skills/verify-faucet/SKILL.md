@@ -47,6 +47,7 @@ Scripted: every feature in [features/](features/README.md) has a test under `ver
 - `faucet.sign(body, secret?)` returns `sha256=<hex>`.
 - `faucet.rows(repoId)` returns the `faucet_events` rows of one repository through `psql`; `faucet.sql(query)` runs any query.
 - `faucet.leaksSecret(text)` says whether `text` holds the secret, so the secret itself never leaves `support.ts`.
+- `faucet.binary` is the path of the faucet executable the run built, for a test that starts its own process (`tests/startup.e2e.ts`) with an explicit environment.
 
 All tests share one server and one database. Each test makes its own `newRepoId()` and `newDeliveryId()` and asserts on that repository's rows only, never on table-wide counts. Payload fixtures are in `tests/payloads.ts`. Run one test by `file:line`: `npx e2e run tests/ingest-ping.e2e.ts:4`.
 
