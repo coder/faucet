@@ -63,10 +63,13 @@ type Subscription struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	ExpiresAt time.Time
+	// Status is what deliveries have recorded. The store assigns it, so
+	// UpsertSubscription ignores the field and keeps what a refreshed row has.
+	Status DeliveryStatus
 }
 
 // Validate checks the fields a caller supplies to Store.UpsertSubscription.
-// CreatedAt and UpdatedAt are ignored because the store assigns them. It
+// CreatedAt, UpdatedAt and Status are ignored because the store assigns them. It
 // requires KeyHash to be the hash of the identity fields, so a row cannot
 // carry the key of another principal's subscription.
 func (s Subscription) Validate(now time.Time) error {

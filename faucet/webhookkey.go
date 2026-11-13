@@ -3,7 +3,9 @@ package faucet
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 
 	"golang.org/x/xerrors"
@@ -39,6 +41,14 @@ func (WebhookKey) Format(f fmt.State, _ rune) {
 	_, _ = fmt.Fprint(f, "WebhookKey{}")
 }
 
+// messageIDKey is the key of the webhook-ids, kept apart from the key that seals
+// secrets.
+func (k WebhookKey) messageIDKey() []byte {
+	mac := hmac.New(sha256.New, k.key[:])
+	_, _ = mac.Write([]byte("faucet webhook-id v1"))
+	return mac.Sum(nil)
+}
+
 func (k WebhookKey) aead() (cipher.AEAD, error) {
 	block, err := aes.NewCipher(k.key[:])
 	if err != nil {
@@ -62,4 +72,18 @@ func sealSecret(aead cipher.AEAD, secret subscriberSecret, aad []byte) ([]byte, 
 	}
 	sealed := append([]byte{sealVersion}, nonce...)
 	return aead.Seal(sealed, nonce, []byte(secret), aad), nil
+}
+
+// openSecret reverses sealSecret. Its errors are fixed text, because the cause
+// of a failure says nothing a caller can use and must not echo the bytes.
+func openSecret(aead cipher.AEAD, sealed, aad []byte) (subscriberSecret, error) {
+	nonceSize := aead.NonceSize()
+	if len(sealed) < 1+nonceSize+aead.Overhead() || sealed[0] != sealVersion {
+		return "", xerrors.New("sealed secret has an unknown layout")
+	}
+	plain, err := aead.Open(nil, sealed[1:1+nonceSize], sealed[1+nonceSize:], aad)
+	if err != nil {
+		return "", xerrors.New("sealed secret does not open under this key")
+	}
+	return subscriberSecret(plain), nil
 }

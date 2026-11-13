@@ -10,6 +10,16 @@ import (
 	"time"
 )
 
+type FaucetDelivery struct {
+	KeyHash       []byte
+	EventID       int64
+	MessageID     string
+	EnqueuedAt    time.Time
+	NextAttemptAt time.Time
+	Attempts      int32
+	LeaseUntil    sql.NullTime
+}
+
 type FaucetEvent struct {
 	ID         int64
 	Source     string
@@ -28,15 +38,19 @@ type FaucetPurgeMark struct {
 }
 
 type FaucetSubscription struct {
-	KeyHash     []byte
-	Principal   string
-	CallbackUrl string
-	EventType   string
-	Arguments   json.RawMessage
-	RepoID      int64
-	SecretEnc   []byte
-	Cursor      int64
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-	ExpiresAt   time.Time
+	KeyHash        []byte
+	Principal      string
+	CallbackUrl    string
+	EventType      string
+	Arguments      json.RawMessage
+	RepoID         int64
+	SecretEnc      []byte
+	Cursor         int64
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	ExpiresAt      time.Time
+	ScannedThrough int64
+	LastDeliveryAt sql.NullTime
+	LastError      sql.NullString
+	FailedSince    sql.NullTime
 }

@@ -18,19 +18,21 @@ import (
 // cronTimeout keeps a run inside the server's write deadline.
 const cronTimeout = 25 * time.Second
 
-// cronRoutes serves the job that Vercel Cron triggers with GET and
+// cronRoutes serves the jobs that Vercel Cron triggers with GET and
 // Authorization: Bearer $CRON_SECRET.
 type cronRoutes struct {
 	// secret is CRON_SECRET. Empty means the routes answer 503 and run nothing.
 	secret    []byte
 	svc       *faucet.Service
 	retention time.Duration
+	delivers  bool
 	clock     quartz.Clock
 	logger    slog.Logger
 }
 
 func (c cronRoutes) mount(r chi.Router) {
 	r.Get("/cron/purge", c.guard(c.purge))
+	r.Get("/cron/deliver", c.guard(c.deliver))
 }
 
 // guard runs next only for the right secret. Both sides are hashed first, so
@@ -67,6 +69,30 @@ func (c cronRoutes) purge(w http.ResponseWriter, r *http.Request) {
 		Deleted       int64 `json:"deleted"`
 		PurgedThrough int64 `json:"purged_through"`
 	}{res.Deleted, res.PurgedThrough})
+}
+
+func (c cronRoutes) deliver(w http.ResponseWriter, r *http.Request) {
+	if !c.delivers {
+		http.Error(w, "delivery is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	res, err := c.svc.DeliverDue(r.Context())
+	if err != nil {
+		c.logger.Error(r.Context(), "cron delivery failed", slog.Error(err))
+		http.Error(w, "delivery failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, struct {
+		Enqueued   int                         `json:"enqueued"`
+		Gaps       int                         `json:"gaps"`
+		Claimed    int                         `json:"claimed"`
+		Sent       int                         `json:"sent"`
+		Delivered  int                         `json:"delivered"`
+		Retried    int                         `json:"retried"`
+		GaveUp     map[faucet.GiveUpReason]int `json:"gave_up"`
+		Superseded int                         `json:"superseded"`
+		Incomplete bool                        `json:"incomplete"`
+	}{res.Enqueued, res.Gaps, res.Claimed, res.Sent, res.Delivered, res.Retried, res.GaveUp, res.Superseded, res.Incomplete})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

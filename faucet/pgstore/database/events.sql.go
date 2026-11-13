@@ -353,7 +353,7 @@ func (q *Queries) RaisePurgeMark(ctx context.Context, through int64) (int64, err
 }
 
 const upsertSubscription = `-- name: UpsertSubscription :one
-INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at)
+INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, scanned_through, created_at, updated_at, expires_at)
 VALUES (
   $1,
   $2,
@@ -362,6 +362,7 @@ VALUES (
   $5,
   $6,
   $7,
+  $8,
   $8,
   $9,
   $9,
@@ -372,7 +373,7 @@ ON CONFLICT (key_hash) DO UPDATE SET
   secret_enc = EXCLUDED.secret_enc,
   updated_at = EXCLUDED.updated_at,
   expires_at = EXCLUDED.expires_at
-RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at
+RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since
 `
 
 type UpsertSubscriptionParams struct {
@@ -414,6 +415,10 @@ func (q *Queries) UpsertSubscription(ctx context.Context, arg UpsertSubscription
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ExpiresAt,
+		&i.ScannedThrough,
+		&i.LastDeliveryAt,
+		&i.LastError,
+		&i.FailedSince,
 	)
 	return i, err
 }

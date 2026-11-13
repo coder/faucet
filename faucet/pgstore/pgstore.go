@@ -242,7 +242,12 @@ func (s *Store) DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (
 }
 
 func toSubscription(row database.FaucetSubscription) (faucet.Subscription, error) {
-	sub := faucet.Subscription{
+	key, err := toKeyHash(row.KeyHash)
+	if err != nil {
+		return faucet.Subscription{}, err
+	}
+	return faucet.Subscription{
+		KeyHash:     key,
 		Principal:   row.Principal,
 		CallbackURL: row.CallbackUrl,
 		EventType:   row.EventType,
@@ -253,11 +258,12 @@ func toSubscription(row database.FaucetSubscription) (faucet.Subscription, error
 		CreatedAt:   row.CreatedAt,
 		UpdatedAt:   row.UpdatedAt,
 		ExpiresAt:   row.ExpiresAt,
-	}
-	if copy(sub.KeyHash[:], row.KeyHash) != len(sub.KeyHash) || len(row.KeyHash) != len(sub.KeyHash) {
-		return faucet.Subscription{}, xerrors.Errorf("stored key hash has %d bytes, want %d", len(row.KeyHash), len(sub.KeyHash))
-	}
-	return sub, nil
+		Status: faucet.DeliveryStatus{
+			LastDeliveryAt: row.LastDeliveryAt.Time,
+			LastError:      faucet.CallbackReason(row.LastError.String),
+			FailedSince:    row.FailedSince.Time,
+		},
+	}, nil
 }
 
 func pollRowToEvent(row database.PollEventsRow) faucet.Event {
