@@ -296,14 +296,29 @@ describe('events poll', () => {
 
     const page1 = await pollRepo(faucet, RUN, repoId, { cursor, maxEvents: 2 });
     const page2 = await pollRepo(faucet, RUN, repoId, { cursor: page1.cursor, maxEvents: 2 });
-    const all = await pollRepo(faucet, RUN, repoId, { cursor, maxEvents: 1000 });
 
     expect(ids(page1)).toEqual(delivered.slice(0, 2));
     expect(page1.hasMore).toBe(true);
     expect(ids(page2)).toEqual(delivered.slice(2));
     expect(page2.hasMore).toBe(false);
-    expect(ids(all)).toEqual(delivered);
-    expect(all.hasMore).toBe(false);
+  });
+
+  test('a page holds at most 100 events, whatever maxEvents says', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const cursor = await startCursor(faucet, repoId);
+    const delivered: string[] = [];
+    for (let i = 0; i < 101; i++) delivered.push(await deliverSample(faucet, run, repoId));
+
+    const unset = await pollRepo(faucet, RUN, repoId, { cursor });
+    const huge = await pollRepo(faucet, RUN, repoId, { cursor, maxEvents: 1000 });
+    const rest = await pollRepo(faucet, RUN, repoId, { cursor: huge.cursor, maxEvents: 1000 });
+
+    expect(ids(unset)).toEqual(delivered.slice(0, 100));
+    expect(unset.hasMore).toBe(true);
+    expect(ids(huge)).toEqual(delivered.slice(0, 100));
+    expect(huge.hasMore).toBe(true);
+    expect(ids(rest)).toEqual(delivered.slice(100));
+    expect(rest.hasMore).toBe(false);
   });
 
   test('maxAgeMs skips events older than that and sets truncated', async ({ faucet }) => {
