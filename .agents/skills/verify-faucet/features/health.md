@@ -13,7 +13,7 @@ An operator or load balancer requests `/healthz`. No account, no header. The run
 
 ## Driving it with e2e
 
-`tests/health.e2e.ts` pins the three behaviors. `tests/smoke.e2e.ts` is the Doctor test: it pins the 200 and checks that `faucet_events` exists, so a green smoke run means faucet started and migrated. Live: `open_session`, `call navigate /healthz`, `observe` shows one text node `ok`.
+`tests/health.e2e.ts` pins the three behaviors. `tests/smoke.e2e.ts` is the Doctor test: it pins the 200 and checks that `faucet_events` exists, so a green smoke run means faucet started and migrated. Live: `open_session`, `call navigate /healthz`, then `call observe` shows one text node `ok`.
 
 ## Proof
 

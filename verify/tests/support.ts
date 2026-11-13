@@ -11,10 +11,12 @@ export { expect } from 'e2e';
 const execFileAsync = promisify(execFile);
 
 interface RunState {
+  dbHost: string;
   dbPort: number;
   psql: string;
   secret: string;
   githubToken: string;
+  binary: string;
 }
 
 export interface EventRow {
@@ -61,18 +63,20 @@ export interface Delivery {
 function readState(baseUrl: string): RunState {
   const port = Number(new URL(baseUrl).port);
   const state: unknown = JSON.parse(readFileSync(stateFile(port), 'utf8'));
-  const { dbPort, psql, secret, githubToken } = state as Partial<RunState>;
+  const { dbHost, dbPort, psql, secret, githubToken, binary } = state as Partial<RunState>;
   if (
+    typeof dbHost !== 'string' ||
     typeof dbPort !== 'number' ||
     typeof psql !== 'string' ||
     typeof secret !== 'string' ||
     secret.length < 16 ||
     typeof githubToken !== 'string' ||
-    githubToken.length < 16
+    githubToken.length < 16 ||
+    typeof binary !== 'string'
   ) {
     throw new Error('the run state written by app.mjs is malformed');
   }
-  return { dbPort, psql, secret, githubToken };
+  return { dbHost, dbPort, psql, secret, githubToken, binary };
 }
 
 export class Faucet {
@@ -82,6 +86,10 @@ export class Faucet {
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl;
     this.#state = readState(baseUrl);
+  }
+
+  get binary(): string {
+    return this.#state.binary;
   }
 
   sign(body: string, secret: string = this.#state.secret): string {
@@ -159,7 +167,7 @@ export class Faucet {
   async sql(query: string): Promise<string> {
     const { stdout } = await execFileAsync(this.#state.psql, [
       '-X', '-A', '-t', '-q',
-      '-h', '127.0.0.1',
+      '-h', this.#state.dbHost,
       '-p', String(this.#state.dbPort),
       '-U', 'postgres',
       '-d', 'postgres',

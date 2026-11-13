@@ -2,16 +2,19 @@
 import { execFile, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpServer } from 'node:http';
-import { createServer } from 'node:net';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { parseArgs, promisify } from 'node:util';
 import { runDir, stateFile } from './runstate.mjs';
 
 const execFileAsync = promisify(execFile);
 const FAUCET_STOP_MS = 20_000;
-const POSTGRES_START_ATTEMPTS = 5;
+const DB_PORT = 5432;
+const SOCKET_PATH_MAX = 100;
+const PARENT_POLL_MS = 1000;
+// An aborted initdb or go build can still be writing into the directory when it is removed.
+const RM_OPTIONS = { recursive: true, force: true, maxRetries: 20, retryDelay: 100 };
 
 function log(message) {
   console.error(`faucet-verify: ${message}`);
@@ -45,17 +48,6 @@ function findPostgresBin() {
   return found;
 }
 
-function freePort() {
-  return new Promise((resolvePort, reject) => {
-    const probe = createServer();
-    probe.once('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close(() => resolvePort(port));
-    });
-  });
-}
-
 // The stub knows one token and answers GET /user and GET /repos/verify/r<id>
 // with repository id <id>. Every other repository is 404, like one the token
 // cannot see.
@@ -77,23 +69,24 @@ async function startGitHubStub(token) {
 }
 
 async function startPostgres(bin, dir, signal) {
-  const dataDir = join(dir, 'pgdata');
-  for (let attempt = 1; ; attempt++) {
-    const port = await freePort();
-    try {
-      await execFileAsync(
-        join(bin, 'pg_ctl'),
-        [
-          'start', '-D', dataDir, '-w', '-t', '60', '-l', join(dir, 'postgres.log'),
-          '-o', `-p ${port} -k '${dir}' -c listen_addresses=127.0.0.1 -c fsync=off`,
-        ],
-        { signal },
-      );
-      return port;
-    } catch (err) {
-      if (attempt === POSTGRES_START_ATTEMPTS || signal.aborted) throw err;
-      log(`postgres did not start on port ${port}, trying another port`);
-    }
+  await execFileAsync(
+    join(bin, 'pg_ctl'),
+    [
+      'start', '-D', join(dir, 'pgdata'), '-w', '-t', '60', '-l', join(dir, 'postgres.log'),
+      '-o', `-p ${DB_PORT} -k '${dir}' -c listen_addresses='' -c unix_socket_permissions=0700 -c fsync=off`,
+    ],
+    { signal },
+  );
+}
+
+function postmasterRuns(dir) {
+  try {
+    const pid = Number(readFileSync(join(dir, 'pgdata', 'postmaster.pid'), 'utf8').split('\n', 1)[0]);
+    if (!(pid > 0)) return false;
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
   }
 }
 
@@ -116,6 +109,15 @@ async function stopFaucet(child) {
   clearTimeout(timer);
 }
 
+function stopWhenParentExits(abort) {
+  const parent = process.ppid;
+  setInterval(() => {
+    if (process.ppid === parent) return;
+    log('parent process exited, shutting down');
+    abort.abort();
+  }, PARENT_POLL_MS).unref();
+}
+
 function waitForFaucetOrAbort(child, signal) {
   return new Promise((resolveOutcome) => {
     if (signal.aborted) return resolveOutcome({ aborted: true });
@@ -125,38 +127,47 @@ function waitForFaucetOrAbort(child, signal) {
   });
 }
 
-async function main(signal) {
-  const { values } = parseArgs({ options: { port: { type: 'string' } } });
+async function main(abort) {
+  const { signal } = abort;
+  const { values } = parseArgs({ options: { port: { type: 'string' }, detach: { type: 'boolean' } } });
   const port = Number(values.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error('--port must be an integer from 1 to 65535');
   }
+  if (!values.detach) stopWhenParentExits(abort);
   const root = resolve(process.env.FAUCET_ROOT ?? join(import.meta.dirname, '..'));
   if (!existsSync(join(root, 'cmd', 'faucet', 'main.go'))) {
     throw new Error(`${root} is not a faucet checkout: cmd/faucet/main.go is missing`);
   }
   const bin = findPostgresBin();
   const dir = runDir(port);
+  const socketPath = join(dir, `.s.PGSQL.${DB_PORT}`);
+  if (Buffer.byteLength(socketPath) >= SOCKET_PATH_MAX) {
+    throw new Error(`${socketPath} is too long for a Unix socket; set TMPDIR to a shorter directory`);
+  }
   try {
     mkdirSync(dir, { mode: 0o700 });
   } catch (err) {
     if (err.code === 'EEXIST') {
-      throw new Error(
-        `${dir} exists, so an earlier run was killed; stop its Postgres with pg_ctl -D ${dir}/pgdata stop, then delete ${dir}`,
-      );
+      const advice = existsSync(join(dir, 'pgdata'))
+        ? `stop its app.mjs, faucet and Postgres, then delete ${dir} (Cleanup in the verify-faucet skill)`
+        : `it has no pgdata, so there is no Postgres to stop; delete ${dir}`;
+      throw new Error(`${dir} exists, so an earlier run was killed; ${advice}`);
     }
     throw err;
   }
 
-  let postgresStarted = false;
   let faucet;
   let githubStub;
   let failure;
   try {
-    await execFileAsync(join(bin, 'initdb'), ['-U', 'postgres', '--auth=trust', '--no-sync', '-D', join(dir, 'pgdata')], { signal });
-    const dbPort = await startPostgres(bin, dir, signal);
-    postgresStarted = true;
-    log(`postgres listening on 127.0.0.1:${dbPort}`);
+    await execFileAsync(
+      join(bin, 'initdb'),
+      ['-U', 'postgres', '--auth-local=trust', '--auth-host=reject', '--no-sync', '-D', join(dir, 'pgdata')],
+      { signal },
+    );
+    await startPostgres(bin, dir, signal);
+    log(`postgres listening on ${socketPath}`);
 
     const binary = join(dir, 'faucet');
     await execFileAsync('go', ['build', '-o', binary, './cmd/faucet'], { cwd: root, signal });
@@ -165,11 +176,16 @@ async function main(signal) {
     const githubToken = `ghp_${randomBytes(20).toString('hex')}`;
     githubStub = await startGitHubStub(githubToken);
     const psql = existsSync(join(bin, 'psql')) ? join(bin, 'psql') : 'psql';
-    writeFileSync(stateFile(port), JSON.stringify({ dbPort, psql, secret, githubToken }), { mode: 0o600 });
+    writeFileSync(
+      stateFile(port),
+      JSON.stringify({ dbHost: dir, dbPort: DB_PORT, psql, secret, githubToken, binary }),
+      { mode: 0o600 },
+    );
+    const databaseUrl = `postgres://postgres@/postgres?${new URLSearchParams({ host: dir, port: String(DB_PORT), sslmode: 'disable' })}`;
 
     faucet = spawn(binary, [], {
       env: {
-        DATABASE_URL: `postgres://postgres@127.0.0.1:${dbPort}/postgres?sslmode=disable`,
+        DATABASE_URL: databaseUrl,
         GITHUB_WEBHOOK_SECRET: secret,
         PORT: String(port),
         FAUCET_GITHUB_API_URL: `http://127.0.0.1:${githubStub.address().port}`,
@@ -183,8 +199,8 @@ async function main(signal) {
   } finally {
     if (faucet) await stopFaucet(faucet);
     githubStub?.close();
-    const postgresStopped = !postgresStarted || (await stopPostgres(bin, dir));
-    if (postgresStopped) rmSync(dir, { recursive: true, force: true });
+    const postgresStopped = !postmasterRuns(dir) || (await stopPostgres(bin, dir));
+    if (postgresStopped) rmSync(dir, RM_OPTIONS);
     else failure ??= `left ${dir} in place because Postgres is still running`;
   }
   if (failure) throw new Error(failure);
@@ -193,7 +209,7 @@ async function main(signal) {
 const abort = new AbortController();
 for (const name of ['SIGINT', 'SIGTERM']) process.on(name, () => abort.abort());
 
-main(abort.signal).then(
+main(abort).then(
   () => process.exit(0),
   (err) => {
     log(err.message);
