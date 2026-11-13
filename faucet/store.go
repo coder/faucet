@@ -4,6 +4,8 @@ package faucet
 import (
 	"context"
 	"encoding/json"
+	"slices"
+	"strings"
 	"time"
 
 	"golang.org/x/xerrors"
@@ -44,7 +46,31 @@ func (e Event) Validate() error {
 	case !json.Valid(e.Data):
 		return xerrors.New("data is not valid JSON")
 	}
+	var v any
+	if err := json.Unmarshal(e.Data, &v); err != nil {
+		return xerrors.Errorf("decode data: %w", err)
+	}
+	if hasNUL(v) {
+		// Postgres jsonb rejects U+0000 in any string.
+		return xerrors.New("data contains a NUL character")
+	}
 	return nil
+}
+
+func hasNUL(v any) bool {
+	switch v := v.(type) {
+	case string:
+		return strings.ContainsRune(v, 0)
+	case []any:
+		return slices.ContainsFunc(v, hasNUL)
+	case map[string]any:
+		for k, e := range v {
+			if strings.ContainsRune(k, 0) || hasNUL(e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Store persists events and serves them to pollers.
