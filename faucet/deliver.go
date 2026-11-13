@@ -84,6 +84,10 @@ type webhookBody struct {
 // the subscription. Every delivery that ends in the call is in the result,
 // delivered or with its reason.
 //
+// A subscription that a purge overtook, one whose unread events were deleted,
+// gets one gap envelope when the call queues its next events. The envelope is
+// one attempt with no retry, and the result counts it as sent or failed.
+//
 // Calls may overlap, in one process or in several. A claim gives an attempt to
 // one caller for 30 seconds, and a caller whose claim lapsed records nothing.
 // A call that dies between a claim and its result leaves the delivery to the
