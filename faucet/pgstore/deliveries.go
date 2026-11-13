@@ -26,14 +26,16 @@ func (s *Store) ScanTargets(ctx context.Context, now time.Time, maxPending, limi
 			return nil, err
 		}
 		targets[i] = faucet.ScanTarget{
-			KeyHash:        key,
-			EventType:      row.EventType,
-			Arguments:      row.Arguments,
-			RepoID:         row.RepoID,
-			CallbackURL:    row.CallbackUrl,
-			SecretEnc:      row.SecretEnc,
-			ScannedThrough: row.ScannedThrough,
-			Pending:        row.Pending,
+			KeyHash:             key,
+			EventType:           row.EventType,
+			Arguments:           row.Arguments,
+			RepoID:              row.RepoID,
+			CallbackURL:         row.CallbackUrl,
+			SecretEnc:           row.SecretEnc,
+			PreviousSecretEnc:   row.PreviousSecretEnc,
+			PreviousSecretUntil: row.PreviousSecretUntil.Time,
+			ScannedThrough:      row.ScannedThrough,
+			Pending:             row.Pending,
 		}
 	}
 	return targets, nil
@@ -102,13 +104,15 @@ func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Dur
 		return faucet.DeliveryClaim{}, false, err
 	}
 	claim := faucet.DeliveryClaim{
-		Ref:         faucet.DeliveryRef{Key: key, EventID: row.EventID, MessageID: row.MessageID, Attempt: row.Attempts},
-		MessageID:   row.MessageID,
-		EnqueuedAt:  row.EnqueuedAt,
-		CallbackURL: row.CallbackUrl,
-		SecretEnc:   row.SecretEnc,
-		RepoID:      row.RepoID,
-		Watermark:   row.Watermark,
+		Ref:                 faucet.DeliveryRef{Key: key, EventID: row.EventID, MessageID: row.MessageID, Attempt: row.Attempts},
+		MessageID:           row.MessageID,
+		EnqueuedAt:          row.EnqueuedAt,
+		CallbackURL:         row.CallbackUrl,
+		SecretEnc:           row.SecretEnc,
+		PreviousSecretEnc:   row.PreviousSecretEnc,
+		PreviousSecretUntil: row.PreviousSecretUntil.Time,
+		RepoID:              row.RepoID,
+		Watermark:           row.Watermark,
 	}
 	if row.StoredEventID.Valid {
 		claim.Event = &faucet.Event{

@@ -94,6 +94,15 @@ VALUES (
 )
 ON CONFLICT (key_hash) DO UPDATE SET
   repo_id = EXCLUDED.repo_id,
+  previous_secret_enc = CASE
+    WHEN faucet_subscriptions.secret_enc = EXCLUDED.secret_enc THEN faucet_subscriptions.previous_secret_enc
+    WHEN sqlc.narg(previous_secret_until)::timestamptz IS NULL THEN NULL
+    ELSE faucet_subscriptions.secret_enc
+  END,
+  previous_secret_until = CASE
+    WHEN faucet_subscriptions.secret_enc = EXCLUDED.secret_enc THEN faucet_subscriptions.previous_secret_until
+    ELSE sqlc.narg(previous_secret_until)::timestamptz
+  END,
   secret_enc = EXCLUDED.secret_enc,
   updated_at = EXCLUDED.updated_at,
   expires_at = EXCLUDED.expires_at
@@ -109,3 +118,8 @@ RETURNING *;
 
 -- name: DeleteExpiredSubscriptions :execrows
 DELETE FROM faucet_subscriptions WHERE expires_at <= sqlc.arg(now);
+
+-- name: ClearExpiredPreviousSecrets :execrows
+UPDATE faucet_subscriptions
+SET previous_secret_enc = NULL, previous_secret_until = NULL
+WHERE previous_secret_until <= sqlc.arg(now)::timestamptz;

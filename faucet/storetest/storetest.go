@@ -42,6 +42,11 @@ func Run(t *testing.T, newStore func(t *testing.T) faucet.Store) {
 		{"PollEventsNeverHidesAConcurrentPurge", pollEventsNeverHidesAConcurrentPurge},
 		{"UpsertSubscriptionStoresThenRefreshes", upsertSubscriptionStoresThenRefreshes},
 		{"UpsertSubscriptionTreatsAnExpiredRowAsAbsent", upsertSubscriptionTreatsAnExpiredRowAsAbsent},
+		{"UpsertSubscriptionKeepsTheReplacedSecretForTheGraceWindow", upsertSubscriptionKeepsTheReplacedSecretForTheGraceWindow},
+		{"UpsertSubscriptionStartsNoWindowWithoutAGrace", upsertSubscriptionStartsNoWindowWithoutAGrace},
+		{"UpsertSubscriptionDropsThePreviousSecretOfALapsedRow", upsertSubscriptionDropsThePreviousSecretOfALapsedRow},
+		{"ClearExpiredPreviousSecretsClearsOnlyEndedWindows", clearExpiredPreviousSecretsClearsOnlyEndedWindows},
+		{"DeleteLiveSubscriptionReturnsThePreviousSecret", deleteLiveSubscriptionReturnsThePreviousSecret},
 		{"DeleteSubscriptionRemovesOnlyTheCallersRow", deleteSubscriptionRemovesOnlyTheCallersRow},
 		{"DeleteLiveSubscriptionGivesTheRowToExactlyOneCaller", deleteLiveSubscriptionGivesTheRowToExactlyOneCaller},
 		{"UpsertSubscriptionEnforcesThePrincipalLimit", upsertSubscriptionEnforcesThePrincipalLimit},
@@ -821,6 +826,118 @@ func upsertSubscriptionStoresThenRefreshes(t *testing.T, s faucet.Store) {
 	require.True(t, later.Equal(again.UpdatedAt))
 	require.True(t, now.Equal(again.CreatedAt), "a refresh keeps created_at")
 	require.EqualValues(t, 7, again.Cursor, "a refresh of a live subscription keeps the cursor and ignores the supplied one")
+}
+
+// rotate refreshes sub at now with sealed as its secret and a window of grace.
+func rotate(t *testing.T, s faucet.Store, sub faucet.Subscription, sealed string, now time.Time, grace time.Duration) faucet.Subscription {
+	t.Helper()
+	sub.SecretEnc = []byte(sealed)
+	sub.RotationGrace = grace
+	sub.ExpiresAt = now.Add(time.Hour)
+	row, err := s.UpsertSubscription(context.Background(), sub, now, 10)
+	require.NoError(t, err)
+	return row
+}
+
+func upsertSubscriptionKeepsTheReplacedSecretForTheGraceWindow(t *testing.T, s faucet.Store) {
+	sub := subscriptionAt(1, subscriptionBase.Add(time.Hour))
+	first := rotate(t, s, sub, "sealed-1", subscriptionBase, 5*time.Minute)
+	require.Nil(t, first.PreviousSecretEnc, "a new subscription has no previous secret")
+	require.True(t, first.PreviousSecretUntil.IsZero())
+
+	at := subscriptionBase.Add(time.Minute)
+	rotated := rotate(t, s, sub, "sealed-2", at, 5*time.Minute)
+	require.Equal(t, []byte("sealed-2"), rotated.SecretEnc)
+	require.Equal(t, []byte("sealed-1"), rotated.PreviousSecretEnc, "a different secret moves the old one to previous")
+	require.True(t, at.Add(5*time.Minute).Equal(rotated.PreviousSecretUntil), "the window ends one grace after the refresh, got %s", rotated.PreviousSecretUntil)
+	require.Zero(t, rotated.RotationGrace, "the grace is an input and is never returned")
+
+	same := rotate(t, s, sub, "sealed-2", at.Add(2*time.Minute), 5*time.Minute)
+	require.Equal(t, []byte("sealed-1"), same.PreviousSecretEnc, "a refresh with the same secret changes nothing")
+	require.True(t, rotated.PreviousSecretUntil.Equal(same.PreviousSecretUntil), "and does not extend the window, got %s", same.PreviousSecretUntil)
+
+	twice := at.Add(3 * time.Minute)
+	again := rotate(t, s, sub, "sealed-3", twice, 2*time.Minute)
+	require.Equal(t, []byte("sealed-3"), again.SecretEnc)
+	require.Equal(t, []byte("sealed-2"), again.PreviousSecretEnc, "a second rotation keeps one previous secret, the one it replaced")
+	require.True(t, twice.Add(2*time.Minute).Equal(again.PreviousSecretUntil))
+}
+
+func upsertSubscriptionStartsNoWindowWithoutAGrace(t *testing.T, s faucet.Store) {
+	sub := subscriptionAt(1, subscriptionBase.Add(time.Hour))
+	rotate(t, s, sub, "sealed-1", subscriptionBase, 5*time.Minute)
+	rotated := rotate(t, s, sub, "sealed-2", subscriptionBase.Add(time.Minute), 5*time.Minute)
+	require.NotNil(t, rotated.PreviousSecretEnc)
+
+	dropped := rotate(t, s, sub, "sealed-3", subscriptionBase.Add(2*time.Minute), 0)
+	require.Equal(t, []byte("sealed-3"), dropped.SecretEnc)
+	require.Nil(t, dropped.PreviousSecretEnc, "a rotation without a grace drops the previous secret")
+	require.True(t, dropped.PreviousSecretUntil.IsZero())
+}
+
+func upsertSubscriptionDropsThePreviousSecretOfALapsedRow(t *testing.T, s faucet.Store) {
+	sub := subscriptionAt(1, subscriptionBase.Add(10*time.Minute))
+	sub.SecretEnc = []byte("sealed-1")
+	_, err := s.UpsertSubscription(context.Background(), sub, subscriptionBase, 10)
+	require.NoError(t, err)
+	sub.RotationGrace = 5 * time.Minute
+	sub.SecretEnc, sub.ExpiresAt = []byte("sealed-2"), subscriptionBase.Add(11*time.Minute)
+	rotated, err := s.UpsertSubscription(context.Background(), sub, subscriptionBase.Add(time.Minute), 10)
+	require.NoError(t, err)
+	require.NotNil(t, rotated.PreviousSecretEnc)
+
+	lapsedAt := rotated.ExpiresAt.Add(time.Minute)
+	sub.SecretEnc, sub.ExpiresAt = []byte("sealed-3"), lapsedAt.Add(10*time.Minute)
+	replaced, err := s.UpsertSubscription(context.Background(), sub, lapsedAt, 10)
+	require.NoError(t, err)
+	require.Nil(t, replaced.PreviousSecretEnc, "a lapsed row is replaced whole, without its previous secret")
+	require.True(t, replaced.PreviousSecretUntil.IsZero())
+}
+
+func clearExpiredPreviousSecretsClearsOnlyEndedWindows(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	ended := subscriptionAt(1, subscriptionBase.Add(time.Hour))
+	running := subscriptionAt(2, subscriptionBase.Add(time.Hour))
+	plain := subscriptionAt(3, subscriptionBase.Add(time.Hour))
+	for _, sub := range []faucet.Subscription{ended, running, plain} {
+		rotate(t, s, sub, "sealed-1", subscriptionBase, time.Minute)
+	}
+	rotate(t, s, ended, "sealed-2", subscriptionBase.Add(time.Minute), time.Minute)
+	rotate(t, s, running, "sealed-2", subscriptionBase.Add(time.Minute), 5*time.Minute)
+
+	cleared, err := s.ClearExpiredPreviousSecrets(ctx, subscriptionBase.Add(2*time.Minute).Add(-time.Second))
+	require.NoError(t, err)
+	require.Zero(t, cleared, "a window that has not ended stays")
+
+	cleared, err = s.ClearExpiredPreviousSecrets(ctx, subscriptionBase.Add(2*time.Minute))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, cleared, "a window ends at its until, and only that row is cleared")
+
+	cleared, err = s.ClearExpiredPreviousSecrets(ctx, subscriptionBase.Add(2*time.Minute))
+	require.NoError(t, err)
+	require.Zero(t, cleared, "clearing is idempotent")
+
+	same := rotate(t, s, ended, "sealed-2", subscriptionBase.Add(3*time.Minute), time.Minute)
+	require.Equal(t, []byte("sealed-2"), same.SecretEnc, "the subscription and its current secret survive the sweep")
+	require.Nil(t, same.PreviousSecretEnc)
+	require.True(t, same.PreviousSecretUntil.IsZero())
+	kept := rotate(t, s, running, "sealed-2", subscriptionBase.Add(3*time.Minute), time.Minute)
+	require.Equal(t, []byte("sealed-1"), kept.PreviousSecretEnc, "a window that runs is not cleared")
+	require.True(t, subscriptionBase.Add(6*time.Minute).Equal(kept.PreviousSecretUntil))
+}
+
+func deleteLiveSubscriptionReturnsThePreviousSecret(t *testing.T, s faucet.Store) {
+	sub := subscriptionAt(1, subscriptionBase.Add(time.Hour))
+	rotate(t, s, sub, "sealed-1", subscriptionBase, 5*time.Minute)
+	at := subscriptionBase.Add(time.Minute)
+	rotate(t, s, sub, "sealed-2", at, 5*time.Minute)
+
+	deleted, found, err := s.DeleteLiveSubscription(context.Background(), sub.Principal, sub.KeyHash, at)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, []byte("sealed-2"), deleted.SecretEnc)
+	require.Equal(t, []byte("sealed-1"), deleted.PreviousSecretEnc, "the row that ends carries the secrets that sign its last envelope")
+	require.True(t, at.Add(5*time.Minute).Equal(deleted.PreviousSecretUntil))
 }
 
 func upsertSubscriptionTreatsAnExpiredRowAsAbsent(t *testing.T, s faucet.Store) {

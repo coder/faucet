@@ -81,7 +81,8 @@ func (s *fakeStore) ScanTargets(ctx context.Context, now time.Time, maxPending, 
 		}
 		targets = append(targets, faucet.ScanTarget{
 			KeyHash: key, EventType: sub.EventType, Arguments: slices.Clone(sub.Arguments), RepoID: sub.RepoID,
-			CallbackURL: sub.CallbackURL, SecretEnc: slices.Clone(sub.SecretEnc), ScannedThrough: s.scanned[key], Pending: pending,
+			CallbackURL: sub.CallbackURL, SecretEnc: slices.Clone(sub.SecretEnc), PreviousSecretEnc: slices.Clone(sub.PreviousSecretEnc), PreviousSecretUntil: sub.PreviousSecretUntil,
+			ScannedThrough: s.scanned[key], Pending: pending,
 		})
 	}
 	slices.SortFunc(targets, func(a, b faucet.ScanTarget) int {
@@ -159,13 +160,15 @@ func (s *fakeStore) ClaimDelivery(ctx context.Context, now time.Time, lease time
 		}
 	}
 	claim := faucet.DeliveryClaim{
-		Ref:         faucet.DeliveryRef{Key: best.key, EventID: best.eventID, MessageID: bestRow.messageID, Attempt: bestRow.attempts},
-		MessageID:   bestRow.messageID,
-		EnqueuedAt:  bestRow.enqueuedAt,
-		CallbackURL: sub.CallbackURL,
-		SecretEnc:   slices.Clone(sub.SecretEnc),
-		RepoID:      sub.RepoID,
-		Watermark:   watermark - 1,
+		Ref:                 faucet.DeliveryRef{Key: best.key, EventID: best.eventID, MessageID: bestRow.messageID, Attempt: bestRow.attempts},
+		MessageID:           bestRow.messageID,
+		EnqueuedAt:          bestRow.enqueuedAt,
+		CallbackURL:         sub.CallbackURL,
+		SecretEnc:           slices.Clone(sub.SecretEnc),
+		PreviousSecretEnc:   slices.Clone(sub.PreviousSecretEnc),
+		PreviousSecretUntil: sub.PreviousSecretUntil,
+		RepoID:              sub.RepoID,
+		Watermark:           watermark - 1,
 	}
 	for _, e := range s.events {
 		if e.ID == best.eventID {

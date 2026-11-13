@@ -4,8 +4,8 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 
 	"golang.org/x/xerrors"
@@ -43,9 +43,15 @@ func (WebhookKey) Format(f fmt.State, _ rune) {
 
 // messageIDKey is the key of the webhook-ids, kept apart from the key that seals
 // secrets.
-func (k WebhookKey) messageIDKey() []byte {
+func (k WebhookKey) messageIDKey() []byte { return k.derive("faucet webhook-id v1") }
+
+// sealNonceKey is the key of the nonces of sealed secrets, kept apart from the
+// key that seals and from the key of the webhook-ids.
+func (k WebhookKey) sealNonceKey() []byte { return k.derive("faucet secret nonce v1") }
+
+func (k WebhookKey) derive(label string) []byte {
 	mac := hmac.New(sha256.New, k.key[:])
-	_, _ = mac.Write([]byte("faucet webhook-id v1"))
+	_, _ = mac.Write([]byte(label))
 	return mac.Sum(nil)
 }
 
@@ -62,16 +68,25 @@ func (k WebhookKey) aead() (cipher.AEAD, error) {
 }
 
 // sealSecret encrypts a subscriber secret for the table. The result is
-// sealVersion, then the nonce, then the AES-256-GCM ciphertext and tag. The
-// nonce is random per call. aad binds the ciphertext to its row. Whoever reads
-// the table must use the same layout.
-func sealSecret(aead cipher.AEAD, secret subscriberSecret, aad []byte) ([]byte, error) {
-	nonce := make([]byte, aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, xerrors.Errorf("read nonce: %w", err)
-	}
+// sealVersion, then the nonce, then the AES-256-GCM ciphertext and tag. aad
+// binds the ciphertext to its row. Whoever reads the table must use the same
+// layout.
+//
+// The nonce is the first bytes of an HMAC under nonceKey over aad and the
+// secret, so one secret in one row always seals to the same bytes. The store
+// relies on that to tell a refresh with the same secret from a rotation without
+// opening anything. A nonce repeats only for a repeated (aad, secret) pair, and
+// that pair gives the same ciphertext, so no keystream covers two plaintexts.
+func sealSecret(aead cipher.AEAD, nonceKey []byte, secret subscriberSecret, aad []byte) []byte {
+	var aadLen [8]byte
+	binary.BigEndian.PutUint64(aadLen[:], uint64(len(aad)))
+	mac := hmac.New(sha256.New, nonceKey)
+	_, _ = mac.Write(aadLen[:])
+	_, _ = mac.Write(aad)
+	_, _ = mac.Write([]byte(secret))
+	nonce := mac.Sum(nil)[:aead.NonceSize()]
 	sealed := append([]byte{sealVersion}, nonce...)
-	return aead.Seal(sealed, nonce, []byte(secret), aad), nil
+	return aead.Seal(sealed, nonce, []byte(secret), aad)
 }
 
 // openSecret reverses sealSecret. Its errors are fixed text, because the cause

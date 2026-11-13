@@ -14,6 +14,20 @@ import (
 	"github.com/lib/pq"
 )
 
+const clearExpiredPreviousSecrets = `-- name: ClearExpiredPreviousSecrets :execrows
+UPDATE faucet_subscriptions
+SET previous_secret_enc = NULL, previous_secret_until = NULL
+WHERE previous_secret_until <= $1::timestamptz
+`
+
+func (q *Queries) ClearExpiredPreviousSecrets(ctx context.Context, now time.Time) (int64, error) {
+	result, err := q.db.ExecContext(ctx, clearExpiredPreviousSecrets, now)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const countOtherSubscriptions = `-- name: CountOtherSubscriptions :one
 SELECT COUNT(*)::bigint AS others FROM faucet_subscriptions WHERE principal = $1 AND key_hash <> $2
 `
@@ -91,7 +105,7 @@ func (q *Queries) DeleteExpiredSubscriptionsOf(ctx context.Context, arg DeleteEx
 const deleteLiveSubscription = `-- name: DeleteLiveSubscription :one
 DELETE FROM faucet_subscriptions
 WHERE key_hash = $1 AND principal = $2 AND expires_at > $3
-RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since
+RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until
 `
 
 type DeleteLiveSubscriptionParams struct {
@@ -119,6 +133,8 @@ func (q *Queries) DeleteLiveSubscription(ctx context.Context, arg DeleteLiveSubs
 		&i.LastDeliveryAt,
 		&i.LastError,
 		&i.FailedSince,
+		&i.PreviousSecretEnc,
+		&i.PreviousSecretUntil,
 	)
 	return i, err
 }
@@ -405,23 +421,33 @@ VALUES (
 )
 ON CONFLICT (key_hash) DO UPDATE SET
   repo_id = EXCLUDED.repo_id,
+  previous_secret_enc = CASE
+    WHEN faucet_subscriptions.secret_enc = EXCLUDED.secret_enc THEN faucet_subscriptions.previous_secret_enc
+    WHEN $11::timestamptz IS NULL THEN NULL
+    ELSE faucet_subscriptions.secret_enc
+  END,
+  previous_secret_until = CASE
+    WHEN faucet_subscriptions.secret_enc = EXCLUDED.secret_enc THEN faucet_subscriptions.previous_secret_until
+    ELSE $11::timestamptz
+  END,
   secret_enc = EXCLUDED.secret_enc,
   updated_at = EXCLUDED.updated_at,
   expires_at = EXCLUDED.expires_at
-RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since
+RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until
 `
 
 type UpsertSubscriptionParams struct {
-	KeyHash     []byte
-	Principal   string
-	CallbackUrl string
-	EventType   string
-	Arguments   json.RawMessage
-	RepoID      int64
-	SecretEnc   []byte
-	Cursor      int64
-	Now         time.Time
-	ExpiresAt   time.Time
+	KeyHash             []byte
+	Principal           string
+	CallbackUrl         string
+	EventType           string
+	Arguments           json.RawMessage
+	RepoID              int64
+	SecretEnc           []byte
+	Cursor              int64
+	Now                 time.Time
+	ExpiresAt           time.Time
+	PreviousSecretUntil sql.NullTime
 }
 
 func (q *Queries) UpsertSubscription(ctx context.Context, arg UpsertSubscriptionParams) (FaucetSubscription, error) {
@@ -436,6 +462,7 @@ func (q *Queries) UpsertSubscription(ctx context.Context, arg UpsertSubscription
 		arg.Cursor,
 		arg.Now,
 		arg.ExpiresAt,
+		arg.PreviousSecretUntil,
 	)
 	var i FaucetSubscription
 	err := row.Scan(
@@ -454,6 +481,8 @@ func (q *Queries) UpsertSubscription(ctx context.Context, arg UpsertSubscription
 		&i.LastDeliveryAt,
 		&i.LastError,
 		&i.FailedSince,
+		&i.PreviousSecretEnc,
+		&i.PreviousSecretUntil,
 	)
 	return i, err
 }
