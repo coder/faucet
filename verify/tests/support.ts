@@ -22,6 +22,11 @@ interface CronState {
   stubUrl: string;
 }
 
+interface ReceiverState {
+  url: string;
+  control: string;
+}
+
 interface RunState {
   dbHost: string;
   dbPort: number;
@@ -31,7 +36,9 @@ interface RunState {
   otherToken: string;
   webhookKey: string;
   binary: string;
+  e2eBinary: string;
   cron: CronState;
+  receiver: ReceiverState;
 }
 
 // A faucet process that the tests can reach: the main one, the one that has cron and hook settings, or one a test starts.
@@ -167,10 +174,16 @@ function readCronState(value: unknown): CronState {
   return { port, db, webhookSecret, cronSecret, hookToken, stubControl, stubUrl };
 }
 
+function readReceiverState(value: unknown): ReceiverState {
+  const { url, control } = (value ?? {}) as Partial<ReceiverState>;
+  if (typeof url !== 'string' || !isSecret(control)) throw new Error('the run state written by app.mjs is malformed');
+  return { url, control };
+}
+
 function readState(baseUrl: string): RunState {
   const port = Number(new URL(baseUrl).port);
   const state: unknown = JSON.parse(readFileSync(stateFile(port), 'utf8'));
-  const { dbHost, dbPort, psql, secret, githubToken, otherToken, webhookKey, binary, cron } = state as Partial<RunState>;
+  const { dbHost, dbPort, psql, secret, githubToken, otherToken, webhookKey, binary, e2eBinary, cron, receiver } = state as Partial<RunState>;
   if (
     typeof dbHost !== 'string' ||
     typeof dbPort !== 'number' ||
@@ -179,14 +192,15 @@ function readState(baseUrl: string): RunState {
     !isSecret(githubToken) ||
     !isSecret(otherToken) ||
     !isSecret(webhookKey) ||
-    typeof binary !== 'string'
+    typeof binary !== 'string' ||
+    typeof e2eBinary !== 'string'
   ) {
     throw new Error('the run state written by app.mjs is malformed');
   }
-  return { dbHost, dbPort, psql, secret, githubToken, otherToken, webhookKey, binary, cron: readCronState(cron) };
+  return { dbHost, dbPort, psql, secret, githubToken, otherToken, webhookKey, binary, e2eBinary, cron: readCronState(cron), receiver: readReceiverState(receiver) };
 }
 
-function freePort(): Promise<number> {
+export function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const probe = createServer();
     probe.once('error', reject);
@@ -237,12 +251,18 @@ export class Faucet {
   // withFaucet starts one more faucet on its own database, runs fn against it and stops it. The new faucet has a random
   // CRON_SECRET, no hook settings and webhook mode off. env adds the rest. fn gets the faucet and a function that returns its
   // output so far.
-  async withFaucet<T>(env: Record<string, string>, fn: (started: Faucet, output: () => string) => Promise<T>): Promise<T> {
+  // opts.e2eBuild runs the binary that was built with -tags faucet_e2e, whose callback client reaches loopback over http.
+  async withFaucet<T>(
+    env: Record<string, string>,
+    fn: (started: Faucet, output: () => string) => Promise<T>,
+    opts: { e2eBuild?: boolean } = {},
+  ): Promise<T> {
     const database = `faucet_${randomBytes(6).toString('hex')}`;
     const port = await freePort();
     const webhookSecret = randomBytes(32).toString('hex');
     const cronSecret = randomBytes(32).toString('hex');
-    const { dbHost, dbPort, binary, cron } = this.#state;
+    const { dbHost, dbPort, cron } = this.#state;
+    const binary = opts.e2eBuild === true ? this.#state.e2eBinary : this.#state.binary;
     const databaseUrl = `postgres://postgres@/${database}?${new URLSearchParams({ host: dbHost, port: String(dbPort), sslmode: 'disable' })}`;
 
     await this.sql(`create database ${database}`);
@@ -464,8 +484,8 @@ export class Faucet {
   }
 
   leaksSecret(text: string): boolean {
-    const { secret, githubToken, otherToken, webhookKey, cron } = this.#state;
-    const secrets = [secret, githubToken, otherToken, webhookKey, cron.webhookSecret, cron.cronSecret, cron.hookToken, cron.stubControl];
+    const { secret, githubToken, otherToken, webhookKey, cron, receiver } = this.#state;
+    const secrets = [secret, githubToken, otherToken, webhookKey, cron.webhookSecret, cron.cronSecret, cron.hookToken, cron.stubControl, receiver.control];
     const own = [this.#target.webhookSecret, this.#cronSecret, ...(this.#target.webhookKey === null ? [] : [this.#target.webhookKey])];
     return [...secrets, ...own].some((value) => text.includes(value));
   }
@@ -533,7 +553,60 @@ export class HookStub {
   }
 }
 
-export const test = base.extend<{ faucet: Faucet; cron: Faucet; hooks: HookStub }>({
+export interface ReceivedRequest {
+  id: string;
+  behavior: string;
+  method: string;
+  path: string;
+  headers: Record<string, string>;
+  body: string;
+  // valid, invalid, missing (a header is absent) or unregistered (the test registered no secret for the id).
+  signature: 'valid' | 'invalid' | 'missing' | 'unregistered';
+}
+
+// Receiver reads and sets what the callback receiver in app.mjs does. A callback URL is <url>/hook/<behavior>/<id>, and
+// app.mjs lists the behaviors. It checks signatures with the secret that register gave for the id, and keeps every request.
+export class Receiver {
+  readonly #url: string;
+  readonly #control: string;
+
+  constructor(appUrl: string) {
+    const { receiver } = readState(appUrl);
+    this.#url = receiver.url;
+    this.#control = receiver.control;
+  }
+
+  // callback returns the callback URL for a behavior and id. port replaces the receiver's own port.
+  callback(behavior: string, id: string, opts: { port?: number } = {}): string {
+    const url = new URL(`${this.#url}/hook/${behavior}/${id}`);
+    if (opts.port !== undefined) url.port = String(opts.port);
+    return url.toString();
+  }
+
+  get port(): number {
+    return Number(new URL(this.#url).port);
+  }
+
+  async register(id: string, secret: string): Promise<void> {
+    await this.#call('PUT', '/__receiver/secrets', { id, secret });
+  }
+
+  async requests(id: string): Promise<ReceivedRequest[]> {
+    return (await this.#call('GET', `/__receiver/requests?id=${encodeURIComponent(id)}`)) as ReceivedRequest[];
+  }
+
+  async #call(method: string, path: string, body?: object): Promise<unknown> {
+    const response = await fetch(`${this.#url}${path}`, {
+      method,
+      headers: { 'X-Stub-Control': this.#control, 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (response.status !== 200) throw new Error(`the receiver answered ${method} ${path} with ${response.status}`);
+    return response.json();
+  }
+}
+
+export const test = base.extend<{ faucet: Faucet; cron: Faucet; hooks: HookStub; receiver: Receiver }>({
   faucet: async ({ app }, use) => {
     await use(Faucet.main(app.baseUrl));
   },
@@ -542,6 +615,9 @@ export const test = base.extend<{ faucet: Faucet; cron: Faucet; hooks: HookStub 
   },
   hooks: async ({ app }, use) => {
     await use(new HookStub(app.baseUrl));
+  },
+  receiver: async ({ app }, use) => {
+    await use(new Receiver(app.baseUrl));
   },
 });
 
