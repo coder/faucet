@@ -25,6 +25,10 @@ var (
 	ErrNoAccess     = xerrors.New("repository not found or not accessible")
 	ErrInvalidToken = xerrors.New("GitHub rejected the token")
 
+	// errRateLimited is GitHub's rate limiter answering, which says nothing
+	// about the principal's access. It is a failed check, never a denial.
+	errRateLimited = xerrors.New("GitHub rate limit reached")
+
 	ownerPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,38}$`)
 	namePattern  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
 )
@@ -124,7 +128,7 @@ func (a TokenAuthorizer) Authenticate(ctx context.Context, token string) (Princi
 }
 
 // get decodes a 200 response into out. For any other status it returns the
-// status and leaves out alone.
+// status and leaves out alone, except that a rate limit answer is errRateLimited.
 func (a TokenAuthorizer) get(ctx context.Context, token, path string, out any) (int, error) {
 	if token == "" {
 		return 0, xerrors.New("principal has no token")
@@ -162,13 +166,38 @@ func (a TokenAuthorizer) get(ctx context.Context, token, path string, out any) (
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxAPIResponseBytes))
+		answer, _ := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseBytes))
+		if rateLimited(resp.StatusCode, resp.Header, answer) {
+			return 0, errRateLimited
+		}
 		return resp.StatusCode, nil
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAPIResponseBytes)).Decode(out); err != nil {
 		return 0, xerrors.Errorf("decode GitHub response: %w", err)
 	}
 	return resp.StatusCode, nil
+}
+
+// rateLimited tells GitHub's rate limiter from a denial. GitHub answers a rate
+// limit with 429, or with 403 and one of three signs: no quota left, a
+// Retry-After header (the secondary limit), or a message that names the limit
+// (the secondary limit, also under its old name, the abuse detection mechanism).
+func rateLimited(status int, header http.Header, answer []byte) bool {
+	if status == http.StatusTooManyRequests {
+		return true
+	}
+	if status != http.StatusForbidden {
+		return false
+	}
+	if header.Get("X-RateLimit-Remaining") == "0" || header.Get("Retry-After") != "" {
+		return true
+	}
+	var body struct {
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(answer, &body)
+	message := strings.ToLower(body.Message)
+	return strings.Contains(message, "rate limit") || strings.Contains(message, "abuse detection")
 }
 
 // parseBaseURL never puts raw in an error because it can carry credentials.

@@ -63,6 +63,7 @@ func TestTokenAuthorizerRepoID(t *testing.T) {
 	tests := []struct {
 		name    string
 		status  int
+		headers map[string]string
 		body    string
 		wantID  int64
 		wantErr error
@@ -71,6 +72,12 @@ func TestTokenAuthorizerRepoID(t *testing.T) {
 		{name: "OK", status: http.StatusOK, body: `{"id": 1296269, "name": "r"}`, wantID: 1296269},
 		{name: "NotFound", status: http.StatusNotFound, body: `{"message":"Not Found"}`, wantErr: faucet.ErrNoAccess},
 		{name: "Forbidden", status: http.StatusForbidden, body: `{"message":"no"}`, wantErr: faucet.ErrNoAccess},
+		{name: "ForbiddenWithQuotaLeft", status: http.StatusForbidden, headers: map[string]string{"X-RateLimit-Remaining": "4999"}, body: `{"message":"Resource not accessible by integration"}`, wantErr: faucet.ErrNoAccess},
+		{name: "PrimaryRateLimit", status: http.StatusForbidden, headers: map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1700000000"}, body: `{"message":"Forbidden"}`, anyErr: true},
+		{name: "SecondaryRateLimitWithRetryAfter", status: http.StatusForbidden, headers: map[string]string{"Retry-After": "60"}, body: `{"message":"Forbidden"}`, anyErr: true},
+		{name: "SecondaryRateLimitByMessage", status: http.StatusForbidden, body: `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`, anyErr: true},
+		{name: "AbuseDetectionByMessage", status: http.StatusForbidden, body: `{"message":"You have triggered an abuse detection mechanism. Please wait a few minutes before you try again."}`, anyErr: true},
+		{name: "TooManyRequests", status: http.StatusTooManyRequests, headers: map[string]string{"X-RateLimit-Remaining": "0"}, body: `{"message":"API rate limit exceeded"}`, anyErr: true},
 		{name: "Unauthorized", status: http.StatusUnauthorized, body: `{"message":"Bad credentials"}`, wantErr: faucet.ErrInvalidToken},
 		{name: "ServerError", status: http.StatusInternalServerError, body: `boom`, anyErr: true},
 		{name: "BadGateway", status: http.StatusBadGateway, body: ``, anyErr: true},
@@ -84,6 +91,9 @@ func TestTokenAuthorizerRepoID(t *testing.T) {
 			stub := newGitHubStub(t, func(w http.ResponseWriter, r *http.Request) {
 				require.Equal(t, "/repos/octo-org/hello.world", r.URL.Path)
 				require.Equal(t, http.MethodGet, r.Method)
+				for name, value := range tt.headers {
+					w.Header().Set(name, value)
+				}
 				reply(tt.status, tt.body)(w, r)
 			})
 			authz := faucet.TokenAuthorizer{BaseURL: stub.URL, Client: stub.Client()}

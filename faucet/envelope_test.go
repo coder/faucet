@@ -7,9 +7,11 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/xerrors"
 
@@ -274,5 +276,51 @@ func TestConcurrentRenewalsAfterRevokedAccessSendOneTerminatedEnvelope(t *testin
 		require.Error(t, err)
 	}
 	require.Len(t, d.rcv.requests("/hook"), 1, "the one renewal whose delete removed the row sent it")
+	require.Equal(t, faucet.Terminations{Sent: 1}, d.svc.Terminations())
+}
+
+func TestRenewalDuringAGitHubRateLimitKeepsTheSubscriptionAndARealDenialStillEndsIt(t *testing.T) {
+	t.Parallel()
+
+	var answer atomic.Pointer[http.HandlerFunc]
+	serve := func(status int, body string, headers map[string]string) {
+		h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			for name, value := range headers {
+				w.Header().Set(name, value)
+			}
+			reply(status, body)(w, r)
+		})
+		answer.Store(&h)
+	}
+	stub := newGitHubStub(t, func(w http.ResponseWriter, r *http.Request) { (*answer.Load())(w, r) })
+	d := newDeliverHarness(t, func(deps *faucet.Deps) {
+		deps.Authorizer = faucet.TokenAuthorizer{BaseURL: stub.URL, Client: stub.Client()}
+	})
+	ep := d.endpoint("/hook")
+	serve(http.StatusOK, `{"id": 42}`, nil)
+	d.subscribeEndpoint(ep)
+
+	for name, limited := range map[string]struct {
+		status  int
+		headers map[string]string
+		body    string
+	}{
+		"primary":                {http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "0"}, `{"message":"Forbidden"}`},
+		"primary, 429":           {http.StatusTooManyRequests, map[string]string{"X-RateLimit-Remaining": "0"}, `{"message":"API rate limit exceeded"}`},
+		"secondary, Retry-After": {http.StatusForbidden, map[string]string{"Retry-After": "60"}, `{"message":"Forbidden"}`},
+		"secondary, message":     {http.StatusForbidden, nil, `{"message":"You have exceeded a secondary rate limit."}`},
+	} {
+		serve(limited.status, limited.body, limited.headers)
+		rpcErr := d.subscribeError(d.renewalParams(ep, ep.secret))
+		require.EqualValues(t, jsonrpc.CodeInternalError, rpcErr.Code, "%s rate limit: a failed check is retryable, not Forbidden", name)
+		require.Len(t, d.rows(), 1, "%s rate limit: the subscription stays", name)
+		require.Zero(t, d.rcv.total(), "%s rate limit: nothing is sent", name)
+	}
+	require.Zero(t, d.svc.Terminations())
+
+	serve(http.StatusForbidden, `{"message":"Resource not accessible by integration"}`, map[string]string{"X-RateLimit-Remaining": "4999"})
+	require.EqualValues(t, -32024, d.subscribeError(d.renewalParams(ep, ep.secret)).Code)
+	require.Len(t, d.rcv.requests("/hook"), 1, "a real denial still ends the subscription, once")
+	require.Empty(t, d.rows())
 	require.Equal(t, faucet.Terminations{Sent: 1}, d.svc.Terminations())
 }
