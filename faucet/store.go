@@ -4,6 +4,8 @@ package faucet
 import (
 	"context"
 	"encoding/json"
+	"slices"
+	"strings"
 	"time"
 
 	"golang.org/x/xerrors"
@@ -29,6 +31,11 @@ type Event struct {
 
 // Validate checks the fields a caller supplies to Store.InsertEvent.
 // ID and ReceivedAt are ignored because the store assigns them.
+//
+// Validate accepts any valid JSON without NUL characters. Postgres jsonb
+// rejects a few other values, such as numbers beyond the float64 range or lone
+// UTF-16 surrogates. Data built with encoding/json never contains them, and
+// InsertEvent returns the database error if a caller sends one anyway.
 func (e Event) Validate() error {
 	switch {
 	case e.Source == "":
@@ -43,6 +50,14 @@ func (e Event) Validate() error {
 		return xerrors.New("data is required")
 	case !json.Valid(e.Data):
 		return xerrors.New("data is not valid JSON")
+	}
+	var v any
+	if err := json.Unmarshal(e.Data, &v); err != nil {
+		return xerrors.Errorf("decode data: %w", err)
+	}
+	if hasNUL(v) {
+		// Postgres jsonb rejects U+0000 in any string.
+		return xerrors.New("data contains a NUL character")
 	}
 	return nil
 }
@@ -87,6 +102,22 @@ type PollPage struct {
 	// had when it answered, so a waiter whose repository is quiet does not
 	// rescan other repositories' events. It is never lower than the query's After.
 	Next int64
+}
+
+func hasNUL(v any) bool {
+	switch v := v.(type) {
+	case string:
+		return strings.ContainsRune(v, 0)
+	case []any:
+		return slices.ContainsFunc(v, hasNUL)
+	case map[string]any:
+		for k, e := range v {
+			if strings.ContainsRune(k, 0) || hasNUL(e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Store persists events and serves them to pollers.
