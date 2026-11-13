@@ -67,6 +67,3 @@ SELECT COUNT(*)::bigint AS deleted, COALESCE(MAX(id), 0)::bigint AS max_id FROM 
 UPDATE faucet_purge_mark
 SET purged_through = GREATEST(purged_through, sqlc.arg(through)::bigint)
 RETURNING purged_through;
-
--- name: StoredDeliveries :many
-SELECT delivery_id FROM faucet_events WHERE delivery_id = ANY(sqlc.arg(delivery_ids)::text[]);

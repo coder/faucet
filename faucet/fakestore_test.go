@@ -92,21 +92,6 @@ func (s *fakeStore) Purge(_ context.Context, before time.Time) (faucet.PurgeResu
 	return res, nil
 }
 
-func (s *fakeStore) StoredDeliveries(_ context.Context, deliveryIDs []string) ([]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.err != nil {
-		return nil, s.err
-	}
-	stored := []string{}
-	for _, e := range s.events {
-		if slices.Contains(deliveryIDs, e.DeliveryID) {
-			stored = append(stored, e.DeliveryID)
-		}
-	}
-	return stored, nil
-}
-
 func (s *fakeStore) lookups() []time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()

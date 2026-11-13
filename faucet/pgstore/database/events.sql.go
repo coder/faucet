@@ -283,30 +283,3 @@ func (q *Queries) RaisePurgeMark(ctx context.Context, through int64) (int64, err
 	err := row.Scan(&purged_through)
 	return purged_through, err
 }
-
-const storedDeliveries = `-- name: StoredDeliveries :many
-SELECT delivery_id FROM faucet_events WHERE delivery_id = ANY($1::text[])
-`
-
-func (q *Queries) StoredDeliveries(ctx context.Context, deliveryIds []string) ([]string, error) {
-	rows, err := q.db.QueryContext(ctx, storedDeliveries, pq.Array(deliveryIds))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []string
-	for rows.Next() {
-		var delivery_id string
-		if err := rows.Scan(&delivery_id); err != nil {
-			return nil, err
-		}
-		items = append(items, delivery_id)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}

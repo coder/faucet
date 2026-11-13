@@ -15,37 +15,22 @@ import (
 	"github.com/coder/quartz"
 )
 
-const (
-	// redeliverEvery is the schedule that the README gives for /cron/redeliver.
-	redeliverEvery = 30 * time.Minute
-	// redeliverLookback is how far back a sweep looks. A delivery is asked for
-	// only while its first attempt is inside this window. The last of the
-	// MaxRedeliveriesPerDelivery requests comes less than that many schedules
-	// after the first attempt, and one schedule more covers a sweep that runs
-	// late or not at all. A sweep that runs less often than redeliverEvery
-	// gives up on deliveries that it could still recover.
-	redeliverLookback = (faucet.MaxRedeliveriesPerDelivery + 1) * redeliverEvery
-	// cronTimeout keeps a run inside the server's write deadline.
-	cronTimeout = 25 * time.Second
-)
+// cronTimeout keeps a run inside the server's write deadline.
+const cronTimeout = 25 * time.Second
 
-// cronRoutes serves the two jobs that Vercel Cron triggers with GET and
+// cronRoutes serves the job that Vercel Cron triggers with GET and
 // Authorization: Bearer $CRON_SECRET.
 type cronRoutes struct {
 	// secret is CRON_SECRET. Empty means the routes answer 503 and run nothing.
 	secret    []byte
 	svc       *faucet.Service
 	retention time.Duration
-	lookback  time.Duration
-	// redelivers says whether the service has a HookAdmin.
-	redelivers bool
-	clock      quartz.Clock
-	logger     slog.Logger
+	clock     quartz.Clock
+	logger    slog.Logger
 }
 
 func (c cronRoutes) mount(r chi.Router) {
 	r.Get("/cron/purge", c.guard(c.purge))
-	r.Get("/cron/redeliver", c.guard(c.redeliver))
 }
 
 // guard runs next only for the right secret. Both sides are hashed first, so
@@ -82,26 +67,6 @@ func (c cronRoutes) purge(w http.ResponseWriter, r *http.Request) {
 		Deleted       int64 `json:"deleted"`
 		PurgedThrough int64 `json:"purged_through"`
 	}{res.Deleted, res.PurgedThrough})
-}
-
-func (c cronRoutes) redeliver(w http.ResponseWriter, r *http.Request) {
-	if !c.redelivers {
-		http.Error(w, "redelivery is not configured", http.StatusServiceUnavailable)
-		return
-	}
-	res, err := c.svc.Redeliver(r.Context(), c.clock.Now().Add(-c.lookback))
-	if err != nil {
-		c.logger.Error(r.Context(), "cron redelivery failed", slog.Error(err))
-		http.Error(w, "redelivery failed", http.StatusBadGateway)
-		return
-	}
-	writeJSON(w, struct {
-		Examined   int  `json:"examined"`
-		Pending    int  `json:"pending"`
-		GaveUp     int  `json:"gave_up"`
-		Requested  int  `json:"requested"`
-		Incomplete bool `json:"incomplete"`
-	}{res.Examined, res.Pending, res.GaveUp, res.Requested, res.Incomplete})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

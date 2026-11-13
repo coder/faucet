@@ -172,18 +172,6 @@ func (s *Store) Purge(ctx context.Context, before time.Time) (faucet.PurgeResult
 	return faucet.PurgeResult{Deleted: deleted.Deleted, PurgedThrough: mark}, nil
 }
 
-func (s *Store) StoredDeliveries(ctx context.Context, deliveryIDs []string) ([]string, error) {
-	// pq.Array encodes a nil slice as NULL, which matches nothing.
-	if len(deliveryIDs) == 0 {
-		return []string{}, nil
-	}
-	stored, err := s.q.StoredDeliveries(ctx, deliveryIDs)
-	if err != nil {
-		return nil, xerrors.Errorf("select deliveries: %w", err)
-	}
-	return stored, nil
-}
-
 func pollRowToEvent(row database.PollEventsRow) faucet.Event {
 	return faucet.Event{
 		ID:         row.ID.Int64,
