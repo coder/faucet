@@ -34,6 +34,10 @@ type HookDelivery struct {
 	// StatusCode is the HTTP status that faucet answered with. It is 0 when
 	// GitHub got no HTTP response.
 	StatusCode int
+	// Redelivery is true when this attempt answers a redelivery request. Such
+	// an attempt has its own, later DeliveredAt, so only the attempts with
+	// Redelivery false carry the time at which the event first happened.
+	Redelivery bool
 }
 
 // DeliveryPage is one page of HookAdmin.ListDeliveries.
@@ -143,6 +147,7 @@ type deliveryJSON struct {
 	GUID        string    `json:"guid"`
 	DeliveredAt time.Time `json:"delivered_at"`
 	StatusCode  int       `json:"status_code"`
+	Redelivery  bool      `json:"redelivery"`
 }
 
 // ListDeliveries implements HookAdmin. It reads the rel="next" cursor from the

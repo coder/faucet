@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { samples, stubDelivery } from './payloads';
 import { describe, expect, newDeliveryId, newRepoId, test, type Faucet, type HookStub, type StubDelivery } from './support';
 
@@ -6,6 +7,7 @@ const MINUTE = 60_000;
 const HOOK = '/orgs/verify/hooks/7';
 const MAX_PAGES = 10;
 const MAX_REQUESTS = 50;
+const MAX_REDELIVERIES_PER_DELIVERY = 3;
 
 interface Sweep {
   examined: number;
@@ -83,16 +85,19 @@ describe('redelivery sweep', () => {
     expect(await cron.rows(repoId)).toHaveLength(4);
   });
 
-  test('asks again on every sweep for a delivery that GitHub cannot get through', async ({ cron, hooks }) => {
+  test('gives up on a delivery that the faucet keeps rejecting after 3 redeliveries', async ({ cron, hooks }) => {
     const repoId = newRepoId();
     const guid = newDeliveryId();
     await hooks.set([{ id: 201, guid, ageMs: 5 * MINUTE, status: 500, event: run.event }]);
 
-    const first = await sweep(cron);
-    const second = await sweep(cron);
+    const sweeps: Sweep[] = [];
+    for (let i = 0; i < MAX_REDELIVERIES_PER_DELIVERY + 2; i++) sweeps.push(await sweep(cron));
+    const requests = await asked(hooks);
 
-    expect([first.requested, second.requested]).toEqual([1, 1]);
+    expect(sweeps.map((r) => [r.pending, r.requested])).toEqual([[1, 1], [1, 1], [1, 1], [0, 0], [0, 0]]);
+    expect(requests, 'the first attempt, then each redelivery').toEqual([201, 202, 203]);
     expect(await cron.rows(repoId)).toEqual([]);
+    expect(readFileSync('.e2e/logs/app.log', 'utf8')).toMatch(new RegExp(`redelivery limit reached\\s+delivery_id=${guid}`));
   });
 
   test('sends at most 50 redelivery requests per run, oldest first, and the next run goes on', async ({ cron, hooks }) => {
