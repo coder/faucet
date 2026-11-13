@@ -35,8 +35,6 @@ func TestStore(t *testing.T) {
 	})
 }
 
-// newDatabase creates a migrated database that only the calling test uses and
-// drops it when the test ends.
 func newDatabase(t *testing.T, adminURL string) *sql.DB {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

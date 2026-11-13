@@ -17,7 +17,6 @@ const eventsLockKey int64 = 1664114494957747203
 
 var _ faucet.Store = (*Store)(nil)
 
-// Store is a faucet.Store backed by a Postgres database.
 type Store struct {
 	db *sql.DB
 	q  *database.Queries
@@ -74,7 +73,6 @@ func (s *Store) InsertEvent(ctx context.Context, ev faucet.Event) (faucet.Event,
 	return toEvent(row), inserted, nil
 }
 
-// EventsAfter returns events with ID > afterID in ID order, at most limit rows.
 func (s *Store) EventsAfter(ctx context.Context, afterID int64, limit int32) ([]faucet.Event, error) {
 	if limit <= 0 {
 		return nil, xerrors.Errorf("limit must be positive, got %d", limit)
