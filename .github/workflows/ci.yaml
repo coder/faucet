@@ -81,7 +81,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Generate
-        run: go tool sqlc generate
+        run: go -C tools tool sqlc generate -f ../sqlc.yaml
 
       - name: Check generated code is committed
         run: |
@@ -103,7 +103,9 @@ jobs:
           go-version-file: go.mod
 
       - name: Tidy
-        run: go mod tidy
+        run: |
+          go mod tidy
+          go -C tools mod tidy
 
       - name: Check go.mod and go.sum are tidy
         run: git diff --exit-code
