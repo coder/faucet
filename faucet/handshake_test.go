@@ -23,6 +23,8 @@ import (
 	"github.com/coder/faucet/faucet"
 )
 
+const handshakeRefillForTest = 12 * time.Second
+
 const pathToken = "tok-7c1f4e9a" //nolint:gosec // A marker that the tests look for, not a credential.
 
 type received struct {
@@ -71,6 +73,16 @@ func (e *endpoint) requests() []received {
 }
 
 func (e *endpoint) callback() string { return e.url + e.path }
+
+func (e *endpoint) requestsTo(prefix string) []received {
+	var out []received
+	for _, got := range e.requests() {
+		if strings.HasPrefix(got.path, prefix) {
+			out = append(out, got)
+		}
+	}
+	return out
+}
 
 func echo(w http.ResponseWriter, got received) {
 	_, _ = fmt.Fprintf(w, "{\n  \"challenge\": %q\n}\n", got.challenge())
@@ -376,6 +388,10 @@ func TestVerifierGetsTheSubscriptionAndASignerButNotTheSecret(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, verifier.VerifyIgnoringTimestamp(body, headers), "the request signs with the subscriber's secret")
 
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q"} {
+		require.NotContains(t, fmt.Sprintf(verb, req), callbackURL, "%s of the request: the URL can hold a token", verb)
+	}
+
 	// An embedder that keeps the request in a field of its own struct is printed by reflection, which skips Format.
 	type embedderState struct{ pending faucet.CallbackRequest }
 	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%x", "%q"} {
@@ -455,4 +471,91 @@ func TestHandshakeRateLimitCountsOneDestinationOnceWhateverItsSpelling(t *testin
 			require.NotErrorIs(t, err, faucet.ErrCallbackRateLimited, "another destination has its own bucket")
 		})
 	}
+}
+
+// shared answers the handshake of /legit like a correct subscriber and refuses every other path, like a gateway that
+// serves many tenants.
+func sharedGateway(t *testing.T, secret string) *endpoint {
+	t.Helper()
+	echoes := subscriberEchoes(secret)
+	return newEndpoint(t, func(w http.ResponseWriter, r *http.Request, got received) {
+		if strings.HasPrefix(r.URL.Path, "/legit") {
+			echoes(w, r, got)
+			return
+		}
+		http.NotFound(w, nil)
+	})
+}
+
+func TestHandshakeOneLoginCannotLockAnotherOutOfAHost(t *testing.T) {
+	t.Parallel()
+
+	secret := newSecret(t, 32)
+	gateway := sharedGateway(t, secret)
+	h := newHandshakeHarness(t, gateway.target, resolveToLoopback())
+	legit := gateway.url + "/legit"
+	failing := func(i int) string { return fmt.Sprintf("%s/x-%d", gateway.url, i) }
+
+	h.as("hubot")
+	h.subscribe(subscribeTo(repoArgs(), legit, secret))
+
+	h.as("octocat")
+	for i := range 5 {
+		rpcErr := h.subscribeError(subscribeTo(repoArgs(), failing(i), secret))
+		require.EqualValues(t, codeCallbackEndpoint, rpcErr.Code, "attempt %d", i)
+	}
+	rpcErr := h.subscribeError(subscribeTo(repoArgs(), failing(5), secret))
+	require.EqualValues(t, codeResourceExhausted, rpcErr.Code, "the login that keeps failing is limited")
+
+	h.as("hardcase")
+	h.subscribe(subscribeTo(repoArgs(), gateway.url+"/legit-new", secret))
+	require.Len(t, h.rows(), 2, "another login still verifies against the host the first one emptied")
+
+	for i := 6; i < 6+55; i++ {
+		h.as("octocat")
+		h.clock.Advance(handshakeRefillForTest)
+		rpcErr := h.subscribeError(subscribeTo(repoArgs(), failing(i), secret))
+		require.EqualValues(t, codeCallbackEndpoint, rpcErr.Code, "octocat takes each token that comes back")
+	}
+	h.as("hubot")
+	h.subscribe(subscribeTo(repoArgs(), legit, secret))
+	require.Len(t, gateway.requestsTo("/legit"), 3, "after 11 minutes hubot's renewal had to verify again, and could")
+}
+
+func TestHandshakeManyLoginsStillCannotFloodOneHost(t *testing.T) {
+	t.Parallel()
+
+	secret := newSecret(t, 32)
+	gateway := sharedGateway(t, secret)
+	h := newHandshakeHarness(t, gateway.target, resolveToLoopback())
+
+	var limited int
+	for login := range 14 {
+		h.as(fmt.Sprintf("user-%d", login))
+		for i := range 5 {
+			rpcErr := h.subscribeError(subscribeTo(repoArgs(), fmt.Sprintf("%s/x-%d-%d", gateway.url, login, i), secret))
+			if rpcErr.Code == codeResourceExhausted {
+				limited++
+			}
+		}
+	}
+	require.EqualValues(t, 60, gateway.hits.Load(), "the host gets at most 60 verification requests at once, whoever asks")
+	require.Equal(t, 10, limited, "and the ones past that are refused")
+	requireNothingStored(t, h, "a refused handshake")
+}
+
+func TestHandshakeAnsweredHandshakesDoNotUseUpTheHostLimit(t *testing.T) {
+	t.Parallel()
+
+	secret := newSecret(t, 32)
+	gateway := sharedGateway(t, secret)
+	h := newHandshakeHarness(t, gateway.target, resolveToLoopback())
+
+	for login := range 13 {
+		h.as(fmt.Sprintf("tenant-%d", login))
+		for i := range 5 {
+			h.subscribe(subscribeTo(repoArgs(), fmt.Sprintf("%s/legit-%d-%d", gateway.url, login, i), secret))
+		}
+	}
+	require.Len(t, h.rows(), 65, "65 correct handshakes to one host, past the 60 that the host bucket holds")
 }
