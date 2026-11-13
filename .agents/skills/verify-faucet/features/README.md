@@ -1,6 +1,6 @@
 # Feature map
 
-One file per user-facing behavior of the faucet server at PR 7a, from the point of view of its four users: GitHub, which POSTs signed webhooks, an operator who watches `/healthz` and schedules the cron routes, a scheduler such as Vercel Cron, and an agent that waits for, lists, polls or subscribes to events through `/mcp`. Each file names the test that pins it, the proof, and its bug-bash charters. Paths are relative to `verify/`.
+One file per user-facing behavior of the faucet server at PR 7b, from the point of view of its four users: GitHub, which POSTs signed webhooks, an operator who watches `/healthz` and schedules the cron routes, a scheduler such as Vercel Cron, and an agent that waits for, lists, polls or subscribes to events through `/mcp` and receives the signed webhooks at its callback URL. Each file names the test that pins it, the proof, and its bug-bash charters. Paths are relative to `verify/`.
 
 | Feature | Route | Test | Status |
 | --- | --- | --- | --- |
@@ -21,18 +21,17 @@ One file per user-facing behavior of the faucet server at PR 7a, from the point 
 | [Events subscribe](events-subscribe.md) | `POST /mcp`, `events/subscribe` | `tests/events-subscribe.e2e.ts`, `tests/events-subscribe-types.e2e.ts` | tested |
 | [Events unsubscribe](events-unsubscribe.md) | `POST /mcp`, `events/unsubscribe` | `tests/events-unsubscribe.e2e.ts` | tested |
 | [Webhook handshake](webhook-handshake.md) | `POST /mcp`, `events/subscribe` in `handshake` mode, and the request that faucet sends to the callback URL | `tests/handshake.e2e.ts` | tested |
-| [Cron routes](cron-auth.md) | `GET /cron/purge`, `GET /cron/redeliver`, the secret check | `tests/cron-auth.e2e.ts` | tested |
+| [Cron routes](cron-auth.md) | `GET /cron/purge`, `GET /cron/redeliver`, `GET /cron/deliver`, the secret check | `tests/cron-auth.e2e.ts` | tested |
 | [Purge](purge.md) | `GET /cron/purge`, then `events/poll`, the wait tool and the subscriptions table | `tests/purge.e2e.ts` | tested |
 | [Redelivery sweep](redeliver.md) | `GET /cron/redeliver` | `tests/redeliver.e2e.ts` | tested |
+| [Webhook delivery](delivery.md) | `GET /cron/deliver`, then the signed `POST` to the callback URL | `tests/delivery.e2e.ts`, `tests/delivery-retry.e2e.ts`, `tests/cron-auth.e2e.ts` | tested |
 
 The webhook handler checks in this order: method, signature header shape, body size, the HMAC, the event and delivery headers, `ping`, then the payload. A rejection earlier in that order wins. A test pins only the first ordering, the signature before the headers. Two more were checked once by hand at PR 2 and are not pinned: an oversize body is 413 before any HMAC, and `ping` needs both headers.
 
 ## Later
 
-Planned for PR 7b onward and not in the server yet, so it has no test or feature file. Mark it `tested` here when its file and test land.
+Planned for a later PR and not in the server yet, so it has no test or feature file. Mark it `tested` here when its file and test land.
 
 | Feature | Planned surface | Status |
 | --- | --- | --- |
-| Delivery | signed webhook delivery to the subscriptions that `events/subscribe` stores (PR 7b onward) | untested |
-
-Delivery has what it needs from PR 7a: a callback receiver that the test owns (`receiver` in `tests/support.ts`, see [Webhook handshake](webhook-handshake.md)), the build with `-tags faucet_e2e` whose client reaches it, and a faucet that `faucet.withFaucet` starts with that build. A delivery test adds the behavior that takes a signed event and the call that runs the sender. `faucet.subscriptions` and `faucet.openSecret` read the rows and open the sealed secrets that delivery signs with.
+| Gap notices | a `gap` notice to a subscription that a purge cost events | untested |

@@ -1,6 +1,6 @@
 # Webhook handshake
 
-An agent that subscribes a callback URL with `events/subscribe` can ask the operator's faucet to check, before it stores anything, that the endpoint behind the URL agrees to receive events. This is the verification handshake of the MCP Events extension (SEP-3415, endpoint verification option 1). The operator turns it on with `FAUCET_WEBHOOK_CALLBACK_VERIFICATION=handshake`. Faucet then sends one signed `POST` to the URL, through a guarded client, and stores the subscription only when the endpoint answers the nonce. The main faucet uses the origin allowlist instead and sends nothing (see [events/subscribe](events-subscribe.md)). At PR 7a faucet sends no event yet. This is the guarded sender that delivery will use.
+An agent that subscribes a callback URL with `events/subscribe` can ask the operator's faucet to check, before it stores anything, that the endpoint behind the URL agrees to receive events. This is the verification handshake of the MCP Events extension (SEP-3415, endpoint verification option 1). The operator turns it on with `FAUCET_WEBHOOK_CALLBACK_VERIFICATION=handshake`. Faucet then sends one signed `POST` to the URL, through a guarded client, and stores the subscription only when the endpoint answers the nonce. The main faucet uses the origin allowlist instead and sends nothing (see [events/subscribe](events-subscribe.md)). [Webhook delivery](delivery.md) sends the events through the same guarded client.
 
 ## Sub-features
 

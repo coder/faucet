@@ -1,0 +1,49 @@
+# Webhook delivery
+
+An agent that subscribed with `events/subscribe` gets the matching GitHub events as Standard Webhooks signed `POST`s at its callback URL. Faucet sends nothing by itself. `GET /cron/deliver` (Vercel Cron, or any scheduler with the cron secret) queues the events that live subscriptions have not read yet, and sends the deliveries that are due through the guarded client of the [handshake](webhook-handshake.md). It needs webhook mode. A webhook can wait up to one scheduler period, and a retry one more.
+
+## Sub-features
+
+- The route is `GET /cron/deliver` with `Authorization: Bearer <CRON_SECRET>`. The 401 for a missing or wrong secret, the 405 for another method and the 503 without `CRON_SECRET` are the ones of [cron routes](cron-auth.md). With the secret and without webhook mode it answers 503 `delivery is not configured`. The reply is JSON with these members and no others: `enqueued`, `gaps`, `claimed`, `sent`, `delivered`, `retried`, `gave_up` (reason to count), `superseded` and `incomplete`.
+- A subscription gets only the events of its repository, of its event name, that match its `sha` and `pr` arguments, from its cursor on and while it is live. An event stored before the subscribe, one of another repository, one of another event name and one for another `pr` get nothing. A subscription that has expired is not read at all.
+- The request is a `POST` to the callback URL with `Content-Type: application/json`, `X-MCP-Subscription-Id` (the `id` that subscribe returned) and the Standard Webhooks headers `webhook-id` (`msg_` and 22 URL-safe characters), `webhook-timestamp` (Unix seconds, near now) and `webhook-signature` (`v1,` and the base64 of the HMAC-SHA256 of `<id>.<timestamp>.<body>`, keyed with the subscriber's secret). It has no `Authorization` header and no cookie.
+- The body is `{"eventId","name","timestamp","data","cursor"}`. `eventId` is the `webhook-id`, never the GitHub delivery ID that `events/poll` names the event by. `name`, `timestamp` and `data` equal what `events/poll` returns. `cursor` is `v1.<id>` of the position before the lowest unsent event of the subscription, so `events/poll` from it returns that event again.
+- Each event is one delivery with one `webhook-id` for every attempt. Any number of runs may overlap, in one process or in more: a claim gives an attempt to one run for 30 seconds, so a `webhook-id` is sent once per attempt and the replies add up to the work.
+- An answer in 200 to 299 ends the delivery. Every other answer, a redirect (never followed) included, fails the attempt, and the retries come after 15 s, 1 min, 3 min and 6 min. The retry has the same `webhook-id` and body, a new `webhook-timestamp` and a new signature. The fifth failure ends the delivery as `attempts_exhausted`. After that nothing is sent for it.
+- `410 Gone` ends that delivery as `endpoint_gone` and `413` as `endpoint_payload_too_large`, with no retry. Neither ends the subscription, and the next event is sent.
+- A delivery of a subscription that expired ends as `subscription_expired` without a request, and so does one that `events/unsubscribe` deletes (that one the run does not count).
+- A run that died after a claim leaves the delivery to the next run once the lease of 30 seconds has passed, and the lost attempt counts: a delivery that lapsed on its fifth attempt ends as `attempts_exhausted` without a request.
+- A renewal reports `deliveryStatus`: `lastError` is the category of the last failed attempt (`http_5xx` for a 500, `http_4xx` for a 410, a 413 or a redirect) until a 2xx sets `lastDeliveryAt` and clears it, and `failedSince` is the time of the first failure since the last 2xx.
+- The log has one line per attempt that ended: `webhook delivered`, `webhook failed, will retry` (`category`) and `webhook given up` (`reason`, `category`), each with `subscription`, `event_id`, `attempt` and `host`. No log line, reply or table holds the secret, the callback path or query, or anything that the endpoint answered. The table `faucet_deliveries` has no column for a secret or a URL.
+- Not reachable from the outside, so pinned by the Go unit tests only: `event_purged`, `repo_mismatch`, `secret_unreadable`, `event_too_large`, `event_malformed`, `window_expired`, a purge gap, the cap of 100 unsent deliveries, and the limits of a run (200 claims, 8 at a time, 10 seconds left to start).
+
+## How to get to it (user POV)
+
+An agent that runs a receiver subscribes with `events/subscribe`, verifies the signature of every request with its own `whsec_` secret, deduplicates on `webhook-id`, and answers `2xx` quickly. It answers `410` to stop one delivery for good. It renews before `refreshBefore` and reads `deliveryStatus` in the answer, and it persists the `cursor` of the last body that it handled and sends it on a renewal. The agent cannot see the queue, the leases, the schedule or the log. The operator schedules `/cron/deliver`. A Vercel Pro cron runs at most once a minute, which sets how late a webhook can be.
+
+## Driving it with e2e
+
+`tests/delivery.e2e.ts` (matching events, concurrent runs, secret hygiene), `tests/delivery-retry.e2e.ts` (retries, the five attempts, 410 and 413, a redirect, expiry, a crashed run, unsubscribe), and the deliver cases of `tests/cron-auth.e2e.ts`. `tests/delivery.ts` holds what they share: `withDeliveryFaucet(faucet, fn)` starts a faucet in `handshake` mode on the build with `-tags faucet_e2e`, so it reaches the receiver on `127.0.0.1`. `endpoint(receiver, behavior)` registers a secret and makes a callback URL with a token in its query. `paramsFor(repoId, at, args?)` builds the subscribe params. `storeRun(started, repoId, runId)` posts a signed `workflow_run` event, and `deliverDue(started)` calls `GET /cron/deliver` and returns its counts, which `counts({...})` builds. `eventRequests(receiver, at)` are the requests for events without the verification request, and `expectSigned(request, subscriptionId)` checks one and returns its body.
+
+The receiver answers events by the behavior in the URL (the list is in `app.mjs`): `ok` (200 when the signature is valid, else 401), `gone` (410), `toolarge` (413), `fail500`, `fail-once` (500, then 200), `gone-once`, `toolarge-once` and `redirect-events` (302). It answers a verification request like `echo`, so the handshake passes for each of them. Every answer body is `ENDPOINT_SAYS` from `runstate.mjs`. `receiver.requests(id)` holds the headers, the body and its own `signature` verdict, which it computes with Node crypto and no code of faucet.
+
+On the faucet that a test started: `started.deliveries()` reads `faucet_deliveries`, `started.makeDeliveriesDue()` moves every `next_attempt_at` into the past and ends the leases, and `started.leaseDeliveries(seconds, attempts)` plays a run that claimed the deliveries and died. Not reachable from a browser: use `run_tests {files: ["tests/delivery.e2e.ts", "tests/delivery-retry.e2e.ts"]}`, or `npx e2e run tests/delivery.e2e.ts tests/delivery-retry.e2e.ts` in `verify/`.
+
+## Proof
+
+The receiver's `signature` is `valid` for every event request, so the HMAC was made over the exact bytes with the subscriber's secret. A test checks the headers, the five body members, `eventId == webhook-id` and not the GitHub delivery ID, and `name`, `timestamp` and `data` against `events/poll`. It sends events for the subscribed repository, another repository and another event name, and a subscription with a `pr` filter that matches none, and the receivers hold exactly the matching requests. The counts of the cron reply are exact. The retry tests read `faucet_deliveries`: the `attempts`, the `next_attempt_at` against the schedule (15 s, 60 s, 180 s, 360 s) and the `message_id` that equals the `webhook-id` of every request. Six runs at once over 30 events add up to 30 sends, 30 distinct `webhook-id`s and no `superseded`, and the work was shared by at least two runs. After the scenarios the log, the cron replies and the tables hold the secret, its base64 part, the callback URL, its token and `ENDPOINT_SAYS` 0 times, and the log names the host without `/hook/`.
+
+## Charters
+
+No charter. Every check needs the cron secret, the receiver's records, the queue table or the log of a faucet that the test started, and a browser session reaches none of them.
+
+## Gotchas
+
+- A backoff of 15 seconds to 6 minutes cannot be waited out. A test sets `next_attempt_at` by SQL (`makeDeliveriesDue`), which is the test's own `update` and needs no route or seam in the server. It leaves `enqueued_at` alone, so the window of 15 minutes stays open. The schedule is checked by reading `next_attempt_at` after each failure, not by waiting.
+- `webhook-timestamp` counts whole seconds, so two attempts within one second can carry the same one. The retry test waits 1.1 seconds before it makes the retry due.
+- One run queues and sends in the same call, so a test cannot hold a delivery in the queue unsent. It gets a queued row from an attempt that failed (`fail500`, `fail-once`) and plays a crash by `leaseDeliveries` on that row.
+- The receiver counts event requests per callback id for `fail-once`, `gone-once` and `toolarge-once`, so each test makes its own id with `endpoint`.
+- `callback_url` holds the URL with its token query, because the sender needs it. The table checks cover the secret and the sealed column, not the URL.
+- A redirect on an event is the category `http_4xx`, like any answer in 3xx or 4xx that is not 410 or 413. The test only checks that it is a category and that the target is never requested.
+- A renewal reports `deliveryStatus` only when the subscription existed. The first subscribe does not.
+- Each test starts its own faucet and database, so the table-wide reads (`deliveries()`) see only that test's rows.
