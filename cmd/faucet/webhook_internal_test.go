@@ -73,3 +73,63 @@ func TestLoadConfigWebhook(t *testing.T) {
 		}
 	}
 }
+
+func loadHandshakeConfig(t *testing.T, extra map[string]string) (config, error) {
+	t.Helper()
+	env := map[string]string{envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret}
+	for k, v := range extra {
+		env[k] = v
+	}
+	return loadConfig(func(name string) string { return env[name] })
+}
+
+func TestLoadConfigWebhookCallbackVerification(t *testing.T) {
+	t.Parallel()
+
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xA5}, 32))
+	const origins = "https://coder.example.test"
+
+	for name, env := range map[string]map[string]string{
+		"the handshake with a key":                    {envWebhookKey: key, envWebhookVerify: verifyHandshake},
+		"the allowlist named, with a key and origins": {envWebhookKey: key, envWebhookOrigins: origins, envWebhookVerify: verifyAllowlist},
+	} {
+		cfg, err := loadHandshakeConfig(t, env)
+		require.NoError(t, err, name)
+		require.NotNil(t, cfg.webhook, name)
+		require.NotNil(t, cfg.webhook.Callbacks, name)
+	}
+
+	for name, tc := range map[string]struct {
+		env  map[string]string
+		want string
+	}{
+		"the handshake without a key": {map[string]string{envWebhookVerify: verifyHandshake}, "webhook delivery needs " + envWebhookKey},
+		"the handshake with origins": {
+			map[string]string{envWebhookKey: key, envWebhookOrigins: origins, envWebhookVerify: verifyHandshake},
+			envWebhookOrigins + " must not be set when " + envWebhookVerify + " is handshake",
+		},
+		"the allowlist named, without origins": {
+			map[string]string{envWebhookKey: key, envWebhookVerify: verifyAllowlist}, "webhook delivery needs " + envWebhookOrigins,
+		},
+		"a mode that does not exist": {
+			map[string]string{envWebhookKey: key, envWebhookOrigins: origins, envWebhookVerify: "handshake-7c1f4e"},
+			envWebhookVerify + " must be allowlist or handshake",
+		},
+		"a mode in capitals": {map[string]string{envWebhookKey: key, envWebhookVerify: "HANDSHAKE"}, envWebhookVerify + " must be allowlist or handshake"},
+		"the handshake with a bad key": {
+			map[string]string{envWebhookKey: "not base64 at all!", envWebhookVerify: verifyHandshake}, envWebhookKey + " must be the standard base64",
+		},
+	} {
+		_, err := loadHandshakeConfig(t, tc.env)
+		require.ErrorContains(t, err, tc.want, name)
+		for _, value := range tc.env {
+			if len(value) >= 8 && value != verifyHandshake && value != verifyAllowlist {
+				require.NotContains(t, err.Error(), value, "%s: the error names variables, never values", name)
+			}
+		}
+	}
+
+	cfg, err := loadHandshakeConfig(t, map[string]string{envWebhookVerify: verifyAllowlist + "x"})
+	require.Error(t, err)
+	require.Nil(t, cfg.webhook)
+}

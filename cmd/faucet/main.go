@@ -178,6 +178,9 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	logger := slog.Make(sloghuman.Sink(os.Stderr))
+	if allowInsecureLoopback {
+		logger.Warn(ctx, "built with faucet_e2e: the callback client reaches loopback over http, do not ship this binary")
+	}
 
 	db, err := dbconn.Open(cfg.databaseURL)
 	if err != nil {
