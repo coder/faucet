@@ -34,6 +34,13 @@ const (
 	envAPIURL      = "FAUCET_GITHUB_API_URL"
 	defaultAPIURL  = "https://api.github.com"
 
+	envCronSecret    = "CRON_SECRET" //nolint:gosec // The name of an environment variable, not a credential.
+	envRetentionDays = "FAUCET_RETENTION_DAYS"
+
+	defaultRetentionDays = 30
+	maxRetentionDays     = 3650
+	minCronSecretBytes   = 16
+
 	dbSetupTimeout  = 30 * time.Second
 	shutdownTimeout = 15 * time.Second
 	githubTimeout   = 10 * time.Second
@@ -47,6 +54,9 @@ type config struct {
 	secret      string
 	port        string
 	githubAPI   string
+	// cronSecret is empty when the cron routes are off.
+	cronSecret string
+	retention  time.Duration
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -75,7 +85,31 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if err := (faucet.TokenAuthorizer{BaseURL: githubAPI}).Validate(); err != nil {
 		return config{}, xerrors.Errorf("%s: %w", envAPIURL, err)
 	}
-	return config{databaseURL: getenv(envDatabaseURL), secret: getenv(envSecret), port: port, githubAPI: githubAPI}, nil
+	cfg := config{databaseURL: getenv(envDatabaseURL), secret: getenv(envSecret), port: port, githubAPI: githubAPI}
+	if err := loadCronConfig(getenv, &cfg); err != nil {
+		return config{}, err
+	}
+	return cfg, nil
+}
+
+// loadCronConfig reads the optional settings of the cron routes. No error
+// names a value, because some of the values are credentials.
+func loadCronConfig(getenv func(string) string, cfg *config) error {
+	cfg.cronSecret = getenv(envCronSecret)
+	if cfg.cronSecret != "" && len(cfg.cronSecret) < minCronSecretBytes {
+		return xerrors.Errorf("%s must be at least %d bytes", envCronSecret, minCronSecretBytes)
+	}
+
+	days := defaultRetentionDays
+	if raw := getenv(envRetentionDays); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > maxRetentionDays {
+			return xerrors.Errorf("%s must be a whole number of days from 1 to %d", envRetentionDays, maxRetentionDays)
+		}
+		days = n
+	}
+	cfg.retention = time.Duration(days) * 24 * time.Hour
+	return nil
 }
 
 func main() {
@@ -101,13 +135,14 @@ func run() error {
 	defer func() { _ = db.Close() }()
 
 	github := faucet.TokenAuthorizer{BaseURL: cfg.githubAPI, Client: &http.Client{Timeout: githubTimeout}}
+	clock := quartz.NewReal()
 	svc, err := faucet.New(faucet.Deps{
 		Store:         pgstore.New(db),
 		Secret:        []byte(cfg.secret),
 		Logger:        logger,
 		Authorizer:    github,
 		PrincipalFrom: principalFrom,
-		Clock:         quartz.NewReal(),
+		Clock:         clock,
 	})
 	if err != nil {
 		return xerrors.Errorf("create service: %w", err)
@@ -115,7 +150,10 @@ func run() error {
 	if err := migrateDatabase(ctx, db); err != nil {
 		return err
 	}
-	return serve(ctx, logger, cfg.port, newRouter(svc, github, logger))
+	cron := cronRoutes{
+		secret: []byte(cfg.cronSecret), svc: svc, retention: cfg.retention, clock: clock, logger: logger,
+	}
+	return serve(ctx, logger, cfg.port, newRouter(svc, github, cron, logger))
 }
 
 func migrateDatabase(ctx context.Context, db *sql.DB) error {
@@ -131,8 +169,9 @@ func migrateDatabase(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func newRouter(svc *faucet.Service, authn authenticator, logger slog.Logger) http.Handler {
+func newRouter(svc *faucet.Service, authn authenticator, cron cronRoutes, logger slog.Logger) http.Handler {
 	r := chi.NewRouter()
+	cron.mount(r)
 	r.Method(http.MethodPost, "/webhook/github", svc.WebhookHandler())
 	r.Handle("/mcp", longResponse(requireBearer(authn, logger, newMCPHandler(svc))))
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {

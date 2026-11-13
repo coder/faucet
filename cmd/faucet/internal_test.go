@@ -148,7 +148,7 @@ func newTestServer(t *testing.T, configure ...func(*httptest.Server)) *testServe
 	})
 	require.NoError(t, err)
 
-	srv := httptest.NewUnstartedServer(newRouter(svc, authz, logger))
+	srv := httptest.NewUnstartedServer(newRouter(svc, authz, cronRoutes{}, logger))
 	for _, c := range configure {
 		c(srv)
 	}

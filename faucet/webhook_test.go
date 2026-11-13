@@ -38,6 +38,8 @@ type fakeStore struct {
 	polls  []faucet.PollQuery
 
 	cursorLookups []time.Time
+	lastID        int64
+	purgeMark     int64
 }
 
 func (s *fakeStore) InsertEvent(_ context.Context, ev faucet.Event) (faucet.Event, bool, error) {
@@ -55,7 +57,8 @@ func (s *fakeStore) InsertEvent(_ context.Context, ev faucet.Event) (faucet.Even
 			return e, false, nil
 		}
 	}
-	ev.ID = int64(len(s.events) + 1)
+	s.lastID++
+	ev.ID = s.lastID
 	ev.ReceivedAt = s.nowLocked()
 	s.events = append(s.events, ev)
 	return ev, true, nil

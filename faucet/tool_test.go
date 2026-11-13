@@ -81,6 +81,7 @@ type waitHarness struct {
 	ctx     context.Context
 	store   *fakeStore
 	clock   *quartz.Mock
+	svc     *faucet.Service
 	authz   *fakeAuthorizer
 	logs    *bytes.Buffer
 	session *mcp.ClientSession
@@ -123,7 +124,7 @@ func newWaitHarness(t *testing.T, mutate ...func(*faucet.Deps)) *waitHarness {
 	t.Cleanup(timers.Close)
 	t.Cleanup(cancel)
 	t.Cleanup(func() { clock.Advance(time.Hour) })
-	return &waitHarness{t: t, ctx: ctx, store: store, clock: clock, authz: authz, logs: logs, session: session, timers: timers, deps: deps}
+	return &waitHarness{t: t, ctx: ctx, store: store, clock: clock, svc: svc, authz: authz, logs: logs, session: session, timers: timers, deps: deps}
 }
 
 type waitResult struct {
@@ -136,7 +137,8 @@ type waitResult struct {
 		Data       json.RawMessage `json:"data"`
 		ReceivedAt time.Time       `json:"received_at"`
 	} `json:"events"`
-	Cursor int64 `json:"cursor"`
+	Cursor    int64 `json:"cursor"`
+	Truncated bool  `json:"truncated"`
 }
 
 func (r waitResult) ids() []int64 {
@@ -313,6 +315,58 @@ func TestWaitReturnsEventsForAnAllowedRepo(t *testing.T) {
 	require.Empty(t, res.Events[1].PRs)
 	require.Equal(t, []string{"octocat " + testRepo}, h.authz.calls)
 	h.requireNoLeak()
+}
+
+func TestWaitReportsEventsThatAPurgeDeleted(t *testing.T) {
+	t.Parallel()
+
+	h := newWaitHarness(t)
+	var e []faucet.Event
+	for range 3 {
+		h.clock.Advance(time.Minute).MustWait(h.ctx)
+		e = append(e, h.insert(repoID, "ci.run_completed", testShaA, 7))
+	}
+	h.clock.Advance(time.Minute).MustWait(h.ctx)
+	wait := func(cursor int64) waitResult {
+		return h.call(args("repo", testRepo, "types", allTypes, "cursor", cursor)).success(t)
+	}
+	require.False(t, wait(0).Truncated, "nothing is purged yet")
+
+	purged, err := h.svc.Purge(h.ctx, e[2].ReceivedAt)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, purged.Deleted)
+
+	for _, cursor := range []int64{0, e[0].ID} {
+		lost := wait(cursor)
+		require.Equal(t, []int64{e[2].ID}, lost.ids(), "cursor %d: the event the purge kept is still returned", cursor)
+		require.True(t, lost.Truncated, "cursor %d: the purge deleted events after the cursor", cursor)
+	}
+	atMark := wait(e[1].ID)
+	require.Equal(t, []int64{e[2].ID}, atMark.ids())
+	require.False(t, atMark.Truncated, "a cursor at the purge mark has missed nothing")
+	h.requireNoLeak()
+}
+
+func TestWaitAfterAPurgeOfEverythingReportsTheGapOnce(t *testing.T) {
+	t.Parallel()
+
+	h := newWaitHarness(t)
+	h.insert(repoID, "ci.run_completed", testShaA, 7)
+	last := h.insert(repoID, "ci.run_completed", testShaB, 8)
+	h.clock.Advance(time.Minute).MustWait(h.ctx)
+	_, err := h.svc.Purge(h.ctx, h.clock.Now())
+	require.NoError(t, err)
+
+	out := h.callAsync(h.ctx, args("repo", testRepo, "types", allTypes, "cursor", 0, "timeout_s", 2))
+	h.step(2 * time.Second)
+	first := h.await(out).success(t)
+	require.Empty(t, first.Events)
+	require.True(t, first.Truncated)
+	require.Equal(t, last.ID, first.Cursor, "the cursor moves to the mark, so the gap is reported once")
+
+	out = h.callAsync(h.ctx, args("repo", testRepo, "types", allTypes, "cursor", first.Cursor, "timeout_s", 2))
+	h.step(2 * time.Second)
+	require.False(t, h.await(out).success(t).Truncated)
 }
 
 func TestWaitFiltersEvents(t *testing.T) {

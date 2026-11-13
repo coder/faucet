@@ -8,6 +8,7 @@ const START_TIMEOUT_MS = 20_000;
 const FAKE_DB_PASSWORD = 'fake-db-password-7c1f4e';
 const FAKE_SECRET = 'fake-webhook-secret-0123456789abcdef';
 const SHORT_SECRET = 'tiny-7c1f4e';
+const FAKE_CRON_SECRET = 'fake-cron-secret-0123456789abcdef';
 const WELL_FORMED_URL = `postgres://app:${FAKE_DB_PASSWORD}@127.0.0.1:1/faucet?sslmode=disable`;
 const MALFORMED_URLS: Record<string, string> = {
   'a port that is not a number': `postgres://app:${FAKE_DB_PASSWORD}@db.example.com:notaport/faucet`,
@@ -56,6 +57,7 @@ describe('startup rejects a bad DATABASE_URL without printing its password', () 
 });
 
 describe('startup configuration', () => {
+  const valid = { DATABASE_URL: WELL_FORMED_URL, GITHUB_WEBHOOK_SECRET: FAKE_SECRET };
   const cases: { name: string; env: Record<string, string>; message: string }[] = [
     {
       name: 'a missing DATABASE_URL',
@@ -93,6 +95,16 @@ describe('startup configuration', () => {
       env: { DATABASE_URL: WELL_FORMED_URL, GITHUB_WEBHOOK_SECRET: FAKE_SECRET, PORT: port },
       message: 'PORT must be a number from 1 to 65535\n',
     })),
+    {
+      name: 'a CRON_SECRET shorter than 16 bytes',
+      env: { ...valid, CRON_SECRET: SHORT_SECRET },
+      message: 'CRON_SECRET must be at least 16 bytes\n',
+    },
+    ...['abc', '0', '-1', '3651', '1.5', '30 days'].map((days) => ({
+      name: `FAUCET_RETENTION_DAYS=${days}`,
+      env: { ...valid, FAUCET_RETENTION_DAYS: days },
+      message: 'FAUCET_RETENTION_DAYS must be a whole number of days from 1 to 3650\n',
+    })),
   ];
   for (const { name, env, message } of cases) {
     test(`${name} exits 1 with a clear message and prints no secret`, async ({ faucet }) => {
@@ -100,7 +112,7 @@ describe('startup configuration', () => {
 
       expect(result.code).toBe(1);
       expect(result.output).toContain(message);
-      for (const secret of [FAKE_DB_PASSWORD, FAKE_SECRET, SHORT_SECRET]) {
+      for (const secret of [FAKE_DB_PASSWORD, FAKE_SECRET, SHORT_SECRET, FAKE_CRON_SECRET]) {
         expect(occurrences(result.output, secret)).toBe(0);
       }
     });

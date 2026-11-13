@@ -84,6 +84,7 @@ func (o pollOutcome) eventIDs() []string {
 type eventsHarness struct {
 	t          *testing.T
 	ctx        context.Context
+	svc        *faucet.Service
 	store      *fakeStore
 	clock      *quartz.Mock
 	authz      *fakeAuthorizer
@@ -127,7 +128,7 @@ func newEventsHarness(t *testing.T, mutate ...func(*faucet.Deps)) *eventsHarness
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = session.Close() })
 
-	return &eventsHarness{t: t, ctx: ctx, store: store, clock: clock, authz: authz, logs: logs, session: session}
+	return &eventsHarness{t: t, ctx: ctx, svc: svc, store: store, clock: clock, authz: authz, logs: logs, session: session}
 }
 
 func (h *eventsHarness) insert(repo int64, typ, sha string, prs ...int32) faucet.Event {
@@ -510,6 +511,70 @@ func TestPollMarksATruncatedReplay(t *testing.T) {
 	fromNow := withAge(nil, fiveMinutes)
 	require.Empty(t, fromNow.Events)
 	require.False(t, fromNow.Truncated, "maxAgeMs does not apply to a poll from now")
+}
+
+func TestPollReportsEventsThatAPurgeDeleted(t *testing.T) {
+	t.Parallel()
+
+	h := newEventsHarness(t)
+	start := h.headCursor(repoArgs())
+	var e []faucet.Event
+	for range 3 {
+		h.clock.Advance(time.Minute)
+		e = append(e, h.insert(repoID, "ci.run_completed", testShaA, 7))
+	}
+	h.clock.Advance(time.Minute)
+
+	page := func(cursor string) pollOutcome {
+		return h.poll(&rawParams{Name: "ci.run_completed", Arguments: raw(repoArgs()), Cursor: cursorOf(cursor), MaxEvents: raw(1)})
+	}
+	atFirst := page(start)
+	atSecond := page(atFirst.Cursor)
+	require.Equal(t, []string{e[1].DeliveryID}, atSecond.eventIDs())
+	require.False(t, atSecond.Truncated, "nothing is purged yet")
+
+	purged, err := h.svc.Purge(h.ctx, e[2].ReceivedAt)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, purged.Deleted)
+
+	for name, cursor := range map[string]string{"from before the first event": start, "from the first event": atFirst.Cursor} {
+		lost := h.poll(pollParams("ci.run_completed", repoArgs(), cursorOf(cursor)))
+		require.Equal(t, []string{e[2].DeliveryID}, lost.eventIDs(), "%s: the event the purge kept is still returned", name)
+		require.True(t, lost.Truncated, "%s: the purge deleted events after the cursor", name)
+
+		next := h.poll(pollParams("ci.run_completed", repoArgs(), cursorOf(lost.Cursor)))
+		require.Empty(t, next.Events)
+		require.False(t, next.Truncated, "%s: the loss is reported once", name)
+	}
+	atMark := h.poll(pollParams("ci.run_completed", repoArgs(), cursorOf(atSecond.Cursor)))
+	require.Equal(t, []string{e[2].DeliveryID}, atMark.eventIDs())
+	require.False(t, atMark.Truncated, "a cursor at the purge mark has missed nothing")
+	h.requireNoLeak()
+}
+
+func TestPollAfterAPurgeOfEverythingReportsTheGapOnce(t *testing.T) {
+	t.Parallel()
+
+	h := newEventsHarness(t)
+	start := h.headCursor(repoArgs())
+	h.clock.Advance(time.Minute)
+	h.insert(repoID, "ci.run_completed", testShaA, 7)
+	h.insert(repoID, "ci.run_completed", testShaB, 8)
+	h.clock.Advance(time.Minute)
+	purged, err := h.svc.Purge(h.ctx, h.clock.Now())
+	require.NoError(t, err)
+	require.EqualValues(t, 2, purged.Deleted)
+
+	first := h.poll(pollParams("ci.run_completed", repoArgs(), cursorOf(start)))
+	require.Empty(t, first.Events)
+	require.True(t, first.Truncated)
+	second := h.poll(pollParams("ci.run_completed", repoArgs(), cursorOf(first.Cursor)))
+	require.False(t, second.Truncated, "an empty store must not report the same gap on every poll")
+
+	fromNow := h.poll(pollParams("ci.run_completed", repoArgs(), nil))
+	require.False(t, fromNow.Truncated)
+	afterwards := h.poll(pollParams("ci.run_completed", repoArgs(), cursorOf(fromNow.Cursor)))
+	require.False(t, afterwards.Truncated, "a poll that starts now has lost nothing")
 }
 
 func (h *eventsHarness) storeReads() int {

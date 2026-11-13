@@ -234,6 +234,7 @@ func (s *Service) readEvents(ctx context.Context, req pollRequest) (*eventsPollR
 	if err != nil {
 		return nil, err
 	}
+	truncated = truncated || after < page.PurgedThrough
 	events, cursor, hasMore := page.Events, page.Next, false
 	if len(events) > int(req.limit) {
 		events = events[:req.limit]
@@ -250,27 +251,17 @@ func (s *Service) readEvents(ctx context.Context, req pollRequest) (*eventsPollR
 }
 
 func (s *Service) replayStart(ctx context.Context, cursor int64, maxAge time.Duration) (after int64, truncated bool, err error) {
-	floor, err := s.retentionFloor(ctx)
+	if maxAge == 0 {
+		return cursor, false, nil
+	}
+	floor, err := s.store.CursorAt(ctx, s.clock.Now().Add(-maxAge))
 	if err != nil {
 		return 0, false, err
-	}
-	if maxAge > 0 {
-		aged, err := s.store.CursorAt(ctx, s.clock.Now().Add(-maxAge))
-		if err != nil {
-			return 0, false, err
-		}
-		floor = max(floor, aged)
 	}
 	if cursor < floor {
 		return floor, true, nil
 	}
 	return cursor, false, nil
-}
-
-// retentionFloor is where a purge reports the lowest cursor a replay can still
-// start from. Nothing purges yet, so it is zero.
-func (*Service) retentionFloor(context.Context) (int64, error) {
-	return 0, nil
 }
 
 func newPollResult(events []eventOccurrence, cursor int64, truncated, hasMore bool) *eventsPollResult {

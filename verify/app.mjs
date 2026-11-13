@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpServer } from 'node:http';
+import { createServer as createNetServer } from 'node:net';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { parseArgs, promisify } from 'node:util';
 import { runDir, stateFile } from './runstate.mjs';
@@ -13,6 +14,7 @@ const FAUCET_STOP_MS = 20_000;
 const DB_PORT = 5432;
 const SOCKET_PATH_MAX = 100;
 const PARENT_POLL_MS = 1000;
+const HEALTHY_MS = 120_000;
 // An aborted initdb or go build can still be writing into the directory when it is removed.
 const RM_OPTIONS = { recursive: true, force: true, maxRetries: 20, retryDelay: 100 };
 
@@ -46,6 +48,19 @@ function findPostgresBin() {
     throw new Error('no PostgreSQL server binaries found; install PostgreSQL or set PG_BIN');
   }
   return found;
+}
+
+const CRON_DB = 'faucet_cron';
+
+function freePort() {
+  return new Promise((resolvePort, reject) => {
+    const probe = createNetServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolvePort(port));
+    });
+  });
 }
 
 // The stub knows one token and answers GET /user and GET /repos/verify/r<id>
@@ -118,13 +133,37 @@ function stopWhenParentExits(abort) {
   }, PARENT_POLL_MS).unref();
 }
 
-function waitForFaucetOrAbort(child, signal) {
+function waitForFaucetOrAbort(children, signal) {
   return new Promise((resolveOutcome) => {
     if (signal.aborted) return resolveOutcome({ aborted: true });
     signal.addEventListener('abort', () => resolveOutcome({ aborted: true }), { once: true });
-    child.once('error', (err) => resolveOutcome({ error: err.message }));
-    child.once('exit', (code, sig) => resolveOutcome({ error: `faucet exited early (${sig ?? code})` }));
+    for (const child of children) {
+      child.once('error', (err) => resolveOutcome({ error: err.message }));
+      child.once('exit', (code, sig) => resolveOutcome({ error: `faucet exited early (${sig ?? code})` }));
+    }
   });
+}
+
+async function waitUntilHealthy(port, child, signal) {
+  const deadline = Date.now() + HEALTHY_MS;
+  while (child.exitCode === null && child.signalCode === null) {
+    signal.throwIfAborted();
+    try {
+      if ((await fetch(`http://127.0.0.1:${port}/healthz`, { signal })).status === 200) return;
+    } catch (err) {
+      if (signal.aborted) throw err;
+    }
+    if (Date.now() > deadline) throw new Error(`the cron faucet did not answer /healthz within ${HEALTHY_MS} ms`);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  throw new Error('the cron faucet exited before it answered /healthz');
+}
+
+async function createDatabase(psql, dir, name) {
+  await execFileAsync(psql, [
+    '-X', '-q', '-h', dir, '-p', String(DB_PORT), '-U', 'postgres', '-d', 'postgres',
+    '-v', 'ON_ERROR_STOP=1', '-c', `CREATE DATABASE ${name}`,
+  ]);
 }
 
 async function main(abort) {
@@ -158,6 +197,7 @@ async function main(abort) {
   }
 
   let faucet;
+  let cronFaucet;
   let githubStub;
   let failure;
   try {
@@ -174,30 +214,53 @@ async function main(abort) {
 
     const secret = randomBytes(32).toString('hex');
     const githubToken = `ghp_${randomBytes(20).toString('hex')}`;
-    githubStub = await startGitHubStub(githubToken);
     const psql = existsSync(join(bin, 'psql')) ? join(bin, 'psql') : 'psql';
+    const cron = {
+      port: await freePort(),
+      db: CRON_DB,
+      webhookSecret: randomBytes(32).toString('hex'),
+      cronSecret: randomBytes(32).toString('hex'),
+    };
+    githubStub = await startGitHubStub(githubToken);
+    const stubUrl = `http://127.0.0.1:${githubStub.address().port}`;
+    await createDatabase(psql, dir, CRON_DB);
     writeFileSync(
       stateFile(port),
-      JSON.stringify({ dbHost: dir, dbPort: DB_PORT, psql, secret, githubToken, binary }),
+      JSON.stringify({ dbHost: dir, dbPort: DB_PORT, psql, secret, githubToken, binary, cron: { ...cron, stubUrl } }),
       { mode: 0o600 },
     );
-    const databaseUrl = `postgres://postgres@/postgres?${new URLSearchParams({ host: dir, port: String(DB_PORT), sslmode: 'disable' })}`;
+    const databaseUrl = (name) =>
+      `postgres://postgres@/${name}?${new URLSearchParams({ host: dir, port: String(DB_PORT), sslmode: 'disable' })}`;
 
-    faucet = spawn(binary, [], {
+    cronFaucet = spawn(binary, [], {
       env: {
-        DATABASE_URL: databaseUrl,
-        GITHUB_WEBHOOK_SECRET: secret,
-        PORT: String(port),
-        FAUCET_GITHUB_API_URL: `http://127.0.0.1:${githubStub.address().port}`,
+        DATABASE_URL: databaseUrl(CRON_DB),
+        GITHUB_WEBHOOK_SECRET: cron.webhookSecret,
+        PORT: String(cron.port),
+        FAUCET_GITHUB_API_URL: stubUrl,
+        CRON_SECRET: cron.cronSecret,
       },
       stdio: ['ignore', 'inherit', 'inherit'],
     });
-    const outcome = await waitForFaucetOrAbort(faucet, signal);
+    await waitUntilHealthy(cron.port, cronFaucet, signal);
+    log(`cron faucet listening on ${cron.port}`);
+
+    faucet = spawn(binary, [], {
+      env: {
+        DATABASE_URL: databaseUrl('postgres'),
+        GITHUB_WEBHOOK_SECRET: secret,
+        PORT: String(port),
+        FAUCET_GITHUB_API_URL: stubUrl,
+      },
+      stdio: ['ignore', 'inherit', 'inherit'],
+    });
+    const outcome = await waitForFaucetOrAbort([faucet, cronFaucet], signal);
     failure = outcome.error;
   } catch (err) {
     if (!signal.aborted) failure = err.message;
   } finally {
     if (faucet) await stopFaucet(faucet);
+    if (cronFaucet) await stopFaucet(cronFaucet);
     githubStub?.close();
     const postgresStopped = !postmasterRuns(dir) || (await stopPostgres(bin, dir));
     if (postgresStopped) rmSync(dir, RM_OPTIONS);

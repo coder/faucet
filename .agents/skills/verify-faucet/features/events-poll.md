@@ -14,7 +14,7 @@ An agent reads the events of one repository through `events/poll` on `POST /mcp`
 - The event name picks the type. `sha` keeps the events with that head SHA, and an event that has none (`pr.comment_created`) never matches. `pr` keeps the events whose `prs` hold that number.
 - The result is `resultType` `complete`, `events`, `cursor`, `truncated`, `hasMore` and `nextPollMs` (always 5000). An event is `eventId`, `name`, `timestamp` and `data`. `eventId` is the GitHub delivery GUID, the `delivery_id` of the Postgres row. `timestamp` is when faucet received the delivery, ISO 8601 in UTC. `data` is the stored data plus `prs` (maybe empty) and `head_sha` (only when the event has one).
 - A page holds at most 100 events. `maxEvents` lowers that and a larger value is cut to 100. `hasMore` says that more events wait, and the cursor then stands at the last event of the page.
-- `maxAgeMs`, with a cursor, skips the events older than that many milliseconds. `truncated` is true when it skipped events.
+- `maxAgeMs`, with a cursor, skips the events older than that many milliseconds. `truncated` is true when it skipped events. It is also true when a [purge](purge.md) deleted events after the cursor.
 
 ## How to get to it (user POV)
 
@@ -44,5 +44,5 @@ poll-access|http|skeptic|Poll repositories the token cannot read, that do not ex
 - The error -32602 is HTTP 400, but -32023 and -32024 are HTTP 200. Read the `error` object.
 - A field of the wrong type (`maxEvents` as 1.5, `cursor` as a number) gives a -32602 message from the SDK. It repeats the whole `params` JSON, `_meta` included. The bearer token is in a header, never in `params`, so this is not a leak.
 - The server checks the shape of a cursor, not that it issued it. A well formed cursor ahead of every event, such as `v1.99999999999`, is accepted and returned as it is. Unknown fields next to `name` and `arguments` are ignored.
-- `truncated` can be true when no event of the polled repository was skipped. The age floor is the newest event of any repository that is older than `maxAgeMs`, so another repository's old event can move it past the cursor. A true flag means that events may be missing.
+- `truncated` can be true when no event of the polled repository was skipped. The age floor is the newest event of any repository that is older than `maxAgeMs`, so another repository's old event can move it past the cursor. A true flag means that events may be missing, for this reason or because a purge deleted events after the cursor.
 - The `maxAgeMs` test lets 1.5 seconds pass between two deliveries, because the server compares event ages with its own clock.

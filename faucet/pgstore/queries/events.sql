@@ -25,8 +25,11 @@ ORDER BY id
 LIMIT sqlc.arg(row_limit);
 
 -- name: PollEvents :many
-WITH head AS (
-  SELECT COALESCE(MAX(id), 0)::bigint AS max_id FROM faucet_events
+WITH mark AS (
+  SELECT purged_through FROM faucet_purge_mark
+), head AS (
+  SELECT GREATEST(COALESCE(MAX(id), 0), (SELECT purged_through FROM mark))::bigint AS max_id
+  FROM faucet_events
 ), page AS (
   SELECT e.* FROM faucet_events e
   WHERE e.repo_id = sqlc.arg(repo_id)
@@ -39,6 +42,7 @@ WITH head AS (
 )
 SELECT
   head.max_id,
+  (SELECT purged_through FROM mark)::bigint AS purged_through,
   page.id, page.source, page.delivery_id, page.type, page.repo_id, page.prs, page.head_sha,
   COALESCE(page.data, 'null'::jsonb)::jsonb AS data,
   page.received_at
@@ -46,6 +50,20 @@ FROM head LEFT JOIN page ON true
 ORDER BY page.id;
 
 -- name: CursorAt :one
-SELECT COALESCE(MAX(id), 0)::bigint AS cursor
+SELECT GREATEST(COALESCE(MAX(id), 0), (SELECT purged_through FROM faucet_purge_mark))::bigint AS cursor
 FROM faucet_events
 WHERE received_at < sqlc.arg(before);
+
+-- name: LockPurgeMark :exec
+SELECT purged_through FROM faucet_purge_mark FOR UPDATE;
+
+-- name: DeleteEventsBefore :one
+WITH deleted AS (
+  DELETE FROM faucet_events WHERE received_at < sqlc.arg(before) RETURNING id
+)
+SELECT COUNT(*)::bigint AS deleted, COALESCE(MAX(id), 0)::bigint AS max_id FROM deleted;
+
+-- name: RaisePurgeMark :one
+UPDATE faucet_purge_mark
+SET purged_through = GREATEST(purged_through, sqlc.arg(through)::bigint)
+RETURNING purged_through;

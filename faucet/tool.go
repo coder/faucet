@@ -57,6 +57,9 @@ type waitEvent struct {
 type waitOutput struct {
 	Events []waitEvent `json:"events"`
 	Cursor int64       `json:"cursor"`
+	// Truncated is true when a retention purge deleted events after the
+	// cursor that the caller passed, so events may be missing.
+	Truncated bool `json:"truncated"`
 }
 
 // Register adds the wait_for_github_events tool and the events/list and
@@ -74,7 +77,8 @@ func (s *Service) Register(srv *mcp.Server) {
 		Name: toolName,
 		Description: "Wait for GitHub events on a repository, such as a CI run finishing or a pull request review, " +
 			"and return them as soon as they arrive. Returns no events and a cursor when timeout_s runs out; " +
-			"call again with that cursor to keep waiting. Event types: " + strings.Join(types, ", ") + ".",
+			"call again with that cursor to keep waiting. When truncated is true, a retention purge deleted events after " +
+			"the cursor you passed, so some may be missing. Event types: " + strings.Join(types, ", ") + ".",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, Title: "Wait for GitHub events"},
 	}, s.waitForEvents)
 	s.registerEvents(srv)
@@ -156,12 +160,12 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err != nil {
 		return nil, waitOutput{}, storeError(ctx, logger, err)
 	}
-	page, err := s.poll(ctx, req)
+	page, truncated, err := s.poll(ctx, req)
 	if err != nil {
 		return nil, waitOutput{}, storeError(ctx, logger, err)
 	}
 
-	out := waitOutput{Events: make([]waitEvent, len(page.Events)), Cursor: page.Next}
+	out := waitOutput{Events: make([]waitEvent, len(page.Events)), Cursor: page.Next, Truncated: truncated}
 	for i, ev := range page.Events {
 		out.Events[i] = toWaitEvent(ev)
 	}
@@ -209,28 +213,32 @@ func (s *Service) startCursor(ctx context.Context, req waitRequest) (int64, erro
 	}
 }
 
-func (s *Service) poll(ctx context.Context, req waitRequest) (PollPage, error) {
+// poll reads until a page has events or the deadline passes. truncated is true
+// when any read found that a purge had deleted events above its start.
+func (s *Service) poll(ctx context.Context, req waitRequest) (PollPage, bool, error) {
 	deadline := s.clock.Now().Add(req.timeout)
 	q := req.query
+	truncated := false
 	for {
 		page, err := s.store.PollEvents(ctx, q)
 		if err != nil {
-			return PollPage{}, err
+			return PollPage{}, false, err
 		}
+		truncated = truncated || q.After < page.PurgedThrough
 		if len(page.Events) > 0 {
-			return page, nil
+			return page, truncated, nil
 		}
 		q.After = page.Next
 
 		remaining := s.clock.Until(deadline)
 		if remaining <= 0 {
-			return page, nil
+			return page, truncated, nil
 		}
 		timer := s.clock.NewTimer(min(pollInterval, remaining))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return PollPage{}, ctx.Err()
+			return PollPage{}, false, ctx.Err()
 		case <-timer.C:
 		}
 	}

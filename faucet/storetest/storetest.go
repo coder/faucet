@@ -33,6 +33,10 @@ func Run(t *testing.T, newStore func(t *testing.T) faucet.Store) {
 		{"PollEventsValidatesQuery", pollEventsValidatesQuery},
 		{"CursorAtReturnsHighestIDReceivedBefore", cursorAtReturnsHighestIDReceivedBefore},
 		{"ConcurrentDuplicateDeliveryStoresOnce", concurrentDuplicateDeliveryStoresOnce},
+		{"PurgeDeletesOnlyEventsReceivedBefore", purgeDeletesOnlyEventsReceivedBefore},
+		{"PollEventsAndCursorAtNeverFallBelowThePurgeMark", pollEventsAndCursorAtNeverFallBelowThePurgeMark},
+		{"PurgeUnderConcurrentInsertsKeepsNewEventsAndAnExactMark", purgeUnderConcurrentInsertsKeepsNewEventsAndAnExactMark},
+		{"PollEventsNeverHidesAConcurrentPurge", pollEventsNeverHidesAConcurrentPurge},
 	}
 	for _, st := range subtests {
 		t.Run(st.name, func(t *testing.T) {
@@ -506,4 +510,246 @@ func concurrentDuplicateDeliveryStoresOnce(t *testing.T, s faucet.Store) {
 	events, err := s.EventsAfter(ctx, 0, rounds+1)
 	require.NoError(t, err)
 	require.Len(t, events, rounds)
+}
+
+func insertSpaced(t *testing.T, s faucet.Store, prefix string, n int) []faucet.Event {
+	t.Helper()
+	stored := make([]faucet.Event, 0, n)
+	for i := range n {
+		got, inserted, err := s.InsertEvent(context.Background(), newEvent(fmt.Sprintf("%s-%d", prefix, i)))
+		require.NoError(t, err)
+		require.True(t, inserted)
+		stored = append(stored, got)
+		time.Sleep(2 * time.Millisecond)
+	}
+	return stored
+}
+
+func requireRemaining(t *testing.T, s faucet.Store, want ...faucet.Event) {
+	t.Helper()
+	got, err := s.EventsAfter(context.Background(), 0, 1000)
+	require.NoError(t, err)
+	require.Len(t, got, len(want))
+	for i := range want {
+		requireSameEvent(t, want[i], got[i])
+	}
+}
+
+// purgeDeletesOnlyEventsReceivedBefore takes its boundaries from the stored
+// ReceivedAt values, like cursorAtReturnsHighestIDReceivedBefore.
+func purgeDeletesOnlyEventsReceivedBefore(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+
+	res, err := s.Purge(ctx, time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	require.Equal(t, faucet.PurgeResult{}, res, "purging an empty store deletes nothing and leaves the mark at 0")
+
+	e := insertSpaced(t, s, "purge", 4)
+
+	res, err = s.Purge(ctx, e[0].ReceivedAt)
+	require.NoError(t, err)
+	require.Equal(t, faucet.PurgeResult{}, res, "an event received exactly at the boundary is kept")
+	requireRemaining(t, s, e[0], e[1], e[2], e[3])
+
+	res, err = s.Purge(ctx, e[2].ReceivedAt)
+	require.NoError(t, err)
+	require.Equal(t, faucet.PurgeResult{Deleted: 2, PurgedThrough: e[1].ID}, res)
+	requireRemaining(t, s, e[2], e[3])
+
+	res, err = s.Purge(ctx, e[1].ReceivedAt)
+	require.NoError(t, err)
+	require.Equal(t, faucet.PurgeResult{Deleted: 0, PurgedThrough: e[1].ID}, res, "an older boundary deletes nothing and the mark never moves down")
+
+	res, err = s.Purge(ctx, e[3].ReceivedAt)
+	require.NoError(t, err)
+	require.Equal(t, faucet.PurgeResult{Deleted: 1, PurgedThrough: e[2].ID}, res)
+	requireRemaining(t, s, e[3])
+
+	res, err = s.Purge(ctx, e[3].ReceivedAt.Add(time.Hour))
+	require.NoError(t, err)
+	require.Equal(t, faucet.PurgeResult{Deleted: 1, PurgedThrough: e[3].ID}, res)
+	requireRemaining(t, s)
+
+	res, err = s.Purge(ctx, e[3].ReceivedAt.Add(2*time.Hour))
+	require.NoError(t, err)
+	require.Equal(t, faucet.PurgeResult{Deleted: 0, PurgedThrough: e[3].ID}, res, "purging an empty store keeps the mark")
+}
+
+func pollEventsAndCursorAtNeverFallBelowThePurgeMark(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	q := faucet.PollQuery{RepoID: 42, Limit: 10}
+
+	before, err := s.PollEvents(ctx, q)
+	require.NoError(t, err)
+	require.Zero(t, before.PurgedThrough, "a store that never purged reports mark 0")
+
+	e := insertSpaced(t, s, "mark", 3)
+	_, err = s.Purge(ctx, e[2].ReceivedAt.Add(time.Hour))
+	require.NoError(t, err)
+	mark := e[2].ID
+
+	for _, after := range []int64{0, e[0].ID, mark, mark + 5} {
+		q.After = after
+		page, err := s.PollEvents(ctx, q)
+		require.NoError(t, err)
+		require.Empty(t, page.Events, "after %d", after)
+		require.Equal(t, mark, page.PurgedThrough, "after %d", after)
+		require.GreaterOrEqual(t, page.Next, max(mark, after), "after %d: a quiet store must not send a poller back below the mark", after)
+	}
+
+	cursor, err := s.CursorAt(ctx, time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	require.Equal(t, mark, cursor, "CursorAt is never below the mark, so a poll that starts now is not a truncated one")
+
+	fresh, _, err := s.InsertEvent(ctx, newEvent("mark-fresh"))
+	require.NoError(t, err)
+	q.After = 0
+	page := requirePollIDs(t, s, q, fresh)
+	require.Equal(t, mark, page.PurgedThrough)
+	require.Equal(t, fresh.ID, page.Next)
+}
+
+// purgeUnderConcurrentInsertsKeepsNewEventsAndAnExactMark runs purges while
+// writers insert. The purge needs no insert lock because it deletes and sets
+// the mark in one statement and IDs commit in order. The test pins what that
+// guarantees: no new event is deleted, and the mark is exactly the highest ID
+// the purge deleted, not the head ID it happened to see.
+func purgeUnderConcurrentInsertsKeepsNewEventsAndAnExactMark(t *testing.T, s faucet.Store) {
+	const (
+		writers          = 8
+		insertsPerWriter = 20
+		purges           = 6
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	old := insertSpaced(t, s, "old", 10)
+	cutoff := old[len(old)-1].ReceivedAt.Add(time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
+
+	var (
+		mu       sync.Mutex
+		inserted []int64
+		purged   []faucet.PurgeResult
+		wg       sync.WaitGroup
+	)
+	start := make(chan struct{})
+	for w := range writers {
+		wg.Go(func() {
+			<-start
+			for i := range insertsPerWriter {
+				stored, ok, err := s.InsertEvent(ctx, newEvent(fmt.Sprintf("new-%d-%d", w, i)))
+				if err != nil || !ok {
+					t.Errorf("writer %d insert %d: inserted=%t err=%v", w, i, ok, err)
+					return
+				}
+				mu.Lock()
+				inserted = append(inserted, stored.ID)
+				mu.Unlock()
+			}
+		})
+	}
+	for range purges {
+		wg.Go(func() {
+			<-start
+			res, err := s.Purge(ctx, cutoff)
+			if err != nil {
+				t.Errorf("purge: %v", err)
+				return
+			}
+			mu.Lock()
+			purged = append(purged, res)
+			mu.Unlock()
+		})
+	}
+	close(start)
+	wg.Wait()
+	if t.Failed() {
+		return
+	}
+
+	var deleted int64
+	for _, res := range purged {
+		deleted += res.Deleted
+		require.Equal(t, old[len(old)-1].ID, res.PurgedThrough, "the mark is the highest purged ID, not the head")
+	}
+	require.EqualValues(t, len(old), deleted, "the old events are deleted exactly once across the concurrent purges")
+
+	remaining, err := s.EventsAfter(ctx, 0, 1000)
+	require.NoError(t, err)
+	got := make([]int64, len(remaining))
+	for i, ev := range remaining {
+		got[i] = ev.ID
+	}
+	slices.Sort(inserted)
+	require.Equal(t, inserted, got, "every event inserted during the purge survives, and nothing else does")
+}
+
+// pollEventsNeverHidesAConcurrentPurge checks that a page and the mark come
+// from one snapshot. A poller holding an old cursor sees every event above it
+// that was not purged. If the mark were read separately from the page, a purge
+// between the two reads would delete events from the page and leave the mark
+// too low to tell the poller.
+func pollEventsNeverHidesAConcurrentPurge(t *testing.T, s faucet.Store) {
+	const (
+		rounds  = 20
+		batch   = 8
+		pollers = 4
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	var cursor int64
+	for round := range rounds {
+		events := make([]faucet.Event, batch)
+		for i := range events {
+			got, _, err := s.InsertEvent(ctx, newEvent(fmt.Sprintf("round-%d-%d", round, i)))
+			require.NoError(t, err)
+			events[i] = got
+		}
+		boundary := events[batch-1].ReceivedAt.Add(time.Millisecond)
+
+		start, purged := make(chan struct{}), make(chan struct{})
+		var wg sync.WaitGroup
+		for range pollers {
+			wg.Go(func() {
+				<-start
+				for done := false; !done; {
+					select {
+					case <-purged:
+						done = true
+					default:
+					}
+					page, err := s.PollEvents(ctx, faucet.PollQuery{RepoID: 42, After: cursor, Limit: 100})
+					if err != nil {
+						t.Errorf("poll: %v", err)
+						return
+					}
+					seen := make(map[int64]bool, len(page.Events))
+					for _, ev := range page.Events {
+						seen[ev.ID] = true
+					}
+					for _, ev := range events {
+						if !seen[ev.ID] && ev.ID > page.PurgedThrough {
+							t.Errorf("round %d: event %d is neither in the page nor at or below the purge mark %d", round, ev.ID, page.PurgedThrough)
+							return
+						}
+					}
+				}
+			})
+		}
+		wg.Go(func() {
+			<-start
+			defer close(purged)
+			if _, err := s.Purge(ctx, boundary); err != nil {
+				t.Errorf("purge: %v", err)
+			}
+		})
+		close(start)
+		wg.Wait()
+		if t.Failed() {
+			return
+		}
+		cursor = events[batch-1].ID
+	}
 }
