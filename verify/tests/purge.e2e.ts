@@ -120,21 +120,25 @@ describe('purge', () => {
     expect([lost.truncated, belowMark.truncated, atMark.truncated]).toEqual([true, true, false]);
   });
 
-  test('a wait on a table that a purge emptied returns a cursor at the mark, so the next wait is not flagged', async ({ cron }) => {
+  test('a wait on a table that a purge emptied is flagged once, then starts at the mark', async ({ cron }) => {
     await cron.withFaucet({}, async (empty) => {
       const repoId = newRepoId();
+      const args = { repo: repoOf(repoId), types: [RUN], timeout_s: 1 };
+      const before = await empty.waitForEvents(args);
       await store(empty, repoId, 40);
       await store(empty, repoId, 41);
       const { purged_through: mark } = await purge(empty);
-      const args = { repo: repoOf(repoId), types: [RUN], timeout_s: 1 };
 
-      const first = await empty.waitForEvents(args);
-      const second = await empty.waitForEvents({ ...args, cursor: first.cursor });
+      const lost = await empty.waitForEvents({ ...args, cursor: before.cursor });
+      const resumed = await empty.waitForEvents({ ...args, cursor: lost.cursor });
+      const fresh = await empty.waitForEvents(args);
 
       expect(await empty.rows(repoId)).toEqual([]);
+      expect(before).toMatchObject({ cursor: 0, truncated: false });
       expect(mark).toBeGreaterThan(0);
-      expect(first).toMatchObject({ events: [], cursor: mark, truncated: false });
-      expect(second).toMatchObject({ events: [], cursor: mark, truncated: false });
+      expect(lost).toMatchObject({ events: [], cursor: mark, truncated: true });
+      expect(resumed).toMatchObject({ events: [], cursor: mark, truncated: false });
+      expect(fresh).toMatchObject({ events: [], cursor: mark, truncated: false });
     });
   });
 
