@@ -174,11 +174,15 @@ func TestGapEnvelopeIsSignedWithBothSecretsDuringTheWindow(t *testing.T) {
 	require.Equal(t, 1, d.deliverDue().GapsSent)
 	requests := d.rcv.requests("/hook")
 	require.Len(t, requests, 2, "one gap envelope and one event")
+	gaps := d.rcv.envelopesOf("/hook", "gap")
+	require.Len(t, gaps, 1)
 	for _, secret := range []string{oldSecret, latest} {
-		d.requireEnvelope(requests[0], "gap", secret, sub.ID)
-		require.True(t, requests[1].signatureValid(secret))
+		d.requireEnvelope(gaps[0], "gap", secret, sub.ID)
+		for _, request := range requests {
+			require.True(t, request.signatureValid(secret), "the event and the gap are both signed with each secret")
+		}
 	}
-	require.Equal(t, 2, requests[0].signatureCount())
+	require.Equal(t, 2, gaps[0].signatureCount())
 	d.requireNoSecretInLogs(oldSecret, latest)
 }
 
@@ -203,4 +207,97 @@ func TestTerminatedEnvelopeIsSignedWithBothStoredSecretsAndNotTheRenewals(t *tes
 	require.False(t, requests[0].signatureValid(renewalSecret))
 	require.Equal(t, 2, requests[0].signatureCount())
 	d.requireNoSecretInLogs(oldSecret, latest, renewalSecret)
+}
+
+// underNewKey is a service on the same store, clock and receiver as d that runs
+// another FAUCET_WEBHOOK_KEY, as after the operator changed it.
+func (d *deliverHarness) underNewKey() *deliverHarness {
+	d.t.Helper()
+	key, err := faucet.NewWebhookKey(bytes.Repeat([]byte{0x5c}, 32))
+	require.NoError(d.t, err)
+	next := newDeliverHarness(d.t, func(deps *faucet.Deps) {
+		deps.Store = d.store
+		deps.Clock = d.clock
+		deps.Webhook.Key = key
+	})
+	next.ledgerSkip = true
+	return next
+}
+
+func (d *deliverHarness) requireUnreadablePreviousSkipped(next *deliverHarness, secrets ...string) {
+	d.t.Helper()
+	require.Contains(d.t, next.logs.String(), "previous secret", "the skipped previous secret is logged")
+	next.requireNoSecretInLogs(secrets...)
+}
+
+func TestKeyChangeThenRenewalStillDeliversWithTheCurrentSecret(t *testing.T) {
+	t.Parallel()
+
+	for name, renewWith := range map[string]func(old string) string{
+		"the same secret": func(old string) string { return old },
+		"a new secret":    func(string) string { return newSecret(t, 32) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d := newDeliverHarness(t)
+			d.ledgerSkip = true
+			ep := d.endpoint("/hook")
+			d.subscribeEndpoint(ep)
+			d.advance(time.Second)
+			next := d.underNewKey()
+			renewed := renewWith(ep.secret)
+			next.subscribe(subscribeTo(ep.args, d.rcv.url(ep.path), renewed))
+
+			d.advance(time.Second)
+			d.newRunEvent()
+			require.Equal(t, 1, next.deliverDue().Delivered, "an unreadable previous secret does not end the delivery")
+			require.Len(t, d.rows(), 1, "and does not delete the subscription")
+			got := d.rcv.requests("/hook")
+			require.Len(t, got, 1)
+			require.True(t, got[0].signatureValid(renewed), "the current secret signs")
+			require.Equal(t, 1, got[0].signatureCount(), "and signs alone")
+			d.requireUnreadablePreviousSkipped(next, ep.secret, renewed)
+		})
+	}
+}
+
+func TestKeyChangeThenRenewalStillSendsGapEnvelopeWithTheCurrentSecret(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	d.ledgerSkip = true
+	ep := d.endpoint("/hook")
+	sub, _, _ := d.purgedBeforeRead(ep)
+	next := d.underNewKey()
+	renewed := newSecret(t, 32)
+	next.subscribe(subscribeTo(ep.args, d.rcv.url(ep.path), renewed))
+
+	require.Equal(t, 1, next.deliverDue().GapsSent)
+	require.Len(t, d.rcv.requests("/hook"), 2, "one gap envelope and one event")
+	gaps := d.rcv.envelopesOf("/hook", "gap")
+	require.Len(t, gaps, 1)
+	d.requireEnvelope(gaps[0], "gap", renewed, sub.ID)
+	require.Equal(t, 1, gaps[0].signatureCount())
+	d.requireUnreadablePreviousSkipped(next, ep.secret, renewed)
+}
+
+func TestKeyChangeThenRenewalStillSendsTerminatedEnvelopeWithTheCurrentSecret(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	d.ledgerSkip = true
+	ep := d.endpoint("/hook")
+	sub := d.subscribeEndpoint(ep)
+	d.advance(time.Second)
+	next := d.underNewKey()
+	renewed := newSecret(t, 32)
+	next.subscribe(subscribeTo(ep.args, d.rcv.url(ep.path), renewed))
+	next.revoke()
+
+	next.subscribeError(subscribeTo(ep.args, d.rcv.url(ep.path), renewed))
+	requests := d.rcv.requests("/hook")
+	require.Len(t, requests, 1)
+	d.requireEnvelope(requests[0], "terminated", renewed, sub.ID)
+	require.Equal(t, 1, requests[0].signatureCount())
+	d.requireUnreadablePreviousSkipped(next, ep.secret, renewed)
 }

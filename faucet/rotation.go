@@ -1,7 +1,10 @@
 package faucet
 
 import (
+	"context"
 	"time"
+
+	"cdr.dev/slog/v3"
 )
 
 // rotationGrace is the longest that a secret keeps signing after a refresh
@@ -31,9 +34,14 @@ func (c DeliveryClaim) sealedSecrets() sealedSecrets {
 
 // signingSecrets opens the secrets that sign a send at now: the current one,
 // and the previous one while now is before its end. A previous secret that the
-// store has not cleared yet, but whose window ended, signs nothing. The errors
-// are those of openSecret, which hold no secret.
-func (wh *webhookState) signingSecrets(now time.Time, key SubscriptionKeyHash, sealed sealedSecrets) ([]subscriberSecret, error) {
+// store has not cleared yet, but whose window ended, signs nothing. The error
+// is that of openSecret for the current secret, which holds no secret.
+//
+// A previous secret that does not open is skipped with a log line, and the
+// current secret signs alone. The store cannot open it, so a renewal under
+// another FAUCET_WEBHOOK_KEY moves a ciphertext of the old key there. It must
+// never end a delivery or the subscription, which the current secret serves.
+func (wh *webhookState) signingSecrets(ctx context.Context, now time.Time, key SubscriptionKeyHash, sealed sealedSecrets) ([]subscriberSecret, error) {
 	current, err := openSecret(wh.aead, sealed.current, key[:])
 	if err != nil {
 		return nil, err
@@ -44,7 +52,9 @@ func (wh *webhookState) signingSecrets(now time.Time, key SubscriptionKeyHash, s
 	}
 	previous, err := openSecret(wh.aead, sealed.previous, key[:])
 	if err != nil {
-		return nil, err
+		wh.logger.Warn(ctx, "the previous secret of a rotation does not open, signing with the current secret only",
+			slog.F("subscription", key.ID()))
+		return secrets, nil
 	}
 	return append(secrets, previous), nil
 }

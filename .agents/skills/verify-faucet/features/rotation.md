@@ -10,6 +10,7 @@ An agent that renews its subscription with a new `delivery.secret` rotates the s
 - The previous secret is sealed as the current one is (AES-256-GCM, the row's `key_hash` as additional data). No row holds either secret in the clear. `previous_secret_until` is set by the server, never by the request.
 - `GET /cron/deliver` sets `previous_secret_enc` and `previous_secret_until` to NULL for every row whose window has ended, and reports how many in `previous_secrets_cleared`. The subscription and its current secret stay.
 - A `terminated` envelope is signed with the stored secrets (current and previous), never with the secret of the renewal that failed the access check.
+- A previous secret that does not open (the operator changed `FAUCET_WEBHOOK_KEY` and the subscriber renewed, so the row holds a ciphertext of the old key) is skipped with a log line. The current secret signs alone and the delivery and the subscription stay. Pinned by Go tests only: e2e runs one webhook key.
 - No log line, reply or row holds either secret.
 
 ## How to get to it (user POV)

@@ -60,7 +60,7 @@ func (wh *webhookState) sendEnvelope(ctx context.Context, now time.Time, kind st
 	if err != nil {
 		return failureEnvelopeEncoding
 	}
-	secrets, err := wh.signingSecrets(now, key, sealed)
+	secrets, err := wh.signingSecrets(ctx, now, key, sealed)
 	if err != nil {
 		return failureSecretUnreadable
 	}

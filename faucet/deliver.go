@@ -478,7 +478,7 @@ func (r *deliveryRun) decide(ctx context.Context, claim DeliveryClaim) attemptOu
 	case now.Sub(claim.EnqueuedAt) > DeliveryWindow:
 		return giveUp(GiveUpWindowExpired)
 	}
-	secrets, err := r.wh.signingSecrets(now, claim.Ref.Key, claim.sealedSecrets())
+	secrets, err := r.wh.signingSecrets(ctx, now, claim.Ref.Key, claim.sealedSecrets())
 	if err != nil {
 		return attemptOutcome{finish: Finish{Kind: FinishDead, Unreadable: claim.SecretEnc}, reason: GiveUpSecretUnreadable}
 	}
