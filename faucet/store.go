@@ -162,9 +162,6 @@ type Store interface {
 	// never moves down. It needs no insert lock: events commit in ID order, so
 	// no event at or below the mark can appear after the purge.
 	Purge(ctx context.Context, before time.Time) (PurgeResult, error)
-	// StoredDeliveries returns the members of deliveryIDs that have a stored
-	// event, each once, in no particular order.
-	StoredDeliveries(ctx context.Context, deliveryIDs []string) ([]string, error)
 	// UpsertSubscription stores sub and returns the stored row. It calls
 	// sub.Validate(now). A row with the same KeyHash that expires after now is
 	// live: the call replaces its RepoID, SecretEnc and ExpiresAt and keeps its

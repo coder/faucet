@@ -24,9 +24,6 @@ type Deps struct {
 	// this request. An error denies the request.
 	PrincipalFrom func(context.Context) (Principal, error)
 	Clock         quartz.Clock
-	// HookAdmin lets Redeliver ask GitHub for failed deliveries again. It is
-	// optional. Without it Redeliver returns ErrNoHookAdmin.
-	HookAdmin HookAdmin
 	// Webhook turns on webhook delivery: events/subscribe, events/unsubscribe
 	// and the webhook mode in events/list. Nil leaves it off, and
 	// events/subscribe then answers Unsupported.
@@ -53,7 +50,6 @@ type Service struct {
 	authorizer    Authorizer
 	principalFrom func(context.Context) (Principal, error)
 	clock         quartz.Clock
-	hooks         HookAdmin
 	webhook       *webhookState
 	listed        []eventDescriptor
 }
@@ -79,7 +75,6 @@ func New(d Deps) (*Service, error) {
 		authorizer:    d.Authorizer,
 		principalFrom: d.PrincipalFrom,
 		clock:         d.Clock,
-		hooks:         d.HookAdmin,
 		listed:        describeEvents([]string{deliveryPoll}),
 	}
 	if d.Webhook != nil {

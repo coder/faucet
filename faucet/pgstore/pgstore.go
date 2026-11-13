@@ -172,18 +172,6 @@ func (s *Store) Purge(ctx context.Context, before time.Time) (faucet.PurgeResult
 	return faucet.PurgeResult{Deleted: deleted.Deleted, PurgedThrough: mark}, nil
 }
 
-func (s *Store) StoredDeliveries(ctx context.Context, deliveryIDs []string) ([]string, error) {
-	// pq.Array encodes a nil slice as NULL, which matches nothing.
-	if len(deliveryIDs) == 0 {
-		return []string{}, nil
-	}
-	stored, err := s.q.StoredDeliveries(ctx, deliveryIDs)
-	if err != nil {
-		return nil, xerrors.Errorf("select deliveries: %w", err)
-	}
-	return stored, nil
-}
-
 // UpsertSubscription takes a lock per principal, so two subscribes of one
 // principal cannot both pass the limit. It deletes the principal's expired
 // rows first, so a lapsed subscription is replaced whole and does not count

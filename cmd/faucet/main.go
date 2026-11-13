@@ -36,10 +36,6 @@ const (
 
 	envCronSecret    = "CRON_SECRET" //nolint:gosec // The name of an environment variable, not a credential.
 	envRetentionDays = "FAUCET_RETENTION_DAYS"
-	envHookToken     = "FAUCET_HOOK_TOKEN" //nolint:gosec // The name of an environment variable, not a credential.
-	envHookOrg       = "FAUCET_HOOK_ORG"
-	envHookRepo      = "FAUCET_HOOK_REPO"
-	envHookID        = "FAUCET_HOOK_ID"
 
 	defaultRetentionDays = 30
 	maxRetentionDays     = 3650
@@ -61,9 +57,7 @@ type config struct {
 	// cronSecret is empty when the cron routes are off.
 	cronSecret string
 	retention  time.Duration
-	// hookAdmin is nil when redelivery is off.
-	hookAdmin faucet.HookAdmin
-	webhook   *faucet.WebhookDeps
+	webhook    *faucet.WebhookDeps
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -119,48 +113,7 @@ func loadCronConfig(getenv func(string) string, cfg *config) error {
 		days = n
 	}
 	cfg.retention = time.Duration(days) * 24 * time.Hour
-
-	token, org, repo, rawID := getenv(envHookToken), getenv(envHookOrg), getenv(envHookRepo), getenv(envHookID)
-	if token == "" && org == "" && repo == "" && rawID == "" {
-		return nil
-	}
-	admin, err := newHookAdmin(cfg.githubAPI, token, org, repo, rawID)
-	if err != nil {
-		return err
-	}
-	cfg.hookAdmin = admin
 	return nil
-}
-
-// newHookAdmin builds the redelivery client. It runs only when some hook
-// variable is set, and then every variable that is needed must be, so a typo
-// does not turn redelivery off.
-func newHookAdmin(githubAPI, token, org, repo, rawID string) (faucet.HookAdmin, error) {
-	var missing []string
-	for _, v := range []struct{ name, value string }{{envHookToken, token}, {envHookID, rawID}} {
-		if v.value == "" {
-			missing = append(missing, v.name)
-		}
-	}
-	switch {
-	case org != "" && repo != "":
-		return nil, xerrors.Errorf("set only one of %s and %s", envHookOrg, envHookRepo)
-	case org == "" && repo == "":
-		missing = append(missing, envHookOrg+" or "+envHookRepo)
-	}
-	if len(missing) > 0 {
-		return nil, xerrors.Errorf("redelivery needs %s", strings.Join(missing, ", "))
-	}
-
-	id, err := strconv.ParseInt(rawID, 10, 64)
-	if err != nil || id < 1 {
-		return nil, xerrors.Errorf("%s must be a positive integer", envHookID)
-	}
-	admin, err := faucet.NewGitHubHookAdmin(githubAPI, token, faucet.HookTarget{Org: org, Repo: repo, HookID: id}, &http.Client{Timeout: githubTimeout})
-	if err != nil {
-		return nil, xerrors.Errorf("FAUCET_HOOK_*: %w", err)
-	}
-	return admin, nil
 }
 
 func main() {
@@ -194,7 +147,6 @@ func run() error {
 		Authorizer:    github,
 		PrincipalFrom: principalFrom,
 		Clock:         clock,
-		HookAdmin:     cfg.hookAdmin,
 		Webhook:       cfg.webhook,
 	})
 	if err != nil {
@@ -204,8 +156,7 @@ func run() error {
 		return err
 	}
 	cron := cronRoutes{
-		secret: []byte(cfg.cronSecret), svc: svc, retention: cfg.retention, lookback: redeliverLookback,
-		redelivers: cfg.hookAdmin != nil, clock: clock, logger: logger,
+		secret: []byte(cfg.cronSecret), svc: svc, retention: cfg.retention, clock: clock, logger: logger,
 	}
 	return serve(ctx, logger, cfg.port, newRouter(svc, github, cron, logger))
 }
