@@ -22,8 +22,7 @@ const (
 var (
 	// ErrNoAccess means the principal cannot see the repository. GitHub gives
 	// the same answer for a repository that does not exist.
-	ErrNoAccess = xerrors.New("repository not found or not accessible")
-	// ErrInvalidToken means GitHub rejected the principal's token.
+	ErrNoAccess     = xerrors.New("repository not found or not accessible")
 	ErrInvalidToken = xerrors.New("GitHub rejected the token")
 
 	ownerPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,38}$`)
@@ -51,7 +50,6 @@ func (p Principal) Format(f fmt.State, _ rune) {
 	_, _ = fmt.Fprintf(f, "Principal{Login:%q}", p.Login)
 }
 
-// Authorizer decides whether a principal may read a repository.
 type Authorizer interface {
 	// RepoID returns the numeric ID of repo, written owner/name, when p can
 	// read it. It returns ErrNoAccess when p cannot.

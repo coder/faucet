@@ -21,7 +21,6 @@ const (
 
 type principalKey struct{}
 
-// authenticator resolves a GitHub token to the user it belongs to.
 type authenticator interface {
 	Authenticate(ctx context.Context, token string) (faucet.Principal, error)
 }
