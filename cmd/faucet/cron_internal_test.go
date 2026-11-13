@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -31,7 +32,35 @@ type cronStore struct {
 	mu      sync.Mutex
 	purges  []time.Time
 	stored  []string
+	claims  []faucet.DeliveryClaim
 	failing error
+}
+
+func (s *cronStore) ScanTargets(context.Context, time.Time, int, int) ([]faucet.ScanTarget, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return nil, s.failing
+}
+
+func (s *cronStore) ExpireDeliveries(context.Context, time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return 0, s.failing
+}
+
+func (s *cronStore) ClaimDelivery(context.Context, time.Time, time.Duration) (faucet.DeliveryClaim, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failing != nil || len(s.claims) == 0 {
+		return faucet.DeliveryClaim{}, false, s.failing
+	}
+	claim := s.claims[0]
+	s.claims = s.claims[1:]
+	return claim, true, nil
+}
+
+func (s *cronStore) FinishDelivery(context.Context, faucet.DeliveryRef, time.Time, faucet.Finish) (faucet.FinishResult, error) {
+	return faucet.FinishResult{Accepted: true, Removed: 1}, nil
 }
 
 func (s *cronStore) Purge(_ context.Context, before time.Time) (faucet.PurgeResult, error) {
@@ -126,6 +155,7 @@ type cronOptions struct {
 	secret     string
 	retention  time.Duration
 	hookConfig bool
+	webhook    bool
 }
 
 func newCronServer(t *testing.T, opts cronOptions) *cronServer {
@@ -150,12 +180,19 @@ func newCronServer(t *testing.T, opts cronOptions) *cronServer {
 		require.NoError(t, err)
 		deps.HookAdmin = admin
 	}
+	if opts.webhook {
+		key, err := faucet.NewWebhookKey(bytes.Repeat([]byte{7}, 32))
+		require.NoError(t, err)
+		callbacks, err := faucet.NewCallbackAllowlist([]string{"https://hooks.example.test"}, false)
+		require.NoError(t, err)
+		deps.Webhook = &faucet.WebhookDeps{Key: key, Callbacks: callbacks}
+	}
 	svc, err := faucet.New(deps)
 	require.NoError(t, err)
 
 	cron := cronRoutes{
 		secret: []byte(opts.secret), svc: svc, retention: retention, lookback: redeliverLookback,
-		redelivers: opts.hookConfig, clock: clock, logger: logger,
+		redelivers: opts.hookConfig, delivers: opts.webhook, clock: clock, logger: logger,
 	}
 	srv := httptest.NewServer(newRouter(svc, faucet.TokenAuthorizer{BaseURL: hooks.URL}, cron, logger))
 	t.Cleanup(srv.Close)
@@ -193,7 +230,7 @@ func (s *cronServer) requireNoSecrets(t *testing.T, texts ...string) {
 	}
 }
 
-var cronPaths = []string{"/cron/purge", "/cron/redeliver"}
+var cronPaths = []string{"/cron/purge", "/cron/redeliver", "/cron/deliver"}
 
 func TestCronRoutesRefuseARequestWithoutTheRightSecret(t *testing.T) {
 	t.Parallel()
@@ -233,7 +270,7 @@ func ptr(s string) *string { return &s }
 func TestCronRoutesRunForTheRightSecretAndOnlyForGet(t *testing.T) {
 	t.Parallel()
 
-	srv := newCronServer(t, cronOptions{secret: testCronSecret, hookConfig: true})
+	srv := newCronServer(t, cronOptions{secret: testCronSecret, hookConfig: true, webhook: true})
 	for _, path := range cronPaths {
 		status, _, body := srv.get(t, http.MethodGet, path, bearer(testCronSecret))
 		require.Equal(t, http.StatusOK, status, "%s: %s", path, body)
@@ -447,6 +484,45 @@ func TestCronRedeliverFailureIsAGenericBadGateway(t *testing.T) {
 	require.NotContains(t, body, "422")
 	require.Contains(t, srv.logs.String(), "422")
 	srv.requireNoSecrets(t, body)
+}
+
+func TestCronDeliverReportsWhatTheRunDid(t *testing.T) {
+	t.Parallel()
+
+	srv := newCronServer(t, cronOptions{secret: testCronSecret, webhook: true})
+	srv.store.claims = []faucet.DeliveryClaim{{Ref: faucet.DeliveryRef{EventID: 4, Attempt: 1}, MessageID: "msg_x", EnqueuedAt: srv.clock.Now()}}
+
+	status, _, body := srv.get(t, http.MethodGet, "/cron/deliver", bearer(testCronSecret))
+	require.Equal(t, http.StatusOK, status, body)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(body), &got), body)
+	require.Equal(t, map[string]any{
+		"enqueued": 0.0, "gaps": 0.0, "claimed": 1.0, "sent": 0.0, "delivered": 0.0, "retried": 0.0,
+		"gave_up": map[string]any{"event_purged": 1.0}, "superseded": 0.0, "incomplete": false,
+	}, got, "the reply holds counts and reasons, nothing else")
+	srv.requireNoSecrets(t, body)
+}
+
+func TestCronDeliverIs503WithoutWebhookDeliveryAfterTheSecretIsChecked(t *testing.T) {
+	t.Parallel()
+
+	srv := newCronServer(t, cronOptions{secret: testCronSecret})
+	status, _, _ := srv.get(t, http.MethodGet, "/cron/deliver", bearer(testCronSecret))
+	require.Equal(t, http.StatusServiceUnavailable, status)
+	status, _, _ = srv.get(t, http.MethodGet, "/cron/deliver", bearer("wrong-secret-0123456789abcdef"))
+	require.Equal(t, http.StatusUnauthorized, status, "a caller without the secret learns nothing about the config")
+}
+
+func TestCronDeliverFailureIsAGenericServerError(t *testing.T) {
+	t.Parallel()
+
+	srv := newCronServer(t, cronOptions{secret: testCronSecret, webhook: true})
+	srv.store.failing = xerrors.New("connection to db.internal:5432 refused")
+
+	status, _, body := srv.get(t, http.MethodGet, "/cron/deliver", bearer(testCronSecret))
+	require.Equal(t, http.StatusInternalServerError, status)
+	require.NotContains(t, body, "db.internal", "the response does not repeat the error")
+	require.Contains(t, srv.logs.String(), "db.internal", "the log keeps it")
 }
 
 func TestLoadConfigCron(t *testing.T) {

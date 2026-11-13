@@ -52,9 +52,9 @@ func loadWebhookConfig(getenv func(string) string, cfg *config) error {
 	if err != nil {
 		return xerrors.Errorf("%s must be the standard base64 of exactly 32 bytes that are not all zero", envWebhookKey)
 	}
-	deps := &faucet.WebhookDeps{Key: key}
+	deps := &faucet.WebhookDeps{Key: key, Client: newCallbackClient()}
 	if mode == verifyHandshake {
-		deps.Callbacks, err = faucet.NewCallbackHandshake(faucet.HandshakeOptions{Client: newCallbackClient()})
+		deps.Callbacks, err = faucet.NewCallbackHandshake(faucet.HandshakeOptions{Client: deps.Client})
 		if err != nil {
 			return xerrors.Errorf("%s: %w", envWebhookVerify, err)
 		}
@@ -78,8 +78,8 @@ func newAllowlist(rawOrigins string) (faucet.CallbackVerifier, error) {
 	return callbacks, nil
 }
 
-// newCallbackClient is the client that sends the verification requests. It
-// reaches loopback over http only in a binary built with the faucet_e2e tag.
+// newCallbackClient is the client that sends the verification requests and the
+// deliveries. It reaches loopback over http only in a binary built with the faucet_e2e tag.
 func newCallbackClient() *http.Client {
 	return faucet.NewHTTPClient(faucet.HTTPClientOptions{AllowInsecureLoopback: allowInsecureLoopback})
 }

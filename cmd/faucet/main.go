@@ -208,7 +208,7 @@ func run() error {
 	}
 	cron := cronRoutes{
 		secret: []byte(cfg.cronSecret), svc: svc, retention: cfg.retention, lookback: redeliverLookback,
-		redelivers: cfg.hookAdmin != nil, clock: clock, logger: logger,
+		redelivers: cfg.hookAdmin != nil, delivers: cfg.webhook != nil, clock: clock, logger: logger,
 	}
 	return serve(ctx, logger, cfg.port, newRouter(svc, github, cron, logger))
 }
