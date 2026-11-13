@@ -43,6 +43,7 @@ func Run(t *testing.T, newStore func(t *testing.T) faucet.Store) {
 		{"UpsertSubscriptionStoresThenRefreshes", upsertSubscriptionStoresThenRefreshes},
 		{"UpsertSubscriptionTreatsAnExpiredRowAsAbsent", upsertSubscriptionTreatsAnExpiredRowAsAbsent},
 		{"DeleteSubscriptionRemovesOnlyTheCallersRow", deleteSubscriptionRemovesOnlyTheCallersRow},
+		{"DeleteLiveSubscriptionGivesTheRowToExactlyOneCaller", deleteLiveSubscriptionGivesTheRowToExactlyOneCaller},
 		{"UpsertSubscriptionEnforcesThePrincipalLimit", upsertSubscriptionEnforcesThePrincipalLimit},
 		{"UpsertSubscriptionLimitHoldsUnderConcurrency", upsertSubscriptionLimitHoldsUnderConcurrency},
 		{"UpsertSubscriptionValidatesInput", upsertSubscriptionValidatesInput},
@@ -879,6 +880,59 @@ func deleteSubscriptionRemovesOnlyTheCallersRow(t *testing.T, s faucet.Store) {
 	deleted, err = s.DeleteSubscription(ctx, "octocat", gone.KeyHash)
 	require.NoError(t, err)
 	require.True(t, deleted, "an expired row is deleted too")
+}
+
+func deleteLiveSubscriptionGivesTheRowToExactlyOneCaller(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	live := subscriptionAt(1, subscriptionBase.Add(time.Hour))
+	lapsing := subscriptionAt(2, subscriptionBase.Add(time.Minute))
+	for _, sub := range []faucet.Subscription{live, lapsing} {
+		_, err := s.UpsertSubscription(ctx, sub, subscriptionBase, 10)
+		require.NoError(t, err)
+	}
+
+	_, found, err := s.DeleteLiveSubscription(ctx, "mallory", live.KeyHash, subscriptionBase)
+	require.NoError(t, err)
+	require.False(t, found, "another principal's key deletes nothing")
+	unknown := faucet.NewSubscriptionKeyHash("octocat", "https://hooks.example.test/unknown", live.EventType, live.Arguments)
+	_, found, err = s.DeleteLiveSubscription(ctx, "octocat", unknown, subscriptionBase)
+	require.NoError(t, err)
+	require.False(t, found, "an unknown key deletes nothing")
+	_, found, err = s.DeleteLiveSubscription(ctx, "octocat", lapsing.KeyHash, subscriptionBase.Add(2*time.Minute))
+	require.NoError(t, err)
+	require.False(t, found, "a lapsed row counts as absent")
+	lapsedStillThere, err := s.DeleteSubscription(ctx, "octocat", lapsing.KeyHash)
+	require.NoError(t, err)
+	require.True(t, lapsedStillThere, "and is left for the sweep")
+
+	var (
+		wg      sync.WaitGroup
+		results [8]struct {
+			row   faucet.Subscription
+			found bool
+			err   error
+		}
+	)
+	for i := range results {
+		wg.Go(func() {
+			results[i].row, results[i].found, results[i].err = s.DeleteLiveSubscription(ctx, "octocat", live.KeyHash, subscriptionBase)
+		})
+	}
+	wg.Wait()
+	winners := 0
+	for _, res := range results {
+		require.NoError(t, res.err)
+		if res.found {
+			winners++
+			require.Equal(t, live.KeyHash, res.row.KeyHash)
+			require.Equal(t, live.CallbackURL, res.row.CallbackURL)
+			require.Equal(t, live.SecretEnc, res.row.SecretEnc, "the winner gets the sealed secret to sign with")
+		}
+	}
+	require.Equal(t, 1, winners, "of concurrent callers, one removes the row and gets it")
+	gone, err := s.DeleteSubscription(ctx, "octocat", live.KeyHash)
+	require.NoError(t, err)
+	require.False(t, gone)
 }
 
 func upsertSubscriptionEnforcesThePrincipalLimit(t *testing.T, s faucet.Store) {

@@ -147,6 +147,20 @@ func (s *fakeStore) DeleteSubscription(_ context.Context, principal string, key 
 	return true, nil
 }
 
+func (s *fakeStore) DeleteLiveSubscription(_ context.Context, principal string, key faucet.SubscriptionKeyHash, now time.Time) (faucet.Subscription, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return faucet.Subscription{}, false, s.err
+	}
+	row, ok := s.subs[key]
+	if !ok || row.Principal != principal || !row.ExpiresAt.After(now) {
+		return faucet.Subscription{}, false, nil
+	}
+	s.dropSubscriptionLocked(key)
+	return row, true, nil
+}
+
 func (s *fakeStore) DeleteExpiredSubscriptions(_ context.Context, now time.Time) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

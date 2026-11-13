@@ -88,6 +88,41 @@ func (q *Queries) DeleteExpiredSubscriptionsOf(ctx context.Context, arg DeleteEx
 	return err
 }
 
+const deleteLiveSubscription = `-- name: DeleteLiveSubscription :one
+DELETE FROM faucet_subscriptions
+WHERE key_hash = $1 AND principal = $2 AND expires_at > $3
+RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since
+`
+
+type DeleteLiveSubscriptionParams struct {
+	KeyHash   []byte
+	Principal string
+	Now       time.Time
+}
+
+func (q *Queries) DeleteLiveSubscription(ctx context.Context, arg DeleteLiveSubscriptionParams) (FaucetSubscription, error) {
+	row := q.db.QueryRowContext(ctx, deleteLiveSubscription, arg.KeyHash, arg.Principal, arg.Now)
+	var i FaucetSubscription
+	err := row.Scan(
+		&i.KeyHash,
+		&i.Principal,
+		&i.CallbackUrl,
+		&i.EventType,
+		&i.Arguments,
+		&i.RepoID,
+		&i.SecretEnc,
+		&i.Cursor,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ExpiresAt,
+		&i.ScannedThrough,
+		&i.LastDeliveryAt,
+		&i.LastError,
+		&i.FailedSince,
+	)
+	return i, err
+}
+
 const deleteSubscription = `-- name: DeleteSubscription :execrows
 DELETE FROM faucet_subscriptions WHERE key_hash = $1 AND principal = $2
 `

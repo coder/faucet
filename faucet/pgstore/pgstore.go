@@ -233,6 +233,18 @@ func (s *Store) DeleteSubscription(ctx context.Context, principal string, key fa
 	return deleted > 0, nil
 }
 
+func (s *Store) DeleteLiveSubscription(ctx context.Context, principal string, key faucet.SubscriptionKeyHash, now time.Time) (faucet.Subscription, bool, error) {
+	row, err := s.q.DeleteLiveSubscription(ctx, database.DeleteLiveSubscriptionParams{KeyHash: key[:], Principal: principal, Now: now})
+	if xerrors.Is(err, sql.ErrNoRows) {
+		return faucet.Subscription{}, false, nil
+	}
+	if err != nil {
+		return faucet.Subscription{}, false, xerrors.Errorf("delete live subscription: %w", err)
+	}
+	deleted, err := toSubscription(row)
+	return deleted, err == nil, err
+}
+
 func (s *Store) DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (int64, error) {
 	deleted, err := s.q.DeleteExpiredSubscriptions(ctx, now)
 	if err != nil {

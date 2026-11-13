@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+
+	"cdr.dev/slog/v3"
 )
 
 const (
@@ -18,6 +20,27 @@ const (
 	failureSecretUnreadable = "secret_unreadable"
 	failureEnvelopeEncoding = "envelope_malformed"
 )
+
+// terminatedEnvelope tells a subscription that it has ended and no longer
+// exists. The error is the SEP's example for revoked access: fixed text that
+// says nothing about the repository.
+type terminatedEnvelope struct {
+	Type  string          `json:"type"`
+	Error terminatedError `json:"error"`
+}
+
+type terminatedError struct {
+	Code    int64             `json:"code"`
+	Message string            `json:"message"`
+	Data    map[string]string `json:"data"`
+}
+
+// Terminations counts the terminated envelopes that a Service has sent since it
+// was built. Failed are the ones the endpoint did not answer with 2xx: the
+// subscription is gone either way, and a failed envelope is not retried.
+type Terminations struct {
+	Sent, Failed uint64
+}
 
 // gapEnvelope tells a subscription that events were lost between refreshes.
 // The client persists cursor and treats it as truncated.
@@ -84,4 +107,44 @@ func (wh *webhookState) post(ctx context.Context, callbackURL, subscriptionID st
 	}
 	_ = resp.Body.Close()
 	return resp.StatusCode, ""
+}
+
+// endRevokedSubscription ends the subscription that a renewal of the same
+// principal, callback URL, event type and arguments names, after the access
+// check of that renewal said the principal can no longer read the repository.
+// The conditional delete is the send token: the one caller whose delete removes
+// the live row sends the terminated envelope, signed with the stored secret
+// and posted once, and any other caller finds no row and sends nothing. A
+// failure is logged and counted. The send does not follow the request's
+// cancellation, because the row is already gone and the envelope is the
+// subscription's only notice.
+func (s *Service) endRevokedSubscription(ctx context.Context, logger slog.Logger, wh *webhookState, principal Principal, req subscribeRequest) {
+	key := NewSubscriptionKeyHash(principal.Login, req.callbackURL, req.eventType.name, req.canonical)
+	row, found, err := s.store.DeleteLiveSubscription(ctx, principal.Login, key, s.clock.Now())
+	if err != nil {
+		logger.Error(ctx, "end a subscription whose access was revoked", slog.Error(err))
+		return
+	}
+	if !found {
+		return
+	}
+	logger = logger.With(slog.F("subscription", key.ID()), slog.F("login", principal.Login))
+	failure := wh.sendEnvelope(context.WithoutCancel(ctx), s.clock.Now(), envelopeTerminated, key, row.CallbackURL, row.SecretEnc,
+		terminatedEnvelope{Type: envelopeTerminated, Error: terminatedError{Code: codeForbidden, Message: "Forbidden", Data: map[string]string{"reason": "Access revoked"}}})
+	if failure == "" {
+		wh.terminated.sent.Add(1)
+		logger.Info(ctx, "the subscription ended, access revoked, the terminated envelope was sent")
+		return
+	}
+	wh.terminated.failed.Add(1)
+	logger.Warn(ctx, "the subscription ended, access revoked, the terminated envelope was not delivered", slog.F("reason", failure))
+}
+
+// Terminations returns the counts of the terminated envelopes that this Service
+// has sent. A Service without webhook delivery sent none.
+func (s *Service) Terminations() Terminations {
+	if s.webhook == nil {
+		return Terminations{}
+	}
+	return Terminations{Sent: s.webhook.terminated.sent.Load(), Failed: s.webhook.terminated.failed.Load()}
 }

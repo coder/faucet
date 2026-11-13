@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/xerrors"
 
 	"github.com/coder/faucet/faucet"
 )
@@ -140,4 +142,137 @@ func TestDeliverDueSendsNoGapEnvelopeWhenAnotherRunTookTheSubscription(t *testin
 	require.Zero(t, res.Gaps, "the run that lost the enqueue reports no gap: the winner does")
 	require.Zero(t, res.GapsSent)
 	require.Zero(t, d.rcv.total(), "the run that lost the enqueue sends nothing")
+}
+
+const revokedEnvelope = `{"type":"terminated","error":{"code":-32024,"message":"Forbidden","data":{"reason":"Access revoked"}}}`
+
+func (d *deliverHarness) revoke() {
+	d.t.Helper()
+	d.authz.mu.Lock()
+	delete(d.authz.repos, testRepo)
+	d.authz.mu.Unlock()
+}
+
+func (d *deliverHarness) renewalParams(ep hookEndpoint, secret string) *rawParams {
+	return subscribeTo(ep.args, d.rcv.url(ep.path), secret)
+}
+
+func TestRenewalAfterRevokedAccessSendsOneSignedTerminatedEnvelopeAndEndsTheSubscription(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	ep := d.endpoint("/hook")
+	sub := d.subscribeEndpoint(ep)
+	other := d.subscribeEndpoint(d.endpoint("/other"))
+	require.Len(t, d.rows(), 2)
+	d.revoke()
+	renewalSecret := newSecret(t, 32)
+
+	rpcErr := d.subscribeError(d.renewalParams(ep, renewalSecret))
+	require.EqualValues(t, -32024, rpcErr.Code, "the caller still gets the Forbidden of a denied subscribe")
+
+	requests := d.rcv.requests("/hook")
+	require.Len(t, requests, 1)
+	d.requireEnvelope(requests[0], "terminated", ep.secret, sub.ID)
+	require.JSONEq(t, revokedEnvelope, string(requests[0].Body))
+	require.False(t, requests[0].signatureValid(renewalSecret), "the stored secret signs, not the one that the renewal brought")
+	require.Equal(t, 1, d.rcv.total(), "the other subscription hears nothing")
+	require.Len(t, d.rows(), 1, "the subscription is gone")
+	require.Equal(t, other.ID, d.rows()[0].KeyHash.ID())
+	require.Equal(t, faucet.Terminations{Sent: 1}, d.svc.Terminations())
+
+	again := d.subscribeError(d.renewalParams(ep, renewalSecret))
+	require.EqualValues(t, -32024, again.Code)
+	require.Equal(t, 1, d.rcv.total(), "the subscription no longer exists, so a second renewal sends nothing")
+	require.Equal(t, faucet.Terminations{Sent: 1}, d.svc.Terminations())
+	d.requireNoCredentialInLogs(ep)
+}
+
+func TestRenewalThatStillHasAccessSendsNothing(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	ep := d.endpoint("/hook")
+	d.subscribeEndpoint(ep)
+	d.subscribeEndpoint(ep)
+
+	require.Zero(t, d.rcv.total())
+	require.Len(t, d.rows(), 1)
+	require.Zero(t, d.svc.Terminations())
+}
+
+func TestDeniedFirstSubscribeSendsNothing(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	ep := d.endpoint("/hook")
+	d.revoke()
+
+	require.EqualValues(t, -32024, d.subscribeError(d.renewalParams(ep, ep.secret)).Code)
+	require.Zero(t, d.rcv.total(), "there was no subscription to end")
+	require.Zero(t, d.svc.Terminations())
+}
+
+func TestRenewalThatCouldNotCheckAccessKeepsTheSubscription(t *testing.T) {
+	t.Parallel()
+
+	for name, err := range map[string]error{
+		"GitHub rejected the token": faucet.ErrInvalidToken,
+		"GitHub could not answer":   xerrors.New("GitHub is down"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d := newDeliverHarness(t)
+			ep := d.endpoint("/hook")
+			d.subscribeEndpoint(ep)
+			d.authz.err = err
+
+			d.subscribeError(d.renewalParams(ep, ep.secret))
+			require.Zero(t, d.rcv.total(), "only a denial ends a subscription")
+			require.Len(t, d.rows(), 1)
+		})
+	}
+}
+
+func TestTerminatedEnvelopeThatDidNotArriveIsCountedAndTheSubscriptionIsStillEnded(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	ep := d.endpoint("/hook")
+	d.subscribeEndpoint(ep)
+	d.rcv.answer("/hook", always(http.StatusInternalServerError))
+	d.revoke()
+
+	require.EqualValues(t, -32024, d.subscribeError(d.renewalParams(ep, ep.secret)).Code)
+	require.Len(t, d.rcv.requests("/hook"), 1, "one attempt")
+	require.Equal(t, faucet.Terminations{Failed: 1}, d.svc.Terminations())
+	require.Empty(t, d.rows())
+	require.True(t, d.logsContain("http_5xx"))
+
+	d.subscribeError(d.renewalParams(ep, ep.secret))
+	require.Len(t, d.rcv.requests("/hook"), 1, "a failed envelope is not retried")
+	d.requireNoCredentialInLogs(ep)
+}
+
+func TestConcurrentRenewalsAfterRevokedAccessSendOneTerminatedEnvelope(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	ep := d.endpoint("/hook")
+	d.subscribeEndpoint(ep)
+	d.revoke()
+
+	const renewals = 8
+	var wg sync.WaitGroup
+	errs := make([]error, renewals)
+	for i := range renewals {
+		wg.Go(func() { _, errs[i] = d.call(methodSubscribe, d.renewalParams(ep, ep.secret)) })
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		require.Error(t, err)
+	}
+	require.Len(t, d.rcv.requests("/hook"), 1, "the one renewal whose delete removed the row sent it")
+	require.Equal(t, faucet.Terminations{Sent: 1}, d.svc.Terminations())
 }

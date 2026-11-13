@@ -174,6 +174,12 @@ type Store interface {
 	// to principal, live or not, and reports whether it did. Another
 	// principal's subscription is never deleted, whatever key is given.
 	DeleteSubscription(ctx context.Context, principal string, key SubscriptionKeyHash) (bool, error)
+	// DeleteLiveSubscription deletes the subscription with this key if it
+	// belongs to principal and is live at now, and returns the row it deleted.
+	// found is false, and nothing is deleted, for another principal's key, an
+	// unknown key and a row that has expired, which counts as absent. Of
+	// concurrent callers for one row, exactly one gets found=true.
+	DeleteLiveSubscription(ctx context.Context, principal string, key SubscriptionKeyHash, now time.Time) (deleted Subscription, found bool, err error)
 	// DeleteExpiredSubscriptions deletes every subscription that expired at or
 	// before now and returns how many it deleted.
 	DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (int64, error)
