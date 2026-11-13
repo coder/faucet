@@ -26,8 +26,13 @@ const (
 	// minTimeToStart is the least time that must be left on the run's deadline
 	// for it to start another attempt: a request takes up to 5 seconds, and the
 	// result needs a moment to be recorded.
-	minTimeToStart       = 10 * time.Second
-	maxScanTargetsPerRun = 200
+	minTimeToStart = 10 * time.Second
+	// maxScanBatches bounds how many subscriptions one run reads events for:
+	// maxScanBatches times maxScanTargetsPerBatch. The enqueue stops earlier
+	// when less than two attempts' worth of time is left, so that the sends
+	// still have theirs.
+	maxScanBatches         = 5
+	maxScanTargetsPerBatch = 200
 	// maxEventBodyBytes is the largest body that faucet sends, the delivery
 	// profile of SEP-3415.
 	maxEventBodyBytes = 256 << 10
@@ -83,10 +88,10 @@ func (s *Service) DeliverDue(ctx context.Context) (DeliverResult, error) {
 	}
 	run := &deliveryRun{svc: s, wh: s.webhook, result: DeliverResult{GaveUp: map[GiveUpReason]int{}}}
 	if err := run.enqueue(ctx); err != nil {
-		return run.result, err
+		return run.result, run.unlessEnded(ctx, err)
 	}
 	if err := run.sweepExpired(ctx); err != nil {
-		return run.result, err
+		return run.result, run.unlessEnded(ctx, err)
 	}
 	err := run.send(ctx)
 	res := run.result
@@ -115,22 +120,47 @@ func (r *deliveryRun) add(update func(*DeliverResult)) {
 	update(&r.result)
 }
 
+// unlessEnded drops an error that the end of the run's context caused, and
+// says the run is incomplete instead. A store call that the deadline cut short
+// is no store failure, and the run's result is still what it did.
+func (r *deliveryRun) unlessEnded(ctx context.Context, err error) error {
+	if ctx.Err() == nil {
+		return err
+	}
+	r.add(func(res *DeliverResult) { res.Incomplete = true })
+	return nil
+}
+
+// enqueue reads the events of the subscriptions that have some, in batches
+// that start with the ones furthest behind. It leaves the sends the time they
+// need: it starts no batch or subscription with less than twice minTimeToStart
+// left.
 func (r *deliveryRun) enqueue(ctx context.Context) error {
 	s := r.svc
-	now := s.clock.Now()
-	targets, err := s.store.ScanTargets(ctx, now, MaxPendingDeliveries, maxScanTargetsPerRun)
-	if err != nil {
-		return xerrors.Errorf("select subscriptions to scan: %w", err)
-	}
-	for _, target := range targets {
-		if err := ctx.Err(); err != nil {
+	for range maxScanBatches {
+		if ctx.Err() != nil || r.outOfTimeFor(ctx, 2*minTimeToStart) {
 			r.add(func(res *DeliverResult) { res.Incomplete = true })
 			return nil
 		}
-		if err := r.enqueueFor(ctx, now, target); err != nil {
-			return err
+		now := s.clock.Now()
+		targets, err := s.store.ScanTargets(ctx, now, MaxPendingDeliveries, maxScanTargetsPerBatch)
+		if err != nil {
+			return xerrors.Errorf("select subscriptions to scan: %w", err)
+		}
+		for _, target := range targets {
+			if ctx.Err() != nil || r.outOfTimeFor(ctx, 2*minTimeToStart) {
+				r.add(func(res *DeliverResult) { res.Incomplete = true })
+				return nil
+			}
+			if err := r.enqueueFor(ctx, now, target); err != nil {
+				return err
+			}
+		}
+		if len(targets) < maxScanTargetsPerBatch {
+			return nil
 		}
 	}
+	r.add(func(res *DeliverResult) { res.Incomplete = true })
 	return nil
 }
 
@@ -254,8 +284,12 @@ func (r *deliveryRun) send(ctx context.Context) error {
 }
 
 func (r *deliveryRun) outOfTime(ctx context.Context) bool {
+	return r.outOfTimeFor(ctx, minTimeToStart)
+}
+
+func (r *deliveryRun) outOfTimeFor(ctx context.Context, least time.Duration) bool {
 	deadline, ok := ctx.Deadline()
-	return ok && r.svc.clock.Until(deadline) < minTimeToStart
+	return ok && r.svc.clock.Until(deadline) < least
 }
 
 // attemptOutcome is how one attempt ended, before the store has it.
@@ -425,7 +459,8 @@ func deliveryFailureOf(err error) CallbackReason {
 }
 
 // classify turns the answer of the endpoint into the next step: 2xx ends the
-// delivery, 410 and 413 end it without a retry, and every other answer fails
+// delivery, 410 and 413 end it without a retry and leave the subscription's
+// delivery status alone (SEP-3415), and every other answer fails
 // the attempt. A failed attempt is retried after its backoff unless it was the
 // last one or the next one would fall outside the window.
 func classify(claim DeliveryClaim, now time.Time, status int, category CallbackReason) attemptOutcome {
@@ -435,12 +470,10 @@ func classify(claim DeliveryClaim, now time.Time, status int, category CallbackR
 		out.finish = Finish{Kind: FinishDelivered}
 		return out
 	case status == http.StatusGone:
-		out.category = CallbackHTTP4xx
-		out.finish, out.reason = Finish{Kind: FinishGiveUp, Failure: CallbackHTTP4xx}, GiveUpEndpointGone
+		out.finish, out.reason = Finish{Kind: FinishGiveUp}, GiveUpEndpointGone
 		return out
 	case status == http.StatusRequestEntityTooLarge:
-		out.category = CallbackHTTP4xx
-		out.finish, out.reason = Finish{Kind: FinishGiveUp, Failure: CallbackHTTP4xx}, GiveUpEndpointPayloadTooLarge
+		out.finish, out.reason = Finish{Kind: FinishGiveUp}, GiveUpEndpointPayloadTooLarge
 		return out
 	case status >= 500:
 		out.category = CallbackHTTP5xx

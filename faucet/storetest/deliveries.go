@@ -17,6 +17,7 @@ const testLease = faucet.DeliveryLease
 var deliverySubtests = []subtest{
 	{"ScanTargetsListsLiveSubscriptionsBehindTheHead", scanTargetsListsLiveSubscriptionsBehindTheHead},
 	{"ScanTargetsSkipsSubscriptionsAtThePendingCap", scanTargetsSkipsSubscriptionsAtThePendingCap},
+	{"ScanTargetsNeedsAnEventOfTheSubscriptionsRepositoryAndType", scanTargetsNeedsAnEventOfTheSubscriptionsRepositoryAndType},
 	{"ScanTargetsIncludesASubscriptionThatAPurgeOvertook", scanTargetsIncludesASubscriptionThatAPurgeOvertook},
 	{"EnqueueDeliveriesMovesThePositionOnlyForTheCaller", enqueueDeliveriesMovesThePositionOnlyForTheCaller},
 	{"EnqueueDeliveriesWinsOnceUnderConcurrency", enqueueDeliveriesWinsOnceUnderConcurrency},
@@ -182,6 +183,26 @@ func scanTargetsSkipsSubscriptionsAtThePendingCap(t *testing.T, s faucet.Store) 
 	targets = r.targets(r.now, 3)
 	require.Len(t, targets, 1)
 	require.EqualValues(t, 2, targets[0].Pending)
+}
+
+func scanTargetsNeedsAnEventOfTheSubscriptionsRepositoryAndType(t *testing.T, s faucet.Store) {
+	r := newRig(t, s, 0)
+	other := func(repoID int64, eventType string) {
+		t.Helper()
+		ev := newEvent(fmt.Sprintf("other-%d-%s", repoID, eventType))
+		ev.RepoID, ev.Type = repoID, eventType
+		_, _, err := s.InsertEvent(r.ctx, ev)
+		require.NoError(t, err)
+	}
+
+	other(43, "ci.run_completed")
+	other(42, "pr.closed")
+	require.Empty(t, r.targets(r.now, 10), "events of another repository or another type are nothing to read")
+
+	other(42, "ci.run_completed")
+	targets := r.targets(r.now, 10)
+	require.Len(t, targets, 1, "an event of the subscription's repository and type is")
+	require.EqualValues(t, 0, targets[0].ScannedThrough)
 }
 
 func scanTargetsIncludesASubscriptionThatAPurgeOvertook(t *testing.T, s faucet.Store) {
@@ -405,6 +426,10 @@ func finishDeliveryNeedsTheCurrentAttempt(t *testing.T, s faucet.Store) {
 	_, err := s.FinishDelivery(r.ctx, unclaimed, r.now, faucet.Finish{Kind: faucet.FinishDelivered})
 	require.Error(t, err, "attempt 0 is no attempt, and a delivery that no one has claimed is at 0")
 	require.Equal(t, faucet.DeliveryStatus{}, r.status(), "a refused finish writes no status")
+	reborn := claim.Ref
+	reborn.MessageID = "msg_from_an_older_subscription"
+	require.False(t, r.finish(reborn, r.now, faucet.Finish{Kind: faucet.FinishDelivered}).Accepted,
+		"a row with another message ID belongs to another incarnation of the subscription")
 	again := r.mustClaim(r.now.Add(testLease))
 	require.EqualValues(t, 2, again.Ref.Attempt, "the delivery is still queued")
 

@@ -73,7 +73,7 @@ func (s *fakeStore) ScanTargets(_ context.Context, now time.Time, maxPending, li
 	var targets []faucet.ScanTarget
 	for key, sub := range s.subs {
 		pending := s.pendingLocked(key)
-		if !sub.ExpiresAt.After(now) || s.scanned[key] >= head || pending >= maxPending {
+		if !sub.ExpiresAt.After(now) || s.scanned[key] >= head || pending >= maxPending || !s.hasSomethingToReadLocked(key, sub) {
 			continue
 		}
 		targets = append(targets, faucet.ScanTarget{
@@ -150,7 +150,7 @@ func (s *fakeStore) ClaimDelivery(_ context.Context, now time.Time, lease time.D
 		}
 	}
 	claim := faucet.DeliveryClaim{
-		Ref:         faucet.DeliveryRef{Key: best.key, EventID: best.eventID, Attempt: bestRow.attempts},
+		Ref:         faucet.DeliveryRef{Key: best.key, EventID: best.eventID, MessageID: bestRow.messageID, Attempt: bestRow.attempts},
 		MessageID:   bestRow.messageID,
 		EnqueuedAt:  bestRow.enqueuedAt,
 		CallbackURL: sub.CallbackURL,
@@ -182,7 +182,7 @@ func (s *fakeStore) FinishDelivery(_ context.Context, ref faucet.DeliveryRef, no
 	sub, ok := s.subs[ref.Key]
 	k := fakeDeliveryKey{ref.Key, ref.EventID}
 	d := s.deliveries[k]
-	if !ok || d == nil || d.attempts != ref.Attempt {
+	if !ok || d == nil || d.attempts != ref.Attempt || d.messageID != ref.MessageID {
 		return faucet.FinishResult{}, nil
 	}
 	result := faucet.FinishResult{Accepted: true}
@@ -244,4 +244,13 @@ func (s *fakeStore) tamperSecret(key faucet.SubscriptionKeyHash) {
 	sub.SecretEnc = slices.Clone(sub.SecretEnc)
 	sub.SecretEnc[len(sub.SecretEnc)-1] ^= 1
 	s.subs[key] = sub
+}
+
+func (s *fakeStore) hasSomethingToReadLocked(key faucet.SubscriptionKeyHash, sub faucet.Subscription) bool {
+	if s.scanned[key] < s.purgeMark {
+		return true
+	}
+	return slices.ContainsFunc(s.events, func(e faucet.Event) bool {
+		return e.RepoID == sub.RepoID && e.Type == sub.EventType && e.ID > s.scanned[key]
+	})
 }

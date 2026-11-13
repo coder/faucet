@@ -100,7 +100,7 @@ func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Dur
 		return faucet.DeliveryClaim{}, false, err
 	}
 	claim := faucet.DeliveryClaim{
-		Ref:         faucet.DeliveryRef{Key: key, EventID: row.EventID, Attempt: row.Attempts},
+		Ref:         faucet.DeliveryRef{Key: key, EventID: row.EventID, MessageID: row.MessageID, Attempt: row.Attempts},
 		MessageID:   row.MessageID,
 		EnqueuedAt:  row.EnqueuedAt,
 		CallbackURL: row.CallbackUrl,
@@ -161,9 +161,9 @@ func finishLocked(ctx context.Context, q *database.Queries, ref faucet.DeliveryR
 	var affected int64
 	var err error
 	if f.Kind == faucet.FinishRetry {
-		affected, err = q.RescheduleDelivery(ctx, database.RescheduleDeliveryParams{NextAttemptAt: f.RetryAt, KeyHash: ref.Key[:], EventID: ref.EventID, Attempt: ref.Attempt})
+		affected, err = q.RescheduleDelivery(ctx, database.RescheduleDeliveryParams{NextAttemptAt: f.RetryAt, KeyHash: ref.Key[:], EventID: ref.EventID, MessageID: ref.MessageID, Attempt: ref.Attempt})
 	} else {
-		affected, err = q.EndDelivery(ctx, database.EndDeliveryParams{KeyHash: ref.Key[:], EventID: ref.EventID, Attempt: ref.Attempt})
+		affected, err = q.EndDelivery(ctx, database.EndDeliveryParams{KeyHash: ref.Key[:], EventID: ref.EventID, MessageID: ref.MessageID, Attempt: ref.Attempt})
 	}
 	if err != nil {
 		return faucet.FinishResult{}, xerrors.Errorf("update delivery: %w", err)

@@ -152,17 +152,23 @@ func (q *Queries) DeleteSubscriptionIfSealed(ctx context.Context, arg DeleteSubs
 
 const endDelivery = `-- name: EndDelivery :execrows
 DELETE FROM faucet_deliveries
-WHERE key_hash = $1 AND event_id = $2 AND attempts = $3
+WHERE key_hash = $1 AND event_id = $2 AND message_id = $3 AND attempts = $4
 `
 
 type EndDeliveryParams struct {
-	KeyHash []byte
-	EventID int64
-	Attempt int32
+	KeyHash   []byte
+	EventID   int64
+	MessageID string
+	Attempt   int32
 }
 
 func (q *Queries) EndDelivery(ctx context.Context, arg EndDeliveryParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, endDelivery, arg.KeyHash, arg.EventID, arg.Attempt)
+	result, err := q.db.ExecContext(ctx, endDelivery,
+		arg.KeyHash,
+		arg.EventID,
+		arg.MessageID,
+		arg.Attempt,
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -170,11 +176,15 @@ func (q *Queries) EndDelivery(ctx context.Context, arg EndDeliveryParams) (int64
 }
 
 const expireDeliveries = `-- name: ExpireDeliveries :execrows
-DELETE FROM faucet_deliveries d
-USING faucet_subscriptions s
-WHERE s.key_hash = d.key_hash
-  AND s.expires_at <= $1
-  AND (d.lease_until IS NULL OR d.lease_until <= $1)
+DELETE FROM faucet_deliveries
+WHERE (key_hash, event_id) IN (
+  SELECT d.key_hash, d.event_id
+  FROM faucet_deliveries d
+  JOIN faucet_subscriptions s ON s.key_hash = d.key_hash
+  WHERE s.expires_at <= $1
+    AND (d.lease_until IS NULL OR d.lease_until <= $1)
+  FOR UPDATE OF d SKIP LOCKED
+)
 `
 
 func (q *Queries) ExpireDeliveries(ctx context.Context, now time.Time) (int64, error) {
@@ -256,13 +266,14 @@ func (q *Queries) RecordDeliverySuccess(ctx context.Context, arg RecordDeliveryS
 const rescheduleDelivery = `-- name: RescheduleDelivery :execrows
 UPDATE faucet_deliveries
 SET next_attempt_at = $1, lease_until = NULL
-WHERE key_hash = $2 AND event_id = $3 AND attempts = $4
+WHERE key_hash = $2 AND event_id = $3 AND message_id = $4 AND attempts = $5
 `
 
 type RescheduleDeliveryParams struct {
 	NextAttemptAt time.Time
 	KeyHash       []byte
 	EventID       int64
+	MessageID     string
 	Attempt       int32
 }
 
@@ -271,6 +282,7 @@ func (q *Queries) RescheduleDelivery(ctx context.Context, arg RescheduleDelivery
 		arg.NextAttemptAt,
 		arg.KeyHash,
 		arg.EventID,
+		arg.MessageID,
 		arg.Attempt,
 	)
 	if err != nil {
@@ -290,6 +302,13 @@ SELECT
 FROM faucet_subscriptions s, head
 WHERE s.expires_at > $1
   AND s.scanned_through < head.max_id
+  AND (
+    s.scanned_through < (SELECT purged_through FROM faucet_purge_mark)
+    OR EXISTS (
+      SELECT 1 FROM faucet_events e
+      WHERE e.repo_id = s.repo_id AND e.type = s.event_type AND e.id > s.scanned_through
+    )
+  )
   AND (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash) < $2::int
 ORDER BY s.scanned_through, s.key_hash
 LIMIT $3

@@ -228,7 +228,9 @@ func TestDeliverDueEndsOn410And413ButKeepsTheSubscription(t *testing.T) {
 			require.Zero(t, res.Retried, "the answer ends the delivery, with no retry")
 
 			d.advance(5 * time.Minute)
-			d.subscribeEndpoint(ep)
+			healthy := d.refreshStatus(ep)
+			require.NotNil(t, healthy)
+			require.Nil(t, healthy.LastError, "the endpoint refused this delivery, which does not touch the subscription's status")
 			require.Zero(t, d.deliverDue().Sent, "the delivery that ended is not retried")
 			require.Len(t, d.rcv.requests("/hook"), 1)
 
@@ -604,6 +606,56 @@ func TestDeliverDueStopsAtItsLimits(t *testing.T) {
 		require.False(t, second.Incomplete)
 	})
 
+	t.Run("a run that is out of time still sends what is queued and reports no error", func(t *testing.T) {
+		t.Parallel()
+		d := newDeliverHarness(t)
+		d.clock.Set(time.Now()).MustWait(d.ctx)
+		d.subscribeEndpoint(d.endpoint("/hook"))
+		d.advance(time.Second)
+		d.rcv.answer("/hook", func(n int) int {
+			if n == 1 {
+				return http.StatusInternalServerError
+			}
+			return http.StatusOK
+		})
+		d.newRunEvent()
+		require.Equal(t, 1, d.deliverDue().Retried)
+		d.newRunEvent()
+		d.advance(15 * time.Second)
+
+		short, cancel := context.WithDeadline(d.ctx, d.clock.Now().Add(15*time.Second))
+		defer cancel()
+		res := d.deliverDueWith(short)
+		require.Zero(t, res.Enqueued, "with under 20 seconds left, no new event is read")
+		require.Equal(t, 1, res.Delivered, "and the retry that is due still goes out")
+		require.True(t, res.Incomplete)
+		require.Equal(t, 1, d.deliverDueWith(context.Background()).Enqueued, "the next run reads the event")
+
+		ended, endNow := context.WithCancel(d.ctx)
+		endNow()
+		res = d.deliverDueWith(ended)
+		require.True(t, res.Incomplete, "a context that ended is no failure")
+	})
+
+	t.Run("a run reads the events of more than 200 subscriptions", func(t *testing.T) {
+		t.Parallel()
+		d := newDeliverHarness(t)
+		const principals, perPrincipal = 3, 90
+		for p := range principals {
+			d.as(fmt.Sprintf("user-%d", p))
+			for n := range perPrincipal {
+				d.subscribeEndpoint(d.endpoint(fmt.Sprintf("/hook/%d/%d", p, n)))
+			}
+		}
+		d.advance(time.Second)
+		d.newRunEvent()
+
+		res := d.deliverDue()
+		require.Equal(t, principals*perPrincipal, res.Enqueued, "every subscription's event is queued in one run")
+		require.Equal(t, 200, res.Claimed)
+		require.True(t, res.Incomplete)
+	})
+
 	t.Run("no attempt starts with under 10 seconds left", func(t *testing.T) {
 		t.Parallel()
 		d := newDeliverHarness(t)
@@ -619,7 +671,7 @@ func TestDeliverDueStopsAtItsLimits(t *testing.T) {
 		require.True(t, res.Incomplete)
 		require.Zero(t, d.rcv.total())
 
-		long, cancelLong := context.WithDeadline(d.ctx, d.clock.Now().Add(11*time.Second))
+		long, cancelLong := context.WithDeadline(d.ctx, d.clock.Now().Add(21*time.Second))
 		defer cancelLong()
 		got := d.deliverDueWith(long)
 		require.Equal(t, 1, got.Delivered, "%+v", got)

@@ -186,16 +186,15 @@ type Store interface {
 	// holds. A new subscription starts reading the log after its Cursor, and a
 	// refresh of a live one leaves the read position alone.
 
-	// ScanTargets returns the live subscriptions at now that have not read the
-	// log to its head and hold fewer than maxPending unsent deliveries, the
-	// ones furthest behind first, at most limit. The head counts the purge
-	// mark, so a subscription that a purge overtook is a target too.
+	// ScanTargets returns the live subscriptions at now that hold fewer than
+	// maxPending unsent deliveries and have something to read: an event of
+	// their repository and event type above their read position, or a purge
+	// mark above it. The ones furthest behind come first, at most limit.
 	ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32) ([]ScanTarget, error)
 	// EnqueueDeliveries queues e.Deliveries and moves the subscription's read
 	// position to e.NewScannedThrough in one transaction, and only if the
 	// subscription is live at now and still at e.ExpectedScannedThrough. It
-	// reports whether it did. A delivery that is already queued stays as it is.
-	// The queued deliveries are due at now.
+	// reports whether it did. The queued deliveries are due at now.
 	EnqueueDeliveries(ctx context.Context, now time.Time, e Enqueue) (bool, error)
 	// ClaimDelivery takes the due delivery with the earliest due time, of a
 	// subscription that is live at now, and no other caller holds. A delivery

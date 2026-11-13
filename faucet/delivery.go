@@ -91,10 +91,13 @@ func (e Enqueue) Validate() error {
 }
 
 // DeliveryRef names one attempt of one delivery. Store.FinishDelivery changes
-// a delivery only for the attempt that the claim returned.
+// a delivery only for the attempt that the claim returned, and only while the
+// row still has the message ID that the claim saw, so a subscription that was
+// deleted and made again does not take over the result of an older attempt.
 type DeliveryRef struct {
-	Key     SubscriptionKeyHash
-	EventID int64
+	Key       SubscriptionKeyHash
+	EventID   int64
+	MessageID string
 	// Attempt counts from 1 and rises at every claim.
 	Attempt int32
 }
@@ -137,8 +140,9 @@ type Finish struct {
 	// RetryAt is the time of the next attempt, for FinishRetry.
 	RetryAt time.Time
 	// Failure is the category that the subscription records as lastError.
-	// FinishRetry needs one. FinishGiveUp may carry one when the endpoint's
-	// answer ended the delivery, and leaves it empty when faucet did.
+	// FinishRetry needs one. FinishGiveUp carries one when a failed attempt was
+	// the last, and leaves it empty when faucet ended the delivery or the
+	// endpoint refused this one with 410 or 413.
 	Failure CallbackReason
 	// Unreadable is the sealed secret that could not be opened, for FinishDead.
 	Unreadable []byte

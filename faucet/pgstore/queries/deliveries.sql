@@ -9,6 +9,13 @@ SELECT
 FROM faucet_subscriptions s, head
 WHERE s.expires_at > sqlc.arg(now)
   AND s.scanned_through < head.max_id
+  AND (
+    s.scanned_through < (SELECT purged_through FROM faucet_purge_mark)
+    OR EXISTS (
+      SELECT 1 FROM faucet_events e
+      WHERE e.repo_id = s.repo_id AND e.type = s.event_type AND e.id > s.scanned_through
+    )
+  )
   AND (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash) < sqlc.arg(max_pending)::int
 ORDER BY s.scanned_through, s.key_hash
 LIMIT sqlc.arg(row_limit);
@@ -56,11 +63,11 @@ LEFT JOIN faucet_events e ON e.id = c.event_id;
 -- name: RescheduleDelivery :execrows
 UPDATE faucet_deliveries
 SET next_attempt_at = sqlc.arg(next_attempt_at), lease_until = NULL
-WHERE key_hash = sqlc.arg(key_hash) AND event_id = sqlc.arg(event_id) AND attempts = sqlc.arg(attempt);
+WHERE key_hash = sqlc.arg(key_hash) AND event_id = sqlc.arg(event_id) AND message_id = sqlc.arg(message_id) AND attempts = sqlc.arg(attempt);
 
 -- name: EndDelivery :execrows
 DELETE FROM faucet_deliveries
-WHERE key_hash = sqlc.arg(key_hash) AND event_id = sqlc.arg(event_id) AND attempts = sqlc.arg(attempt);
+WHERE key_hash = sqlc.arg(key_hash) AND event_id = sqlc.arg(event_id) AND message_id = sqlc.arg(message_id) AND attempts = sqlc.arg(attempt);
 
 -- name: RecordDeliverySuccess :exec
 UPDATE faucet_subscriptions
@@ -79,11 +86,15 @@ SELECT COUNT(*)::bigint AS pending FROM faucet_deliveries WHERE key_hash = sqlc.
 DELETE FROM faucet_subscriptions WHERE key_hash = sqlc.arg(key_hash) AND secret_enc = sqlc.arg(secret_enc);
 
 -- name: ExpireDeliveries :execrows
-DELETE FROM faucet_deliveries d
-USING faucet_subscriptions s
-WHERE s.key_hash = d.key_hash
-  AND s.expires_at <= sqlc.arg(now)
-  AND (d.lease_until IS NULL OR d.lease_until <= sqlc.arg(now));
+DELETE FROM faucet_deliveries
+WHERE (key_hash, event_id) IN (
+  SELECT d.key_hash, d.event_id
+  FROM faucet_deliveries d
+  JOIN faucet_subscriptions s ON s.key_hash = d.key_hash
+  WHERE s.expires_at <= sqlc.arg(now)
+    AND (d.lease_until IS NULL OR d.lease_until <= sqlc.arg(now))
+  FOR UPDATE OF d SKIP LOCKED
+);
 
 -- name: LockSubscription :one
 SELECT 1::int AS locked FROM faucet_subscriptions WHERE key_hash = sqlc.arg(key_hash) FOR NO KEY UPDATE;
