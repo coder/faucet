@@ -191,16 +191,23 @@ var nonGlobalPrefixes = func() []netip.Prefix {
 		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
 		"192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15",
 		"198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
-		"::/96", "64:ff9b::/96", "100::/64", "2001::/32", "2001:db8::/32", "2002::/16", "fc00::/7", "fe80::/10", "ff00::/8",
+		"::/96", "::ffff:0:0:0/96", "64:ff9b::/96", "64:ff9b:1::/48", "100::/64", "100:0:0:1::/64", "2001::/23",
+		"2001:db8::/32", "2002::/16", "3fff::/20", "5f00::/16", "fc00::/7", "fe80::/10", "fec0::/10", "ff00::/8",
 	} {
 		out = append(out, netip.MustParsePrefix(p))
 	}
 	return out
 }()
 
+// isGlobalAddr reports whether addr is publicly routable. The standard library
+// predicates cross-check the table of prefixes, so a prefix left out of it
+// still cannot let loopback, private, link-local or multicast space through.
 func isGlobalAddr(addr netip.Addr) bool {
-	addr = addr.Unmap()
-	return addr.IsValid() && !slices.ContainsFunc(nonGlobalPrefixes, func(p netip.Prefix) bool { return p.Contains(addr) })
+	addr = addr.WithZone("").Unmap()
+	if !addr.IsValid() || addr.IsUnspecified() || addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsMulticast() {
+		return false
+	}
+	return !slices.ContainsFunc(nonGlobalPrefixes, func(p netip.Prefix) bool { return p.Contains(addr) })
 }
 
 // callbackCache does not remember a failure, so a retry can succeed. A restart
