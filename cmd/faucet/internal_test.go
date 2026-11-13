@@ -185,6 +185,7 @@ func (s *testServer) connect(ctx context.Context, t *testing.T, token string) *m
 	}, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = session.Close() })
+	t.Cleanup(func() { s.clock.Advance(time.Hour) })
 	return session
 }
 
