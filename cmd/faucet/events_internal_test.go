@@ -195,15 +195,21 @@ func TestMCPEventsListIsSafeForConcurrentRequests(t *testing.T) {
 	}
 }
 
+const metaTriple = `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",` +
+	`"io.modelcontextprotocol/clientInfo":{"name":"raw","version":"0"},` +
+	`"io.modelcontextprotocol/clientCapabilities":{}}`
+
 func eventsPollRequest(t *testing.T, srv *testServer, token, name string) (status int, body string) {
+	t.Helper()
+	params := `{"name":"ci.run_completed","arguments":{"repo":"o/r"},` + metaTriple + `}`
+	return postEventsPoll(t, srv, token, name, params)
+}
+
+func postEventsPoll(t *testing.T, srv *testServer, token, name, params string) (status int, body string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
-	payload := `{"jsonrpc":"2.0","id":7,"method":"events/poll","params":{"name":"ci.run_completed",` +
-		`"arguments":{"repo":"o/r"},` +
-		`"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28",` +
-		`"io.modelcontextprotocol/clientInfo":{"name":"raw","version":"0"},` +
-		`"io.modelcontextprotocol/clientCapabilities":{}}}}`
+	payload := `{"jsonrpc":"2.0","id":7,"method":"events/poll","params":` + params + `}`
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/mcp", strings.NewReader(payload))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
@@ -242,4 +248,27 @@ func TestMCPEventsPollNeedsTheNameHeader(t *testing.T) {
 
 	status, _ = eventsPollRequest(t, srv, "", "")
 	require.Equal(t, http.StatusUnauthorized, status, "authentication comes before the header check")
+}
+
+func TestMCPEventsPollNameHeaderAgreesWithTheEventTheSDKServes(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t)
+	tests := []struct {
+		name       string
+		params     string
+		header     string
+		wantStatus int
+		wantServed string
+	}{
+		{"last duplicate wins in both", `{"name":"ci.run_completed","name":"zzz.first","arguments":{"repo":"o/r"},` + metaTriple + `}`, "zzz.first", http.StatusOK, "zzz.first"},
+		{"a name in another case is a different field", `{"name":"zzz.sdk","Name":"ci.run_completed","arguments":{"repo":"o/r"},` + metaTriple + `}`, "ci.run_completed", http.StatusBadRequest, ""},
+	}
+	for _, tt := range tests {
+		status, body := postEventsPoll(t, srv, aliceToken, tt.header, tt.params)
+		require.Equal(t, tt.wantStatus, status, "%s: %s", tt.name, body)
+		if tt.wantServed != "" {
+			require.Contains(t, body, `unknown event type \"`+tt.wantServed+`\"`, tt.name)
+		}
+	}
 }

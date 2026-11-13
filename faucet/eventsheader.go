@@ -25,12 +25,6 @@ const (
 // params.name, so SEP-3415 requires their Mcp-Name header.
 var nameMethods = []string{"events/poll", "events/stream", "events/subscribe", "events/unsubscribe"}
 
-type rpcRequest struct {
-	ID     json.RawMessage `json:"id"`
-	Method string          `json:"method"`
-	Params json.RawMessage `json:"params"`
-}
-
 // RequireEventName wraps an MCP Streamable HTTP handler. It answers 400 with
 // the HeaderMismatch error when the Mcp-Name header of an events/* request is
 // missing or differs from params.name. The SDK checks the header for tools,
@@ -63,35 +57,36 @@ func RequireEventName(next http.Handler) http.Handler {
 
 // checkEventName returns the request ID and the problem of the first events/*
 // request in body that the header does not match. A body that is not JSON-RPC
-// is left to the SDK to reject.
+// is left to the SDK to reject. The fields are read by exact name, because the
+// SDK matches them that way and encoding/json would not.
 func checkEventName(body []byte, header string) (id json.RawMessage, problem string) {
-	var requests []rpcRequest
+	var requests []json.RawMessage
 	if bytes.HasPrefix(bytes.TrimSpace(body), []byte("[")) {
 		if json.Unmarshal(body, &requests) != nil {
 			return nil, ""
 		}
 	} else {
-		var single rpcRequest
-		if json.Unmarshal(body, &single) != nil {
-			return nil, ""
-		}
-		requests = []rpcRequest{single}
+		requests = []json.RawMessage{body}
 	}
-	for _, req := range requests {
-		if !slices.Contains(nameMethods, req.Method) {
+	for _, raw := range requests {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(raw, &fields) != nil {
 			continue
 		}
-		var params struct {
-			Name string `json:"name"`
+		var method string
+		if json.Unmarshal(fields["method"], &method) != nil || !slices.Contains(nameMethods, method) {
+			continue
 		}
-		if json.Unmarshal(req.Params, &params) != nil || params.Name == "" {
+		var params map[string]json.RawMessage
+		var name string
+		if json.Unmarshal(fields["params"], &params) != nil || json.Unmarshal(params["name"], &name) != nil || name == "" {
 			continue
 		}
 		if header == "" {
-			return req.ID, fmt.Sprintf("missing required Mcp-Name header for method %q", req.Method)
+			return fields["id"], fmt.Sprintf("missing required Mcp-Name header for method %q", method)
 		}
-		if got, ok := decodeNameHeader(header); !ok || got != params.Name {
-			return req.ID, "header mismatch: Mcp-Name header does not match params.name"
+		if got, ok := decodeNameHeader(header); !ok || got != name {
+			return fields["id"], "header mismatch: Mcp-Name header does not match params.name"
 		}
 	}
 	return nil, ""
