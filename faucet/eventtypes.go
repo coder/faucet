@@ -9,8 +9,6 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
-// eventType describes one event type for events/list. Its name is the
-// normalized event type that Normalize stores.
 type eventType struct {
 	name          string
 	description   string
@@ -100,8 +98,6 @@ var eventCatalog = []eventType{
 	},
 }
 
-// pollArguments is the arguments object of events/poll, after validation
-// against pollArgumentsSchema.
 type pollArguments struct {
 	Repo string `json:"repo"`
 	SHA  string `json:"sha"`

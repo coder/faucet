@@ -325,7 +325,6 @@ describe('events poll', () => {
     const repoId = newRepoId();
     const cursor = await startCursor(faucet, repoId);
     const old = await deliverSample(faucet, run, repoId);
-    // The server compares the age of events with its own clock, so the test has to let real time pass.
     await sleep(1_500);
     const recent = await deliverSample(faucet, run, repoId);
 

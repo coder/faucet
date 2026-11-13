@@ -21,8 +21,6 @@ const (
 	base64Suffix = "?="
 )
 
-// nameMethods are the events/* methods that carry the event name in
-// params.name, so SEP-3415 requires their Mcp-Name header.
 var nameMethods = []string{"events/poll", "events/stream", "events/subscribe", "events/unsubscribe"}
 
 // RequireEventName wraps an MCP Streamable HTTP handler. It answers 400 with
@@ -56,17 +54,13 @@ func RequireEventName(next http.Handler) http.Handler {
 	})
 }
 
-// rpcFailure is an HTTP 400 answer with a JSON-RPC error in its body.
 type rpcFailure struct {
 	id      json.RawMessage
 	code    int64
 	message string
 }
 
-// checkEventName returns nil when every events/* request in body carries a
-// matching header. A body it cannot read as one JSON value, or a request that
-// is not a JSON object, fails here too, because a body the check skipped could
-// still reach a handler. The fields are read by exact name, because the SDK
+// The fields are read by exact name, because the SDK
 // matches them that way and encoding/json would not. A repeated field fails as
 // well: the SDK keeps an earlier string when a later duplicate is null, and a
 // map here would keep the null.
@@ -112,7 +106,6 @@ func checkEventName(body []byte, header string) *rpcFailure {
 	return nil
 }
 
-// hasRepeatedKey reports whether the top-level object in raw names a key twice.
 func hasRepeatedKey(raw json.RawMessage) bool {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {

@@ -29,8 +29,6 @@ const (
 	resultComplete = "complete"
 	cursorPrefix   = "v1."
 
-	// recommendedPollMs is the nextPollMs of every poll. The client floors it
-	// at one second anyway, and GitHub delivers webhooks seconds after the fact.
 	recommendedPollMs = 5000
 	maxAgeLimitMs     = math.MaxInt64 / int64(time.Millisecond)
 
@@ -77,8 +75,6 @@ type eventsPollParams struct {
 	MaxEvents *int32          `json:"maxEvents,omitempty"`
 }
 
-// eventOccurrence is the EventOccurrence of SEP-3415. A poll has no per-event
-// cursor, because it returns one for the whole batch.
 type eventOccurrence struct {
 	EventID   string          `json:"eventId"`
 	Name      string          `json:"name"`
@@ -121,8 +117,6 @@ func (s *Service) registerEvents(srv *mcp.Server) {
 	}
 }
 
-// listEvents answers events/list. The catalog is one page, so any cursor is
-// one the server never issued.
 func listEvents(_ context.Context, _ *mcp.ServerSession, p *eventsListParams) (*eventsListResult, error) {
 	if p != nil && p.Cursor != "" {
 		return nil, invalidParams("cursor is not valid, the event types fit one page")
@@ -133,13 +127,10 @@ func listEvents(_ context.Context, _ *mcp.ServerSession, p *eventsListParams) (*
 type pollRequest struct {
 	eventType eventType
 	repo      string
-	// query has the filters. The caller sets RepoID, After and Limit.
-	query PollQuery
-	// cursor is nil when the client asks to start from now.
-	cursor *int64
-	// maxAge is zero when the client set no floor.
-	maxAge time.Duration
-	limit  int32
+	query     PollQuery
+	cursor    *int64
+	maxAge    time.Duration
+	limit     int32
 }
 
 func parsePoll(p *eventsPollParams) (pollRequest, error) {
@@ -224,8 +215,6 @@ func (s *Service) pollEventsMethod(ctx context.Context, _ *mcp.ServerSession, p 
 	return res, nil
 }
 
-// readEvents answers one poll. A poll without a cursor returns no events and
-// the cursor of the present, the same position a wait without a cursor starts from.
 func (s *Service) readEvents(ctx context.Context, req pollRequest) (*eventsPollResult, error) {
 	if req.cursor == nil {
 		head, err := s.store.CursorAt(ctx, s.clock.Now())
@@ -240,7 +229,6 @@ func (s *Service) readEvents(ctx context.Context, req pollRequest) (*eventsPollR
 	}
 	q := req.query
 	q.After = after
-	// One row past the limit tells whether more events wait, without a count query.
 	q.Limit = req.limit + 1
 	page, err := s.store.PollEvents(ctx, q)
 	if err != nil {
@@ -261,9 +249,6 @@ func (s *Service) readEvents(ctx context.Context, req pollRequest) (*eventsPollR
 	return newPollResult(occurrences, cursor, truncated, hasMore), nil
 }
 
-// replayStart returns the cursor a poll reads after. It is the client's cursor,
-// unless the replay floor is later. Then events between the two are gone, and
-// truncated says so, as SEP-3415 requires.
 func (s *Service) replayStart(ctx context.Context, cursor int64, maxAge time.Duration) (after int64, truncated bool, err error) {
 	floor, err := s.retentionFloor(ctx)
 	if err != nil {
@@ -282,9 +267,6 @@ func (s *Service) replayStart(ctx context.Context, cursor int64, maxAge time.Dur
 	return cursor, false, nil
 }
 
-// retentionFloor is the lowest cursor a replay can still start from. The store
-// purges nothing yet, so it is zero. The purge in a later PR returns its mark
-// here, and every poll below it reports truncated.
 func (*Service) retentionFloor(context.Context) (int64, error) {
 	return 0, nil
 }
@@ -303,9 +285,6 @@ func newPollResult(events []eventOccurrence, cursor int64, truncated, hasMore bo
 	}
 }
 
-// occurrenceOf turns a stored event into an EventOccurrence. The pull request
-// numbers and the head SHA are columns, not part of the stored data, so they
-// join the data here and the payload schemas list them.
 func occurrenceOf(ev Event) (eventOccurrence, error) {
 	var data map[string]json.RawMessage
 	if err := json.Unmarshal(ev.Data, &data); err != nil || data == nil {
@@ -339,7 +318,6 @@ func encodeCursor(id int64) string {
 	return cursorPrefix + strconv.FormatInt(id, 10)
 }
 
-// decodeCursor accepts only what encodeCursor writes.
 func decodeCursor(cursor string) (int64, bool) {
 	digits, ok := strings.CutPrefix(cursor, cursorPrefix)
 	if !ok {
@@ -364,9 +342,6 @@ func invalidParams(format string, args ...any) error {
 	return rpcError(jsonrpc.CodeInvalidParams, fmt.Sprintf(format, args...), nil)
 }
 
-// accessError maps the errors of authorize. Every refusal is Forbidden with
-// the same message for a missing repository and an unreadable one, so the
-// answer does not tell which it was.
 func accessError(err error) error {
 	if xerrors.Is(err, errVerify) {
 		return rpcError(jsonrpc.CodeInternalError, err.Error(), nil)

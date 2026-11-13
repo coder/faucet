@@ -41,8 +41,6 @@ var sampleData = map[string]string{
 	"pr.review_submitted": `{"review_id":3,"state":"approved","user_login":"octocat","html_url":"https://example.test/pull/7#r3"}`,
 }
 
-// rawParams carries a request body the test wrote as JSON, so it can send a
-// null, a missing field or a wrong type that a typed struct cannot.
 type rawParams struct {
 	mcp.ParamsBase
 	Name      string          `json:"name,omitempty"`

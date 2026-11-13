@@ -169,11 +169,6 @@ export class Faucet {
     return outcome;
   }
 
-  // mcp sends one JSON-RPC request to /mcp the way a stateless 2026-07-28
-  // client does. A string token replaces the run's valid GitHub token and null
-  // sends no Authorization header. Mcp-Name defaults to params.name, a string
-  // replaces it and null omits it. A reply that is not JSON-RPC (a 401) has a
-  // null id, result and error.
   async mcp<R = Record<string, unknown>>(
     method: string,
     params: Record<string, unknown> = {},
