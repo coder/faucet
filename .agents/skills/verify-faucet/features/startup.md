@@ -1,12 +1,13 @@
 # Startup configuration
 
-The `faucet` process reads `DATABASE_URL`, `GITHUB_WEBHOOK_SECRET` and `PORT` from its environment and refuses to start, with exit status 1 and one line on stderr, when they are wrong. It never prints a secret or a database password.
+The `faucet` process reads `DATABASE_URL`, `GITHUB_WEBHOOK_SECRET`, `PORT` and `FAUCET_GITHUB_API_URL` from its environment and refuses to start, with exit status 1 and one line on stderr, when they are wrong. It never prints a secret or a database password.
 
 ## Sub-features
 
 - A missing `DATABASE_URL` or `GITHUB_WEBHOOK_SECRET` names the missing variables (both when both are missing).
 - A `GITHUB_WEBHOOK_SECRET` shorter than 16 bytes is refused.
 - A `PORT` that is not a whole number from 1 to 65535 is refused. An empty `PORT` means 8080.
+- A `FAUCET_GITHUB_API_URL` that is not an absolute `https` URL (or `http` on a loopback host), or that carries user info, a query or a fragment, is refused with `FAUCET_GITHUB_API_URL: GitHub API URL must ...`. The text never quotes the URL. An empty value means `https://api.github.com`. The stub in `app.mjs` is the loopback `http` case.
 - A `DATABASE_URL` that does not parse is refused with `DATABASE_URL: not a valid Postgres connection string`. The text never quotes the URL, because the driver's own parse error would.
 - `GET /healthz`, an unknown path and `GET /webhook/github` answer as the running server should. Their tests are `tests/health.e2e.ts` and `tests/ingest-wrong-method.e2e.ts`.
 

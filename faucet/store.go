@@ -62,6 +62,48 @@ func (e Event) Validate() error {
 	return nil
 }
 
+// PollQuery selects the events one repository's waiter wants to see.
+type PollQuery struct {
+	RepoID int64
+	// Types limits the result to these event types. Empty means every type.
+	Types []string
+	// HeadSHA limits the result to events with this head SHA. Empty means no limit.
+	HeadSHA string
+	// PR limits the result to events that mention this pull request number.
+	// Zero means no limit.
+	PR int32
+	// After is the cursor: only events with ID > After are returned.
+	After int64
+	// Limit is the page size. It must be positive.
+	Limit int32
+}
+
+// Validate checks the fields a caller supplies to Store.PollEvents.
+func (q PollQuery) Validate() error {
+	switch {
+	case q.RepoID <= 0:
+		return xerrors.New("repo ID must be positive")
+	case q.Limit <= 0:
+		return xerrors.New("limit must be positive")
+	case q.After < 0:
+		return xerrors.New("after must not be negative")
+	case q.PR < 0:
+		return xerrors.New("pr must not be negative")
+	}
+	return nil
+}
+
+// PollPage is the result of Store.PollEvents.
+type PollPage struct {
+	// Events are the matching events in ID order.
+	Events []Event
+	// Next is the cursor to poll with next. It is Events[len(Events)-1].ID
+	// when the page is full. Otherwise it is the highest event ID the store
+	// had when it answered, so a waiter whose repository is quiet does not
+	// rescan other repositories' events. It is never lower than the query's After.
+	Next int64
+}
+
 func hasNUL(v any) bool {
 	switch v := v.(type) {
 	case string:
@@ -92,4 +134,12 @@ type Store interface {
 	// EventsAfter returns events with ID > afterID in ID order, at most limit rows.
 	// limit must be positive.
 	EventsAfter(ctx context.Context, afterID int64, limit int32) ([]Event, error)
+	// PollEvents returns one page for q. Every filter is applied before the
+	// limit, and the events and PollPage.Next come from one snapshot. Because
+	// IDs are visible in commit order, polling again with After set to Next
+	// never skips a matching event.
+	PollEvents(ctx context.Context, q PollQuery) (PollPage, error)
+	// CursorAt returns the highest event ID received before t, or 0 when there
+	// is none. Polling with it as the cursor returns the events from t on.
+	CursorAt(ctx context.Context, t time.Time) (int64, error)
 }

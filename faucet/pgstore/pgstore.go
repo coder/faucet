@@ -4,6 +4,7 @@ package pgstore
 import (
 	"context"
 	"database/sql"
+	"time"
 
 	"golang.org/x/xerrors"
 
@@ -86,6 +87,68 @@ func (s *Store) EventsAfter(ctx context.Context, afterID int64, limit int32) ([]
 		events[i] = toEvent(row)
 	}
 	return events, nil
+}
+
+// PollEvents runs one statement, so the page and the head ID it reports share a
+// snapshot. The head ID is read in the same statement as the page because
+// IDs become visible in commit order: every ID at or below it that will ever
+// exist is already visible, so a cursor set to it cannot skip an event.
+func (s *Store) PollEvents(ctx context.Context, q faucet.PollQuery) (faucet.PollPage, error) {
+	if err := q.Validate(); err != nil {
+		return faucet.PollPage{}, xerrors.Errorf("validate poll query: %w", err)
+	}
+	// pq.Array encodes a nil slice as NULL, which makes the type filter match nothing.
+	types := q.Types
+	if types == nil {
+		types = []string{}
+	}
+	rows, err := s.q.PollEvents(ctx, database.PollEventsParams{
+		RepoID:   q.RepoID,
+		AfterID:  q.After,
+		Types:    types,
+		HeadSha:  q.HeadSHA,
+		Pr:       q.PR,
+		RowLimit: q.Limit,
+	})
+	if err != nil {
+		return faucet.PollPage{}, xerrors.Errorf("poll events: %w", err)
+	}
+	if len(rows) == 0 {
+		return faucet.PollPage{}, xerrors.New("poll events: statement returned no head row")
+	}
+
+	page := faucet.PollPage{Next: max(rows[0].MaxID, q.After)}
+	for _, row := range rows {
+		if row.ID.Valid {
+			page.Events = append(page.Events, pollRowToEvent(row))
+		}
+	}
+	if len(page.Events) == int(q.Limit) {
+		page.Next = page.Events[len(page.Events)-1].ID
+	}
+	return page, nil
+}
+
+func (s *Store) CursorAt(ctx context.Context, t time.Time) (int64, error) {
+	id, err := s.q.CursorAt(ctx, t)
+	if err != nil {
+		return 0, xerrors.Errorf("select cursor: %w", err)
+	}
+	return id, nil
+}
+
+func pollRowToEvent(row database.PollEventsRow) faucet.Event {
+	return faucet.Event{
+		ID:         row.ID.Int64,
+		Source:     row.Source.String,
+		DeliveryID: row.DeliveryID.String,
+		Type:       row.Type.String,
+		RepoID:     row.RepoID.Int64,
+		PRs:        row.Prs,
+		HeadSHA:    row.HeadSha.String,
+		Data:       row.Data,
+		ReceivedAt: row.ReceivedAt.Time,
+	}
 }
 
 func toEvent(row database.FaucetEvent) faucet.Event {

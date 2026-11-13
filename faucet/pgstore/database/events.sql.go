@@ -7,10 +7,25 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"time"
 
 	"github.com/lib/pq"
 )
+
+const cursorAt = `-- name: CursorAt :one
+SELECT COALESCE(MAX(id), 0)::bigint AS cursor
+FROM faucet_events
+WHERE received_at < $1
+`
+
+func (q *Queries) CursorAt(ctx context.Context, before time.Time) (int64, error) {
+	row := q.db.QueryRowContext(ctx, cursorAt, before)
+	var cursor int64
+	err := row.Scan(&cursor)
+	return cursor, err
+}
 
 const eventsAfter = `-- name: EventsAfter :many
 SELECT id, source, delivery_id, type, repo_id, prs, head_sha, data, received_at FROM faucet_events
@@ -135,4 +150,89 @@ SELECT pg_advisory_xact_lock($1::bigint)
 func (q *Queries) LockEvents(ctx context.Context, key int64) error {
 	_, err := q.db.ExecContext(ctx, lockEvents, key)
 	return err
+}
+
+const pollEvents = `-- name: PollEvents :many
+WITH head AS (
+  SELECT COALESCE(MAX(id), 0)::bigint AS max_id FROM faucet_events
+), page AS (
+  SELECT e.id, e.source, e.delivery_id, e.type, e.repo_id, e.prs, e.head_sha, e.data, e.received_at FROM faucet_events e
+  WHERE e.repo_id = $1
+    AND e.id > $2
+    AND (cardinality($3::text[]) = 0 OR e.type = ANY($3::text[]))
+    AND ($4::text = '' OR e.head_sha = $4::text)
+    AND ($5::int = 0 OR $5::int = ANY(e.prs))
+  ORDER BY e.id
+  LIMIT $6
+)
+SELECT
+  head.max_id,
+  page.id, page.source, page.delivery_id, page.type, page.repo_id, page.prs, page.head_sha,
+  COALESCE(page.data, 'null'::jsonb)::jsonb AS data,
+  page.received_at
+FROM head LEFT JOIN page ON true
+ORDER BY page.id
+`
+
+type PollEventsParams struct {
+	RepoID   int64
+	AfterID  int64
+	Types    []string
+	HeadSha  string
+	Pr       int32
+	RowLimit int32
+}
+
+type PollEventsRow struct {
+	MaxID      int64
+	ID         sql.NullInt64
+	Source     sql.NullString
+	DeliveryID sql.NullString
+	Type       sql.NullString
+	RepoID     sql.NullInt64
+	Prs        []int32
+	HeadSha    sql.NullString
+	Data       json.RawMessage
+	ReceivedAt sql.NullTime
+}
+
+func (q *Queries) PollEvents(ctx context.Context, arg PollEventsParams) ([]PollEventsRow, error) {
+	rows, err := q.db.QueryContext(ctx, pollEvents,
+		arg.RepoID,
+		arg.AfterID,
+		pq.Array(arg.Types),
+		arg.HeadSha,
+		arg.Pr,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PollEventsRow
+	for rows.Next() {
+		var i PollEventsRow
+		if err := rows.Scan(
+			&i.MaxID,
+			&i.ID,
+			&i.Source,
+			&i.DeliveryID,
+			&i.Type,
+			&i.RepoID,
+			pq.Array(&i.Prs),
+			&i.HeadSha,
+			&i.Data,
+			&i.ReceivedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

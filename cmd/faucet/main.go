@@ -1,4 +1,5 @@
-// Command faucet receives GitHub webhooks and stores them as events.
+// Command faucet receives GitHub webhooks, stores them as events, and serves
+// them to agents through the wait_for_github_events MCP tool.
 package main
 
 import (
@@ -22,6 +23,7 @@ import (
 	"github.com/coder/faucet/cmd/faucet/internal/dbconn"
 	"github.com/coder/faucet/faucet"
 	"github.com/coder/faucet/faucet/pgstore"
+	"github.com/coder/quartz"
 )
 
 const (
@@ -29,15 +31,22 @@ const (
 	envSecret      = "GITHUB_WEBHOOK_SECRET" //nolint:gosec // The name of an environment variable, not a credential.
 	envPort        = "PORT"
 	defaultPort    = "8080"
+	envAPIURL      = "FAUCET_GITHUB_API_URL"
+	defaultAPIURL  = "https://api.github.com"
 
 	dbSetupTimeout  = 30 * time.Second
 	shutdownTimeout = 15 * time.Second
+	githubTimeout   = 10 * time.Second
+	// mcpWriteTimeout replaces the server's write deadline on /mcp. It must
+	// outlast the longest wait the tool allows, which is 50 seconds.
+	mcpWriteTimeout = 75 * time.Second
 )
 
 type config struct {
 	databaseURL string
 	secret      string
 	port        string
+	githubAPI   string
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -58,7 +67,15 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
 		return config{}, xerrors.Errorf("%s must be a number from 1 to 65535", envPort)
 	}
-	return config{databaseURL: getenv(envDatabaseURL), secret: getenv(envSecret), port: port}, nil
+
+	githubAPI := getenv(envAPIURL)
+	if githubAPI == "" {
+		githubAPI = defaultAPIURL
+	}
+	if err := (faucet.TokenAuthorizer{BaseURL: githubAPI}).Validate(); err != nil {
+		return config{}, xerrors.Errorf("%s: %w", envAPIURL, err)
+	}
+	return config{databaseURL: getenv(envDatabaseURL), secret: getenv(envSecret), port: port, githubAPI: githubAPI}, nil
 }
 
 func main() {
@@ -83,10 +100,14 @@ func run() error {
 	}
 	defer func() { _ = db.Close() }()
 
+	github := faucet.TokenAuthorizer{BaseURL: cfg.githubAPI, Client: &http.Client{Timeout: githubTimeout}}
 	svc, err := faucet.New(faucet.Deps{
-		Store:  pgstore.New(db),
-		Secret: []byte(cfg.secret),
-		Logger: logger,
+		Store:         pgstore.New(db),
+		Secret:        []byte(cfg.secret),
+		Logger:        logger,
+		Authorizer:    github,
+		PrincipalFrom: principalFrom,
+		Clock:         quartz.NewReal(),
 	})
 	if err != nil {
 		return xerrors.Errorf("create service: %w", err)
@@ -94,7 +115,7 @@ func run() error {
 	if err := migrateDatabase(ctx, db); err != nil {
 		return err
 	}
-	return serve(ctx, logger, cfg.port, newRouter(svc))
+	return serve(ctx, logger, cfg.port, newRouter(svc, github, logger))
 }
 
 func migrateDatabase(ctx context.Context, db *sql.DB) error {
@@ -110,9 +131,10 @@ func migrateDatabase(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func newRouter(svc *faucet.Service) http.Handler {
+func newRouter(svc *faucet.Service, authn authenticator, logger slog.Logger) http.Handler {
 	r := chi.NewRouter()
 	r.Method(http.MethodPost, "/webhook/github", svc.WebhookHandler())
+	r.Handle("/mcp", longResponse(requireBearer(authn, logger, newMCPHandler(svc))))
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok\n")
 	})

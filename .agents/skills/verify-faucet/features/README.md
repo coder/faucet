@@ -1,6 +1,6 @@
 # Feature map
 
-One file per user-facing behavior of the faucet server at PR 2, from the point of view of its two users: GitHub, which POSTs signed webhooks, and an operator who watches `/healthz`. Each file names the test that pins it, the proof, and its bug-bash charters. Paths are relative to `verify/`.
+One file per user-facing behavior of the faucet server at PR 3, from the point of view of its three users: GitHub, which POSTs signed webhooks, an operator who watches `/healthz`, and an agent that waits for events through `/mcp`. Each file names the test that pins it, the proof, and its bug-bash charters. Paths are relative to `verify/`.
 
 | Feature | Route | Test | Status |
 | --- | --- | --- | --- |
@@ -15,17 +15,17 @@ One file per user-facing behavior of the faucet server at PR 2, from the point o
 | [Oversize body](ingest-oversize.md) | `POST /webhook/github` | `tests/ingest-oversize.e2e.ts` | tested |
 | [Wrong method](ingest-wrong-method.md) | `/webhook/github` | `tests/ingest-wrong-method.e2e.ts` | tested |
 | [Startup configuration](startup.md) | the `faucet` process, before it listens | `tests/startup.e2e.ts` | tested |
+| [Wait tool](wait-tool.md) | `POST /mcp` | `tests/wait-tool.e2e.ts` | tested |
 
 The webhook handler checks in this order: method, signature header shape, body size, the HMAC, the event and delivery headers, `ping`, then the payload. A rejection earlier in that order wins. A test pins only the first ordering, the signature before the headers. Two more were checked once by hand at PR 2 and are not pinned: an oversize body is 413 before any HMAC, and `ping` needs both headers.
 
 ## Later
 
-Planned for PR 3 onward and not in the server yet, so none of it has a test or a feature file. Mark each `tested` here when its file and test land.
+Planned for PR 4 onward and not in the server yet, so none of it has a test or a feature file. Mark each `tested` here when its file and test land.
 
 | Feature | Planned surface | Status |
 | --- | --- | --- |
-| Wait tool | the `wait_for_github_events` MCP tool (PR 3) | untested |
 | Poll | the `events/poll` MCP method with a cursor (PR 4) | untested |
 | Subscribe | `events/subscribe` and `events/unsubscribe`, signed webhook delivery to subscribers (PR 6 onward) | untested |
 
-Each of them needs more than this harness has: an MCP client, and for subscribe a callback receiver the test owns. The Postgres store the ingest tests read is the same one they will write to, so `faucet.rows` stays useful.
+Poll and subscribe need more than this harness has: a longer MCP conversation, and for subscribe a callback receiver the test owns. `faucet.waitForEvents` is the one-call client the wait tool needed. The Postgres store the ingest tests read is the same one they will write to, so `faucet.rows` stays useful.

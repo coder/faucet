@@ -27,6 +27,11 @@ func Run(t *testing.T, newStore func(t *testing.T) faucet.Store) {
 		{"InsertEventValidatesInput", insertEventValidatesInput},
 		{"EventsAfterReturnsIDOrderAndLimit", eventsAfterReturnsIDOrderAndLimit},
 		{"ConcurrentInsertsCommitInIDOrder", concurrentInsertsCommitInIDOrder},
+		{"PollEventsAppliesFiltersBeforeLimit", pollEventsAppliesFiltersBeforeLimit},
+		{"PollEventsReturnsHeadCursorWhenNothingMatches", pollEventsReturnsHeadCursorWhenNothingMatches},
+		{"PollEventsReturnsLastIDWhenPageIsFull", pollEventsReturnsLastIDWhenPageIsFull},
+		{"PollEventsValidatesQuery", pollEventsValidatesQuery},
+		{"CursorAtReturnsHighestIDReceivedBefore", cursorAtReturnsHighestIDReceivedBefore},
 		{"ConcurrentDuplicateDeliveryStoresOnce", concurrentDuplicateDeliveryStoresOnce},
 	}
 	for _, st := range subtests {
@@ -242,6 +247,209 @@ func concurrentInsertsCommitInIDOrder(t *testing.T, s faucet.Store) {
 		require.Empty(t, extra, "reader %d saw IDs nobody inserted", r)
 		require.Len(t, ids, len(inserted), "reader %d saw an ID twice", r)
 	}
+}
+
+const (
+	shaA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	shaB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
+// seedPollEvents inserts, in this order:
+//
+//	[0] repo 42 ci.run_completed     sha A PRs 7
+//	[1] repo 42 pr.closed            no sha PRs 7
+//	[2] repo 42 ci.run_completed     sha B PRs 9
+//	[3] repo 42 pr.review_submitted  sha A PRs 7 and 9
+//	[4] repo 42 ci.run_completed     sha A no PRs
+//	[5] repo 43 ci.run_completed     sha A PRs 7
+func seedPollEvents(t *testing.T, s faucet.Store) []faucet.Event {
+	t.Helper()
+	specs := []struct {
+		repoID  int64
+		typ     string
+		headSHA string
+		prs     []int32
+	}{
+		{42, "ci.run_completed", shaA, []int32{7}},
+		{42, "pr.closed", "", []int32{7}},
+		{42, "ci.run_completed", shaB, []int32{9}},
+		{42, "pr.review_submitted", shaA, []int32{7, 9}},
+		{42, "ci.run_completed", shaA, nil},
+		{43, "ci.run_completed", shaA, []int32{7}},
+	}
+	stored := make([]faucet.Event, 0, len(specs))
+	for i, sp := range specs {
+		ev := newEvent(fmt.Sprintf("poll-%d", i))
+		ev.RepoID, ev.Type, ev.HeadSHA, ev.PRs = sp.repoID, sp.typ, sp.headSHA, sp.prs
+		got, inserted, err := s.InsertEvent(context.Background(), ev)
+		require.NoError(t, err)
+		require.True(t, inserted)
+		stored = append(stored, got)
+	}
+	return stored
+}
+
+func requirePollIDs(t *testing.T, s faucet.Store, q faucet.PollQuery, want ...faucet.Event) faucet.PollPage {
+	t.Helper()
+	page, err := s.PollEvents(context.Background(), q)
+	require.NoError(t, err)
+	require.Len(t, page.Events, len(want))
+	for i := range want {
+		requireSameEvent(t, want[i], page.Events[i])
+	}
+	return page
+}
+
+func pollEventsAppliesFiltersBeforeLimit(t *testing.T, s faucet.Store) {
+	e := seedPollEvents(t, s)
+	base := faucet.PollQuery{RepoID: 42, Limit: 100}
+
+	tests := []struct {
+		name   string
+		mutate func(q *faucet.PollQuery)
+		want   []faucet.Event
+	}{
+		{"repo only", func(*faucet.PollQuery) {}, []faucet.Event{e[0], e[1], e[2], e[3], e[4]}},
+		{"other repo", func(q *faucet.PollQuery) { q.RepoID = 43 }, []faucet.Event{e[5]}},
+		{"unknown repo", func(q *faucet.PollQuery) { q.RepoID = 99 }, nil},
+		{"one type", func(q *faucet.PollQuery) { q.Types = []string{"pr.closed"} }, []faucet.Event{e[1]}},
+		{"two types", func(q *faucet.PollQuery) { q.Types = []string{"pr.closed", "pr.review_submitted"} }, []faucet.Event{e[1], e[3]}},
+		{"sha", func(q *faucet.PollQuery) { q.HeadSHA = shaA }, []faucet.Event{e[0], e[3], e[4]}},
+		{"pr", func(q *faucet.PollQuery) { q.PR = 9 }, []faucet.Event{e[2], e[3]}},
+		{"after", func(q *faucet.PollQuery) { q.After = e[2].ID }, []faucet.Event{e[3], e[4]}},
+		{"all filters", func(q *faucet.PollQuery) {
+			q.Types, q.HeadSHA, q.PR, q.After = []string{"pr.review_submitted"}, shaA, 7, e[0].ID
+		}, []faucet.Event{e[3]}},
+		{"filters that exclude everything", func(q *faucet.PollQuery) { q.Types, q.PR = []string{"pr.closed"}, 9 }, nil},
+	}
+	for _, tt := range tests {
+		q := base
+		tt.mutate(&q)
+		requirePollIDs(t, s, q, tt.want...)
+	}
+
+	q := base
+	q.Types, q.HeadSHA, q.Limit = []string{"ci.run_completed"}, shaA, 1
+	page := requirePollIDs(t, s, q, e[0])
+	q.After = page.Next
+	page = requirePollIDs(t, s, q, e[4])
+	q.After = page.Next
+	requirePollIDs(t, s, q)
+
+	q = base
+	q.Types, q.PR, q.Limit = []string{"pr.review_submitted"}, 9, 1
+	requirePollIDs(t, s, q, e[3])
+}
+
+func pollEventsReturnsHeadCursorWhenNothingMatches(t *testing.T, s faucet.Store) {
+	empty, err := s.PollEvents(context.Background(), faucet.PollQuery{RepoID: 42, Limit: 10})
+	require.NoError(t, err)
+	require.Empty(t, empty.Events)
+	require.Zero(t, empty.Next, "an empty store has head 0")
+
+	e := seedPollEvents(t, s)
+	head := e[5].ID
+
+	for name, q := range map[string]faucet.PollQuery{
+		"type nobody sent":                 {RepoID: 42, Types: []string{"pr.comment_created"}, Limit: 10},
+		"repo with no events":              {RepoID: 99, Limit: 10},
+		"already at the head":              {RepoID: 42, After: e[4].ID, Limit: 10},
+		"newer events only in other repos": {RepoID: 43, After: e[5].ID, Limit: 10},
+	} {
+		page := requirePollIDs(t, s, q)
+		require.Equal(t, head, page.Next, name)
+	}
+
+	page := requirePollIDs(t, s, faucet.PollQuery{RepoID: 42, After: head + 100, Limit: 10})
+	require.Equal(t, head+100, page.Next, "the cursor never moves backwards")
+
+	page = requirePollIDs(t, s, faucet.PollQuery{RepoID: 42, Limit: 100}, e[0], e[1], e[2], e[3], e[4])
+	require.Equal(t, head, page.Next, "a page with room left reports the head, not its last event")
+}
+
+func pollEventsReturnsLastIDWhenPageIsFull(t *testing.T, s faucet.Store) {
+	e := seedPollEvents(t, s)
+
+	page := requirePollIDs(t, s, faucet.PollQuery{RepoID: 42, Limit: 2}, e[0], e[1])
+	require.Equal(t, e[1].ID, page.Next)
+
+	page = requirePollIDs(t, s, faucet.PollQuery{RepoID: 42, Limit: 5}, e[0], e[1], e[2], e[3], e[4])
+	require.Equal(t, e[4].ID, page.Next, "a page that is exactly full still reports its last event")
+
+	var got []faucet.Event
+	q := faucet.PollQuery{RepoID: 42, Limit: 2}
+	for range 10 {
+		page, err := s.PollEvents(context.Background(), q)
+		require.NoError(t, err)
+		got = append(got, page.Events...)
+		if len(page.Events) == 0 {
+			break
+		}
+		q.After = page.Next
+	}
+	require.Len(t, got, 5)
+	for i := range got {
+		requireSameEvent(t, e[i], got[i])
+	}
+}
+
+func pollEventsValidatesQuery(t *testing.T, s faucet.Store) {
+	good := faucet.PollQuery{RepoID: 42, Limit: 10}
+	for name, mutate := range map[string]func(q *faucet.PollQuery){
+		"zero repo ID":     func(q *faucet.PollQuery) { q.RepoID = 0 },
+		"negative repo ID": func(q *faucet.PollQuery) { q.RepoID = -1 },
+		"zero limit":       func(q *faucet.PollQuery) { q.Limit = 0 },
+		"negative limit":   func(q *faucet.PollQuery) { q.Limit = -1 },
+		"negative after":   func(q *faucet.PollQuery) { q.After = -1 },
+		"negative pr":      func(q *faucet.PollQuery) { q.PR = -1 },
+	} {
+		q := good
+		mutate(&q)
+		_, err := s.PollEvents(context.Background(), q)
+		require.Error(t, err, name)
+	}
+	_, err := s.PollEvents(context.Background(), good)
+	require.NoError(t, err)
+}
+
+// cursorAtReturnsHighestIDReceivedBefore takes its boundaries from the stored
+// ReceivedAt values, so it does not depend on the clock of the test process
+// matching the clock of the store.
+func cursorAtReturnsHighestIDReceivedBefore(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+
+	none, err := s.CursorAt(ctx, time.Now())
+	require.NoError(t, err)
+	require.Zero(t, none)
+
+	var stored []faucet.Event
+	for i := range 3 {
+		got, _, err := s.InsertEvent(ctx, newEvent(fmt.Sprintf("cursor-%d", i)))
+		require.NoError(t, err)
+		stored = append(stored, got)
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	for name, tt := range map[string]struct {
+		at   time.Time
+		want int64
+	}{
+		"before every event":           {stored[0].ReceivedAt.Add(-time.Hour), 0},
+		"exactly at the first event":   {stored[0].ReceivedAt, 0},
+		"exactly at the second event":  {stored[1].ReceivedAt, stored[0].ID},
+		"between the second and third": {stored[1].ReceivedAt.Add(time.Millisecond), stored[1].ID},
+		"exactly at the third event":   {stored[2].ReceivedAt, stored[1].ID},
+		"after every event":            {stored[2].ReceivedAt.Add(time.Hour), stored[2].ID},
+	} {
+		got, err := s.CursorAt(ctx, tt.at)
+		require.NoError(t, err, name)
+		require.Equal(t, tt.want, got, name)
+	}
+
+	page, err := s.PollEvents(ctx, faucet.PollQuery{RepoID: 42, After: stored[0].ID, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, page.Events, 2)
+	require.Equal(t, stored[1].ID, page.Events[0].ID, "CursorAt then PollEvents returns the events from that time on")
 }
 
 func difference(a, b []int64) []int64 {

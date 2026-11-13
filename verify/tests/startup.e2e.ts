@@ -77,6 +77,17 @@ describe('startup configuration', () => {
       env: { DATABASE_URL: WELL_FORMED_URL, GITHUB_WEBHOOK_SECRET: SHORT_SECRET },
       message: 'secret must be at least 16 bytes\n',
     },
+    ...[
+      ['http://api.github.com', 'use https'],
+      ['ftp://api.github.com', 'use https'],
+      ['api.github.com', 'be an absolute URL'],
+      ['https://api.github.com?x=1', 'not have user info'],
+      [`https://user:${FAKE_DB_PASSWORD}@api.github.com`, 'not have user info'],
+    ].map(([url, reason]) => ({
+      name: `FAUCET_GITHUB_API_URL=${url?.replace(FAKE_DB_PASSWORD, '***')}`,
+      env: { DATABASE_URL: WELL_FORMED_URL, GITHUB_WEBHOOK_SECRET: FAKE_SECRET, FAUCET_GITHUB_API_URL: url ?? '' },
+      message: `FAUCET_GITHUB_API_URL: GitHub API URL must ${reason}`,
+    })),
     ...['abc', '0', '65536', '-1', '80.5'].map((port) => ({
       name: `PORT=${port}`,
       env: { DATABASE_URL: WELL_FORMED_URL, GITHUB_WEBHOOK_SECRET: FAKE_SECRET, PORT: port },

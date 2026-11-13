@@ -15,6 +15,7 @@ interface RunState {
   dbPort: number;
   psql: string;
   secret: string;
+  githubToken: string;
   binary: string;
 }
 
@@ -35,6 +36,23 @@ export interface Reply {
   headers: Headers;
 }
 
+export interface WaitedEvent {
+  id: number;
+  type: string;
+  repo_id: number;
+  prs: number[];
+  head_sha: string;
+  data: Record<string, unknown>;
+  received_at: string;
+}
+
+export interface WaitOutcome extends Reply {
+  isError: boolean;
+  text: string;
+  events: WaitedEvent[] | null;
+  cursor: number | null;
+}
+
 export interface Delivery {
   event?: string;
   delivery?: string;
@@ -45,18 +63,20 @@ export interface Delivery {
 function readState(baseUrl: string): RunState {
   const port = Number(new URL(baseUrl).port);
   const state: unknown = JSON.parse(readFileSync(stateFile(port), 'utf8'));
-  const { dbHost, dbPort, psql, secret, binary } = state as Partial<RunState>;
+  const { dbHost, dbPort, psql, secret, githubToken, binary } = state as Partial<RunState>;
   if (
     typeof dbHost !== 'string' ||
     typeof dbPort !== 'number' ||
     typeof psql !== 'string' ||
     typeof secret !== 'string' ||
     secret.length < 16 ||
+    typeof githubToken !== 'string' ||
+    githubToken.length < 16 ||
     typeof binary !== 'string'
   ) {
     throw new Error('the run state written by app.mjs is malformed');
   }
-  return { dbHost, dbPort, psql, secret, binary };
+  return { dbHost, dbPort, psql, secret, githubToken, binary };
 }
 
 export class Faucet {
@@ -86,6 +106,51 @@ export class Faucet {
     return this.request('/webhook/github', { method: 'POST', headers, body: delivery.body });
   }
 
+  // waitForEvents calls the wait_for_github_events tool on /mcp the way a
+  // stateless 2026-07-28 client does. A string token replaces the run's valid
+  // GitHub token and null sends no Authorization header.
+  async waitForEvents(args: Record<string, unknown>, token: string | null = this.#state.githubToken): Promise<WaitOutcome> {
+    const protocolVersion = '2026-07-28';
+    const headers = new Headers({
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+      'MCP-Protocol-Version': protocolVersion,
+      'Mcp-Method': 'tools/call',
+      'Mcp-Name': 'wait_for_github_events',
+    });
+    if (token !== null) headers.set('Authorization', `Bearer ${token}`);
+    const body = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'wait_for_github_events',
+        arguments: args,
+        _meta: {
+          'io.modelcontextprotocol/protocolVersion': protocolVersion,
+          'io.modelcontextprotocol/clientInfo': { name: 'faucet-verify', version: '0' },
+          'io.modelcontextprotocol/clientCapabilities': {},
+        },
+      },
+    });
+    const reply = await this.request('/mcp', { method: 'POST', headers, body });
+    const outcome: WaitOutcome = { ...reply, isError: false, text: '', events: null, cursor: null };
+    if (reply.status !== 200) return outcome;
+
+    const { result } = JSON.parse(reply.body) as {
+      result: {
+        isError?: boolean;
+        content: { text: string }[];
+        structuredContent?: { events: WaitedEvent[]; cursor: number };
+      };
+    };
+    outcome.isError = result.isError === true;
+    outcome.text = result.content[0]?.text ?? '';
+    outcome.events = result.structuredContent?.events ?? null;
+    outcome.cursor = result.structuredContent?.cursor ?? null;
+    return outcome;
+  }
+
   async request(path: string, init: RequestInit = {}): Promise<Reply> {
     const response = await fetch(`${this.baseUrl}${path}`, init);
     return { status: response.status, body: await response.text(), headers: response.headers };
@@ -113,7 +178,7 @@ export class Faucet {
   }
 
   leaksSecret(text: string): boolean {
-    return text.includes(this.#state.secret);
+    return text.includes(this.#state.secret) || text.includes(this.#state.githubToken);
   }
 }
 
