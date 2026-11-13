@@ -67,7 +67,9 @@ type rpcFailure struct {
 // matching header. A body it cannot read as one JSON value, or a request that
 // is not a JSON object, fails here too, because a body the check skipped could
 // still reach a handler. The fields are read by exact name, because the SDK
-// matches them that way and encoding/json would not.
+// matches them that way and encoding/json would not. A repeated field fails as
+// well: the SDK keeps an earlier string when a later duplicate is null, and a
+// map here would keep the null.
 func checkEventName(body []byte, header string) *rpcFailure {
 	if !json.Valid(body) {
 		return &rpcFailure{code: jsonrpc.CodeParseError, message: "request body is not one JSON value"}
@@ -85,9 +87,15 @@ func checkEventName(body []byte, header string) *rpcFailure {
 		if json.Unmarshal(raw, &fields) != nil {
 			return &rpcFailure{code: jsonrpc.CodeInvalidRequest, message: "request is not a JSON object"}
 		}
+		if hasRepeatedKey(raw) {
+			return &rpcFailure{fields["id"], jsonrpc.CodeInvalidRequest, "request repeats a field"}
+		}
 		var method string
 		if json.Unmarshal(fields["method"], &method) != nil || !slices.Contains(nameMethods, method) {
 			continue
+		}
+		if hasRepeatedKey(fields["params"]) {
+			return &rpcFailure{fields["id"], jsonrpc.CodeInvalidRequest, "params repeats a field"}
 		}
 		var params map[string]json.RawMessage
 		var name string
@@ -102,6 +110,31 @@ func checkEventName(body []byte, header string) *rpcFailure {
 		}
 	}
 	return nil
+}
+
+// hasRepeatedKey reports whether the top-level object in raw names a key twice.
+func hasRepeatedKey(raw json.RawMessage) bool {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return false
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		key, isKey := tok.(string)
+		if err != nil || !isKey {
+			return false
+		}
+		if seen[key] {
+			return true
+		}
+		seen[key] = true
+		var value json.RawMessage
+		if dec.Decode(&value) != nil {
+			return false
+		}
+	}
+	return false
 }
 
 // decodeNameHeader reads a header value that is plain or in the Base64

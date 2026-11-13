@@ -261,7 +261,9 @@ func TestMCPEventsPollNameHeaderAgreesWithTheEventTheSDKServes(t *testing.T) {
 		wantStatus int
 		wantServed string
 	}{
-		{"last duplicate wins in both", `{"name":"ci.run_completed","name":"zzz.first","arguments":{"repo":"o/r"},` + metaTriple + `}`, "zzz.first", http.StatusOK, "zzz.first"},
+		{"a repeated name is refused", `{"name":"ci.run_completed","name":null,"arguments":{"repo":"o/r"},` + metaTriple + `}`, "", http.StatusBadRequest, ""},
+		{"a repeated name with a header for the last", `{"name":"ci.run_completed","name":"zzz.first","arguments":{"repo":"o/r"},` + metaTriple + `}`, "zzz.first", http.StatusBadRequest, ""},
+		{"one unknown name is served as sent", `{"name":"zzz.only","arguments":{"repo":"o/r"},` + metaTriple + `}`, "zzz.only", http.StatusOK, "zzz.only"},
 		{"a name in another case is a different field", `{"name":"zzz.sdk","Name":"ci.run_completed","arguments":{"repo":"o/r"},` + metaTriple + `}`, "ci.run_completed", http.StatusBadRequest, ""},
 	}
 	for _, tt := range tests {
