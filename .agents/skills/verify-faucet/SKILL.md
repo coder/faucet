@@ -61,11 +61,13 @@ Never print `state.json`: it holds the secret.
 
 ## Evidence
 
-Every run writes `.e2e/report.json`, a short `trace.md` per test under `.e2e/results/` (`trace: 'on'` in the config), and the app's own log at `.e2e/logs/app.log`. faucet logs one `webhook stored` line per accepted delivery (`event_id`, `inserted`) and one `webhook rejected` line per refusal (`status`, `reason`). The next run clears `.e2e/results/`, so a proof that must outlive it runs with its own output directory and keeps the app log beside it:
+Every run writes `.e2e/report.json`, a short `trace.md` per test under `.e2e/results/` (`trace: 'on'` in the config), and the app's own log at `.e2e/logs/app.log`. faucet logs one `webhook stored` line per accepted delivery (`event_id`, `inserted`) and one `webhook rejected` line per refusal (`status`, `reason`). The next run clears `.e2e/results/`, and the app log is appended to across runs. A proof that must outlive them starts a fresh log, runs with its own output directory and keeps the log beside it:
 
 ```sh
-npx e2e run --output .e2e/proof/<name> && cp .e2e/logs/app.log .e2e/proof/<name>/app.log
+rm -f .e2e/logs/app.log && npx e2e run --output .e2e/proof/<name> && cp .e2e/logs/app.log .e2e/proof/<name>/app.log
 ```
+
+`run.summary` in the proof's `report.json` holds the counts (`selected`, `passed`, `failed`).
 
 API tests record no screens, so the trace pages only say pass or fail. The proof of a side effect is the test's own assertion on the `psql` rows, and the report says which ones passed.
 
