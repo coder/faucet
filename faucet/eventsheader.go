@@ -47,23 +47,34 @@ func RequireEventName(next http.Handler) http.Handler {
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
-		if id, problem := checkEventName(body, r.Header.Get(nameHeader)); problem != "" {
-			writeHeaderMismatch(w, id, problem)
+		if f := checkEventName(body, r.Header.Get(nameHeader)); f != nil {
+			writeRPCFailure(w, f)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-// checkEventName returns the request ID and the problem of the first events/*
-// request in body that the header does not match. A body that is not JSON-RPC
-// is left to the SDK to reject. The fields are read by exact name, because the
-// SDK matches them that way and encoding/json would not.
-func checkEventName(body []byte, header string) (id json.RawMessage, problem string) {
+// rpcFailure is an HTTP 400 answer with a JSON-RPC error in its body.
+type rpcFailure struct {
+	id      json.RawMessage
+	code    int64
+	message string
+}
+
+// checkEventName returns nil when every events/* request in body carries a
+// matching header. A body it cannot read as one JSON value, or a request that
+// is not a JSON object, fails here too, because a body the check skipped could
+// still reach a handler. The fields are read by exact name, because the SDK
+// matches them that way and encoding/json would not.
+func checkEventName(body []byte, header string) *rpcFailure {
+	if !json.Valid(body) {
+		return &rpcFailure{code: jsonrpc.CodeParseError, message: "request body is not one JSON value"}
+	}
 	var requests []json.RawMessage
 	if bytes.HasPrefix(bytes.TrimSpace(body), []byte("[")) {
 		if json.Unmarshal(body, &requests) != nil {
-			return nil, ""
+			return &rpcFailure{code: jsonrpc.CodeParseError, message: "request body is not valid JSON-RPC"}
 		}
 	} else {
 		requests = []json.RawMessage{body}
@@ -71,7 +82,7 @@ func checkEventName(body []byte, header string) (id json.RawMessage, problem str
 	for _, raw := range requests {
 		var fields map[string]json.RawMessage
 		if json.Unmarshal(raw, &fields) != nil {
-			continue
+			return &rpcFailure{code: jsonrpc.CodeInvalidRequest, message: "request is not a JSON object"}
 		}
 		var method string
 		if json.Unmarshal(fields["method"], &method) != nil || !slices.Contains(nameMethods, method) {
@@ -82,14 +93,14 @@ func checkEventName(body []byte, header string) (id json.RawMessage, problem str
 		if json.Unmarshal(fields["params"], &params) != nil || json.Unmarshal(params["name"], &name) != nil || name == "" {
 			continue
 		}
-		if header == "" {
-			return fields["id"], fmt.Sprintf("missing required Mcp-Name header for method %q", method)
-		}
-		if got, ok := decodeNameHeader(header); !ok || got != name {
-			return fields["id"], "header mismatch: Mcp-Name header does not match params.name"
+		switch got, ok := decodeNameHeader(header); {
+		case header == "":
+			return &rpcFailure{fields["id"], mcp.CodeHeaderMismatch, fmt.Sprintf("missing required Mcp-Name header for method %q", method)}
+		case !ok || got != name:
+			return &rpcFailure{fields["id"], mcp.CodeHeaderMismatch, "header mismatch: Mcp-Name header does not match params.name"}
 		}
 	}
-	return nil, ""
+	return nil
 }
 
 // decodeNameHeader reads a header value that is plain or in the Base64
@@ -110,7 +121,8 @@ func decodeNameHeader(value string) (string, bool) {
 	return string(decoded), true
 }
 
-func writeHeaderMismatch(w http.ResponseWriter, id json.RawMessage, message string) {
+func writeRPCFailure(w http.ResponseWriter, f *rpcFailure) {
+	id := f.id
 	if len(id) == 0 {
 		id = json.RawMessage("null")
 	}
@@ -118,9 +130,9 @@ func writeHeaderMismatch(w http.ResponseWriter, id json.RawMessage, message stri
 		JSONRPC string          `json:"jsonrpc"`
 		ID      json.RawMessage `json:"id"`
 		Error   *jsonrpc.Error  `json:"error"`
-	}{"2.0", id, &jsonrpc.Error{Code: mcp.CodeHeaderMismatch, Message: message}})
+	}{"2.0", id, &jsonrpc.Error{Code: f.code, Message: f.message}})
 	if err != nil {
-		panic(fmt.Sprintf("marshal header mismatch error: %v", err))
+		panic(fmt.Sprintf("marshal JSON-RPC error: %v", err))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadRequest)

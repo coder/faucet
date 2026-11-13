@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 
@@ -36,6 +37,7 @@ func TestRequireEventName(t *testing.T) {
 		header      string
 		wantStatus  int
 		wantID      string
+		wantCode    int
 		wantMessage string
 	}{
 		{name: "matching name", method: http.MethodPost, body: rpcBody("1", "events/poll", pollA), header: "ci.run_completed", wantStatus: wantMatch},
@@ -54,14 +56,19 @@ func TestRequireEventName(t *testing.T) {
 		{name: "poll without a name is the handler's to reject", method: http.MethodPost, body: rpcBody("5", "events/poll", `{"arguments":{}}`), wantStatus: wantMatch},
 		{name: "poll with a name that is not text", method: http.MethodPost, body: rpcBody("5", "events/poll", `{"name":7}`), wantStatus: wantMatch},
 		{name: "poll without params", method: http.MethodPost, body: `{"jsonrpc":"2.0","id":5,"method":"events/poll"}`, wantStatus: wantMatch},
-		{name: "not JSON", method: http.MethodPost, body: `not json`, wantStatus: wantMatch},
+		{name: "not JSON", method: http.MethodPost, body: `not json`, wantStatus: http.StatusBadRequest, wantID: "null", wantCode: jsonrpc.CodeParseError, wantMessage: "not one JSON value"},
+		{name: "a second document after a poll", method: http.MethodPost, body: rpcBody("1", "events/poll", pollA) + `{}`, header: "ci.run_completed", wantStatus: http.StatusBadRequest, wantID: "null", wantCode: jsonrpc.CodeParseError, wantMessage: "not one JSON value"},
+		{name: "a second document after a list", method: http.MethodPost, body: rpcBody("1", "events/list", `{}`) + `{}`, wantStatus: http.StatusBadRequest, wantID: "null", wantCode: jsonrpc.CodeParseError, wantMessage: "not one JSON value"},
+		{name: "a request that is not an object", method: http.MethodPost, body: `"events/poll"`, wantStatus: http.StatusBadRequest, wantID: "null", wantCode: jsonrpc.CodeInvalidRequest, wantMessage: "not a JSON object"},
+		{name: "a batch member that is not an object", method: http.MethodPost, body: `[` + rpcBody("1", "events/list", `{}`) + `,7]`, wantStatus: http.StatusBadRequest, wantID: "null", wantCode: jsonrpc.CodeInvalidRequest, wantMessage: "not a JSON object"},
+		{name: "null", method: http.MethodPost, body: `null`, wantStatus: wantMatch},
 		{name: "name in another case is not the SDK's name", method: http.MethodPost, body: rpcBody("6", "events/poll", `{"name":"pr.closed","Name":"ci.run_completed"}`), header: "ci.run_completed", wantStatus: http.StatusBadRequest, wantID: "6", wantMessage: "does not match"},
 		{name: "last duplicate name wins like in the SDK", method: http.MethodPost, body: rpcBody("6", "events/poll", `{"name":"pr.closed","name":"ci.run_completed"}`), header: "ci.run_completed", wantStatus: wantMatch},
 		{name: "method in another case is not an events method", method: http.MethodPost, body: `{"jsonrpc":"2.0","id":6,"Method":"events/poll","params":` + pollA + `}`, wantStatus: wantMatch},
 		{name: "notification", method: http.MethodPost, body: `{"jsonrpc":"2.0","method":"events/poll","params":` + pollA + `}`, wantStatus: http.StatusBadRequest, wantID: "null", wantMessage: "missing"},
 		{name: "batch that matches", method: http.MethodPost, body: `[` + rpcBody("1", "events/poll", pollA) + `,` + rpcBody("2", "events/list", `{}`) + `]`, header: "ci.run_completed", wantStatus: wantMatch},
 		{name: "batch with another name", method: http.MethodPost, body: `[` + rpcBody("1", "events/list", `{}`) + `,` + rpcBody("2", "events/poll", pollA) + `]`, header: "pr.closed", wantStatus: http.StatusBadRequest, wantID: "2", wantMessage: "does not match"},
-		{name: "broken batch", method: http.MethodPost, body: `[{`, wantStatus: wantMatch},
+		{name: "broken batch", method: http.MethodPost, body: `[{`, wantStatus: http.StatusBadRequest, wantID: "null", wantCode: jsonrpc.CodeParseError, wantMessage: "not one JSON value"},
 		{name: "GET", method: http.MethodGet, wantStatus: wantMatch},
 	}
 	for _, tt := range tests {
@@ -99,7 +106,11 @@ func TestRequireEventName(t *testing.T) {
 			}
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 			require.Equal(t, tt.wantID, string(resp.ID))
-			require.Equal(t, mcp.CodeHeaderMismatch, resp.Error.Code)
+			wantCode := tt.wantCode
+			if wantCode == 0 {
+				wantCode = mcp.CodeHeaderMismatch
+			}
+			require.Equal(t, wantCode, resp.Error.Code)
 			require.Contains(t, resp.Error.Message, tt.wantMessage)
 		})
 	}
