@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFile, spawn } from 'node:child_process';
-import { createHmac, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpServer } from 'node:http';
@@ -50,7 +50,6 @@ function findPostgresBin() {
   return found;
 }
 
-const HOOK_PATH = '/orgs/verify/hooks/7';
 const CRON_DB = 'faucet_cron';
 
 function freePort() {
@@ -64,133 +63,23 @@ function freePort() {
   });
 }
 
-async function readJson(req) {
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-}
-
-// The stub plays GitHub. `token` is the caller's token: GET /user answers
-// verify-user, GET /repos/verify/r<id> answers repository id <id>, and every
-// other repository is 404, like one the token cannot see.
-//
-// It also serves the deliveries API of the org webhook verify/7 to `hookToken`
-// alone, and it plays what GitHub does on a redelivery: it POSTs the stored
-// payload, signed, to the cron faucet. A test sets the deliveries and reads the
-// requests through /__stub/, which needs `control`. The records name the kind
-// of credential each request carried and never the credential.
-async function startGitHubStub({ token, hookToken, control, cronSecret, cronUrl, webhookSecret }) {
-  const reply = (res, status, body, headers = {}) => {
-    res.writeHead(status, { 'Content-Type': 'application/json', ...headers });
+// The stub knows one token and answers GET /user and GET /repos/verify/r<id>
+// with repository id <id>. Every other repository is 404, like one the token
+// cannot see.
+async function startGitHubStub(token) {
+  const reply = (res, status, body) => {
+    res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(body));
   };
-  const kindOf = (auth) => {
-    if (auth === `Bearer ${hookToken}`) return 'hook';
-    if (auth === `Bearer ${token}`) return 'user';
-    if (auth === `Bearer ${cronSecret}`) return 'cron';
-    return auth ? 'other' : 'none';
-  };
-  let deliveries = [];
-  let pageSize = 100;
-  let redeliveryStatus = 202;
-  let requests = [];
-  let address;
-
-  const handleControl = async (req, res, url) => {
-    if (req.headers['x-stub-control'] !== control) return reply(res, 403, { message: 'Forbidden' });
-    if (req.method === 'PUT' && url.pathname === '/__stub/deliveries') {
-      const body = await readJson(req);
-      const now = Date.now();
-      deliveries = body.deliveries.map((d) => ({ ...d, deliveredAt: now - d.ageMs, redelivery: false }));
-      pageSize = body.pageSize ?? 100;
-      redeliveryStatus = body.redeliveryStatus ?? 202;
-      requests = [];
-      return reply(res, 200, {});
-    }
-    if (req.method === 'GET' && url.pathname === '/__stub/requests') return reply(res, 200, requests);
+  const stub = createHttpServer((req, res) => {
+    if (req.headers.authorization !== `Bearer ${token}`) return reply(res, 401, { message: 'Bad credentials' });
+    if (req.url === '/user') return reply(res, 200, { login: 'verify-user' });
+    const repo = /^\/repos\/verify\/r(\d+)$/.exec(req.url ?? '');
+    if (repo) return reply(res, 200, { id: Number(repo[1]) });
     return reply(res, 404, { message: 'Not Found' });
-  };
-
-  const redeliver = async (res, id) => {
-    const original = deliveries.find((d) => d.id === id);
-    if (!original) return reply(res, 404, { message: 'Not Found' });
-    if (redeliveryStatus !== 202) return reply(res, redeliveryStatus, { message: 'refused' });
-    let status = 500;
-    if (original.payload) {
-      const body = JSON.stringify(original.payload);
-      const signature = `sha256=${createHmac('sha256', webhookSecret).update(body).digest('hex')}`;
-      const delivered = await fetch(`${cronUrl}/webhook/github`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-GitHub-Event': original.event,
-          'X-GitHub-Delivery': original.guid,
-          'X-Hub-Signature-256': signature,
-        },
-        body,
-      });
-      status = delivered.status;
-    }
-    const nextId = Math.max(...deliveries.map((d) => d.id)) + 1;
-    deliveries.push({ id: nextId, guid: original.guid, deliveredAt: Date.now(), status, event: original.event, redelivery: true });
-    return reply(res, 202, {});
-  };
-
-  const hooks = async (req, res, url) => {
-    if (req.headers.authorization !== `Bearer ${hookToken}`) return reply(res, 401, { message: 'Bad credentials' });
-    if (req.method === 'GET' && url.pathname === `${HOOK_PATH}/deliveries`) {
-      const sorted = [...deliveries].sort((a, b) => b.deliveredAt - a.deliveredAt || b.id - a.id);
-      const perPage = Math.min(Number(url.searchParams.get('per_page')) || 30, pageSize);
-      const offset = Number(/^c(\d+)$/.exec(url.searchParams.get('cursor') ?? '')?.[1] ?? 0);
-      const page = sorted.slice(offset, offset + perPage);
-      const headers = {};
-      if (offset + perPage < sorted.length) {
-        headers.Link = `<http://127.0.0.1:${address.port}${url.pathname}?per_page=${perPage}&cursor=c${offset + perPage}>; rel="next"`;
-      }
-      return reply(
-        res,
-        200,
-        page.map((d) => ({
-          id: d.id,
-          guid: d.guid,
-          delivered_at: new Date(d.deliveredAt).toISOString(),
-          redelivery: d.redelivery,
-          duration: 0.1,
-          status: String(d.status),
-          status_code: d.status,
-          event: d.event ?? 'workflow_run',
-          action: null,
-          installation_id: null,
-          repository_id: null,
-          throttled_at: null,
-        })),
-        headers,
-      );
-    }
-    const attempt = req.method === 'POST' && new RegExp(`^${HOOK_PATH}/deliveries/(\\d+)/attempts$`).exec(url.pathname);
-    if (attempt) return redeliver(res, Number(attempt[1]));
-    return reply(res, 404, { message: 'Not Found' });
-  };
-
-  const stub = createHttpServer(async (req, res) => {
-    try {
-      const url = new URL(req.url ?? '/', 'http://stub');
-      if (url.pathname.startsWith('/__stub/')) return await handleControl(req, res, url);
-      requests.push({ method: req.method, path: url.pathname, query: url.search, auth: kindOf(req.headers.authorization) });
-      if (url.pathname.startsWith(HOOK_PATH)) return await hooks(req, res, url);
-      if (req.headers.authorization !== `Bearer ${token}`) return reply(res, 401, { message: 'Bad credentials' });
-      if (url.pathname === '/user') return reply(res, 200, { login: 'verify-user' });
-      const repo = /^\/repos\/verify\/r(\d+)$/.exec(url.pathname);
-      if (repo) return reply(res, 200, { id: Number(repo[1]) });
-      return reply(res, 404, { message: 'Not Found' });
-    } catch (err) {
-      log(`stub: ${err.message}`);
-      return reply(res, 500, { message: 'stub error' });
-    }
   });
   stub.listen(0, '127.0.0.1');
   await once(stub, 'listening');
-  address = stub.address();
   return stub;
 }
 
@@ -331,17 +220,8 @@ async function main(abort) {
       db: CRON_DB,
       webhookSecret: randomBytes(32).toString('hex'),
       cronSecret: randomBytes(32).toString('hex'),
-      hookToken: `ghp_${randomBytes(20).toString('hex')}`,
-      stubControl: randomBytes(16).toString('hex'),
     };
-    githubStub = await startGitHubStub({
-      token: githubToken,
-      hookToken: cron.hookToken,
-      control: cron.stubControl,
-      cronSecret: cron.cronSecret,
-      cronUrl: `http://127.0.0.1:${cron.port}`,
-      webhookSecret: cron.webhookSecret,
-    });
+    githubStub = await startGitHubStub(githubToken);
     const stubUrl = `http://127.0.0.1:${githubStub.address().port}`;
     await createDatabase(psql, dir, CRON_DB);
     writeFileSync(
@@ -359,9 +239,6 @@ async function main(abort) {
         PORT: String(cron.port),
         FAUCET_GITHUB_API_URL: stubUrl,
         CRON_SECRET: cron.cronSecret,
-        FAUCET_HOOK_TOKEN: cron.hookToken,
-        FAUCET_HOOK_ORG: 'verify',
-        FAUCET_HOOK_ID: '7',
       },
       stdio: ['ignore', 'inherit', 'inherit'],
     });
