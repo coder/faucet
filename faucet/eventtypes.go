@@ -73,7 +73,7 @@ var eventCatalog = []eventType{
 		description: "A pull request was closed, merged or not.",
 		payloadSchema: payloadSchema(`
     "merged": {"type": "boolean"},
-    "merge_commit_sha": {"type": ["string", "null"], "description": "Null when the pull request was closed without a merge."},
+    "merge_commit_sha": {"type": ["string", "null"], "description": "The merge commit. Before a merge it is the test-merge commit of GitHub or null, so it does not mean the pull request merged. Read merged."},
     "html_url": {"type": "string"}`,
 			"merged", "merge_commit_sha", "html_url"),
 	},
