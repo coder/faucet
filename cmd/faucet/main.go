@@ -16,11 +16,11 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/lib/pq"
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog/v3"
 	"cdr.dev/slog/v3/sloggers/sloghuman"
+	"github.com/coder/faucet/cmd/faucet/internal/dbconn"
 	"github.com/coder/faucet/faucet"
 	"github.com/coder/faucet/faucet/pgstore"
 	"github.com/coder/quartz"
@@ -94,9 +94,9 @@ func run() error {
 	defer stop()
 	logger := slog.Make(sloghuman.Sink(os.Stderr))
 
-	db, err := openDatabase(cfg.databaseURL)
+	db, err := dbconn.Open(cfg.databaseURL)
 	if err != nil {
-		return err
+		return xerrors.Errorf("%s: %w", envDatabaseURL, err)
 	}
 	defer func() { _ = db.Close() }()
 
@@ -116,15 +116,6 @@ func run() error {
 		return err
 	}
 	return serve(ctx, logger, cfg.port, newRouter(svc, github, logger))
-}
-
-// openDatabase drops the parse error because lib/pq can echo the password in it.
-func openDatabase(url string) (*sql.DB, error) {
-	connector, err := pq.NewConnector(url)
-	if err != nil {
-		return nil, xerrors.Errorf("%s is not a valid Postgres connection string", envDatabaseURL)
-	}
-	return sql.OpenDB(connector), nil
 }
 
 func migrateDatabase(ctx context.Context, db *sql.DB) error {

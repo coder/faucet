@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,6 +32,7 @@ const (
 type fakeStore struct {
 	mu     sync.Mutex
 	events []faucet.Event
+	calls  int
 	err    error
 	now    func() time.Time
 	polls  []faucet.PollQuery
@@ -41,6 +43,7 @@ type fakeStore struct {
 func (s *fakeStore) InsertEvent(_ context.Context, ev faucet.Event) (faucet.Event, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls++
 	if s.err != nil {
 		return faucet.Event{}, false, s.err
 	}
@@ -71,6 +74,12 @@ func (s *fakeStore) EventsAfter(_ context.Context, afterID int64, limit int32) (
 		}
 	}
 	return out, nil
+}
+
+func (s *fakeStore) insertCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
 }
 
 func (s *fakeStore) stored() []faucet.Event {
@@ -119,6 +128,31 @@ func newRequest(method string, body []byte, event, delivery string) *http.Reques
 	req.Header.Set("X-Hub-Signature-256", sign(testSecret, body))
 	req.Header.Set("X-GitHub-Event", event)
 	req.Header.Set("X-GitHub-Delivery", delivery)
+	return req
+}
+
+type countingBody struct {
+	remaining int64
+	read      int64
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	if b.remaining == 0 {
+		return 0, io.EOF
+	}
+	n := min(int64(len(p)), b.remaining)
+	for i := range p[:n] {
+		p[i] = 'a'
+	}
+	b.remaining -= n
+	b.read += n
+	return int(n), nil
+}
+
+func newStreamedRequest(body *countingBody, event, delivery string) *http.Request {
+	req := newRequest(http.MethodPost, nil, event, delivery)
+	req.Body = io.NopCloser(body)
+	req.ContentLength = -1
 	return req
 }
 
@@ -306,6 +340,18 @@ func TestWebhookHandlerRejects(t *testing.T) {
 			req.Header.Del("X-GitHub-Delivery")
 			return req
 		}, http.StatusUnauthorized},
+		{"BadSignatureBeatsMalformedPayload", func(*testing.T) *http.Request {
+			payload := []byte(`{"action":"completed"`)
+			req := newRequest(http.MethodPost, payload, "workflow_run", "d-1")
+			req.Header.Set("X-Hub-Signature-256", sign("another-secret-0123456789", payload))
+			return req
+		}, http.StatusUnauthorized},
+		{"BadSignatureBeatsPayloadWithoutRepositoryID", func(t *testing.T) *http.Request {
+			payload := mutate(t, "workflow_run_completed", func(doc map[string]any) { delete(doc, "repository") })
+			req := newRequest(http.MethodPost, payload, "workflow_run", "d-1")
+			req.Header.Set("X-Hub-Signature-256", sign("another-secret-0123456789", payload))
+			return req
+		}, http.StatusUnauthorized},
 		{"MissingEventHeader", func(*testing.T) *http.Request {
 			req := newRequest(http.MethodPost, body, "workflow_run", "d-1")
 			req.Header.Del("X-GitHub-Event")
@@ -335,6 +381,7 @@ func TestWebhookHandlerRejects(t *testing.T) {
 			rec := h.serve(tt.request(t))
 			require.Equal(t, tt.wantStatus, rec.Code)
 			require.Empty(t, h.store.stored())
+			require.Zero(t, h.store.insertCalls())
 		})
 	}
 
@@ -357,6 +404,57 @@ func TestWebhookHandlerBodyLimit(t *testing.T) {
 	h := newHarness(t)
 	rec := h.serve(newRequest(http.MethodPost, bytes.Repeat([]byte("a"), maxBodyBytes), "push", "d-1"))
 	require.Equal(t, http.StatusAccepted, rec.Code, "a body of exactly 25 MiB is accepted")
+}
+
+func TestWebhookHandlerStopsReadingAtTheCap(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	body := &countingBody{remaining: maxBodyBytes + 4<<20}
+	rec := h.serve(newStreamedRequest(body, "push", "d-1"))
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+	require.LessOrEqual(t, body.read, int64(maxBodyBytes)+1, "bytes read from the body")
+	require.Zero(t, h.store.insertCalls())
+}
+
+func TestWebhookHandlerRejectsBadSignatureHeaderWithoutReadingBody(t *testing.T) {
+	t.Parallel()
+
+	valid := sign(testSecret, []byte("{}"))
+	tests := []struct {
+		name   string
+		header func(req *http.Request)
+	}{
+		{"Missing", func(req *http.Request) { req.Header.Del("X-Hub-Signature-256") }},
+		{"WithoutPrefix", func(req *http.Request) {
+			req.Header.Set("X-Hub-Signature-256", strings.TrimPrefix(valid, "sha256="))
+		}},
+		{"NotHex", func(req *http.Request) {
+			req.Header.Set("X-Hub-Signature-256", "sha256="+strings.Repeat("z", 64))
+		}},
+		{"TooShort", func(req *http.Request) { req.Header.Set("X-Hub-Signature-256", valid[:20]) }},
+		{"TooLong", func(req *http.Request) { req.Header.Set("X-Hub-Signature-256", valid+"00") }},
+		{"SHA1Only", func(req *http.Request) {
+			req.Header.Del("X-Hub-Signature-256")
+			req.Header.Set("X-Hub-Signature", "sha1=0000000000000000000000000000000000000000")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newHarness(t)
+			body := &countingBody{remaining: 1 << 10}
+			req := newStreamedRequest(body, "push", "d-1")
+			tt.header(req)
+			rec := h.serve(req)
+
+			require.Equal(t, http.StatusUnauthorized, rec.Code)
+			require.Zero(t, body.read, "bytes read from the body")
+			require.Zero(t, h.store.insertCalls())
+		})
+	}
 }
 
 func TestWebhookHandlerStoreFailure(t *testing.T) {

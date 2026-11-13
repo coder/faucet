@@ -116,19 +116,31 @@ func decode[P any](f func(P) (fields, bool)) func([]byte) (fields, bool, error) 
 	}
 }
 
-type prRef struct {
-	Number int32 `json:"number"`
+type repoRef struct {
+	ID int64 `json:"id"`
 }
 
-func prNumbers(refs []prRef) []int32 {
+type prRef struct {
+	Number int32 `json:"number"`
+	Base   struct {
+		Repo repoRef `json:"repo"`
+	} `json:"base"`
+}
+
+// GitHub also lists pull requests whose base is another repository. Their
+// numbers mean nothing here.
+func prNumbers(repoID int64, refs []prRef) []int32 {
 	nums := make([]int32, 0, len(refs))
 	for _, r := range refs {
-		nums = append(nums, r.Number)
+		if r.Base.Repo.ID == repoID {
+			nums = append(nums, r.Number)
+		}
 	}
 	return nums
 }
 
 type workflowRunPayload struct {
+	Repository  repoRef `json:"repository"`
 	WorkflowRun struct {
 		ID           int64   `json:"id"`
 		Name         string  `json:"name"`
@@ -144,7 +156,7 @@ type workflowRunPayload struct {
 func workflowRunCompleted(p workflowRunPayload) (fields, bool) {
 	r := p.WorkflowRun
 	return fields{
-		prs:     prNumbers(r.PullRequests),
+		prs:     prNumbers(p.Repository.ID, r.PullRequests),
 		headSHA: r.HeadSHA,
 		data: map[string]any{
 			"run_id":      r.ID,
@@ -158,7 +170,8 @@ func workflowRunCompleted(p workflowRunPayload) (fields, bool) {
 }
 
 type checkRunPayload struct {
-	CheckRun struct {
+	Repository repoRef `json:"repository"`
+	CheckRun   struct {
 		ID           int64   `json:"id"`
 		Name         string  `json:"name"`
 		Conclusion   string  `json:"conclusion"`
@@ -174,7 +187,7 @@ type checkRunPayload struct {
 func checkRunCompleted(p checkRunPayload) (fields, bool) {
 	c := p.CheckRun
 	return fields{
-		prs:     prNumbers(c.PullRequests),
+		prs:     prNumbers(p.Repository.ID, c.PullRequests),
 		headSHA: c.HeadSHA,
 		data: map[string]any{
 			"check_run_id": c.ID,

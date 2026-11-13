@@ -109,3 +109,39 @@ jobs:
 
       - name: Check go.mod and go.sum are tidy
         run: git diff --exit-code
+
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: verify
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Install
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx e2e-web install chromium --with-deps
+
+      - name: Typecheck
+        run: npx tsc --noEmit -p .
+
+      - name: Verify
+        run: npx e2e run
+        env:
+          E2E_TELEMETRY_DISABLED: "1"
