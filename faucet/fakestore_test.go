@@ -59,6 +59,7 @@ func (s *fakeStore) CursorAt(_ context.Context, t time.Time) (int64, error) {
 	if s.err != nil {
 		return 0, s.err
 	}
+	s.cursorLookups = append(s.cursorLookups, t)
 	var id int64
 	for _, e := range s.events {
 		if e.ReceivedAt.Before(t) {
@@ -66,6 +67,12 @@ func (s *fakeStore) CursorAt(_ context.Context, t time.Time) (int64, error) {
 		}
 	}
 	return id, nil
+}
+
+func (s *fakeStore) lookups() []time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.cursorLookups)
 }
 
 func (s *fakeStore) pollQueries() []faucet.PollQuery {

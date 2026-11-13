@@ -34,6 +34,8 @@ type fakeStore struct {
 	err    error
 	now    func() time.Time
 	polls  []faucet.PollQuery
+
+	cursorLookups []time.Time
 }
 
 func (s *fakeStore) InsertEvent(_ context.Context, ev faucet.Event) (faucet.Event, bool, error) {
@@ -88,11 +90,9 @@ func newHarness(t *testing.T) *harness {
 	t.Helper()
 	store := &fakeStore{}
 	logs := &bytes.Buffer{}
-	svc, err := faucet.New(faucet.Deps{
-		Store:  store,
-		Secret: []byte(testSecret),
-		Logger: slog.Make(sloghuman.Sink(logs)),
-	})
+	deps := testDeps(store)
+	deps.Logger = slog.Make(sloghuman.Sink(logs))
+	svc, err := faucet.New(deps)
 	require.NoError(t, err)
 	return &harness{t: t, store: store, logs: logs, handler: svc.WebhookHandler()}
 }
@@ -128,7 +128,8 @@ func TestNew(t *testing.T) {
 	t.Run("RequiresStore", func(t *testing.T) {
 		t.Parallel()
 
-		svc, err := faucet.New(faucet.Deps{Secret: []byte(testSecret)})
+		deps := testDeps(nil)
+		svc, err := faucet.New(deps)
 		require.Error(t, err)
 		require.Nil(t, svc)
 	})
@@ -137,12 +138,15 @@ func TestNew(t *testing.T) {
 		t.Parallel()
 
 		short := "0123456789abcde"
-		svc, err := faucet.New(faucet.Deps{Store: &fakeStore{}, Secret: []byte(short)})
+		deps := testDeps(&fakeStore{})
+		deps.Secret = []byte(short)
+		svc, err := faucet.New(deps)
 		require.Error(t, err)
 		require.Nil(t, svc)
 		require.NotContains(t, err.Error(), short)
 
-		_, err = faucet.New(faucet.Deps{Store: &fakeStore{}, Secret: []byte(short + "f")})
+		deps.Secret = []byte(short + "f")
+		_, err = faucet.New(deps)
 		require.NoError(t, err)
 	})
 
@@ -150,7 +154,9 @@ func TestNew(t *testing.T) {
 		t.Parallel()
 
 		secret := []byte(testSecret)
-		svc, err := faucet.New(faucet.Deps{Store: &fakeStore{}, Secret: secret})
+		deps := testDeps(&fakeStore{})
+		deps.Secret = secret
+		svc, err := faucet.New(deps)
 		require.NoError(t, err)
 		clear(secret)
 
