@@ -8,6 +8,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
+	mrand "math/rand/v2"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -266,18 +268,25 @@ func TestSubscribeGrantsAtMostTenMinutes(t *testing.T) {
 		ttl  json.RawMessage
 		want time.Duration
 	}{
-		"omitted":              {nil, 10 * time.Minute},
-		"null asks for none":   {json.RawMessage("null"), 10 * time.Minute},
-		"an hour":              {json.RawMessage("3600000"), 10 * time.Minute},
-		"just above the cap":   {json.RawMessage("600001"), 10 * time.Minute},
-		"beyond int64":         {json.RawMessage("99999999999999999999"), 10 * time.Minute},
-		"exactly the cap":      {json.RawMessage("600000"), 10 * time.Minute},
-		"a minute":             {json.RawMessage("60000"), time.Minute},
-		"below the floor":      {json.RawMessage("1"), 30 * time.Second},
-		"zero":                 {json.RawMessage("0"), 30 * time.Second},
-		"negative":             {json.RawMessage("-5"), 30 * time.Second},
-		"very negative":        {json.RawMessage("-99999999999999999999"), 30 * time.Second},
-		"just above the floor": {json.RawMessage("31000"), 31 * time.Second},
+		"omitted":                          {nil, 10 * time.Minute},
+		"null asks for none":               {json.RawMessage("null"), 10 * time.Minute},
+		"an hour":                          {json.RawMessage("3600000"), 10 * time.Minute},
+		"just above the cap":               {json.RawMessage("600001"), 10 * time.Minute},
+		"beyond int64":                     {json.RawMessage("99999999999999999999"), 10 * time.Minute},
+		"exactly the cap":                  {json.RawMessage("600000"), 10 * time.Minute},
+		"a minute":                         {json.RawMessage("60000"), time.Minute},
+		"below the floor":                  {json.RawMessage("1"), 30 * time.Second},
+		"zero":                             {json.RawMessage("0"), 30 * time.Second},
+		"negative":                         {json.RawMessage("-5"), 30 * time.Second},
+		"very negative":                    {json.RawMessage("-99999999999999999999"), 30 * time.Second},
+		"just above the floor":             {json.RawMessage("31000"), 31 * time.Second},
+		"max int64":                        {json.RawMessage("9223372036854775807"), 10 * time.Minute},
+		"min int64":                        {json.RawMessage("-9223372036854775808"), 30 * time.Second},
+		"largest that fits in nanoseconds": {json.RawMessage("-9223372036854"), 30 * time.Second},
+		"first that wraps to 292 years":    {json.RawMessage("-9223372036855"), 30 * time.Second},
+		"wraps to 291 years":               {json.RawMessage("-9300000000000"), 30 * time.Second},
+		"wraps to 14 years":                {json.RawMessage("-18000000000000"), 30 * time.Second},
+		"wraps to a few minutes":           {json.RawMessage("-18446744073710"), 30 * time.Second},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -769,6 +778,10 @@ func TestSubscribeReadsTheSuppliedCursor(t *testing.T) {
 	require.Equal(t, "v1.999", got.Cursor, "a cursor ahead of the head is kept, as poll keeps it")
 	require.False(t, got.Truncated)
 
+	got = at("v1.1", raw(int64(math.MaxInt64)), "https://hooks.example.test/huge")
+	require.Equal(t, "v1.1", got.Cursor, "the largest maxAgeMs is a very old floor, not a wrapped one")
+	require.False(t, got.Truncated)
+
 	h.clock.Advance(time.Minute)
 	_, err := h.store.Purge(h.ctx, h.clock.Now().Add(-2*time.Minute))
 	require.NoError(t, err)
@@ -782,8 +795,10 @@ func TestSubscribeReadsTheSuppliedCursor(t *testing.T) {
 		require.EqualValues(t, codeInvalidParams, h.subscribeError(params).Code, name)
 	}
 	params := subscribeTo(repoArgs(), callbackURL, secret)
-	params.MaxAgeMs = raw(0)
-	require.EqualValues(t, codeInvalidParams, h.subscribeError(params).Code, "maxAgeMs of zero")
+	for _, ms := range []int64{0, -1, -9223372036855, math.MinInt64} {
+		params.MaxAgeMs = raw(ms)
+		require.EqualValues(t, codeInvalidParams, h.subscribeError(params).Code, "maxAgeMs of %d", ms)
+	}
 }
 
 func TestSubscribeLimitsEachPrincipal(t *testing.T) {
@@ -1057,4 +1072,59 @@ func TestSubscribeReadsParamsOfEveryValidType(t *testing.T) {
 	got := h.subscribe(&rawParams{Whole: ok})
 	require.Equal(t, h.clock.Now().Add(2*time.Minute).UTC().Format(time.RFC3339), got.RefreshBefore)
 	require.Len(t, h.rows(), 1)
+}
+
+func TestSubscribeGrantStaysFromTheFloorToTheCapForAnyInteger(t *testing.T) {
+	t.Parallel()
+
+	const wrapStep = 18446744073709
+	rng := mrand.New(mrand.NewPCG(1, 2))
+	values := []int64{math.MinInt64, math.MaxInt64, 0, 1, -1}
+	for k := range 63 {
+		values = append(values, 1<<k, -(1 << k), 1<<k+1, -(1<<k)-1)
+	}
+	for k := int64(-40); k <= 40; k++ {
+		for d := int64(-2); d <= 2; d++ {
+			values = append(values, k*wrapStep+d)
+		}
+	}
+	for range 300 {
+		values = append(values, int64(rng.Uint64()))
+	}
+
+	h := newWebhookHarness(t)
+	secret := newSecret(t, 32)
+	now := h.clock.Now()
+	for _, ms := range values {
+		params := subscribeTo(repoArgs(), callbackURL, secret)
+		params.TTLMs = raw(ms)
+		got := h.subscribe(params)
+		grant, err := time.Parse(time.RFC3339, got.RefreshBefore)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, grant.Sub(now), 29*time.Second, "ttlMs %d", ms)
+		require.LessOrEqual(t, grant.Sub(now), 10*time.Minute, "ttlMs %d", ms)
+	}
+}
+
+func TestSubscribeChecksRepositoryAccessAgainOnEveryRenewal(t *testing.T) {
+	t.Parallel()
+
+	h := newWebhookHarness(t)
+	h.subscribe(subscribeTo(repoArgs(), callbackURL, newSecret(t, 32)))
+	granted := h.rows()
+
+	h.authz.mu.Lock()
+	delete(h.authz.repos, testRepo)
+	h.authz.mu.Unlock()
+	h.clock.Advance(2 * time.Minute)
+
+	rpcErr := h.subscribeError(subscribeTo(repoArgs(), callbackURL, newSecret(t, 32)))
+	require.EqualValues(t, codeForbidden, rpcErr.Code, "a renewal does not reuse the grant of the first subscribe")
+	require.Equal(t, granted, h.rows(), "a refused renewal changes nothing: same expiry, same sealed secret")
+
+	h.authz.mu.Lock()
+	h.authz.repos[testRepo] = repoID
+	h.authz.mu.Unlock()
+	h.subscribe(subscribeTo(repoArgs(), callbackURL, newSecret(t, 32)))
+	require.Greater(t, h.rows()[0].ExpiresAt, granted[0].ExpiresAt, "with access back, the renewal is granted again")
 }
