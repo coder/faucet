@@ -133,6 +133,60 @@ func TestNormalize(t *testing.T) {
 	}
 }
 
+func TestNormalizeKeepsOnlyPullRequestsOfTheRepository(t *testing.T) {
+	t.Parallel()
+
+	const repoID, otherRepoID = 1001, 2002
+	pr := func(number, baseRepoID, headRepoID int) map[string]any {
+		return map[string]any{
+			"number": number,
+			"base":   map[string]any{"repo": map[string]any{"id": baseRepoID}},
+			"head":   map[string]any{"repo": map[string]any{"id": headRepoID}},
+		}
+	}
+	events := []struct {
+		event   string
+		fixture string
+	}{
+		{"workflow_run", "workflow_run_completed"},
+		{"check_run", "check_run_completed"},
+	}
+	cases := []struct {
+		name string
+		prs  []any
+		want []int32
+	}{
+		{"PullRequestOfTheRepository", []any{pr(2, repoID, repoID)}, []int32{2}},
+		{"PullRequestFromAForkIntoTheRepository", []any{pr(5, repoID, otherRepoID)}, []int32{5}},
+		{"PullRequestIntoAnotherRepository", []any{pr(1, otherRepoID, repoID)}, []int32{}},
+		{"PullRequestWithoutBaseRepository", []any{map[string]any{"number": 4}}, []int32{}},
+		{"MixedKeepsOrder", []any{pr(2, repoID, repoID), pr(1, otherRepoID, repoID), pr(3, repoID, otherRepoID)}, []int32{2, 3}},
+	}
+	for _, e := range events {
+		t.Run(e.event, func(t *testing.T) {
+			t.Parallel()
+
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					t.Parallel()
+
+					payload := mutate(t, e.fixture, func(doc map[string]any) {
+						doc["repository"] = map[string]any{"id": repoID}
+						run, ok := doc[e.event].(map[string]any)
+						require.True(t, ok)
+						run["pull_requests"] = tc.prs
+					})
+					ev, err := faucet.Normalize(e.event, payload, "delivery-1")
+					require.NoError(t, err)
+					require.NotNil(t, ev)
+					require.Equal(t, int64(repoID), ev.RepoID)
+					require.Equal(t, tc.want, ev.PRs)
+				})
+			}
+		})
+	}
+}
+
 func TestNormalizeIgnores(t *testing.T) {
 	t.Parallel()
 
