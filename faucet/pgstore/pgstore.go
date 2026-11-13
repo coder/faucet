@@ -117,7 +117,7 @@ func (s *Store) PollEvents(ctx context.Context, q faucet.PollQuery) (faucet.Poll
 		return faucet.PollPage{}, xerrors.New("poll events: statement returned no head row")
 	}
 
-	page := faucet.PollPage{Next: max(rows[0].MaxID, q.After)}
+	page := faucet.PollPage{Next: max(rows[0].MaxID, q.After), PurgedThrough: rows[0].PurgedThrough}
 	for _, row := range rows {
 		if row.ID.Valid {
 			page.Events = append(page.Events, pollRowToEvent(row))
@@ -135,6 +135,49 @@ func (s *Store) CursorAt(ctx context.Context, t time.Time) (int64, error) {
 		return 0, xerrors.Errorf("select cursor: %w", err)
 	}
 	return id, nil
+}
+
+// Purge deletes the old events and raises the mark in one transaction. The
+// mark is the highest ID the same statement deleted, so it is exact whatever
+// inserts run alongside: an insert that the statement's snapshot cannot see is
+// not deleted and gets an ID above every ID the snapshot can see. Purge does
+// not take eventsLockKey, so a large delete never holds up a webhook. It locks
+// the mark row first, so concurrent purges queue up instead of deadlocking.
+func (s *Store) Purge(ctx context.Context, before time.Time) (faucet.PurgeResult, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return faucet.PurgeResult{}, xerrors.Errorf("begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	q := s.q.WithTx(tx)
+
+	if err := q.LockPurgeMark(ctx); err != nil {
+		return faucet.PurgeResult{}, xerrors.Errorf("lock purge mark: %w", err)
+	}
+	deleted, err := q.DeleteEventsBefore(ctx, before)
+	if err != nil {
+		return faucet.PurgeResult{}, xerrors.Errorf("delete events: %w", err)
+	}
+	mark, err := q.RaisePurgeMark(ctx, deleted.MaxID)
+	if err != nil {
+		return faucet.PurgeResult{}, xerrors.Errorf("raise purge mark: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return faucet.PurgeResult{}, xerrors.Errorf("commit: %w", err)
+	}
+	return faucet.PurgeResult{Deleted: deleted.Deleted, PurgedThrough: mark}, nil
+}
+
+func (s *Store) StoredDeliveries(ctx context.Context, deliveryIDs []string) ([]string, error) {
+	// pq.Array encodes a nil slice as NULL, which matches nothing.
+	if len(deliveryIDs) == 0 {
+		return []string{}, nil
+	}
+	stored, err := s.q.StoredDeliveries(ctx, deliveryIDs)
+	if err != nil {
+		return nil, xerrors.Errorf("select deliveries: %w", err)
+	}
+	return stored, nil
 }
 
 func pollRowToEvent(row database.PollEventsRow) faucet.Event {

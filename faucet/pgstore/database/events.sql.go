@@ -15,7 +15,7 @@ import (
 )
 
 const cursorAt = `-- name: CursorAt :one
-SELECT COALESCE(MAX(id), 0)::bigint AS cursor
+SELECT GREATEST(COALESCE(MAX(id), 0), (SELECT purged_through FROM faucet_purge_mark))::bigint AS cursor
 FROM faucet_events
 WHERE received_at < $1
 `
@@ -25,6 +25,25 @@ func (q *Queries) CursorAt(ctx context.Context, before time.Time) (int64, error)
 	var cursor int64
 	err := row.Scan(&cursor)
 	return cursor, err
+}
+
+const deleteEventsBefore = `-- name: DeleteEventsBefore :one
+WITH deleted AS (
+  DELETE FROM faucet_events WHERE received_at < $1 RETURNING id
+)
+SELECT COUNT(*)::bigint AS deleted, COALESCE(MAX(id), 0)::bigint AS max_id FROM deleted
+`
+
+type DeleteEventsBeforeRow struct {
+	Deleted int64
+	MaxID   int64
+}
+
+func (q *Queries) DeleteEventsBefore(ctx context.Context, before time.Time) (DeleteEventsBeforeRow, error) {
+	row := q.db.QueryRowContext(ctx, deleteEventsBefore, before)
+	var i DeleteEventsBeforeRow
+	err := row.Scan(&i.Deleted, &i.MaxID)
+	return i, err
 }
 
 const eventsAfter = `-- name: EventsAfter :many
@@ -152,9 +171,21 @@ func (q *Queries) LockEvents(ctx context.Context, key int64) error {
 	return err
 }
 
+const lockPurgeMark = `-- name: LockPurgeMark :exec
+SELECT purged_through FROM faucet_purge_mark FOR UPDATE
+`
+
+func (q *Queries) LockPurgeMark(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, lockPurgeMark)
+	return err
+}
+
 const pollEvents = `-- name: PollEvents :many
-WITH head AS (
-  SELECT COALESCE(MAX(id), 0)::bigint AS max_id FROM faucet_events
+WITH mark AS (
+  SELECT purged_through FROM faucet_purge_mark
+), head AS (
+  SELECT GREATEST(COALESCE(MAX(id), 0), (SELECT purged_through FROM mark))::bigint AS max_id
+  FROM faucet_events
 ), page AS (
   SELECT e.id, e.source, e.delivery_id, e.type, e.repo_id, e.prs, e.head_sha, e.data, e.received_at FROM faucet_events e
   WHERE e.repo_id = $1
@@ -167,6 +198,7 @@ WITH head AS (
 )
 SELECT
   head.max_id,
+  (SELECT purged_through FROM mark)::bigint AS purged_through,
   page.id, page.source, page.delivery_id, page.type, page.repo_id, page.prs, page.head_sha,
   COALESCE(page.data, 'null'::jsonb)::jsonb AS data,
   page.received_at
@@ -184,16 +216,17 @@ type PollEventsParams struct {
 }
 
 type PollEventsRow struct {
-	MaxID      int64
-	ID         sql.NullInt64
-	Source     sql.NullString
-	DeliveryID sql.NullString
-	Type       sql.NullString
-	RepoID     sql.NullInt64
-	Prs        []int32
-	HeadSha    sql.NullString
-	Data       json.RawMessage
-	ReceivedAt sql.NullTime
+	MaxID         int64
+	PurgedThrough int64
+	ID            sql.NullInt64
+	Source        sql.NullString
+	DeliveryID    sql.NullString
+	Type          sql.NullString
+	RepoID        sql.NullInt64
+	Prs           []int32
+	HeadSha       sql.NullString
+	Data          json.RawMessage
+	ReceivedAt    sql.NullTime
 }
 
 func (q *Queries) PollEvents(ctx context.Context, arg PollEventsParams) ([]PollEventsRow, error) {
@@ -214,6 +247,7 @@ func (q *Queries) PollEvents(ctx context.Context, arg PollEventsParams) ([]PollE
 		var i PollEventsRow
 		if err := rows.Scan(
 			&i.MaxID,
+			&i.PurgedThrough,
 			&i.ID,
 			&i.Source,
 			&i.DeliveryID,
@@ -227,6 +261,46 @@ func (q *Queries) PollEvents(ctx context.Context, arg PollEventsParams) ([]PollE
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const raisePurgeMark = `-- name: RaisePurgeMark :one
+UPDATE faucet_purge_mark
+SET purged_through = GREATEST(purged_through, $1::bigint)
+RETURNING purged_through
+`
+
+func (q *Queries) RaisePurgeMark(ctx context.Context, through int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, raisePurgeMark, through)
+	var purged_through int64
+	err := row.Scan(&purged_through)
+	return purged_through, err
+}
+
+const storedDeliveries = `-- name: StoredDeliveries :many
+SELECT delivery_id FROM faucet_events WHERE delivery_id = ANY($1::text[])
+`
+
+func (q *Queries) StoredDeliveries(ctx context.Context, deliveryIds []string) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, storedDeliveries, pq.Array(deliveryIds))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var delivery_id string
+		if err := rows.Scan(&delivery_id); err != nil {
+			return nil, err
+		}
+		items = append(items, delivery_id)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err

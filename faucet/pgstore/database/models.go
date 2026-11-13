@@ -21,3 +21,8 @@ type FaucetEvent struct {
 	Data       json.RawMessage
 	ReceivedAt time.Time
 }
+
+type FaucetPurgeMark struct {
+	ID            bool
+	PurgedThrough int64
+}

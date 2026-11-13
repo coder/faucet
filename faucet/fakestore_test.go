@@ -46,7 +46,9 @@ func (s *fakeStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.Po
 		}
 		page.Events = append(page.Events, e)
 	}
+	head = max(head, s.purgeMark)
 	page.Next = max(head, q.After)
+	page.PurgedThrough = s.purgeMark
 	if len(page.Events) == int(q.Limit) {
 		page.Next = page.Events[len(page.Events)-1].ID
 	}
@@ -60,13 +62,49 @@ func (s *fakeStore) CursorAt(_ context.Context, t time.Time) (int64, error) {
 		return 0, s.err
 	}
 	s.cursorLookups = append(s.cursorLookups, t)
-	var id int64
+	id := s.purgeMark
 	for _, e := range s.events {
 		if e.ReceivedAt.Before(t) {
 			id = max(id, e.ID)
 		}
 	}
 	return id, nil
+}
+
+func (s *fakeStore) Purge(_ context.Context, before time.Time) (faucet.PurgeResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return faucet.PurgeResult{}, s.err
+	}
+	var res faucet.PurgeResult
+	kept := s.events[:0:0]
+	for _, e := range s.events {
+		if !e.ReceivedAt.Before(before) {
+			kept = append(kept, e)
+			continue
+		}
+		res.Deleted++
+		s.purgeMark = max(s.purgeMark, e.ID)
+	}
+	s.events = kept
+	res.PurgedThrough = s.purgeMark
+	return res, nil
+}
+
+func (s *fakeStore) StoredDeliveries(_ context.Context, deliveryIDs []string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return nil, s.err
+	}
+	stored := []string{}
+	for _, e := range s.events {
+		if slices.Contains(deliveryIDs, e.DeliveryID) {
+			stored = append(stored, e.DeliveryID)
+		}
+	}
+	return stored, nil
 }
 
 func (s *fakeStore) lookups() []time.Time {

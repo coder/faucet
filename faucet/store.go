@@ -100,8 +100,22 @@ type PollPage struct {
 	// Next is the cursor to poll with next. It is Events[len(Events)-1].ID
 	// when the page is full. Otherwise it is the highest event ID the store
 	// had when it answered, so a waiter whose repository is quiet does not
-	// rescan other repositories' events. It is never lower than the query's After.
+	// rescan other repositories' events. It is never lower than the query's
+	// After or than PurgedThrough.
 	Next int64
+	// PurgedThrough is the purge mark: the highest event ID any purge has
+	// deleted, or 0. The store reads it in the same snapshot as Events, so a
+	// caller whose cursor is below it knows that events above the cursor may be
+	// gone, whatever a purge did while the page was read.
+	PurgedThrough int64
+}
+
+// PurgeResult is what Store.Purge reports.
+type PurgeResult struct {
+	// Deleted is the number of events this call deleted.
+	Deleted int64
+	// PurgedThrough is the purge mark after the call.
+	PurgedThrough int64
 }
 
 func hasNUL(v any) bool {
@@ -140,6 +154,15 @@ type Store interface {
 	// never skips a matching event.
 	PollEvents(ctx context.Context, q PollQuery) (PollPage, error)
 	// CursorAt returns the highest event ID received before t, or 0 when there
-	// is none. Polling with it as the cursor returns the events from t on.
+	// is none. It is never lower than the purge mark, so polling with it as
+	// the cursor returns the events from t on and is not reported as a gap.
 	CursorAt(ctx context.Context, t time.Time) (int64, error)
+	// Purge deletes the events received before the given time and raises the
+	// purge mark to the highest ID it deleted, in one transaction. The mark
+	// never moves down. It needs no insert lock: events commit in ID order, so
+	// no event at or below the mark can appear after the purge.
+	Purge(ctx context.Context, before time.Time) (PurgeResult, error)
+	// StoredDeliveries returns the members of deliveryIDs that have a stored
+	// event, each once, in no particular order.
+	StoredDeliveries(ctx context.Context, deliveryIDs []string) ([]string, error)
 }
