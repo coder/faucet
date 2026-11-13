@@ -92,7 +92,7 @@ The charters are in [features/](features/), one fan-out line `slug|target|agent|
 
 ## Cleanup
 
-The runner stops the app it started, and `close_session` stops the one a session started. Both run `app.mjs`'s SIGTERM path, which stops faucet and Postgres and deletes `$TMPDIR/faucet-verify-<port>`. If the runner is killed with SIGKILL, `app.mjs` notices within seconds and runs the same teardown (`tests/lifecycle.e2e.ts` pins both). Never `pkill` by name.
+The runner stops the app it started, and `close_session` stops the one a session started. Both run `app.mjs`'s SIGTERM path, which stops faucet and Postgres and deletes `$TMPDIR/faucet-verify-<port>`. If the runner is killed with SIGKILL, `app.mjs` notices within seconds and runs the same teardown (`tests/lifecycle.e2e.ts` pins it, also for a kill while initdb runs). Never `pkill` by name.
 
 Wait ten seconds after a kill, then run `ls -d "${TMPDIR:-/tmp}"/faucet-verify-*`. A directory you know is yours (the port is in its name) that is still listed, `<dir>` below, needs these steps in order, with `ps -eo pid,args | grep -F '<text>' | grep -v grep` to find a pid:
 

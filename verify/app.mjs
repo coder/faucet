@@ -2,7 +2,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { parseArgs, promisify } from 'node:util';
 import { runDir, stateFile } from './runstate.mjs';
@@ -12,6 +12,8 @@ const FAUCET_STOP_MS = 20_000;
 const DB_PORT = 5432;
 const SOCKET_PATH_MAX = 100;
 const PARENT_POLL_MS = 1000;
+// An aborted initdb or go build can still be writing into the directory when it is removed.
+const RM_OPTIONS = { recursive: true, force: true, maxRetries: 20, retryDelay: 100 };
 
 function log(message) {
   console.error(`faucet-verify: ${message}`);
@@ -54,6 +56,17 @@ async function startPostgres(bin, dir, signal) {
     ],
     { signal },
   );
+}
+
+function postmasterRuns(dir) {
+  try {
+    const pid = Number(readFileSync(join(dir, 'pgdata', 'postmaster.pid'), 'utf8').split('\n', 1)[0]);
+    if (!(pid > 0)) return false;
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
 }
 
 async function stopPostgres(bin, dir) {
@@ -156,8 +169,8 @@ async function main(abort) {
     if (!signal.aborted) failure = err.message;
   } finally {
     if (faucet) await stopFaucet(faucet);
-    const postgresStopped = !existsSync(join(dir, 'pgdata', 'postmaster.pid')) || (await stopPostgres(bin, dir));
-    if (postgresStopped) rmSync(dir, { recursive: true, force: true });
+    const postgresStopped = !postmasterRuns(dir) || (await stopPostgres(bin, dir));
+    if (postgresStopped) rmSync(dir, RM_OPTIONS);
     else failure ??= `left ${dir} in place because Postgres is still running`;
   }
   if (failure) throw new Error(failure);

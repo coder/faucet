@@ -14,7 +14,8 @@ const PARENT_SCRIPT = `
 const { spawn } = require('node:child_process');
 const child = spawn(process.execPath, process.argv.slice(1), { stdio: ['ignore', 'ignore', 'inherit'] });
 console.log(child.pid);
-setInterval(() => {}, 1 << 30);
+const runner = process.ppid;
+setInterval(() => process.ppid === runner || process.exit(0), 1000);
 `;
 
 function freePort(): Promise<number> {
@@ -66,7 +67,7 @@ class Stack {
     this.appPid = appPid;
   }
 
-  static async start(extraArgs: string[]): Promise<Stack> {
+  static async launch(extraArgs: string[]): Promise<Stack> {
     const port = await freePort();
     mkdirSync('.e2e/logs', { recursive: true });
     const log = openSync(`.e2e/logs/lifecycle-${port}.log`, 'w');
@@ -82,9 +83,11 @@ class Stack {
     });
     const appPid = Number(firstLine.trim());
     if (!Number.isInteger(appPid) || appPid < 2) throw new Error('the parent did not report the app pid');
-    const stack = new Stack(port, parent, appPid);
-    await waitFor('the stack to answer /healthz', READY_MS, () => healthy(port));
-    return stack;
+    return new Stack(port, parent, appPid);
+  }
+
+  ready(): Promise<void> {
+    return waitFor('the stack to answer /healthz', READY_MS, () => healthy(this.port));
   }
 
   postgresPid(): number {
@@ -102,8 +105,9 @@ class Stack {
 
 describe('app lifecycle', () => {
   test('SIGKILL of the parent tears faucet, Postgres and the run directory down', async () => {
-    const stack = await Stack.start([]);
+    const stack = await Stack.launch([]);
     try {
+      await stack.ready();
       const postgres = stack.postgresPid();
 
       stack.parent.kill('SIGKILL');
@@ -116,9 +120,25 @@ describe('app lifecycle', () => {
     }
   });
 
-  test('--detach keeps the stack running after its parent dies and SIGTERM then tears it down', async () => {
-    const stack = await Stack.start(['--detach']);
+  test('SIGKILL of the parent while initdb runs still removes the run directory', async () => {
+    const stack = await Stack.launch([]);
     try {
+      await waitFor('initdb to start', READY_MS, () => existsSync(`${stack.dir}/pgdata`));
+
+      stack.parent.kill('SIGKILL');
+      await waitFor('the run directory to go', TEARDOWN_MS, () => !existsSync(stack.dir));
+      await waitFor('app.mjs to exit', TEARDOWN_MS, () => !alive(stack.appPid));
+
+      expect(await healthy(stack.port)).toBe(false);
+    } finally {
+      await stack.teardown();
+    }
+  });
+
+  test('--detach keeps the stack running after its parent dies and SIGTERM then tears it down', async () => {
+    const stack = await Stack.launch(['--detach']);
+    try {
+      await stack.ready();
       const postgres = stack.postgresPid();
 
       stack.parent.kill('SIGKILL');
