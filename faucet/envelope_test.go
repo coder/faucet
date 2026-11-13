@@ -324,3 +324,133 @@ func TestRenewalDuringAGitHubRateLimitKeepsTheSubscriptionAndARealDenialStillEnd
 	require.Empty(t, d.rows())
 	require.Equal(t, faucet.Terminations{Sent: 1}, d.svc.Terminations())
 }
+
+// scriptedStore lets a test act at two points of a DeliverDue run.
+type scriptedStore struct {
+	faucet.Store
+	onExpire func()
+	pollErr  func(call int) error
+
+	mu    sync.Mutex
+	polls int
+}
+
+func (s *scriptedStore) ExpireDeliveries(ctx context.Context, now time.Time) (int64, error) {
+	if s.onExpire != nil {
+		s.onExpire()
+	}
+	return s.Store.ExpireDeliveries(ctx, now)
+}
+
+func (s *scriptedStore) PollEvents(ctx context.Context, q faucet.PollQuery) (faucet.PollPage, error) {
+	s.mu.Lock()
+	s.polls++
+	call := s.polls
+	s.mu.Unlock()
+	if s.pollErr != nil {
+		if err := s.pollErr(call); err != nil {
+			return faucet.PollPage{}, err
+		}
+	}
+	return s.Store.PollEvents(ctx, q)
+}
+
+// gappedThenBusy is a subscription that a purge overtook, at slow, and after it
+// a subscription of the other repository at fast, which has a new event. The
+// run reads the one furthest behind first.
+func (d *deliverHarness) gappedThenBusy(slow hookEndpoint) hookEndpoint {
+	d.t.Helper()
+	d.purgedBeforeRead(slow)
+	fast := hookEndpoint{path: "/fast", secret: newSecret(d.t, 32), args: args("repo", otherRepo)}
+	d.subscribeEndpoint(fast)
+	d.insert(otherRepoID, "ci.run_completed", "")
+	return fast
+}
+
+func TestDeliverDueGapEndpointThatStallsDoesNotDelayQueueingOrSendingOtherSubscriptions(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	slow := d.endpoint("/slow")
+	started, release := make(chan struct{}, 1), make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	d.rcv.answer("/slow", func(n int) int {
+		if n == 1 {
+			started <- struct{}{}
+			<-release
+		}
+		return http.StatusOK
+	})
+	fast := d.gappedThenBusy(slow)
+
+	type outcome struct {
+		res faucet.DeliverResult
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := d.svc.DeliverDue(d.ctx)
+		done <- outcome{res, err}
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the gap envelope was never sent")
+	}
+	require.Eventually(t, func() bool { return len(d.rcv.requests(fast.path)) == 1 }, 5*time.Second, 10*time.Millisecond,
+		"while the gap endpoint stalls, another subscription's new event is queued and sent")
+
+	once.Do(func() { close(release) })
+	got := <-done
+	require.NoError(t, got.err)
+	d.record(got.res)
+	require.Equal(t, 1, got.res.Gaps)
+	require.Equal(t, 1, got.res.GapsSent)
+	require.Equal(t, 2, got.res.Delivered, "the survivor of the gapped subscription and the new event of the other")
+}
+
+func TestDeliverDueCountsGapsThatItDidNotSend(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the run ended before the send phase", func(t *testing.T) {
+		t.Parallel()
+		var d *deliverHarness
+		d = newDeliverHarness(t, func(deps *faucet.Deps) {
+			deps.Store = &scriptedStore{Store: deps.Store, onExpire: func() { d.advance(16 * time.Second) }}
+		})
+		d.clock.Set(time.Now()).MustWait(d.ctx)
+		d.purgedBeforeRead(d.endpoint("/hook"))
+
+		short, cancel := context.WithDeadline(context.Background(), d.clock.Now().Add(25*time.Second))
+		defer cancel()
+		res := d.deliverDueWith(short)
+		require.Equal(t, 1, res.Gaps)
+		require.Equal(t, 1, res.GapsFailed, "a gap that the run had no time to send is counted, not dropped")
+		require.Zero(t, res.GapsSent)
+		require.True(t, res.Incomplete)
+		require.Zero(t, d.rcv.total())
+		require.True(t, d.logsContain("the gap envelope was not sent"))
+	})
+
+	t.Run("the run failed after queueing it", func(t *testing.T) {
+		t.Parallel()
+		d := newDeliverHarness(t, func(deps *faucet.Deps) {
+			deps.Store = &scriptedStore{Store: deps.Store, pollErr: func(call int) error {
+				if call == 2 {
+					return xerrors.New("database is down")
+				}
+				return nil
+			}}
+		})
+		d.ledgerSkip = true
+		d.gappedThenBusy(d.endpoint("/slow"))
+
+		res, err := d.svc.DeliverDue(d.ctx)
+		require.Error(t, err)
+		require.Equal(t, 1, res.Gaps)
+		require.Equal(t, 1, res.GapsFailed, "a gap queued before the failure is counted as not sent")
+		require.Zero(t, d.rcv.total())
+	})
+}
