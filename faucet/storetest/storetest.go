@@ -255,39 +255,47 @@ func difference(a, b []int64) []int64 {
 }
 
 // GitHub can redeliver a webhook while the first delivery is still in flight.
+// One race window is narrow, so the test runs several rounds to catch a store
+// that handles it wrongly on most runs, not only some.
 func concurrentDuplicateDeliveryStoresOnce(t *testing.T, s faucet.Store) {
 	ctx := context.Background()
-	const writers = 16
+	const (
+		rounds  = 8
+		writers = 16
+	)
 
 	type result struct {
 		id       int64
 		inserted bool
 		err      error
 	}
-	results := make([]result, writers)
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	for i := range writers {
-		wg.Go(func() {
-			<-start
-			stored, inserted, err := s.InsertEvent(ctx, newEvent("delivery-dup"))
-			results[i] = result{id: stored.ID, inserted: inserted, err: err}
-		})
-	}
-	close(start)
-	wg.Wait()
-
-	insertedCount := 0
-	for _, r := range results {
-		require.NoError(t, r.err)
-		require.Equal(t, results[0].id, r.id, "every writer must get the stored row")
-		if r.inserted {
-			insertedCount++
+	for round := range rounds {
+		deliveryID := fmt.Sprintf("delivery-dup-%d", round)
+		results := make([]result, writers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := range writers {
+			wg.Go(func() {
+				<-start
+				stored, inserted, err := s.InsertEvent(ctx, newEvent(deliveryID))
+				results[i] = result{id: stored.ID, inserted: inserted, err: err}
+			})
 		}
-	}
-	require.Equal(t, 1, insertedCount)
+		close(start)
+		wg.Wait()
 
-	events, err := s.EventsAfter(ctx, 0, 10)
+		insertedCount := 0
+		for _, r := range results {
+			require.NoError(t, r.err, "round %d", round)
+			require.Equal(t, results[0].id, r.id, "round %d: every writer must get the stored row", round)
+			if r.inserted {
+				insertedCount++
+			}
+		}
+		require.Equal(t, 1, insertedCount, "round %d", round)
+	}
+
+	events, err := s.EventsAfter(ctx, 0, rounds+1)
 	require.NoError(t, err)
-	require.Len(t, events, 1)
+	require.Len(t, events, rounds)
 }
