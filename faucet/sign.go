@@ -21,14 +21,14 @@ const maxMessageIDBytes = 128
 // 128 letters, digits, underscores or hyphens. The errors never contain the
 // secret.
 func SignWebhook(secret, id string, timestamp time.Time, body []byte) (http.Header, error) {
-	return signWebhook([]subscriberSecret{subscriberSecret(secret)}, id, timestamp, body)
+	return signWithSecrets([]subscriberSecret{subscriberSecret(secret)}, id, timestamp, body)
 }
 
-// signWebhook is SignWebhook for one or more secrets. The signature header
+// signWithSecrets is SignWebhook for one or more secrets. The signature header
 // holds one "v1," entry per secret, in the order given, space-delimited, as
 // Standard Webhooks defines for a rotation: a receiver accepts the message when
 // any entry verifies.
-func signWebhook(secrets []subscriberSecret, id string, timestamp time.Time, body []byte) (http.Header, error) {
+func signWithSecrets(secrets []subscriberSecret, id string, timestamp time.Time, body []byte) (http.Header, error) {
 	switch {
 	case len(secrets) == 0:
 		return nil, xerrors.New("webhook needs at least one secret to sign with")

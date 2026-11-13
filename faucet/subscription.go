@@ -85,9 +85,9 @@ type Subscription struct {
 
 // Validate checks the fields a caller supplies to Store.UpsertSubscription.
 // CreatedAt, UpdatedAt, Status, PreviousSecretEnc and PreviousSecretUntil are
-// ignored because the store assigns them. It
-// requires KeyHash to be the hash of the identity fields, so a row cannot
-// carry the key of another principal's subscription.
+// ignored because the store assigns them. It requires KeyHash to be the hash
+// of the identity fields, so a row cannot carry the key of another principal's
+// subscription.
 func (s Subscription) Validate(now time.Time) error {
 	switch {
 	case s.Principal == "":

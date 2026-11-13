@@ -6,7 +6,7 @@ An agent that renews its subscription with a new `delivery.secret` rotates the s
 
 - `events/subscribe` for an existing subscription with a different `delivery.secret` replaces the current secret and keeps the replaced one as the previous secret, until `now + min(10 minutes, TTL that the call was granted)`. Since a grant is 10 minutes at most, the window is the grant. A renewal with the same secret changes neither the secret nor the window, so it does not extend it. A second rotation inside the window replaces the previous secret with the one it replaced: only one previous secret is kept.
 - While `now` is before the end, `webhook-signature` of an event, a `gap` envelope and a `terminated` envelope holds one `v1,` entry per secret, space-delimited, as Standard Webhooks defines. A receiver accepts the request when any entry verifies. After the end it holds the entry of the current secret only, whether or not a run has cleared the previous secret yet.
-- The handshake of a first subscribe is signed with the secret of that request only.
+- A handshake that a call triggers (a first subscribe, or a renewal after faucet forgot the verified login and URL) is signed with the secret of that request only, so a receiver must hold the new secret before the rotating call.
 - The previous secret is sealed as the current one is (AES-256-GCM, the row's `key_hash` as additional data). No row holds either secret in the clear. `previous_secret_until` is set by the server, never by the request.
 - `GET /cron/deliver` sets `previous_secret_enc` and `previous_secret_until` to NULL for every row whose window has ended, and reports how many in `previous_secrets_cleared`. The subscription and its current secret stay.
 - A `terminated` envelope is signed with the stored secrets (current and previous), never with the secret of the renewal that failed the access check.
@@ -32,4 +32,4 @@ No charter. Every check needs the receiver's records, the cron secret and the su
 
 - A run clears an ended window before it sends, so e2e cannot show an ended but unswept window that still does not sign. A Go test pins that with a store that clears nothing.
 - `gap` is not driven here. Its signing is pinned by Go tests, and the scan target's columns by the store contract (`ScanTargetsAndClaimsCarryThePreviousSecret`).
-- The handshake result of the first subscribe is cached for the login and URL, so the rotating renewal sends no verification request. A rotation that the cache missed would sign the verification with the new secret only.
+- Faucet caches a verified login and URL, so the rotating renewal in the test sends no verification request. After the cache lapses, a renewal sends one signed with the new secret only, and a receiver that holds only the old secret fails it. Pinned by no test.

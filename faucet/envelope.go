@@ -64,7 +64,7 @@ func (wh *webhookState) sendEnvelope(ctx context.Context, now time.Time, kind st
 	if err != nil {
 		return failureSecretUnreadable
 	}
-	headers, err := signWebhook(secrets, newEnvelopeID(kind), now, body)
+	headers, err := signWithSecrets(secrets, newEnvelopeID(kind), now, body)
 	if err != nil {
 		return failureSecretUnreadable
 	}

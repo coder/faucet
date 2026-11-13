@@ -1138,6 +1138,10 @@ func upsertSubscriptionValidatesInput(t *testing.T, s faucet.Store) {
 		"negative cursor":      func(sub *faucet.Subscription) { sub.Cursor = -1 },
 		"already expired":      func(sub *faucet.Subscription) { sub.ExpiresAt = subscriptionBase },
 		"zero key hash":        func(sub *faucet.Subscription) { sub.KeyHash = faucet.SubscriptionKeyHash{} },
+		"negative grace":       func(sub *faucet.Subscription) { sub.RotationGrace = -time.Second },
+		"grace past the expiry": func(sub *faucet.Subscription) {
+			sub.RotationGrace = time.Hour + time.Second
+		},
 		"another principal's key hash": func(sub *faucet.Subscription) {
 			sub.KeyHash = faucet.NewSubscriptionKeyHash("mallory", sub.CallbackURL, sub.EventType, sub.Arguments)
 		},

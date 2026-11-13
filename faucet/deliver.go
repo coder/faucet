@@ -427,7 +427,7 @@ func (r *deliveryRun) decide(ctx context.Context, claim DeliveryClaim) attemptOu
 	if !ok {
 		return outcome
 	}
-	headers, err := signWebhook(secrets, claim.MessageID, now, body)
+	headers, err := signWithSecrets(secrets, claim.MessageID, now, body)
 	if err != nil {
 		return attemptOutcome{finish: Finish{Kind: FinishDead, Unreadable: claim.SecretEnc}, reason: GiveUpSecretUnreadable}
 	}
