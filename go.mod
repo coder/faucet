@@ -10,6 +10,7 @@ require (
 	github.com/google/jsonschema-go v0.4.3
 	github.com/lib/pq v1.10.9
 	github.com/modelcontextprotocol/go-sdk v1.8.0
+	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da
 )

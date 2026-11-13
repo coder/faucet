@@ -1,0 +1,49 @@
+package faucet
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"golang.org/x/xerrors"
+)
+
+const maxMessageIDBytes = 128
+
+// SignWebhook returns the Standard Webhooks headers for one message: webhook-id,
+// webhook-timestamp and webhook-signature, which is "v1," and the base64 of the
+// HMAC-SHA256 of id, timestamp and body joined by dots, keyed with the decoded
+// secret. secret is a whsec_ value as events/subscribe accepts it. id is 1 to
+// 128 letters, digits, underscores or hyphens. The errors never contain the
+// secret.
+func SignWebhook(secret, id string, timestamp time.Time, body []byte) (http.Header, error) {
+	key, ok := decodeSecret(secret)
+	switch {
+	case !ok:
+		return nil, xerrors.New("webhook secret is not a whsec_ value of 24 to 64 bytes")
+	case !validMessageID(id):
+		return nil, xerrors.Errorf("webhook id must be 1 to %d letters, digits, underscores or hyphens", maxMessageIDBytes)
+	case timestamp.Unix() <= 0:
+		return nil, xerrors.New("webhook timestamp must be after 1970")
+	}
+	seconds := strconv.FormatInt(timestamp.Unix(), 10)
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(id + "." + seconds + "."))
+	mac.Write(body)
+
+	headers := http.Header{}
+	headers.Set("webhook-id", id)
+	headers.Set("webhook-timestamp", seconds)
+	headers.Set("webhook-signature", "v1,"+base64.StdEncoding.EncodeToString(mac.Sum(nil)))
+	return headers, nil
+}
+
+func validMessageID(id string) bool {
+	return id != "" && len(id) <= maxMessageIDBytes && !strings.ContainsFunc(id, func(r rune) bool {
+		return !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-')
+	})
+}

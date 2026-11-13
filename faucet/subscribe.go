@@ -453,16 +453,23 @@ func (d deliveryParams) subscriberSecret() (subscriberSecret, error) {
 // padded base64 of 24 to 64 bytes. The error names the rule and never the
 // value.
 func parseSecret(s string) (subscriberSecret, error) {
-	bad := invalidParams("delivery.secret must be %s followed by the base64 of %d to %d random bytes", secretPrefix, minSubscriberSecretBytes, maxSubscriberSecretBytes)
+	if _, ok := decodeSecret(s); !ok {
+		return "", invalidParams("delivery.secret must be %s followed by the base64 of %d to %d random bytes", secretPrefix, minSubscriberSecretBytes, maxSubscriberSecretBytes)
+	}
+	return subscriberSecret(s), nil
+}
+
+// decodeSecret returns the HMAC key bytes of a secret that parseSecret accepts.
+func decodeSecret(s string) ([]byte, bool) {
 	encoded, ok := strings.CutPrefix(s, secretPrefix)
 	if !ok || len(s) > maxSecretChars || strings.IndexFunc(encoded, func(r rune) bool { return !isBase64Char(r) }) >= 0 {
-		return "", bad
+		return nil, false
 	}
 	decoded, err := base64.StdEncoding.Strict().DecodeString(encoded)
 	if err != nil || len(decoded) < minSubscriberSecretBytes || len(decoded) > maxSubscriberSecretBytes {
-		return "", bad
+		return nil, false
 	}
-	return subscriberSecret(s), nil
+	return decoded, true
 }
 
 func isBase64Char(r rune) bool {
