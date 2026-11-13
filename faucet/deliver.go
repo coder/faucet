@@ -148,7 +148,7 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 		HeadSHA: strings.ToLower(args.SHA),
 		PR:      args.PR,
 		After:   target.ScannedThrough,
-		Limit:   int32(MaxPendingDeliveries - target.Pending), //nolint:gosec // The store only returns targets under the cap.
+		Limit:   MaxPendingDeliveries - target.Pending,
 	})
 	if err != nil {
 		return xerrors.Errorf("read events for a subscription: %w", err)
@@ -295,7 +295,7 @@ func (r *deliveryRun) attempt(ctx context.Context, claim DeliveryClaim) error {
 		return xerrors.Errorf("record the result of a delivery: %w", err)
 	}
 	if !res.Accepted {
-		logger.Info(ctx, "another run owns the delivery now, the result is dropped")
+		logger.Info(ctx, "the delivery is no longer this attempt's, the result is dropped")
 		r.add(func(tally *DeliverResult) {
 			tally.Superseded++
 			if out.sent {
@@ -447,7 +447,7 @@ func classify(claim DeliveryClaim, now time.Time, status int, category CallbackR
 	case status > 0:
 		out.category = CallbackHTTP4xx
 	}
-	switch retryAt := now.Add(deliveryBackoff[min(claim.Ref.Attempt, len(deliveryBackoff))-1]); {
+	switch retryAt := now.Add(deliveryBackoff[min(int(claim.Ref.Attempt), len(deliveryBackoff))-1]); {
 	case claim.Ref.Attempt >= MaxDeliveryAttempts:
 		out.finish, out.reason = Finish{Kind: FinishGiveUp, Failure: out.category}, GiveUpAttemptsExhausted
 	case retryAt.Sub(claim.EnqueuedAt) > DeliveryWindow:

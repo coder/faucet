@@ -49,7 +49,7 @@ type ScanTarget struct {
 	// ScannedThrough is the highest event ID the enqueue has read for it.
 	ScannedThrough int64
 	// Pending is the number of deliveries it holds that have not ended.
-	Pending int
+	Pending int32
 }
 
 // NewDelivery is one event that a subscription is to receive.
@@ -96,7 +96,7 @@ type DeliveryRef struct {
 	Key     SubscriptionKeyHash
 	EventID int64
 	// Attempt counts from 1 and rises at every claim.
-	Attempt int
+	Attempt int32
 }
 
 // DeliveryClaim is a delivery that a run now owns for DeliveryLease.
@@ -207,7 +207,8 @@ type DeliverResult struct {
 	// GaveUp is the deliveries that ended without a success, by reason.
 	GaveUp map[GiveUpReason]int
 	// Superseded is the attempts whose result the store refused, because
-	// another run owns the delivery now. That run counts its end.
+	// another run owns the delivery now or its subscription was deleted. The
+	// other run counts its end.
 	Superseded int
 	// Incomplete says that due work was left, because the run reached its
 	// limit or its deadline.

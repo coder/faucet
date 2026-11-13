@@ -3,7 +3,6 @@ package pgstore
 import (
 	"context"
 	"database/sql"
-	"math"
 	"time"
 
 	"golang.org/x/xerrors"
@@ -12,11 +11,11 @@ import (
 	"github.com/coder/faucet/faucet/pgstore/database"
 )
 
-func (s *Store) ScanTargets(ctx context.Context, now time.Time, maxPending, limit int) ([]faucet.ScanTarget, error) {
-	if maxPending <= 0 || limit <= 0 || limit > math.MaxInt32 {
-		return nil, xerrors.Errorf("max pending and limit must be positive, and the limit at most %d", math.MaxInt32)
+func (s *Store) ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32) ([]faucet.ScanTarget, error) {
+	if maxPending <= 0 || limit <= 0 {
+		return nil, xerrors.New("max pending and limit must be positive")
 	}
-	rows, err := s.q.ScanTargets(ctx, database.ScanTargetsParams{Now: now, MaxPending: int64(maxPending), RowLimit: int32(limit)}) //nolint:gosec // The limit is checked above.
+	rows, err := s.q.ScanTargets(ctx, database.ScanTargetsParams{Now: now, MaxPending: maxPending, RowLimit: limit})
 	if err != nil {
 		return nil, xerrors.Errorf("select scan targets: %w", err)
 	}
@@ -32,7 +31,7 @@ func (s *Store) ScanTargets(ctx context.Context, now time.Time, maxPending, limi
 			Arguments:      row.Arguments,
 			RepoID:         row.RepoID,
 			ScannedThrough: row.ScannedThrough,
-			Pending:        int(row.Pending),
+			Pending:        row.Pending,
 		}
 	}
 	return targets, nil
@@ -101,7 +100,7 @@ func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Dur
 		return faucet.DeliveryClaim{}, false, err
 	}
 	claim := faucet.DeliveryClaim{
-		Ref:         faucet.DeliveryRef{Key: key, EventID: row.EventID, Attempt: int(row.Attempts)},
+		Ref:         faucet.DeliveryRef{Key: key, EventID: row.EventID, Attempt: row.Attempts},
 		MessageID:   row.MessageID,
 		EnqueuedAt:  row.EnqueuedAt,
 		CallbackURL: row.CallbackUrl,
@@ -130,8 +129,8 @@ func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Dur
 // then the deliveries that cascade), and two transactions that took the two
 // locks in opposite orders could wait on each other.
 func (s *Store) FinishDelivery(ctx context.Context, ref faucet.DeliveryRef, now time.Time, f faucet.Finish) (faucet.FinishResult, error) {
-	if ref.Attempt < 1 || ref.Attempt > math.MaxInt32 {
-		return faucet.FinishResult{}, xerrors.Errorf("attempt must be from 1 to %d, got %d", math.MaxInt32, ref.Attempt)
+	if ref.Attempt < 1 {
+		return faucet.FinishResult{}, xerrors.Errorf("attempt must be at least 1, got %d", ref.Attempt)
 	}
 	if err := f.Validate(); err != nil {
 		return faucet.FinishResult{}, xerrors.Errorf("validate finish: %w", err)
@@ -148,8 +147,7 @@ func (s *Store) FinishDelivery(ctx context.Context, ref faucet.DeliveryRef, now 
 	} else if err != nil {
 		return faucet.FinishResult{}, xerrors.Errorf("lock subscription: %w", err)
 	}
-	attempt := int32(ref.Attempt) //nolint:gosec // The range is checked above.
-	result, err := finishLocked(ctx, q, ref, attempt, now, f)
+	result, err := finishLocked(ctx, q, ref, now, f)
 	if err != nil || !result.Accepted {
 		return faucet.FinishResult{}, err
 	}
@@ -159,13 +157,13 @@ func (s *Store) FinishDelivery(ctx context.Context, ref faucet.DeliveryRef, now 
 	return result, nil
 }
 
-func finishLocked(ctx context.Context, q *database.Queries, ref faucet.DeliveryRef, attempt int32, now time.Time, f faucet.Finish) (faucet.FinishResult, error) {
+func finishLocked(ctx context.Context, q *database.Queries, ref faucet.DeliveryRef, now time.Time, f faucet.Finish) (faucet.FinishResult, error) {
 	var affected int64
 	var err error
 	if f.Kind == faucet.FinishRetry {
-		affected, err = q.RescheduleDelivery(ctx, database.RescheduleDeliveryParams{NextAttemptAt: f.RetryAt, KeyHash: ref.Key[:], EventID: ref.EventID, Attempt: attempt})
+		affected, err = q.RescheduleDelivery(ctx, database.RescheduleDeliveryParams{NextAttemptAt: f.RetryAt, KeyHash: ref.Key[:], EventID: ref.EventID, Attempt: ref.Attempt})
 	} else {
-		affected, err = q.EndDelivery(ctx, database.EndDeliveryParams{KeyHash: ref.Key[:], EventID: ref.EventID, Attempt: attempt})
+		affected, err = q.EndDelivery(ctx, database.EndDeliveryParams{KeyHash: ref.Key[:], EventID: ref.EventID, Attempt: ref.Attempt})
 	}
 	if err != nil {
 		return faucet.FinishResult{}, xerrors.Errorf("update delivery: %w", err)

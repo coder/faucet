@@ -286,18 +286,18 @@ WITH head AS (
 )
 SELECT
   s.key_hash, s.event_type, s.arguments, s.repo_id, s.scanned_through,
-  (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash)::bigint AS pending
+  (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash)::int AS pending
 FROM faucet_subscriptions s, head
 WHERE s.expires_at > $1
   AND s.scanned_through < head.max_id
-  AND (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash) < $2::bigint
+  AND (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash) < $2::int
 ORDER BY s.scanned_through, s.key_hash
 LIMIT $3
 `
 
 type ScanTargetsParams struct {
 	Now        time.Time
-	MaxPending int64
+	MaxPending int32
 	RowLimit   int32
 }
 
@@ -307,7 +307,7 @@ type ScanTargetsRow struct {
 	Arguments      json.RawMessage
 	RepoID         int64
 	ScannedThrough int64
-	Pending        int64
+	Pending        int32
 }
 
 func (q *Queries) ScanTargets(ctx context.Context, arg ScanTargetsParams) ([]ScanTargetsRow, error) {

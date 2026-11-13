@@ -190,7 +190,7 @@ type Store interface {
 	// log to its head and hold fewer than maxPending unsent deliveries, the
 	// ones furthest behind first, at most limit. The head counts the purge
 	// mark, so a subscription that a purge overtook is a target too.
-	ScanTargets(ctx context.Context, now time.Time, maxPending, limit int) ([]ScanTarget, error)
+	ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32) ([]ScanTarget, error)
 	// EnqueueDeliveries queues e.Deliveries and moves the subscription's read
 	// position to e.NewScannedThrough in one transaction, and only if the
 	// subscription is live at now and still at e.ExpectedScannedThrough. It

@@ -36,7 +36,7 @@ type cronStore struct {
 	failing error
 }
 
-func (s *cronStore) ScanTargets(context.Context, time.Time, int, int) ([]faucet.ScanTarget, error) {
+func (s *cronStore) ScanTargets(context.Context, time.Time, int32, int32) ([]faucet.ScanTarget, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return nil, s.failing
@@ -59,7 +59,7 @@ func (s *cronStore) ClaimDelivery(context.Context, time.Time, time.Duration) (fa
 	return claim, true, nil
 }
 
-func (s *cronStore) FinishDelivery(context.Context, faucet.DeliveryRef, time.Time, faucet.Finish) (faucet.FinishResult, error) {
+func (*cronStore) FinishDelivery(context.Context, faucet.DeliveryRef, time.Time, faucet.Finish) (faucet.FinishResult, error) {
 	return faucet.FinishResult{Accepted: true, Removed: 1}, nil
 }
 

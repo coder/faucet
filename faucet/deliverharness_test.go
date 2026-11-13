@@ -20,7 +20,6 @@ import (
 	"github.com/coder/faucet/faucet"
 )
 
-// hookRequest is one request that the callback hookReceiver got.
 type hookRequest struct {
 	Path   string
 	Header http.Header
@@ -213,9 +212,6 @@ func (d *deliverHarness) deliverDue() faucet.DeliverResult {
 	return d.deliverDueWith(d.ctx)
 }
 
-// subscribeTo subscribes the hookReceiver's path to the repository's ci events.
-// refresh calls it again with the same secret, which keeps the subscription
-// live and the secret the same.
 type hookEndpoint struct {
 	path   string
 	secret string

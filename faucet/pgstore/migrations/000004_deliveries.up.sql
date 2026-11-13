@@ -1,7 +1,5 @@
--- scanned_through is the highest event ID that the delivery enqueue has read
--- for a subscription. A new row starts at its cursor. last_delivery_at,
--- last_error and failed_since are the deliveryStatus of SEP-3415, and last_error
--- is one of its categories.
+-- last_delivery_at, last_error and failed_since are the deliveryStatus of
+-- SEP-3415.
 ALTER TABLE faucet_subscriptions
   ADD COLUMN scanned_through  bigint NOT NULL DEFAULT 0 CHECK (scanned_through >= 0),
   ADD COLUMN last_delivery_at timestamptz,
@@ -10,15 +8,10 @@ ALTER TABLE faucet_subscriptions
 
 UPDATE faucet_subscriptions SET scanned_through = cursor;
 
--- One row per delivery that has not ended: a subscription and an event that it
--- is to receive. The row is deleted when the delivery ends, and with its
--- subscription. It holds no secret. event_id has no foreign key, so a purge
--- of old events never waits for a delivery and never deletes one: the worker
--- finds the event gone and ends the delivery with a reason.
---
--- message_id is the webhook-id, the same on every attempt. attempts rises when
--- a run claims the row, and lease_until is when that claim lapses. A finish
--- must present the attempt it was given.
+-- One row per delivery that has not ended. It holds no secret. event_id has no
+-- foreign key, so a purge of old events never waits for a delivery and never
+-- deletes one: the worker finds the event gone and ends the delivery with a
+-- reason.
 CREATE TABLE faucet_deliveries (
   key_hash        bytea NOT NULL REFERENCES faucet_subscriptions (key_hash) ON DELETE CASCADE,
   event_id        bigint NOT NULL CHECK (event_id > 0),

@@ -39,10 +39,9 @@ type cronRoutes struct {
 	lookback  time.Duration
 	// redelivers says whether the service has a HookAdmin.
 	redelivers bool
-	// delivers says whether the service has webhook delivery on.
-	delivers bool
-	clock    quartz.Clock
-	logger   slog.Logger
+	delivers   bool
+	clock      quartz.Clock
+	logger     slog.Logger
 }
 
 func (c cronRoutes) mount(r chi.Router) {

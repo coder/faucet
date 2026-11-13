@@ -20,7 +20,7 @@ type fakeDelivery struct {
 	messageID   string
 	enqueuedAt  time.Time
 	nextAttempt time.Time
-	attempts    int
+	attempts    int32
 	leaseUntil  time.Time
 }
 
@@ -42,8 +42,8 @@ func (s *fakeStore) dropSubscriptionLocked(key faucet.SubscriptionKeyHash) {
 	}
 }
 
-func (s *fakeStore) pendingLocked(key faucet.SubscriptionKeyHash) int {
-	n := 0
+func (s *fakeStore) pendingLocked(key faucet.SubscriptionKeyHash) int32 {
+	var n int32
 	for k := range s.deliveries {
 		if k.key == key {
 			n++
@@ -60,7 +60,7 @@ func (s *fakeStore) headLocked() int64 {
 	return head
 }
 
-func (s *fakeStore) ScanTargets(_ context.Context, now time.Time, maxPending, limit int) ([]faucet.ScanTarget, error) {
+func (s *fakeStore) ScanTargets(_ context.Context, now time.Time, maxPending, limit int32) ([]faucet.ScanTarget, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.err != nil {
@@ -87,7 +87,7 @@ func (s *fakeStore) ScanTargets(_ context.Context, now time.Time, maxPending, li
 		}
 		return bytes.Compare(a.KeyHash[:], b.KeyHash[:])
 	})
-	return targets[:min(len(targets), limit)], nil
+	return targets[:min(len(targets), int(limit))], nil
 }
 
 func (s *fakeStore) EnqueueDeliveries(_ context.Context, now time.Time, e faucet.Enqueue) (bool, error) {
@@ -226,12 +226,10 @@ func (s *fakeStore) ExpireDeliveries(_ context.Context, now time.Time) (int64, e
 	return deleted, nil
 }
 
-// deliveryRows returns the unfinished deliveries that the fake holds, with
-// how many attempts each has had.
-func (s *fakeStore) deliveryRows() map[string]int {
+func (s *fakeStore) deliveryRows() map[string]int32 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows := map[string]int{}
+	rows := map[string]int32{}
 	for _, d := range s.deliveries {
 		rows[d.messageID] = d.attempts
 	}

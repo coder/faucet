@@ -5,11 +5,11 @@ WITH head AS (
 )
 SELECT
   s.key_hash, s.event_type, s.arguments, s.repo_id, s.scanned_through,
-  (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash)::bigint AS pending
+  (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash)::int AS pending
 FROM faucet_subscriptions s, head
 WHERE s.expires_at > sqlc.arg(now)
   AND s.scanned_through < head.max_id
-  AND (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash) < sqlc.arg(max_pending)::bigint
+  AND (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash) < sqlc.arg(max_pending)::int
 ORDER BY s.scanned_through, s.key_hash
 LIMIT sqlc.arg(row_limit);
 

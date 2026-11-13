@@ -72,7 +72,6 @@ func (r *rig) addEvent() faucet.Event {
 
 func messageIDOf(ev faucet.Event) string { return fmt.Sprintf("msg_%d", ev.ID) }
 
-// enqueue queues the events and moves the position to the last of them.
 func (r *rig) enqueue(events ...faucet.Event) {
 	r.t.Helper()
 	e := faucet.Enqueue{Key: r.sub.KeyHash, ExpectedScannedThrough: r.scanned, NewScannedThrough: events[len(events)-1].ID}
@@ -106,7 +105,7 @@ func (r *rig) finish(ref faucet.DeliveryRef, now time.Time, f faucet.Finish) fau
 	return res
 }
 
-func (r *rig) targets(now time.Time, maxPending int) []faucet.ScanTarget {
+func (r *rig) targets(now time.Time, maxPending int32) []faucet.ScanTarget {
 	r.t.Helper()
 	targets, err := r.s.ScanTargets(r.ctx, now, maxPending, 100)
 	require.NoError(r.t, err)
@@ -122,7 +121,7 @@ func (r *rig) status() faucet.DeliveryStatus {
 	return row.Status
 }
 
-func (r *rig) pending() int {
+func (r *rig) pending() int32 {
 	r.t.Helper()
 	r.addEvent()
 	for _, target := range r.targets(r.now, faucet.MaxPendingDeliveries) {
@@ -182,7 +181,7 @@ func scanTargetsSkipsSubscriptionsAtThePendingCap(t *testing.T, s faucet.Store) 
 	require.Empty(t, targets, "a subscription with as many unsent deliveries as the cap is not a target")
 	targets = r.targets(r.now, 3)
 	require.Len(t, targets, 1)
-	require.Equal(t, 2, targets[0].Pending)
+	require.EqualValues(t, 2, targets[0].Pending)
 }
 
 func scanTargetsIncludesASubscriptionThatAPurgeOvertook(t *testing.T, s faucet.Store) {
@@ -213,14 +212,14 @@ func enqueueDeliveriesMovesThePositionOnlyForTheCaller(t *testing.T, s faucet.St
 	targets := r.targets(r.now, 10)
 	require.Len(t, targets, 1)
 	require.Equal(t, r.events[2].ID, targets[0].ScannedThrough, "the position moved to the last event read, matching or not")
-	require.Equal(t, 2, targets[0].Pending)
+	require.EqualValues(t, 2, targets[0].Pending)
 
 	again := e
 	again.Deliveries = []faucet.NewDelivery{{EventID: r.events[1].ID, MessageID: "msg_c"}}
 	won, err = s.EnqueueDeliveries(r.ctx, r.now, again)
 	require.NoError(t, err)
 	require.False(t, won, "a caller that read from a position the subscription has left queues nothing")
-	require.Equal(t, 2, r.targets(r.now, 10)[0].Pending)
+	require.EqualValues(t, 2, r.targets(r.now, 10)[0].Pending)
 
 	empty := faucet.Enqueue{Key: r.sub.KeyHash, ExpectedScannedThrough: r.events[2].ID, NewScannedThrough: r.events[3].ID}
 	won, err = s.EnqueueDeliveries(r.ctx, r.now, empty)
@@ -271,7 +270,7 @@ func enqueueDeliveriesWinsOnceUnderConcurrency(t *testing.T, s faucet.Store) {
 	close(start)
 	wg.Wait()
 	require.Equal(t, 1, wins, "one caller moves the position and queues the deliveries")
-	require.Equal(t, 3, r.pending(), "the deliveries are queued once")
+	require.EqualValues(t, 3, r.pending(), "the deliveries are queued once")
 }
 
 func enqueueDeliveriesValidatesInput(t *testing.T, s faucet.Store) {
@@ -300,7 +299,7 @@ func claimDeliveryReturnsTheDeliveryWithItsEventSecretAndWatermark(t *testing.T,
 	first := r.mustClaim(r.now)
 	require.Equal(t, r.sub.KeyHash, first.Ref.Key)
 	require.Equal(t, r.events[0].ID, first.Ref.EventID, "the earliest event is due first")
-	require.Equal(t, 1, first.Ref.Attempt)
+	require.EqualValues(t, 1, first.Ref.Attempt)
 	require.Equal(t, messageIDOf(r.events[0]), first.MessageID)
 	require.True(t, r.now.Equal(first.EnqueuedAt))
 	require.Equal(t, r.sub.CallbackURL, first.CallbackURL)
@@ -346,7 +345,7 @@ func claimDeliveryGivesOneAttemptToOneCaller(t *testing.T, s faucet.Store) {
 	close(start)
 	wg.Wait()
 	require.Len(t, claimed, 1, "one caller holds the attempt")
-	require.Equal(t, 1, claimed[0].Ref.Attempt)
+	require.EqualValues(t, 1, claimed[0].Ref.Attempt)
 }
 
 func claimDeliveryLeaseRunsOutAndTheNextAttemptCounts(t *testing.T, s faucet.Store) {
@@ -358,7 +357,7 @@ func claimDeliveryLeaseRunsOutAndTheNextAttemptCounts(t *testing.T, s faucet.Sto
 	require.False(t, ok, "the lease still holds")
 
 	retaken := r.mustClaim(r.now.Add(testLease))
-	require.Equal(t, 2, retaken.Ref.Attempt, "a claim whose run never finished used its attempt")
+	require.EqualValues(t, 2, retaken.Ref.Attempt, "a claim whose run never finished used its attempt")
 	require.Equal(t, first.MessageID, retaken.MessageID, "the message ID is the same on every attempt")
 
 	res := r.finish(first.Ref, r.now.Add(testLease), faucet.Finish{Kind: faucet.FinishDelivered})
@@ -375,7 +374,7 @@ func claimDeliverySkipsExpiredSubscriptions(t *testing.T, s faucet.Store) {
 	require.False(t, ok, "an expired subscription gets no attempt")
 	claim, ok := r.claim(r.sub.ExpiresAt.Add(-time.Second))
 	require.True(t, ok, "one second before its expiry it does")
-	require.Equal(t, 1, claim.Ref.Attempt, "the refused claim took no attempt")
+	require.EqualValues(t, 1, claim.Ref.Attempt, "the refused claim took no attempt")
 }
 
 func claimDeliveryReturnsNoEventAfterAPurge(t *testing.T, s faucet.Store) {
@@ -394,7 +393,7 @@ func finishDeliveryNeedsTheCurrentAttempt(t *testing.T, s faucet.Store) {
 	r.enqueue(r.events...)
 	claim := r.mustClaim(r.now)
 
-	for _, attempt := range []int{2, claim.Ref.Attempt + 5} {
+	for _, attempt := range []int32{2, claim.Ref.Attempt + 5} {
 		stale := claim.Ref
 		stale.Attempt = attempt
 		res := r.finish(stale, r.now, faucet.Finish{Kind: faucet.FinishDelivered})
@@ -407,7 +406,7 @@ func finishDeliveryNeedsTheCurrentAttempt(t *testing.T, s faucet.Store) {
 	require.Error(t, err, "attempt 0 is no attempt, and a delivery that no one has claimed is at 0")
 	require.Equal(t, faucet.DeliveryStatus{}, r.status(), "a refused finish writes no status")
 	again := r.mustClaim(r.now.Add(testLease))
-	require.Equal(t, 2, again.Ref.Attempt, "the delivery is still queued")
+	require.EqualValues(t, 2, again.Ref.Attempt, "the delivery is still queued")
 
 	gone := claim.Ref
 	gone.EventID = claim.Ref.EventID + 1000
@@ -431,7 +430,7 @@ func finishDeliveryRetryReschedulesAndRecordsTheFailure(t *testing.T, s faucet.S
 	_, ok := r.claim(retryAt.Add(-time.Second))
 	require.False(t, ok, "the retry is not due yet, and the lease was released")
 	second := r.mustClaim(retryAt)
-	require.Equal(t, 2, second.Ref.Attempt)
+	require.EqualValues(t, 2, second.Ref.Attempt)
 
 	later := retryAt.Add(time.Minute)
 	r.finish(second.Ref, retryAt, faucet.Finish{Kind: faucet.FinishRetry, RetryAt: later, Failure: faucet.CallbackTimeout})
@@ -462,7 +461,7 @@ func finishDeliveryDeliveredEndsTheDeliveryAndClearsTheFailure(t *testing.T, s f
 	require.False(t, res.Accepted, "a delivery ends once")
 	next := r.mustClaim(deliveredAt)
 	require.Equal(t, r.events[0].ID, next.Ref.EventID, "the delivery that ended is not claimed again")
-	require.Equal(t, 2, next.Ref.Attempt)
+	require.EqualValues(t, 2, next.Ref.Attempt)
 }
 
 func finishDeliveryGiveUpRecordsOnlyWhatTheEndpointSaid(t *testing.T, s faucet.Store) {
@@ -555,7 +554,7 @@ func watermarkStaysBelowTheLowestUnsentEvent(t *testing.T, s faucet.Store) {
 
 	again := r.mustClaim(r.now.Add(11 * time.Minute))
 	require.Equal(t, r.events[0].ID-1, again.Watermark, "the lowest unsent event is the one that waits")
-	require.Equal(t, 2, again.Ref.Attempt)
+	require.EqualValues(t, 2, again.Ref.Attempt)
 	r.finish(again.Ref, r.now.Add(11*time.Minute), faucet.Finish{Kind: faucet.FinishDelivered})
 
 	next := r.addEvent()
