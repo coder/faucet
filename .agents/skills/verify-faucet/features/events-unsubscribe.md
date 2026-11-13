@@ -4,7 +4,7 @@ An agent ends a webhook subscription through `events/unsubscribe` on `POST /mcp`
 
 ## Sub-features
 
-- With webhook mode off the call is the error -32026 (see [events/list](events-list.md)). With it on, a bearer token that GitHub accepts and a matching `Mcp-Name` header are required, as for subscribe.
+- With webhook mode off the call is the error -32026 (see [events/list](events-list.md)). With it on, a bearer token that GitHub accepts and a matching `Mcp-Name` header are required, as for subscribe. Its params are read by exact member name too.
 - `params` are `name`, `arguments` (as for subscribe) and `delivery` with a `url`. The `secret` is not needed. The parameters are checked as for subscribe: an unknown event is -32023, a `delivery.mode` other than `webhook` is -32026, and a bad URL or arguments is -32602.
 - A match is deleted and the result is `resultType` `complete`.
 - A call that matches nothing is the error -32023 with `data` `{"kind": "subscription"}` and the message `no such subscription`. That covers a second call, a key nobody subscribed, and a key that only another principal subscribed. The three replies are the same, so one principal cannot tell that another holds a subscription. The other principal's row is not touched.
