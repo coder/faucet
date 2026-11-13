@@ -127,9 +127,8 @@ type prRef struct {
 	} `json:"base"`
 }
 
-// prNumbers keeps the pull requests whose base is repoID. GitHub also lists
-// pull requests that live in another repository, and their numbers mean
-// nothing here.
+// GitHub also lists pull requests whose base is another repository. Their
+// numbers mean nothing here.
 func prNumbers(repoID int64, refs []prRef) []int32 {
 	nums := make([]int32, 0, len(refs))
 	for _, r := range refs {

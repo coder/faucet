@@ -10,8 +10,8 @@ import (
 
 // Open returns a pool for the connection string url. It opens no connection.
 //
-// The error for a malformed url never mentions the url. lib/pq copies the
-// whole url, password included, into its own error, so Open drops that error.
+// The error never quotes url. lib/pq returns parse errors that contain the
+// connection string, password included, so Open replaces them.
 func Open(url string) (*sql.DB, error) {
 	connector, err := pq.NewConnector(url)
 	if err != nil {

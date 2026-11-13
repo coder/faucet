@@ -124,7 +124,6 @@ func newRequest(method string, body []byte, event, delivery string) *http.Reques
 	return req
 }
 
-// countingBody serves remaining bytes and counts how many the handler read.
 type countingBody struct {
 	remaining int64
 	read      int64
