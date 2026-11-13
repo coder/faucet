@@ -27,6 +27,7 @@ func Run(t *testing.T, newStore func(t *testing.T) faucet.Store) {
 		{"InsertEventValidatesInput", insertEventValidatesInput},
 		{"EventsAfterReturnsIDOrderAndLimit", eventsAfterReturnsIDOrderAndLimit},
 		{"ConcurrentInsertsCommitInIDOrder", concurrentInsertsCommitInIDOrder},
+		{"ConcurrentDuplicateDeliveryStoresOnce", concurrentDuplicateDeliveryStoresOnce},
 	}
 	for _, st := range subtests {
 		t.Run(st.name, func(t *testing.T) {
@@ -101,6 +102,8 @@ func insertEventValidatesInput(t *testing.T, s faucet.Store) {
 		"nil data":          func(ev *faucet.Event) { ev.Data = nil },
 		"empty data":        func(ev *faucet.Event) { ev.Data = json.RawMessage{} },
 		"invalid JSON data": func(ev *faucet.Event) { ev.Data = json.RawMessage(`{"a":`) },
+		"NUL in a value":    func(ev *faucet.Event) { ev.Data = json.RawMessage(`{"msg":"a\u0000b"}`) },
+		"NUL in a key":      func(ev *faucet.Event) { ev.Data = json.RawMessage(`{"a\u0000":[1]}`) },
 	}
 	for name, mutate := range bad {
 		ev := newEvent("delivery-bad")
@@ -249,4 +252,50 @@ func difference(a, b []int64) []int64 {
 		}
 	}
 	return out
+}
+
+// GitHub can redeliver a webhook while the first delivery is still in flight.
+// One race window is narrow, so the test runs several rounds to catch a store
+// that handles it wrongly on most runs, not only some.
+func concurrentDuplicateDeliveryStoresOnce(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	const (
+		rounds  = 8
+		writers = 16
+	)
+
+	type result struct {
+		id       int64
+		inserted bool
+		err      error
+	}
+	for round := range rounds {
+		deliveryID := fmt.Sprintf("delivery-dup-%d", round)
+		results := make([]result, writers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := range writers {
+			wg.Go(func() {
+				<-start
+				stored, inserted, err := s.InsertEvent(ctx, newEvent(deliveryID))
+				results[i] = result{id: stored.ID, inserted: inserted, err: err}
+			})
+		}
+		close(start)
+		wg.Wait()
+
+		insertedCount := 0
+		for _, r := range results {
+			require.NoError(t, r.err, "round %d", round)
+			require.Equal(t, results[0].id, r.id, "round %d: every writer must get the stored row", round)
+			if r.inserted {
+				insertedCount++
+			}
+		}
+		require.Equal(t, 1, insertedCount, "round %d", round)
+	}
+
+	events, err := s.EventsAfter(ctx, 0, rounds+1)
+	require.NoError(t, err)
+	require.Len(t, events, rounds)
 }

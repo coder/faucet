@@ -12,6 +12,11 @@ import (
 	"golang.org/x/xerrors"
 )
 
+// MigrationsTable records faucet's schema version. It is not golang-migrate's
+// default name, so faucet can share a database with a host such as coderd,
+// which already uses schema_migrations.
+const MigrationsTable = "faucet_schema_migrations"
+
 //go:embed migrations/*.sql
 var migrations embed.FS
 
@@ -30,7 +35,7 @@ func Migrate(ctx context.Context, db *sql.DB) (err error) {
 		_ = src.Close()
 		return xerrors.Errorf("acquire connection: %w", err)
 	}
-	driver, err := postgres.WithConnection(ctx, conn, &postgres.Config{})
+	driver, err := postgres.WithConnection(ctx, conn, &postgres.Config{MigrationsTable: MigrationsTable})
 	if err != nil {
 		_ = conn.Close()
 		_ = src.Close()
