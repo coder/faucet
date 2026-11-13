@@ -50,6 +50,10 @@ type ScanTarget struct {
 	// SecretEnc is the sealed secret, never the plaintext.
 	CallbackURL string
 	SecretEnc   []byte
+	// PreviousSecretEnc and PreviousSecretUntil are the subscription's, for the
+	// same envelope: the rotation window that signs it too.
+	PreviousSecretEnc   []byte
+	PreviousSecretUntil time.Time
 	// ScannedThrough is the highest event ID the enqueue has read for it.
 	ScannedThrough int64
 	// Pending is the number of deliveries it holds that have not ended.
@@ -115,6 +119,10 @@ type DeliveryClaim struct {
 	// secret, never the plaintext.
 	CallbackURL string
 	SecretEnc   []byte
+	// PreviousSecretEnc and PreviousSecretUntil are the subscription's,
+	// as of the claim: the rotation window that signs the attempt too.
+	PreviousSecretEnc   []byte
+	PreviousSecretUntil time.Time
 	// RepoID is the repository the subscription is granted now.
 	RepoID int64
 	// Watermark is the lowest unsent event ID of the subscription, minus one.
@@ -218,6 +226,9 @@ type DeliverResult struct {
 	Retried int
 	// GaveUp is the deliveries that ended without a success, by reason.
 	GaveUp map[GiveUpReason]int
+	// PreviousSecretsCleared is the subscriptions whose rotation window had
+	// ended, so that the run removed their previous secret.
+	PreviousSecretsCleared int
 	// Superseded is the attempts whose result the store refused, because
 	// another run owns the delivery now or its subscription was deleted. The
 	// other run counts its end.

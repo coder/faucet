@@ -23,6 +23,7 @@ var deliverySubtests = []subtest{
 	{"EnqueueDeliveriesWinsOnceUnderConcurrency", enqueueDeliveriesWinsOnceUnderConcurrency},
 	{"EnqueueDeliveriesValidatesInput", enqueueDeliveriesValidatesInput},
 	{"ClaimDeliveryReturnsTheDeliveryWithItsEventSecretAndWatermark", claimDeliveryReturnsTheDeliveryWithItsEventSecretAndWatermark},
+	{"ScanTargetsAndClaimsCarryThePreviousSecret", scanTargetsAndClaimsCarryThePreviousSecret},
 	{"ClaimDeliveryGivesOneAttemptToOneCaller", claimDeliveryGivesOneAttemptToOneCaller},
 	{"ClaimDeliveryLeaseRunsOutAndTheNextAttemptCounts", claimDeliveryLeaseRunsOutAndTheNextAttemptCounts},
 	{"ClaimDeliverySkipsExpiredSubscriptions", claimDeliverySkipsExpiredSubscriptions},
@@ -692,6 +693,28 @@ func scanPositionStartsAtTheCursorAndSurvivesARefresh(t *testing.T, s faucet.Sto
 	for _, target := range r.targets(lapsedAt, 10) {
 		require.NotEqual(t, started.KeyHash, target.KeyHash, "a replaced row starts at its new cursor, which is the head")
 	}
+}
+
+func scanTargetsAndClaimsCarryThePreviousSecret(t *testing.T, s faucet.Store) {
+	r := newRig(t, s, 1)
+	rotated := r.sub
+	rotated.SecretEnc = []byte("sealed-2")
+	rotated.RotationGrace = 5 * time.Minute
+	_, err := s.UpsertSubscription(r.ctx, rotated, r.now, 10)
+	require.NoError(t, err)
+	until := r.now.Add(5 * time.Minute)
+
+	targets := r.targets(r.now, 10)
+	require.Len(t, targets, 1)
+	require.Equal(t, []byte("sealed-2"), targets[0].SecretEnc)
+	require.Equal(t, []byte("sealed-1"), targets[0].PreviousSecretEnc, "the scan target carries the secret that the gap envelope is also signed with")
+	require.True(t, until.Equal(targets[0].PreviousSecretUntil), "got %s", targets[0].PreviousSecretUntil)
+
+	r.enqueue(r.events...)
+	claim := r.mustClaim(r.now)
+	require.Equal(t, []byte("sealed-2"), claim.SecretEnc)
+	require.Equal(t, []byte("sealed-1"), claim.PreviousSecretEnc, "the claim carries the secret that the delivery is also signed with")
+	require.True(t, until.Equal(claim.PreviousSecretUntil), "got %s", claim.PreviousSecretUntil)
 }
 
 // purgeLeavesBelowTheMarkOnlyTheSubscriptionsThatLostEvents pins what a gap

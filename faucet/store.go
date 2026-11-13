@@ -172,10 +172,13 @@ type Store interface {
 	// UpsertSubscription stores sub and returns the stored row. It calls
 	// sub.Validate(now). A row with the same KeyHash that expires after now is
 	// live: the call replaces its RepoID, SecretEnc and ExpiresAt and keeps its
-	// CreatedAt and Cursor. A row that has expired counts as absent and is
-	// replaced whole. When the principal already holds maxLive live
-	// subscriptions under other keys it returns ErrSubscriptionLimit and writes
-	// nothing. maxLive must be positive.
+	// CreatedAt and Cursor. When the new SecretEnc differs from the row's, the
+	// row's becomes PreviousSecretEnc until now plus RotationGrace (and a
+	// previous secret from an earlier rotation is dropped). When it is equal,
+	// the previous secret and its end stay as they were. A row that has
+	// expired counts as absent and is replaced whole. When the principal
+	// already holds maxLive live subscriptions under other keys it returns
+	// ErrSubscriptionLimit and writes nothing. maxLive must be positive.
 	UpsertSubscription(ctx context.Context, sub Subscription, now time.Time, maxLive int) (Subscription, error)
 	// DeleteSubscription deletes the subscription with this key if it belongs
 	// to principal, live or not, and reports whether it did. Another
@@ -190,6 +193,10 @@ type Store interface {
 	// DeleteExpiredSubscriptions deletes every subscription that expired at or
 	// before now and returns how many it deleted.
 	DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (int64, error)
+	// ClearExpiredPreviousSecrets removes the previous secret of every
+	// subscription whose PreviousSecretUntil is at or before now, and returns
+	// how many rows it cleared.
+	ClearExpiredPreviousSecrets(ctx context.Context, now time.Time) (int64, error)
 
 	// The rest of the interface is the delivery queue. A subscription's
 	// deliveries end with it: deleting a subscription deletes the deliveries it

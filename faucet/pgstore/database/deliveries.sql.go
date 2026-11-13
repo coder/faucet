@@ -62,7 +62,7 @@ WITH due AS (
 )
 SELECT
   c.key_hash, c.event_id, c.message_id, c.attempts, c.enqueued_at,
-  s.callback_url, s.secret_enc, s.repo_id,
+  s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.repo_id,
   (SELECT COALESCE(MIN(p.event_id), c.event_id) - 1 FROM faucet_deliveries p WHERE p.key_hash = c.key_hash)::bigint AS watermark,
   e.id AS stored_event_id, e.source, e.delivery_id, e.type, e.repo_id AS event_repo_id, e.prs, e.head_sha, COALESCE(e.data, 'null'::jsonb)::jsonb AS data, e.received_at
 FROM claimed c
@@ -76,24 +76,26 @@ type ClaimDeliveryParams struct {
 }
 
 type ClaimDeliveryRow struct {
-	KeyHash       []byte
-	EventID       int64
-	MessageID     string
-	Attempts      int32
-	EnqueuedAt    time.Time
-	CallbackUrl   string
-	SecretEnc     []byte
-	RepoID        int64
-	Watermark     int64
-	StoredEventID sql.NullInt64
-	Source        sql.NullString
-	DeliveryID    sql.NullString
-	Type          sql.NullString
-	EventRepoID   sql.NullInt64
-	Prs           []int32
-	HeadSha       sql.NullString
-	Data          json.RawMessage
-	ReceivedAt    sql.NullTime
+	KeyHash             []byte
+	EventID             int64
+	MessageID           string
+	Attempts            int32
+	EnqueuedAt          time.Time
+	CallbackUrl         string
+	SecretEnc           []byte
+	PreviousSecretEnc   []byte
+	PreviousSecretUntil sql.NullTime
+	RepoID              int64
+	Watermark           int64
+	StoredEventID       sql.NullInt64
+	Source              sql.NullString
+	DeliveryID          sql.NullString
+	Type                sql.NullString
+	EventRepoID         sql.NullInt64
+	Prs                 []int32
+	HeadSha             sql.NullString
+	Data                json.RawMessage
+	ReceivedAt          sql.NullTime
 }
 
 func (q *Queries) ClaimDelivery(ctx context.Context, arg ClaimDeliveryParams) (ClaimDeliveryRow, error) {
@@ -107,6 +109,8 @@ func (q *Queries) ClaimDelivery(ctx context.Context, arg ClaimDeliveryParams) (C
 		&i.EnqueuedAt,
 		&i.CallbackUrl,
 		&i.SecretEnc,
+		&i.PreviousSecretEnc,
+		&i.PreviousSecretUntil,
 		&i.RepoID,
 		&i.Watermark,
 		&i.StoredEventID,
@@ -297,7 +301,7 @@ WITH head AS (
   FROM faucet_events
 )
 SELECT
-  s.key_hash, s.event_type, s.arguments, s.repo_id, s.callback_url, s.secret_enc, s.scanned_through,
+  s.key_hash, s.event_type, s.arguments, s.repo_id, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.scanned_through,
   (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash)::int AS pending
 FROM faucet_subscriptions s, head
 WHERE s.expires_at > $1
@@ -321,14 +325,16 @@ type ScanTargetsParams struct {
 }
 
 type ScanTargetsRow struct {
-	KeyHash        []byte
-	EventType      string
-	Arguments      json.RawMessage
-	RepoID         int64
-	CallbackUrl    string
-	SecretEnc      []byte
-	ScannedThrough int64
-	Pending        int32
+	KeyHash             []byte
+	EventType           string
+	Arguments           json.RawMessage
+	RepoID              int64
+	CallbackUrl         string
+	SecretEnc           []byte
+	PreviousSecretEnc   []byte
+	PreviousSecretUntil sql.NullTime
+	ScannedThrough      int64
+	Pending             int32
 }
 
 func (q *Queries) ScanTargets(ctx context.Context, arg ScanTargetsParams) ([]ScanTargetsRow, error) {
@@ -347,6 +353,8 @@ func (q *Queries) ScanTargets(ctx context.Context, arg ScanTargetsParams) ([]Sca
 			&i.RepoID,
 			&i.CallbackUrl,
 			&i.SecretEnc,
+			&i.PreviousSecretEnc,
+			&i.PreviousSecretUntil,
 			&i.ScannedThrough,
 			&i.Pending,
 		); err != nil {

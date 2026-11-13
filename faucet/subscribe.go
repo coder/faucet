@@ -67,10 +67,12 @@ type webhookState struct {
 	verified              *callbackCache
 	client                *http.Client
 	idKey                 []byte
+	nonceKey              []byte
+	logger                slog.Logger
 	terminated            struct{ sent, failed atomic.Uint64 }
 }
 
-func newWebhookState(d WebhookDeps, clock quartz.Clock) (*webhookState, error) {
+func newWebhookState(d WebhookDeps, clock quartz.Clock, logger slog.Logger) (*webhookState, error) {
 	switch {
 	case d.Key == (WebhookKey{}):
 		return nil, xerrors.New("webhook key is required")
@@ -85,7 +87,7 @@ func newWebhookState(d WebhookDeps, clock quartz.Clock) (*webhookState, error) {
 	if client == nil {
 		client = NewHTTPClient(HTTPClientOptions{AllowInsecureLoopback: d.AllowInsecureLoopback})
 	}
-	return &webhookState{aead: aead, callbacks: d.Callbacks, allowInsecureLoopback: d.AllowInsecureLoopback, verified: newCallbackCache(clock), client: client, idKey: d.Key.messageIDKey()}, nil
+	return &webhookState{aead: aead, callbacks: d.Callbacks, allowInsecureLoopback: d.AllowInsecureLoopback, verified: newCallbackCache(clock), client: client, idKey: d.Key.messageIDKey(), nonceKey: d.Key.sealNonceKey(), logger: logger}, nil
 }
 
 // subscriptionParams holds the params of events/subscribe and
@@ -230,11 +232,8 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 	if err != nil {
 		return nil, subscriptionStoreError(ctx, logger, err)
 	}
-	sealed, err := sealSecret(wh.aead, req.secret, key[:])
-	if err != nil {
-		logger.Error(ctx, "seal subscriber secret", slog.Error(err))
-		return nil, rpcError(jsonrpc.CodeInternalError, errSubscriptionStore.Error(), nil)
-	}
+	sealed := sealSecret(wh.aead, wh.nonceKey, req.secret, key[:])
+	expiresAt := now.Add(req.ttl).Truncate(time.Second)
 	row, err := s.store.UpsertSubscription(ctx, Subscription{
 		KeyHash:     key,
 		Principal:   principal.Login,
@@ -244,7 +243,10 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 		RepoID:      repoID,
 		SecretEnc:   sealed,
 		Cursor:      start,
-		ExpiresAt:   now.Add(req.ttl).Truncate(time.Second),
+		ExpiresAt:   expiresAt,
+		// The window never outlasts the grant, so a previous secret cannot
+		// outlive its subscription.
+		RotationGrace: min(rotationGrace, expiresAt.Sub(now)),
 	}, now, maxLiveSubscriptions)
 	switch {
 	case xerrors.Is(err, ErrSubscriptionLimit):

@@ -123,6 +123,9 @@ export interface SubscriptionRow {
   arguments: Record<string, unknown>;
   repo_id: number;
   secret_enc: string;
+  // previous_secret_enc and previous_secret_until are null unless a rotation window runs or ended and no delivery run has cleared it.
+  previous_secret_enc: string | null;
+  previous_secret_until: number | null;
   cursor: number;
   created_at: number;
   updated_at: number;
@@ -428,19 +431,23 @@ export class Faucet {
     const ms = (column: string): string => `floor(extract(epoch from ${column}) * 1000)::bigint as ${column}`;
     const query = `select coalesce(json_agg(t order by created_at, callback_url), '[]') from (
       select encode(key_hash, 'hex') as key_hash, principal, callback_url, event_type, arguments, repo_id,
-        encode(secret_enc, 'hex') as secret_enc, cursor, ${ms('created_at')}, ${ms('updated_at')}, ${ms('expires_at')}
+        encode(secret_enc, 'hex') as secret_enc, encode(previous_secret_enc, 'hex') as previous_secret_enc, ${ms('previous_secret_until')},
+        cursor, ${ms('created_at')}, ${ms('updated_at')}, ${ms('expires_at')}
       from faucet_subscriptions where position('${marker}' in callback_url) > 0) t`;
     return JSON.parse(await this.sql(query)) as SubscriptionRow[];
   }
 
   // secretCopies counts the rows of faucet_subscriptions that hold the subscriber secret in any column: as text, as the
-  // text without its whsec_ prefix, or as the decoded bytes, which is how a plaintext bytea column would hold it.
+  // text without its whsec_ prefix, or as the decoded bytes, which is how a plaintext bytea column (secret_enc or
+  // previous_secret_enc) would hold it.
   async secretCopies(secret: string): Promise<number> {
     if (!/^whsec_[A-Za-z0-9+/]+=*$/.test(secret)) throw new Error('secret must be a whsec_ value in standard base64');
     const encoded = secret.slice('whsec_'.length);
     const query = `select count(*) from faucet_subscriptions t where strpos(t::text, '${encoded}') > 0
       or position(convert_to('${encoded}', 'UTF8') in t.secret_enc) > 0
-      or position(decode('${encoded}', 'base64') in t.secret_enc) > 0`;
+      or position(decode('${encoded}', 'base64') in t.secret_enc) > 0
+      or position(convert_to('${encoded}', 'UTF8') in t.previous_secret_enc) > 0
+      or position(decode('${encoded}', 'base64') in t.previous_secret_enc) > 0`;
     return Number(await this.sql(query));
   }
 
@@ -450,6 +457,15 @@ export class Faucet {
     if (!/^[0-9a-z-]{8,}$/.test(marker)) throw new Error('marker must be 8 or more lowercase letters, digits or hyphens');
     const query = `with moved as (update faucet_subscriptions set expires_at = now() - interval '1 minute'
       where position('${marker}' in callback_url) > 0 returning 1) select count(*) from moved`;
+    return Number(await this.sql(query));
+  }
+
+  // endRotationWindows moves the end of the rotation window of the rows whose callback URL holds marker into the past, which
+  // the clock of the server cannot be made to do (a window lasts up to 10 minutes). It returns how many rows it changed.
+  async endRotationWindows(marker: string): Promise<number> {
+    if (!/^[0-9a-z-]{8,}$/.test(marker)) throw new Error('marker must be 8 or more lowercase letters, digits or hyphens');
+    const query = `with moved as (update faucet_subscriptions set previous_secret_until = now() - interval '1 second'
+      where position('${marker}' in callback_url) > 0 and previous_secret_enc is not null returning 1) select count(*) from moved`;
     return Number(await this.sql(query));
   }
 
@@ -487,6 +503,13 @@ export class Faucet {
     const sealKey = key ?? (this.#target.webhookKey === null ? null : Buffer.from(this.#target.webhookKey, 'base64'));
     if (sealKey === null) throw new Error('this faucet has no webhook key');
     return openSealedSecret(sealKey, row.secret_enc, row.key_hash);
+  }
+
+  // openPreviousSecret opens previous_secret_enc, sealed like secret_enc, with this server's key.
+  openPreviousSecret(row: SubscriptionRow): string {
+    if (row.previous_secret_enc === null) throw new Error('the row has no previous secret');
+    if (this.#target.webhookKey === null) throw new Error('this faucet has no webhook key');
+    return openSealedSecret(Buffer.from(this.#target.webhookKey, 'base64'), row.previous_secret_enc, row.key_hash);
   }
 
   async sql(query: string): Promise<string> {

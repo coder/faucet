@@ -85,7 +85,7 @@ func New(d Deps) (*Service, error) {
 	}
 	if d.Webhook != nil {
 		var err error
-		if svc.webhook, err = newWebhookState(*d.Webhook, d.Clock); err != nil {
+		if svc.webhook, err = newWebhookState(*d.Webhook, d.Clock, d.Logger); err != nil {
 			return nil, xerrors.Errorf("webhook: %w", err)
 		}
 		svc.listed = describeEvents([]string{deliveryPoll, deliveryWebhook})

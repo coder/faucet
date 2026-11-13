@@ -50,20 +50,21 @@ type gapEnvelope struct {
 }
 
 // sendEnvelope signs one control envelope of SEP-3415 with the subscription's
-// stored secret and posts it once through the guarded client. It returns ""
+// stored secrets, which are the current one and, during a rotation window, the
+// previous one, and posts it once through the guarded client. It returns ""
 // when the endpoint answered 2xx, and else the category of the failure. It
-// never retries: the caller counts and logs the failure. The secret is opened
-// here, to sign, and goes nowhere else.
-func (wh *webhookState) sendEnvelope(ctx context.Context, now time.Time, kind string, key SubscriptionKeyHash, callbackURL string, sealed []byte, envelope any) string {
+// never retries: the caller counts and logs the failure. The secrets are opened
+// here, to sign, and go nowhere else.
+func (wh *webhookState) sendEnvelope(ctx context.Context, now time.Time, kind string, key SubscriptionKeyHash, callbackURL string, sealed sealedSecrets, envelope any) string {
 	body, err := json.Marshal(envelope)
 	if err != nil {
 		return failureEnvelopeEncoding
 	}
-	secret, err := openSecret(wh.aead, sealed, key[:])
+	secrets, err := wh.signingSecrets(ctx, now, key, sealed)
 	if err != nil {
 		return failureSecretUnreadable
 	}
-	headers, err := SignWebhook(string(secret), newEnvelopeID(kind), now, body)
+	headers, err := signWithSecrets(secrets, newEnvelopeID(kind), now, body)
 	if err != nil {
 		return failureSecretUnreadable
 	}
@@ -129,7 +130,7 @@ func (s *Service) endRevokedSubscription(ctx context.Context, logger slog.Logger
 		return
 	}
 	logger = logger.With(slog.F("subscription", key.ID()), slog.F("login", principal.Login))
-	failure := wh.sendEnvelope(context.WithoutCancel(ctx), s.clock.Now(), envelopeTerminated, key, row.CallbackURL, row.SecretEnc,
+	failure := wh.sendEnvelope(context.WithoutCancel(ctx), s.clock.Now(), envelopeTerminated, key, row.CallbackURL, row.sealedSecrets(),
 		terminatedEnvelope{Type: envelopeTerminated, Error: terminatedError{Code: codeForbidden, Message: "Forbidden", Data: map[string]string{"reason": "Access revoked"}}})
 	if failure == "" {
 		wh.terminated.sent.Add(1)

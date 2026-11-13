@@ -208,16 +208,17 @@ func (s *Store) UpsertSubscription(ctx context.Context, sub faucet.Subscription,
 		return faucet.Subscription{}, faucet.ErrSubscriptionLimit
 	}
 	row, err := q.UpsertSubscription(ctx, database.UpsertSubscriptionParams{
-		KeyHash:     sub.KeyHash[:],
-		Principal:   sub.Principal,
-		CallbackUrl: sub.CallbackURL,
-		EventType:   sub.EventType,
-		Arguments:   sub.Arguments,
-		RepoID:      sub.RepoID,
-		SecretEnc:   sub.SecretEnc,
-		Cursor:      sub.Cursor,
-		Now:         now,
-		ExpiresAt:   sub.ExpiresAt,
+		KeyHash:             sub.KeyHash[:],
+		Principal:           sub.Principal,
+		CallbackUrl:         sub.CallbackURL,
+		EventType:           sub.EventType,
+		Arguments:           sub.Arguments,
+		RepoID:              sub.RepoID,
+		SecretEnc:           sub.SecretEnc,
+		Cursor:              sub.Cursor,
+		Now:                 now,
+		ExpiresAt:           sub.ExpiresAt,
+		PreviousSecretUntil: sql.NullTime{Time: now.Add(sub.RotationGrace), Valid: sub.RotationGrace > 0},
 	})
 	if err != nil {
 		return faucet.Subscription{}, xerrors.Errorf("upsert subscription: %w", err)
@@ -256,23 +257,33 @@ func (s *Store) DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (
 	return deleted, nil
 }
 
+func (s *Store) ClearExpiredPreviousSecrets(ctx context.Context, now time.Time) (int64, error) {
+	cleared, err := s.q.ClearExpiredPreviousSecrets(ctx, now)
+	if err != nil {
+		return 0, xerrors.Errorf("clear expired previous secrets: %w", err)
+	}
+	return cleared, nil
+}
+
 func toSubscription(row database.FaucetSubscription) (faucet.Subscription, error) {
 	key, err := toKeyHash(row.KeyHash)
 	if err != nil {
 		return faucet.Subscription{}, err
 	}
 	return faucet.Subscription{
-		KeyHash:     key,
-		Principal:   row.Principal,
-		CallbackURL: row.CallbackUrl,
-		EventType:   row.EventType,
-		Arguments:   row.Arguments,
-		RepoID:      row.RepoID,
-		SecretEnc:   row.SecretEnc,
-		Cursor:      row.Cursor,
-		CreatedAt:   row.CreatedAt,
-		UpdatedAt:   row.UpdatedAt,
-		ExpiresAt:   row.ExpiresAt,
+		KeyHash:             key,
+		Principal:           row.Principal,
+		CallbackURL:         row.CallbackUrl,
+		EventType:           row.EventType,
+		Arguments:           row.Arguments,
+		RepoID:              row.RepoID,
+		SecretEnc:           row.SecretEnc,
+		PreviousSecretEnc:   row.PreviousSecretEnc,
+		PreviousSecretUntil: row.PreviousSecretUntil.Time,
+		Cursor:              row.Cursor,
+		CreatedAt:           row.CreatedAt,
+		UpdatedAt:           row.UpdatedAt,
+		ExpiresAt:           row.ExpiresAt,
 		Status: faucet.DeliveryStatus{
 			LastDeliveryAt: row.LastDeliveryAt.Time,
 			LastError:      faucet.CallbackReason(row.LastError.String),

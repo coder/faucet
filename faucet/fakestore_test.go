@@ -1,6 +1,7 @@
 package faucet_test
 
 import (
+	"bytes"
 	"context"
 	"maps"
 	"slices"
@@ -149,8 +150,17 @@ func (s *fakeStore) UpsertSubscription(_ context.Context, sub faucet.Subscriptio
 	}
 	sub.CreatedAt, sub.UpdatedAt = now, now
 	sub.Status = faucet.DeliveryStatus{}
+	sub.PreviousSecretEnc, sub.PreviousSecretUntil = nil, time.Time{}
+	grace := sub.RotationGrace
+	sub.RotationGrace = 0
 	if row, ok := s.subs[sub.KeyHash]; ok {
 		sub.CreatedAt, sub.Cursor, sub.Status = row.CreatedAt, row.Cursor, row.Status
+		switch {
+		case bytes.Equal(row.SecretEnc, sub.SecretEnc):
+			sub.PreviousSecretEnc, sub.PreviousSecretUntil = row.PreviousSecretEnc, row.PreviousSecretUntil
+		case grace > 0:
+			sub.PreviousSecretEnc, sub.PreviousSecretUntil = row.SecretEnc, now.Add(grace)
+		}
 	} else {
 		s.scanned[sub.KeyHash] = sub.Cursor
 	}
@@ -200,6 +210,23 @@ func (s *fakeStore) DeleteExpiredSubscriptions(_ context.Context, now time.Time)
 		}
 	}
 	return deleted, nil
+}
+
+func (s *fakeStore) ClearExpiredPreviousSecrets(_ context.Context, now time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return 0, s.err
+	}
+	var cleared int64
+	for key, row := range s.subs {
+		if row.PreviousSecretEnc != nil && !row.PreviousSecretUntil.After(now) {
+			row.PreviousSecretEnc, row.PreviousSecretUntil = nil, time.Time{}
+			s.subs[key] = row
+			cleared++
+		}
+	}
+	return cleared, nil
 }
 
 func (s *fakeStore) subscriptions() []faucet.Subscription {

@@ -56,6 +56,21 @@ type Subscription struct {
 	// SecretEnc is the subscriber's signing secret, sealed. It is never the
 	// plaintext.
 	SecretEnc []byte
+	// PreviousSecretEnc is the secret that SecretEnc replaced, sealed like it,
+	// while the grace window of a rotation runs, and nil otherwise. The store
+	// assigns it, so UpsertSubscription ignores the field.
+	PreviousSecretEnc []byte
+	// PreviousSecretUntil is when PreviousSecretEnc stops signing, and zero
+	// when it is nil. The store assigns it, so UpsertSubscription ignores the
+	// field. A reader treats a value at or before the time of its send as
+	// "no previous secret", because the store clears expired ones only when
+	// ClearExpiredPreviousSecrets runs.
+	PreviousSecretUntil time.Time
+	// RotationGrace is an input of UpsertSubscription and is never returned:
+	// when the call replaces the SecretEnc of a live row with a different
+	// value, the replaced one becomes PreviousSecretEnc for this long. Zero
+	// starts no window and drops any previous secret.
+	RotationGrace time.Duration
 	// Cursor is the event ID after which delivery starts. A refresh of a live
 	// subscription keeps it.
 	Cursor int64
@@ -69,9 +84,10 @@ type Subscription struct {
 }
 
 // Validate checks the fields a caller supplies to Store.UpsertSubscription.
-// CreatedAt, UpdatedAt and Status are ignored because the store assigns them. It
-// requires KeyHash to be the hash of the identity fields, so a row cannot
-// carry the key of another principal's subscription.
+// CreatedAt, UpdatedAt, Status, PreviousSecretEnc and PreviousSecretUntil are
+// ignored because the store assigns them. It requires KeyHash to be the hash
+// of the identity fields, so a row cannot carry the key of another principal's
+// subscription.
 func (s Subscription) Validate(now time.Time) error {
 	switch {
 	case s.Principal == "":
@@ -90,6 +106,8 @@ func (s Subscription) Validate(now time.Time) error {
 		return xerrors.New("cursor must not be negative")
 	case !s.ExpiresAt.After(now):
 		return xerrors.New("expiry must be after now")
+	case s.RotationGrace < 0 || now.Add(s.RotationGrace).After(s.ExpiresAt):
+		return xerrors.New("rotation grace must not be negative or outlast the expiry")
 	case s.KeyHash != NewSubscriptionKeyHash(s.Principal, s.CallbackURL, s.EventType, s.Arguments):
 		return xerrors.New("key hash does not match the principal, callback URL, event type and arguments")
 	}
