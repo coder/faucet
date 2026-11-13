@@ -577,6 +577,11 @@ export class Receiver {
     await this.#call('PUT', '/__receiver/secrets', { id, secret });
   }
 
+  // revoke makes the GitHub stub answer 404 for the repository from now on, as it does after a principal loses access.
+  async revoke(repoId: number): Promise<void> {
+    await this.#call('PUT', '/__receiver/revoked', { repoId });
+  }
+
   async requests(id: string): Promise<ReceivedRequest[]> {
     return (await this.#call('GET', `/__receiver/requests?id=${encodeURIComponent(id)}`)) as ReceivedRequest[];
   }
