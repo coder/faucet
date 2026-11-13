@@ -7,7 +7,8 @@ const HANDSHAKE_ENV = { FAUCET_WEBHOOK_KEY: randomBytes(32).toString('base64'), 
 const run = samples['workflow_run.completed'];
 
 export const MESSAGE_ID = /^msg_[A-Za-z0-9_-]{22}$/;
-export const SIGNATURE = /^v1,[A-Za-z0-9+/]{43}=$/;
+// SIGNATURES is the webhook-signature header: one entry, or one per secret while a rotation window runs.
+export const SIGNATURES = /^v1,[A-Za-z0-9+/]{43}=( v1,[A-Za-z0-9+/]{43}=)*$/;
 export const CATEGORY = /^(connection_refused|timeout|tls_error|http_4xx|http_5xx|challenge_failed)$/;
 
 // Endpoint is a callback URL on the receiver, with the secret that the receiver checks signatures with. The URL has the id in
@@ -61,12 +62,13 @@ export interface DeliverReply {
   retried: number;
   gave_up: Record<string, number>;
   superseded: number;
+  previous_secrets_cleared: number;
   incomplete: boolean;
 }
 
 // counts is the reply of a run that did what over says and nothing else.
 export function counts(over: Partial<DeliverReply> = {}): DeliverReply {
-  return { enqueued: 0, gaps: 0, gaps_sent: 0, gaps_failed: 0, claimed: 0, sent: 0, delivered: 0, retried: 0, gave_up: {}, superseded: 0, incomplete: false, ...over };
+  return { enqueued: 0, gaps: 0, gaps_sent: 0, gaps_failed: 0, claimed: 0, sent: 0, delivered: 0, retried: 0, gave_up: {}, superseded: 0, previous_secrets_cleared: 0, incomplete: false, ...over };
 }
 
 export function parseReply(reply: Reply): DeliverReply {
@@ -110,7 +112,7 @@ export function expectSignedEnvelope(request: ReceivedRequest, type: 'gap' | 'te
   expect(headers['content-type']).toBe('application/json');
   expect(headers['webhook-id']).toMatch(new RegExp(`^msg_${type}_[A-Za-z0-9_-]{22}$`));
   expect(Math.abs(Number(headers['webhook-timestamp']) - Date.now() / 1000)).toBeLessThan(60);
-  expect(headers['webhook-signature']).toMatch(SIGNATURE);
+  expect(headers['webhook-signature']).toMatch(SIGNATURES);
   expect(headers['x-mcp-subscription-id']).toBe(subscriptionId);
   expect(headers.authorization).toBeUndefined();
   expect(headers.cookie).toBeUndefined();
@@ -128,7 +130,7 @@ export function expectSigned(request: ReceivedRequest, subscriptionId: string): 
   expect(headers['content-type']).toBe('application/json');
   expect(headers['webhook-id']).toMatch(MESSAGE_ID);
   expect(Math.abs(Number(headers['webhook-timestamp']) - Date.now() / 1000)).toBeLessThan(60);
-  expect(headers['webhook-signature']).toMatch(SIGNATURE);
+  expect(headers['webhook-signature']).toMatch(SIGNATURES);
   expect(headers['x-mcp-subscription-id']).toBe(subscriptionId);
   expect(headers.authorization).toBeUndefined();
   expect(headers.cookie).toBeUndefined();
