@@ -232,6 +232,7 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 		return nil, subscriptionStoreError(ctx, logger, err)
 	}
 	sealed := sealSecret(wh.aead, wh.nonceKey, req.secret, key[:])
+	expiresAt := now.Add(req.ttl).Truncate(time.Second)
 	row, err := s.store.UpsertSubscription(ctx, Subscription{
 		KeyHash:     key,
 		Principal:   principal.Login,
@@ -241,7 +242,10 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 		RepoID:      repoID,
 		SecretEnc:   sealed,
 		Cursor:      start,
-		ExpiresAt:   now.Add(req.ttl).Truncate(time.Second),
+		ExpiresAt:   expiresAt,
+		// The window never outlasts the grant, so a previous secret cannot
+		// outlive its subscription.
+		RotationGrace: min(rotationGrace, expiresAt.Sub(now)),
 	}, now, maxLiveSubscriptions)
 	switch {
 	case xerrors.Is(err, ErrSubscriptionLimit):

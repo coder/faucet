@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/xerrors"
@@ -20,24 +21,39 @@ const maxMessageIDBytes = 128
 // 128 letters, digits, underscores or hyphens. The errors never contain the
 // secret.
 func SignWebhook(secret, id string, timestamp time.Time, body []byte) (http.Header, error) {
-	key, ok := decodeSecret(secret)
+	return signWebhook([]subscriberSecret{subscriberSecret(secret)}, id, timestamp, body)
+}
+
+// signWebhook is SignWebhook for one or more secrets. The signature header
+// holds one "v1," entry per secret, in the order given, space-delimited, as
+// Standard Webhooks defines for a rotation: a receiver accepts the message when
+// any entry verifies.
+func signWebhook(secrets []subscriberSecret, id string, timestamp time.Time, body []byte) (http.Header, error) {
 	switch {
-	case !ok:
-		return nil, xerrors.New("webhook secret is not a whsec_ value of 24 to 64 bytes")
+	case len(secrets) == 0:
+		return nil, xerrors.New("webhook needs at least one secret to sign with")
 	case !validMessageID(id):
 		return nil, xerrors.Errorf("webhook id must be 1 to %d letters, digits, underscores or hyphens", maxMessageIDBytes)
 	case timestamp.Unix() <= 0:
 		return nil, xerrors.New("webhook timestamp must be after 1970")
 	}
 	seconds := strconv.FormatInt(timestamp.Unix(), 10)
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte(id + "." + seconds + "."))
-	_, _ = mac.Write(body)
+	signatures := make([]string, len(secrets))
+	for i, secret := range secrets {
+		key, ok := decodeSecret(string(secret))
+		if !ok {
+			return nil, xerrors.New("webhook secret is not a whsec_ value of 24 to 64 bytes")
+		}
+		mac := hmac.New(sha256.New, key)
+		_, _ = mac.Write([]byte(id + "." + seconds + "."))
+		_, _ = mac.Write(body)
+		signatures[i] = "v1," + base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	}
 
 	headers := http.Header{}
 	headers.Set("webhook-id", id)
 	headers.Set("webhook-timestamp", seconds)
-	headers.Set("webhook-signature", "v1,"+base64.StdEncoding.EncodeToString(mac.Sum(nil)))
+	headers.Set("webhook-signature", strings.Join(signatures, " "))
 	return headers, nil
 }
 

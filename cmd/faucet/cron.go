@@ -83,18 +83,19 @@ func (c cronRoutes) deliver(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, struct {
-		Enqueued   int                         `json:"enqueued"`
-		Gaps       int                         `json:"gaps"`
-		GapsSent   int                         `json:"gaps_sent"`
-		GapsFailed int                         `json:"gaps_failed"`
-		Claimed    int                         `json:"claimed"`
-		Sent       int                         `json:"sent"`
-		Delivered  int                         `json:"delivered"`
-		Retried    int                         `json:"retried"`
-		GaveUp     map[faucet.GiveUpReason]int `json:"gave_up"`
-		Superseded int                         `json:"superseded"`
-		Incomplete bool                        `json:"incomplete"`
-	}{res.Enqueued, res.Gaps, res.GapsSent, res.GapsFailed, res.Claimed, res.Sent, res.Delivered, res.Retried, res.GaveUp, res.Superseded, res.Incomplete})
+		Enqueued               int                         `json:"enqueued"`
+		Gaps                   int                         `json:"gaps"`
+		GapsSent               int                         `json:"gaps_sent"`
+		GapsFailed             int                         `json:"gaps_failed"`
+		Claimed                int                         `json:"claimed"`
+		Sent                   int                         `json:"sent"`
+		Delivered              int                         `json:"delivered"`
+		Retried                int                         `json:"retried"`
+		GaveUp                 map[faucet.GiveUpReason]int `json:"gave_up"`
+		Superseded             int                         `json:"superseded"`
+		PreviousSecretsCleared int                         `json:"previous_secrets_cleared"`
+		Incomplete             bool                        `json:"incomplete"`
+	}{res.Enqueued, res.Gaps, res.GapsSent, res.GapsFailed, res.Claimed, res.Sent, res.Delivered, res.Retried, res.GaveUp, res.Superseded, res.PreviousSecretsCleared, res.Incomplete})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

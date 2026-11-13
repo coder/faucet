@@ -107,6 +107,9 @@ func (s *Service) DeliverDue(ctx context.Context) (DeliverResult, error) {
 	if err := run.sweepExpired(ctx); err != nil {
 		return run.result, run.unlessEnded(ctx, err)
 	}
+	if err := run.sweepPreviousSecrets(ctx); err != nil {
+		return run.result, run.unlessEnded(ctx, err)
+	}
 	err := run.send(ctx)
 	res := run.result
 	logger := s.logger.Debug
@@ -219,7 +222,7 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 // resumes from it loses none of them, and every watermark that a later event
 // carries is at or above it.
 func (r *deliveryRun) sendGap(ctx context.Context, logger slog.Logger, target ScanTarget, purgedThrough int64) {
-	failure := r.wh.sendEnvelope(ctx, r.svc.clock.Now(), envelopeGap, target.KeyHash, target.CallbackURL, target.SecretEnc,
+	failure := r.wh.sendEnvelope(ctx, r.svc.clock.Now(), envelopeGap, target.KeyHash, target.CallbackURL, target.sealedSecrets(),
 		gapEnvelope{Type: envelopeGap, Cursor: encodeCursor(purgedThrough)})
 	logger = logger.With(slog.F("scanned_through", target.ScannedThrough), slog.F("purged_through", purgedThrough))
 	if failure == "" {
@@ -245,6 +248,18 @@ func (r *deliveryRun) sweepExpired(ctx context.Context) error {
 	if deleted > 0 {
 		r.svc.logger.Info(ctx, "deliveries of expired subscriptions ended", slog.F("count", deleted))
 		r.add(func(res *DeliverResult) { res.GaveUp[GiveUpSubscriptionExpired] += int(deleted) })
+	}
+	return nil
+}
+
+func (r *deliveryRun) sweepPreviousSecrets(ctx context.Context) error {
+	cleared, err := r.svc.store.ClearExpiredPreviousSecrets(ctx, r.svc.clock.Now())
+	if err != nil {
+		return xerrors.Errorf("clear expired previous secrets: %w", err)
+	}
+	if cleared > 0 {
+		r.svc.logger.Info(ctx, "previous secrets of ended rotations removed", slog.F("count", cleared))
+		r.add(func(res *DeliverResult) { res.PreviousSecretsCleared += int(cleared) })
 	}
 	return nil
 }
@@ -404,7 +419,7 @@ func (r *deliveryRun) decide(ctx context.Context, claim DeliveryClaim) attemptOu
 	case now.Sub(claim.EnqueuedAt) > DeliveryWindow:
 		return giveUp(GiveUpWindowExpired)
 	}
-	secret, err := openSecret(r.wh.aead, claim.SecretEnc, claim.Ref.Key[:])
+	secrets, err := r.wh.signingSecrets(now, claim.Ref.Key, claim.sealedSecrets())
 	if err != nil {
 		return attemptOutcome{finish: Finish{Kind: FinishDead, Unreadable: claim.SecretEnc}, reason: GiveUpSecretUnreadable}
 	}
@@ -412,7 +427,7 @@ func (r *deliveryRun) decide(ctx context.Context, claim DeliveryClaim) attemptOu
 	if !ok {
 		return outcome
 	}
-	headers, err := SignWebhook(string(secret), claim.MessageID, now, body)
+	headers, err := signWebhook(secrets, claim.MessageID, now, body)
 	if err != nil {
 		return attemptOutcome{finish: Finish{Kind: FinishDead, Unreadable: claim.SecretEnc}, reason: GiveUpSecretUnreadable}
 	}

@@ -226,6 +226,9 @@ type DeliverResult struct {
 	Retried int
 	// GaveUp is the deliveries that ended without a success, by reason.
 	GaveUp map[GiveUpReason]int
+	// PreviousSecretsCleared is the subscriptions whose rotation window had
+	// ended, so that the run removed their previous secret.
+	PreviousSecretsCleared int
 	// Superseded is the attempts whose result the store refused, because
 	// another run owns the delivery now or its subscription was deleted. The
 	// other run counts its end.
