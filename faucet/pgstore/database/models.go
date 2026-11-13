@@ -27,6 +27,35 @@ type FaucetPurgeMark struct {
 	PurgedThrough int64
 }
 
+type FaucetRedelivery struct {
+	Guid           string
+	State          string
+	Reason         sql.NullString
+	LastAttemptID  int64
+	LastAttemptAt  time.Time
+	FirstAttemptAt time.Time
+	Asks           int32
+	NextAskAt      time.Time
+	SettledAt      sql.NullTime
+}
+
+type FaucetRedeliveryRange struct {
+	ID       int64
+	State    string
+	NewerAt  time.Time
+	OlderAt  time.Time
+	Cursor   string
+	ClosedAt sql.NullTime
+}
+
+type FaucetRedeliveryScan struct {
+	ID         bool
+	Hook       string
+	Epoch      int64
+	LeaseUntil sql.NullTime
+	TopAt      sql.NullTime
+}
+
 type FaucetSubscription struct {
 	KeyHash     []byte
 	Principal   string

@@ -29,6 +29,15 @@ func TestStore(t *testing.T) {
 	})
 }
 
+func TestRedeliveryStore(t *testing.T) {
+	t.Parallel()
+	adminURL := testDatabaseURL(t)
+
+	storetest.RunRedelivery(t, func(t *testing.T) storetest.RedeliveryStore {
+		return pgstore.New(newDatabase(t, adminURL))
+	})
+}
+
 func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {
 	t.Parallel()
 	adminURL := testDatabaseURL(t)
@@ -47,7 +56,7 @@ func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {
 	require.EqualValues(t, 400, hostVersion)
 	var faucetVersion int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM `+pq.QuoteIdentifier(pgstore.MigrationsTable)).Scan(&faucetVersion))
-	require.EqualValues(t, 3, faucetVersion)
+	require.EqualValues(t, 4, faucetVersion)
 }
 
 func testDatabaseURL(t *testing.T) string {
