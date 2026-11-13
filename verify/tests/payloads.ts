@@ -1,6 +1,16 @@
 const HEAD_SHA = '0123456789abcdef0123456789abcdef01234567';
 const MERGE_SHA = 'fedcba9876543210fedcba9876543210fedcba98';
+const BASE_SHA = '00112233445566778899aabbccddeeff00112233';
 const PR = 7;
+const FORK_PR = 99;
+
+function pullRequestRef(number: number, repoId: number, baseRepoId: number = repoId): object {
+  return {
+    number,
+    head: { ref: 'feat/example', sha: HEAD_SHA, repo: { id: repoId } },
+    base: { ref: 'main', sha: BASE_SHA, repo: { id: baseRepoId } },
+  };
+}
 
 export interface Sample {
   event: string;
@@ -41,7 +51,7 @@ export const samples: Record<string, Sample> = {
         head_sha: HEAD_SHA,
         html_url: 'https://github.com/example/repo/actions/runs/9001',
         run_attempt: 2,
-        pull_requests: [{ number: PR }],
+        pull_requests: [pullRequestRef(PR, repoId), pullRequestRef(FORK_PR, repoId, repoId + 1)],
       },
     }),
     expected: {
@@ -69,7 +79,11 @@ export const samples: Record<string, Sample> = {
         conclusion: 'failure',
         head_sha: HEAD_SHA,
         html_url: 'https://github.com/example/repo/runs/9002',
-        pull_requests: [{ number: PR }, { number: PR + 1 }],
+        pull_requests: [
+          pullRequestRef(PR, repoId),
+          pullRequestRef(PR + 1, repoId),
+          pullRequestRef(FORK_PR, repoId, repoId + 1),
+        ],
         app: { slug: 'github-actions' },
       },
     }),
