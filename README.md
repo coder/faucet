@@ -8,10 +8,10 @@ It is a Go library first, with a thin HTTP server on top, so coder/coder can emb
 
 PR 6 of 8. Faucet receives GitHub webhooks, stores them as typed events, and lets an agent wait for them through the `wait_for_github_events` MCP tool, or poll them with the MCP Events extension (SEP-3415). It deletes old events and tells a waiting agent when a purge deleted events after its cursor. An agent can also subscribe a callback URL with `events/subscribe`. Faucet stores the subscription. It does not send any event yet, which PR 7 adds. The first half of PR 7 adds what delivery needs: a guarded HTTP client, a webhook signer and the handshake that checks a callback URL.
 
-- `faucet`: `Event`, `Store`, `Normalize`, `Service.WebhookHandler`, `Service.Register` (the MCP tool and the `events/list`, `events/poll`, `events/subscribe` and `events/unsubscribe` methods), `ServerCapabilities` and `RequireEventName` (the Events extension), and `Principal`, `Authorizer` and `TokenAuthorizer` (the per-repo access check), `Service.Purge` (retention), and `WebhookDeps`, `WebhookKey`, `CallbackVerifier`, `NewCallbackAllowlist` and `NewCallbackHandshake` (webhook subscriptions), and `NewHTTPClient` and `SignWebhook` (the guarded client and the signer that deliveries use).
+- `faucet`: `Event`, `Store`, `Normalize`, `Service.WebhookHandler`, `Service.Register` (the MCP tool and the `events/list`, `events/poll`, `events/subscribe` and `events/unsubscribe` methods), `ServerCapabilities` and `RequireEventName` (the Events extension), and `Principal`, `Authorizer` and `TokenAuthorizer` (the per-repo access check), `Service.Purge` (retention), and `WebhookDeps`, `WebhookKey`, `CallbackVerifier`, `NewCallbackAllowlist` and `NewCallbackHandshake` (webhook subscriptions), and `NewHTTPClient` and `SignWebhook` (the guarded client and the signer that deliveries use), and `Service.Redeliver`, `HookAdmin`, `GitHubHookAdmin` and `RedeliveryStore` (redelivery of failed webhooks).
 - `faucet/pgstore`: the Postgres store, with embedded migrations and sqlc queries.
 - `faucet/storetest`: the contract tests every `Store` must pass.
-- `cmd/faucet`: the server. It serves `POST /webhook/github`, `/mcp`, `GET /healthz` and `GET /cron/purge`.
+- `cmd/faucet`: the server. It serves `POST /webhook/github`, `/mcp`, `GET /healthz`, `GET /cron/purge` and `GET /cron/redeliver`.
 
 ## Run the server
 
@@ -94,6 +94,33 @@ To embed faucet, set `Deps.Webhook` to a `WebhookDeps`: a `WebhookKey` from `New
 **`GET /cron/purge`** deletes the events received more than `FAUCET_RETENTION_DAYS` ago and answers `{"deleted": n, "purged_through": id}`. `purged_through` is the purge mark, the highest event ID any purge has deleted. A wait or poll whose cursor is below the mark reports `truncated: true`. It also deletes the webhook subscriptions that have expired, which the response does not count.
 
 To embed faucet, call `Service.Purge(ctx, before)` on your own schedule. It has no auth. The host decides who may call it. A `Store` of your own must implement `Purge`, and `storetest` checks it.
+
+## Redeliver failed webhooks
+
+GitHub does not send a webhook again when faucet was down or answered with an error. `GET /cron/redeliver` asks GitHub to deliver each failed delivery again, until faucet stores the event. Faucet keeps its place in GitHub's delivery list in Postgres. A run that cannot read all of the list goes on where it stopped, and no failed delivery ends without a counted, logged final state. Redelivery is off until the hook settings are set. It uses the same `CRON_SECRET` guard as the purge. Schedule it every 10 minutes (`*/10 * * * *`), with `GET` and `Authorization: Bearer <CRON_SECRET>`.
+
+| Variable | Meaning |
+| --- | --- |
+| `FAUCET_HOOK_TOKEN` | A token that can list and redeliver the webhook's deliveries: a classic token with `admin:org_hook` (org hook) or the repository hook permission (repo hook), owned by a machine user. GitHub offers no narrower grant, and the same token can edit or delete the hook, so set it in production only. Faucet sends it only to the GitHub API URL, and only to two endpoints: `GET .../hooks/{id}/deliveries` and `POST .../deliveries/{attempt}/attempts`. |
+| `FAUCET_HOOK_ORG` or `FAUCET_HOOK_REPO` | The webhook's owner: an organization, or `owner/name`. Set exactly one. |
+| `FAUCET_HOOK_ID` | The webhook's numeric ID. |
+
+The token, the ID and one of org or repo go together. With none set, `/cron/redeliver` answers 503. With some set, the server refuses to start and names the missing variables, never a value.
+
+**What a run does.** A run reads GitHub's deliveries, newest first, down to where the run before it stopped, less a 5 minute overlap for attempts that GitHub wrote late. A stretch that the run cannot read inside its page limit is kept as a range with GitHub's cursor, and later runs read the ranges, newest first. A delivery qualifies when an attempt failed (any answer outside 200 to 299, or none), its event and action are ones that faucet stores, and faucet has no event with its GUID. A run asks for it, and a later run sees the event stored, or a later successful attempt, and counts it recovered. A stored delivery, or one that succeeded later, is never asked for. Two runs never overlap: one holds a lease, and a second answers `busy: true`.
+
+**Final states.** Every failed delivery ends once, in one of these, and the run that ends it counts it in the reply and logs it:
+
+- `recovered`: faucet stored the event, or a later attempt succeeded.
+- `gave_up` with `limit`: every ask was spent. A delivery is asked for 7 times, at 0, 10, 30, 70, 150, 310 and 630 minutes after the run that first read it. The count is raised before the request is sent, so a crash or a refused request costs an ask, and two runs cannot send the same one.
+- `gave_up` with `expired`: GitHub keeps a delivery for 72 hours, counted from its first attempt (the earliest attempt that a run read), and the delivery was still not stored.
+- `gap`: a time range of attempts that no run read. It names no delivery, because the attempts were never read. A range whose old end left GitHub's retention before a run read it is a gap, and so is the part of GitHub's 72 hours before the first run's lookback of 24 hours, and the open ranges of a webhook that the operator replaced.
+
+The reply is JSON: `busy`, `pages`, `attempts`, `tracked`, `asked`, `recovered`, `gave_up` (`limit` and `expired`), `gaps`, `pending` and `ranges`. The first reply of a new database says `gaps: 1`, for the time before its lookback. Rows of the three redelivery tables are deleted 72 hours after their last attempt, so a give-up is logged once.
+
+**Capacity.** A run reads at most 20 pages of 100 attempts, which is 2,000 attempts, and sends at most 50 requests. A run every 10 minutes covers 10 minutes of new attempts and the 5 minute overlap, so it keeps up with 8,000 attempts an hour and sends at most 300 requests an hour. A hook that records more than that does not lose anything silently: the part of the list that a run could not read stays a range, and the ranges are read when the load drops, or they expire as a gap. A failure of a request, GitHub's rate limit or a slow API makes a run read fewer pages. The simulations in `faucet/redeliver_sim_test.go` run 4,200 attempts an hour with one failure in 100, and outages of up to an hour at 150, 300 and 600 attempts an hour, and no failure is lost. An outage of faucet that ends within 630 minutes of the first run that reads a failure is recovered by one of its asks.
+
+To embed faucet, set `Deps.Redelivery` to a `RedeliveryDeps`: a `RedeliveryStore` (`pgstore.Store` is one, and `storetest.RunRedelivery` checks yours), and a `HookAdmin`. `NewGitHubHookAdmin` is the one for GitHub's REST API. Call `Service.Redeliver(ctx)` on your own schedule. It has no auth. The host decides who may call it.
 
 ## Tests
 
