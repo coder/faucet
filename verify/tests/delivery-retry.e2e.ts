@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CATEGORY, counts, deliverDue, endpoint, eventRequests, expectSigned, paramsFor, refreshed, storeRun, withDeliveryFaucet } from './delivery';
 import { describe, expect, newRepoId, test } from './support';
-import { subscribed, unsubscribe } from './subscriptions';
+import { newSecret, subscribed, unsubscribe } from './subscriptions';
 
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 // The wait after attempt 1, 2, 3 and 4. The fifth attempt has no wait, because nothing follows it.
@@ -146,6 +146,22 @@ describe('webhook delivery, failures and retries', () => {
       });
     });
   }
+
+  test('an endpoint that cannot verify the signature answers 401, and that is a failed attempt', async ({ faucet, receiver }) => {
+    await withDeliveryFaucet(faucet, async (started) => {
+      const repoId = newRepoId();
+      const at = await endpoint(receiver, 'ok');
+      const params = paramsFor(repoId, at);
+      await subscribed(started, params);
+      await receiver.register(at.id, newSecret());
+      await storeRun(started, repoId, 9502);
+
+      expect(await deliverDue(started)).toEqual(counts({ enqueued: 1, claimed: 1, sent: 1, retried: 1 }));
+      const requests = await eventRequests(receiver, at);
+      expect(requests.map((r) => r.signature), 'the receiver tells a signature of another secret from a valid one').toEqual(['invalid']);
+      expect((await refreshed(started, params)).lastError).toBe('http_4xx');
+    });
+  });
 
   test('a redirect is a failed attempt and is never followed', async ({ faucet, receiver }) => {
     await withDeliveryFaucet(faucet, async (started) => {

@@ -32,8 +32,8 @@ export function withDeliveryFaucet<T>(faucet: Faucet, fn: (started: Faucet, outp
   return faucet.withFaucet(HANDSHAKE_ENV, fn, { e2eBuild: true });
 }
 
-export function paramsFor(repoId: number, at: Endpoint, args: Record<string, unknown> = {}): Params {
-  return { name: EVENT, arguments: { repo: repoOf(repoId), ...args }, delivery: { url: at.url, secret: at.secret } };
+export function paramsFor(repoId: number, at: Endpoint, args: Record<string, unknown> = {}, name: string = EVENT): Params {
+  return { name, arguments: { repo: repoOf(repoId), ...args }, delivery: { url: at.url, secret: at.secret } };
 }
 
 // runPayload is a completed workflow run of the repository. runId tells the events of a test apart in their data.

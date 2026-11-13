@@ -13,11 +13,26 @@ import {
   withDeliveryFaucet,
   type DeliverReply,
 } from './delivery';
-import { samples } from './payloads';
+import { samples, type Sample } from './payloads';
 import { describe, expect, newDeliveryId, newRepoId, test } from './support';
 import { occurrences, subscribed } from './subscriptions';
 
 const check = samples['check_run.completed'];
+const workflow = samples['workflow_run.completed'];
+
+// What a subscription asks for besides the repository, and how many of the two runs of the repository it matches.
+const NARROWED: [string, Record<string, unknown>, number][] = [
+  ['the sha of the runs in capitals', { sha: workflow.expected.headSha!.toUpperCase() }, 2],
+  ['the pr of the runs', { pr: workflow.expected.prs[0]! }, 2],
+  ['another sha', { sha: 'f'.repeat(40) }, 0],
+  ['another pr', { pr: workflow.expected.prs[0]! + 1 }, 0],
+];
+
+// dataOf is the data of an event of the sample, which events/poll returns too.
+function dataOf(sample: Sample): Record<string, unknown> {
+  const { prs, headSha, data } = sample.expected;
+  return headSha === null ? { ...data, prs } : { ...data, prs, head_sha: headSha };
+}
 
 describe('webhook delivery', () => {
   test('a subscription gets its matching events as signed webhooks, once each, and no other event', async ({ faucet, receiver }) => {
@@ -25,12 +40,15 @@ describe('webhook delivery', () => {
       const repoId = newRepoId();
       const otherRepoId = newRepoId();
       const watching = await endpoint(receiver, 'ok');
-      const filtered = await endpoint(receiver, 'ok');
       const elsewhere = await endpoint(receiver, 'ok');
 
       const before = await storeRun(started, repoId, 9000);
       const subscription = await subscribed(started, paramsFor(repoId, watching));
-      await subscribed(started, paramsFor(repoId, filtered, { pr: 8 }));
+      const narrowed = [];
+      for (const [title, args, runs] of NARROWED) {
+        const at = await endpoint(receiver, 'ok');
+        narrowed.push({ title, at, runs, id: (await subscribed(started, paramsFor(repoId, at, args))).id });
+      }
       const otherSubscription = await subscribed(started, paramsFor(otherRepoId, elsewhere));
       const cursor = await pollStart(started, repoId);
 
@@ -43,7 +61,7 @@ describe('webhook delivery', () => {
       const reply = await started.cronJob('deliver');
       expect(reply.status, reply.body).toBe(200);
       expect(reply.headers.get('content-type')).toContain('application/json');
-      expect(JSON.parse(reply.body), 'the cron reply has these members and no others').toEqual(counts({ enqueued: 3, claimed: 3, sent: 3, delivered: 3 }));
+      expect(JSON.parse(reply.body), 'the cron reply has these members and no others').toEqual(counts({ enqueued: 7, claimed: 7, sent: 7, delivered: 7 }));
       expect(started.leaksSecret(reply.body)).toBe(false);
 
       const requests = await eventRequests(receiver, watching);
@@ -64,7 +82,11 @@ describe('webhook delivery', () => {
         expect(body.cursor).toMatch(/^v1\.\d+$/);
       }
 
-      expect(await eventRequests(receiver, filtered), 'a pr filter that no run matches gets nothing').toEqual([]);
+      for (const { title, at, runs, id } of narrowed) {
+        const got = await eventRequests(receiver, at);
+        expect(got, `a subscription to ${title} gets ${runs} of the runs`).toHaveLength(runs);
+        for (const request of got) expectSigned(request, id);
+      }
 
       const [alone] = await eventRequests(receiver, elsewhere);
       expect(await eventRequests(receiver, elsewhere)).toHaveLength(1);
@@ -78,7 +100,33 @@ describe('webhook delivery', () => {
       expect(await started.deliveries(), 'every delivery ended').toEqual([]);
       expect(await deliverDue(started), 'a second run has nothing to do').toEqual(counts());
       expect(await eventRequests(receiver, watching)).toHaveLength(2);
-      expect(output().match(/\[info\]\s+webhook delivered\s.*subscription=/g)).toHaveLength(3);
+      expect(output().match(/\[info\]\s+webhook delivered\s.*subscription=/g)).toHaveLength(7);
+    });
+  });
+
+  test('each event type is delivered under its own name with its own data', async ({ faucet, receiver }) => {
+    await withDeliveryFaucet(faucet, async (started) => {
+      const repoId = newRepoId();
+      const watching = [];
+      for (const sample of Object.values(samples)) {
+        const at = await endpoint(receiver, 'ok');
+        watching.push({ sample, at, id: (await subscribed(started, paramsFor(repoId, at, {}, sample.expected.type))).id });
+      }
+      for (const sample of Object.values(samples)) {
+        const stored = await started.deliver({ event: sample.event, delivery: newDeliveryId(), body: JSON.stringify(sample.payload(repoId)) });
+        expect(stored.body, sample.event).toBe('stored\n');
+      }
+
+      const types = Object.keys(samples).length;
+      expect(await deliverDue(started)).toEqual(counts({ enqueued: types, claimed: types, sent: types, delivered: types }));
+      for (const { sample, at, id } of watching) {
+        const { type } = sample.expected;
+        const requests = await eventRequests(receiver, at);
+        expect(requests, `${type} gets its own event only`).toHaveLength(1);
+        const body = expectSigned(requests[0]!, id);
+        expect(body.name).toBe(type);
+        expect(body.data, `${type} data`).toEqual(dataOf(sample));
+      }
     });
   });
 
