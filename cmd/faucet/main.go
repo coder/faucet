@@ -57,6 +57,7 @@ type config struct {
 	// cronSecret is empty when the cron routes are off.
 	cronSecret string
 	retention  time.Duration
+	webhook    *faucet.WebhookDeps
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -87,6 +88,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	cfg := config{databaseURL: getenv(envDatabaseURL), secret: getenv(envSecret), port: port, githubAPI: githubAPI}
 	if err := loadCronConfig(getenv, &cfg); err != nil {
+		return config{}, err
+	}
+	if err := loadWebhookConfig(getenv, &cfg); err != nil {
 		return config{}, err
 	}
 	return cfg, nil
@@ -143,6 +147,7 @@ func run() error {
 		Authorizer:    github,
 		PrincipalFrom: principalFrom,
 		Clock:         clock,
+		Webhook:       cfg.webhook,
 	})
 	if err != nil {
 		return xerrors.Errorf("create service: %w", err)

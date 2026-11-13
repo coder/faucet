@@ -2,9 +2,13 @@ package faucet_test
 
 import (
 	"context"
+	"maps"
 	"slices"
+	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/xerrors"
 
 	"github.com/coder/faucet/faucet"
 	"github.com/coder/faucet/faucet/storetest"
@@ -90,6 +94,82 @@ func (s *fakeStore) Purge(_ context.Context, before time.Time) (faucet.PurgeResu
 	s.events = kept
 	res.PurgedThrough = s.purgeMark
 	return res, nil
+}
+
+func (s *fakeStore) UpsertSubscription(_ context.Context, sub faucet.Subscription, now time.Time, maxLive int) (faucet.Subscription, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return faucet.Subscription{}, s.err
+	}
+	if maxLive <= 0 {
+		return faucet.Subscription{}, xerrors.Errorf("max live subscriptions must be positive, got %d", maxLive)
+	}
+	if err := sub.Validate(now); err != nil {
+		return faucet.Subscription{}, err
+	}
+	if s.subs == nil {
+		s.subs = map[faucet.SubscriptionKeyHash]faucet.Subscription{}
+	}
+	others := 0
+	for key, row := range s.subs {
+		switch {
+		case row.Principal != sub.Principal:
+		case !row.ExpiresAt.After(now):
+			delete(s.subs, key)
+		case key != sub.KeyHash:
+			others++
+		}
+	}
+	if others >= maxLive {
+		return faucet.Subscription{}, faucet.ErrSubscriptionLimit
+	}
+	sub.CreatedAt, sub.UpdatedAt = now, now
+	if row, ok := s.subs[sub.KeyHash]; ok {
+		sub.CreatedAt, sub.Cursor = row.CreatedAt, row.Cursor
+	}
+	s.subs[sub.KeyHash] = sub
+	return sub, nil
+}
+
+func (s *fakeStore) DeleteSubscription(_ context.Context, principal string, key faucet.SubscriptionKeyHash) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return false, s.err
+	}
+	row, ok := s.subs[key]
+	if !ok || row.Principal != principal {
+		return false, nil
+	}
+	delete(s.subs, key)
+	return true, nil
+}
+
+func (s *fakeStore) DeleteExpiredSubscriptions(_ context.Context, now time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return 0, s.err
+	}
+	var deleted int64
+	for key, row := range s.subs {
+		if !row.ExpiresAt.After(now) {
+			delete(s.subs, key)
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
+func (s *fakeStore) subscriptions() []faucet.Subscription {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows := slices.Collect(maps.Values(s.subs))
+	slices.SortFunc(rows, func(a, b faucet.Subscription) int {
+		return strings.Compare(a.CallbackURL+a.EventType+string(a.Arguments), b.CallbackURL+b.EventType+string(b.Arguments))
+	})
+	return rows
 }
 
 func (s *fakeStore) lookups() []time.Time {

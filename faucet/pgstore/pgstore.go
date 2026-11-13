@@ -172,6 +172,94 @@ func (s *Store) Purge(ctx context.Context, before time.Time) (faucet.PurgeResult
 	return faucet.PurgeResult{Deleted: deleted.Deleted, PurgedThrough: mark}, nil
 }
 
+// UpsertSubscription takes a lock per principal, so two subscribes of one
+// principal cannot both pass the limit. It deletes the principal's expired
+// rows first, so a lapsed subscription is replaced whole and does not count
+// against the limit.
+func (s *Store) UpsertSubscription(ctx context.Context, sub faucet.Subscription, now time.Time, maxLive int) (faucet.Subscription, error) {
+	if maxLive <= 0 {
+		return faucet.Subscription{}, xerrors.Errorf("max live subscriptions must be positive, got %d", maxLive)
+	}
+	if err := sub.Validate(now); err != nil {
+		return faucet.Subscription{}, xerrors.Errorf("validate subscription: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return faucet.Subscription{}, xerrors.Errorf("begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	q := s.q.WithTx(tx)
+
+	if err := q.LockSubscriptions(ctx, sub.Principal); err != nil {
+		return faucet.Subscription{}, xerrors.Errorf("lock subscriptions: %w", err)
+	}
+	if err := q.DeleteExpiredSubscriptionsOf(ctx, database.DeleteExpiredSubscriptionsOfParams{Principal: sub.Principal, Now: now}); err != nil {
+		return faucet.Subscription{}, xerrors.Errorf("delete expired subscriptions: %w", err)
+	}
+	others, err := q.CountOtherSubscriptions(ctx, database.CountOtherSubscriptionsParams{Principal: sub.Principal, KeyHash: sub.KeyHash[:]})
+	if err != nil {
+		return faucet.Subscription{}, xerrors.Errorf("count subscriptions: %w", err)
+	}
+	if others >= int64(maxLive) {
+		return faucet.Subscription{}, faucet.ErrSubscriptionLimit
+	}
+	row, err := q.UpsertSubscription(ctx, database.UpsertSubscriptionParams{
+		KeyHash:     sub.KeyHash[:],
+		Principal:   sub.Principal,
+		CallbackUrl: sub.CallbackURL,
+		EventType:   sub.EventType,
+		Arguments:   sub.Arguments,
+		RepoID:      sub.RepoID,
+		SecretEnc:   sub.SecretEnc,
+		Cursor:      sub.Cursor,
+		Now:         now,
+		ExpiresAt:   sub.ExpiresAt,
+	})
+	if err != nil {
+		return faucet.Subscription{}, xerrors.Errorf("upsert subscription: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return faucet.Subscription{}, xerrors.Errorf("commit: %w", err)
+	}
+	return toSubscription(row)
+}
+
+func (s *Store) DeleteSubscription(ctx context.Context, principal string, key faucet.SubscriptionKeyHash) (bool, error) {
+	deleted, err := s.q.DeleteSubscription(ctx, database.DeleteSubscriptionParams{KeyHash: key[:], Principal: principal})
+	if err != nil {
+		return false, xerrors.Errorf("delete subscription: %w", err)
+	}
+	return deleted > 0, nil
+}
+
+func (s *Store) DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (int64, error) {
+	deleted, err := s.q.DeleteExpiredSubscriptions(ctx, now)
+	if err != nil {
+		return 0, xerrors.Errorf("delete expired subscriptions: %w", err)
+	}
+	return deleted, nil
+}
+
+func toSubscription(row database.FaucetSubscription) (faucet.Subscription, error) {
+	sub := faucet.Subscription{
+		Principal:   row.Principal,
+		CallbackURL: row.CallbackUrl,
+		EventType:   row.EventType,
+		Arguments:   row.Arguments,
+		RepoID:      row.RepoID,
+		SecretEnc:   row.SecretEnc,
+		Cursor:      row.Cursor,
+		CreatedAt:   row.CreatedAt,
+		UpdatedAt:   row.UpdatedAt,
+		ExpiresAt:   row.ExpiresAt,
+	}
+	if copy(sub.KeyHash[:], row.KeyHash) != len(sub.KeyHash) || len(row.KeyHash) != len(sub.KeyHash) {
+		return faucet.Subscription{}, xerrors.Errorf("stored key hash has %d bytes, want %d", len(row.KeyHash), len(sub.KeyHash))
+	}
+	return sub, nil
+}
+
 func pollRowToEvent(row database.PollEventsRow) faucet.Event {
 	return faucet.Event{
 		ID:         row.ID.Int64,

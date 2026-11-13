@@ -7,7 +7,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { parseArgs, promisify } from 'node:util';
-import { runDir, stateFile } from './runstate.mjs';
+import { CALLBACK_ORIGIN, runDir, stateFile } from './runstate.mjs';
 
 const execFileAsync = promisify(execFile);
 const FAUCET_STOP_MS = 20_000;
@@ -63,17 +63,18 @@ function freePort() {
   });
 }
 
-// The stub knows one token and answers GET /user and GET /repos/verify/r<id>
-// with repository id <id>. Every other repository is 404, like one the token
-// cannot see.
-async function startGitHubStub(token) {
+// The stub knows two tokens and answers GET /user with the login of the token
+// (verify-user and verify-other) and GET /repos/verify/r<id> with repository id
+// <id> for both. Every other repository is 404, like one the token cannot see.
+async function startGitHubStub(token, otherToken) {
   const reply = (res, status, body) => {
     res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(body));
   };
   const stub = createHttpServer((req, res) => {
-    if (req.headers.authorization !== `Bearer ${token}`) return reply(res, 401, { message: 'Bad credentials' });
-    if (req.url === '/user') return reply(res, 200, { login: 'verify-user' });
+    const login = { [`Bearer ${token}`]: 'verify-user', [`Bearer ${otherToken}`]: 'verify-other' }[req.headers.authorization ?? ''];
+    if (login === undefined) return reply(res, 401, { message: 'Bad credentials' });
+    if (req.url === '/user') return reply(res, 200, { login });
     const repo = /^\/repos\/verify\/r(\d+)$/.exec(req.url ?? '');
     if (repo) return reply(res, 200, { id: Number(repo[1]) });
     return reply(res, 404, { message: 'Not Found' });
@@ -214,6 +215,8 @@ async function main(abort) {
 
     const secret = randomBytes(32).toString('hex');
     const githubToken = `ghp_${randomBytes(20).toString('hex')}`;
+    const otherToken = `ghp_${randomBytes(20).toString('hex')}`;
+    const webhookKey = randomBytes(32).toString('base64');
     const psql = existsSync(join(bin, 'psql')) ? join(bin, 'psql') : 'psql';
     const cron = {
       port: await freePort(),
@@ -221,12 +224,12 @@ async function main(abort) {
       webhookSecret: randomBytes(32).toString('hex'),
       cronSecret: randomBytes(32).toString('hex'),
     };
-    githubStub = await startGitHubStub(githubToken);
+    githubStub = await startGitHubStub(githubToken, otherToken);
     const stubUrl = `http://127.0.0.1:${githubStub.address().port}`;
     await createDatabase(psql, dir, CRON_DB);
     writeFileSync(
       stateFile(port),
-      JSON.stringify({ dbHost: dir, dbPort: DB_PORT, psql, secret, githubToken, binary, cron: { ...cron, stubUrl } }),
+      JSON.stringify({ dbHost: dir, dbPort: DB_PORT, psql, secret, githubToken, otherToken, webhookKey, binary, cron: { ...cron, stubUrl } }),
       { mode: 0o600 },
     );
     const databaseUrl = (name) =>
@@ -251,6 +254,8 @@ async function main(abort) {
         GITHUB_WEBHOOK_SECRET: secret,
         PORT: String(port),
         FAUCET_GITHUB_API_URL: stubUrl,
+        FAUCET_WEBHOOK_KEY: webhookKey,
+        FAUCET_WEBHOOK_ALLOWED_ORIGINS: CALLBACK_ORIGIN,
       },
       stdio: ['ignore', 'inherit', 'inherit'],
     });

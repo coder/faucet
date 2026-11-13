@@ -47,7 +47,7 @@ func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {
 	require.EqualValues(t, 400, hostVersion)
 	var faucetVersion int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM `+pq.QuoteIdentifier(pgstore.MigrationsTable)).Scan(&faucetVersion))
-	require.EqualValues(t, 2, faucetVersion)
+	require.EqualValues(t, 3, faucetVersion)
 }
 
 func testDatabaseURL(t *testing.T) string {

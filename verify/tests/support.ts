@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { createHmac, randomBytes, randomInt, randomUUID } from 'node:crypto';
+import { createDecipheriv, createHmac, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -26,6 +26,8 @@ interface RunState {
   psql: string;
   secret: string;
   githubToken: string;
+  otherToken: string;
+  webhookKey: string;
   binary: string;
   cron: CronState;
 }
@@ -35,6 +37,8 @@ interface Target {
   baseUrl: string;
   webhookSecret: string;
   database: string;
+  // The FAUCET_WEBHOOK_KEY this process runs with, or null when it has none.
+  webhookKey: string | null;
 }
 
 export interface CronCredentials {
@@ -97,8 +101,25 @@ export interface McpReply<R = Record<string, unknown>> extends Reply {
 
 export interface McpOptions {
   token?: string | null;
+  // as 'other' sends the second principal's token, the one the stub answers as verify-other. token must then be unset.
+  as?: 'other';
   name?: string | null;
   id?: number | string;
+}
+
+// SubscriptionRow is a faucet_subscriptions row as Postgres holds it. Times are epoch milliseconds, key_hash and secret_enc are hex.
+export interface SubscriptionRow {
+  key_hash: string;
+  principal: string;
+  callback_url: string;
+  event_type: string;
+  arguments: Record<string, unknown>;
+  repo_id: number;
+  secret_enc: string;
+  cursor: number;
+  created_at: number;
+  updated_at: number;
+  expires_at: number;
 }
 
 export interface Delivery {
@@ -129,18 +150,20 @@ function readCronState(value: unknown): CronState {
 function readState(baseUrl: string): RunState {
   const port = Number(new URL(baseUrl).port);
   const state: unknown = JSON.parse(readFileSync(stateFile(port), 'utf8'));
-  const { dbHost, dbPort, psql, secret, githubToken, binary, cron } = state as Partial<RunState>;
+  const { dbHost, dbPort, psql, secret, githubToken, otherToken, webhookKey, binary, cron } = state as Partial<RunState>;
   if (
     typeof dbHost !== 'string' ||
     typeof dbPort !== 'number' ||
     typeof psql !== 'string' ||
     !isSecret(secret) ||
     !isSecret(githubToken) ||
+    !isSecret(otherToken) ||
+    !isSecret(webhookKey) ||
     typeof binary !== 'string'
   ) {
     throw new Error('the run state written by app.mjs is malformed');
   }
-  return { dbHost, dbPort, psql, secret, githubToken, binary, cron: readCronState(cron) };
+  return { dbHost, dbPort, psql, secret, githubToken, otherToken, webhookKey, binary, cron: readCronState(cron) };
 }
 
 function freePort(): Promise<number> {
@@ -167,17 +190,22 @@ export class Faucet {
     this.#cronSecret = cronSecret;
   }
 
-  // main is the server that has no CRON_SECRET.
+  // main is the server that has no CRON_SECRET. It has webhook mode on, with the key in the run state.
   static main(appUrl: string): Faucet {
     const state = readState(appUrl);
-    const target = { baseUrl: appUrl, webhookSecret: state.secret, database: 'postgres' };
+    const target = { baseUrl: appUrl, webhookSecret: state.secret, database: 'postgres', webhookKey: state.webhookKey };
     return new Faucet(state, target, state.cron.cronSecret);
   }
 
   // cron is the server that has CRON_SECRET. It has its own database, because a purge moves the purge mark of the whole table.
   static cron(appUrl: string): Faucet {
     const state = readState(appUrl);
-    const target = { baseUrl: `http://127.0.0.1:${state.cron.port}`, webhookSecret: state.cron.webhookSecret, database: state.cron.db };
+    const target = {
+      baseUrl: `http://127.0.0.1:${state.cron.port}`,
+      webhookSecret: state.cron.webhookSecret,
+      database: state.cron.db,
+      webhookKey: null,
+    };
     return new Faucet(state, target, state.cron.cronSecret);
   }
 
@@ -186,7 +214,8 @@ export class Faucet {
   }
 
   // withFaucet starts one more faucet on its own database, runs fn against it and stops it. The new faucet has a random
-  // CRON_SECRET. env adds the rest. fn gets the faucet and a function that returns its output so far.
+  // CRON_SECRET and webhook mode off. env adds the rest. fn gets the faucet and a function that returns its
+  // output so far.
   async withFaucet<T>(env: Record<string, string>, fn: (started: Faucet, output: () => string) => Promise<T>): Promise<T> {
     const database = `faucet_${randomBytes(6).toString('hex')}`;
     const port = await freePort();
@@ -219,7 +248,8 @@ export class Faucet {
         if (!running() || waited > 20_000) throw new Error(`the started faucet did not become healthy:\n${output}`);
         await sleep(100);
       }
-      return await fn(new Faucet(this.#state, { baseUrl, webhookSecret, database }, cronSecret), () => output);
+      const target = { baseUrl, webhookSecret, database, webhookKey: env.FAUCET_WEBHOOK_KEY ?? null };
+      return await fn(new Faucet(this.#state, target, cronSecret), () => output);
     } finally {
       if (running()) child.kill('SIGTERM');
       await Promise.race([exited, sleep(10_000)]);
@@ -305,7 +335,8 @@ export class Faucet {
     opts: McpOptions = {},
   ): Promise<McpReply<R>> {
     const protocolVersion = '2026-07-28';
-    const token = opts.token === undefined ? this.#state.githubToken : opts.token;
+    if (opts.as !== undefined && opts.token !== undefined) throw new Error('set opts.as or opts.token, not both');
+    const token = opts.as === 'other' ? this.#state.otherToken : opts.token === undefined ? this.#state.githubToken : opts.token;
     const name = opts.name === undefined ? (typeof params.name === 'string' ? params.name : null) : opts.name;
     const headers = new Headers({
       'Content-Type': 'application/json',
@@ -360,6 +391,44 @@ export class Faucet {
     return Number(await this.sql('select purged_through from faucet_purge_mark'));
   }
 
+  async subscriptions(marker: string): Promise<SubscriptionRow[]> {
+    if (!/^[0-9a-z-]{8,}$/.test(marker)) throw new Error('marker must be 8 or more lowercase letters, digits or hyphens');
+    const ms = (column: string): string => `floor(extract(epoch from ${column}) * 1000)::bigint as ${column}`;
+    const query = `select coalesce(json_agg(t order by created_at, callback_url), '[]') from (
+      select encode(key_hash, 'hex') as key_hash, principal, callback_url, event_type, arguments, repo_id,
+        encode(secret_enc, 'hex') as secret_enc, cursor, ${ms('created_at')}, ${ms('updated_at')}, ${ms('expires_at')}
+      from faucet_subscriptions where position('${marker}' in callback_url) > 0) t`;
+    return JSON.parse(await this.sql(query)) as SubscriptionRow[];
+  }
+
+  // secretCopies counts the rows of faucet_subscriptions that hold the subscriber secret in any column: as text, as the
+  // text without its whsec_ prefix, or as the decoded bytes, which is how a plaintext bytea column would hold it.
+  async secretCopies(secret: string): Promise<number> {
+    if (!/^whsec_[A-Za-z0-9+/]+=*$/.test(secret)) throw new Error('secret must be a whsec_ value in standard base64');
+    const encoded = secret.slice('whsec_'.length);
+    const query = `select count(*) from faucet_subscriptions t where strpos(t::text, '${encoded}') > 0
+      or position(convert_to('${encoded}', 'UTF8') in t.secret_enc) > 0
+      or position(decode('${encoded}', 'base64') in t.secret_enc) > 0`;
+    return Number(await this.sql(query));
+  }
+
+  // expireSubscriptions moves the expiry of the rows whose callback URL holds marker into the past, which the clock of
+  // the server cannot be made to do. It returns how many rows it changed.
+  async expireSubscriptions(marker: string): Promise<number> {
+    if (!/^[0-9a-z-]{8,}$/.test(marker)) throw new Error('marker must be 8 or more lowercase letters, digits or hyphens');
+    const query = `with moved as (update faucet_subscriptions set expires_at = now() - interval '1 minute'
+      where position('${marker}' in callback_url) > 0 returning 1) select count(*) from moved`;
+    return Number(await this.sql(query));
+  }
+
+  // openSecret opens the sealed secret of a row with this server's key, or with key when given. It throws when the key or the
+  // row's key_hash is not the one that sealed it.
+  openSecret(row: SubscriptionRow, key?: Buffer): string {
+    const sealKey = key ?? (this.#target.webhookKey === null ? null : Buffer.from(this.#target.webhookKey, 'base64'));
+    if (sealKey === null) throw new Error('this faucet has no webhook key');
+    return openSealedSecret(sealKey, row.secret_enc, row.key_hash);
+  }
+
   async sql(query: string): Promise<string> {
     const { stdout } = await execFileAsync(this.#state.psql, [
       '-X', '-A', '-t', '-q',
@@ -374,10 +443,32 @@ export class Faucet {
   }
 
   leaksSecret(text: string): boolean {
-    const { secret, githubToken, cron } = this.#state;
-    const secrets = [secret, githubToken, cron.webhookSecret, cron.cronSecret];
-    return [...secrets, this.#target.webhookSecret, this.#cronSecret].some((value) => text.includes(value));
+    const { secret, githubToken, otherToken, webhookKey, cron } = this.#state;
+    const secrets = [secret, githubToken, otherToken, webhookKey, cron.webhookSecret, cron.cronSecret];
+    const own = [this.#target.webhookSecret, this.#cronSecret, ...(this.#target.webhookKey === null ? [] : [this.#target.webhookKey])];
+    return [...secrets, ...own].some((value) => text.includes(value));
   }
+}
+
+const SEAL_VERSION = 1;
+const GCM_NONCE_BYTES = 12;
+const GCM_TAG_BYTES = 16;
+
+// openSealedSecret opens secret_enc, which is the version byte 0x01, a 12-byte nonce, then the AES-256-GCM ciphertext and its
+// tag, with the row's key_hash as additional data. It is an independent reading of that layout: it shares nothing with faucet.
+export function openSealedSecret(key: Buffer, secretEncHex: string, keyHashHex: string): string {
+  const sealed = Buffer.from(secretEncHex, 'hex');
+  if (sealed[0] !== SEAL_VERSION) throw new Error(`unknown seal version ${sealed[0]}`);
+  const nonce = sealed.subarray(1, 1 + GCM_NONCE_BYTES);
+  const ciphertext = sealed.subarray(1 + GCM_NONCE_BYTES, sealed.length - GCM_TAG_BYTES);
+  const decipher = createDecipheriv('aes-256-gcm', key, nonce);
+  decipher.setAAD(Buffer.from(keyHashHex, 'hex'));
+  decipher.setAuthTag(sealed.subarray(sealed.length - GCM_TAG_BYTES));
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+}
+
+export function appLog(): string {
+  return readFileSync('.e2e/logs/app.log', 'utf8');
 }
 
 async function isHealthy(baseUrl: string): Promise<boolean> {

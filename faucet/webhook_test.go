@@ -40,6 +40,7 @@ type fakeStore struct {
 	cursorLookups []time.Time
 	lastID        int64
 	purgeMark     int64
+	subs          map[faucet.SubscriptionKeyHash]faucet.Subscription
 }
 
 func (s *fakeStore) InsertEvent(_ context.Context, ev faucet.Event) (faucet.Event, bool, error) {
