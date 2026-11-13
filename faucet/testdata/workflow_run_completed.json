@@ -1,0 +1,97 @@
+{
+  "action": "completed",
+  "repository": {
+    "default_branch": "master",
+    "fork": false,
+    "full_name": "octo-org/octo-repo",
+    "html_url": "https://github.com/octo-org/octo-repo",
+    "id": 300029405,
+    "name": "octo-repo",
+    "owner": {
+      "id": 41548062,
+      "login": "octo-org",
+      "site_admin": false,
+      "type": "Organization"
+    },
+    "private": false
+  },
+  "sender": {
+    "id": 15669918,
+    "login": "Codertocat",
+    "site_admin": false,
+    "type": "User"
+  },
+  "workflow": {
+    "html_url": "https://github.com/octo-org/octo-repo/blob/master/.github/workflows/test.yml",
+    "id": 2823525,
+    "name": "test",
+    "path": ".github/workflows/test.yml",
+    "state": "active"
+  },
+  "workflow_run": {
+    "name": "CI",
+    "check_suite_id": 1291536064,
+    "check_suite_node_id": "MDg6V29ya2Zsb3cyODIzNTI1",
+    "conclusion": "success",
+    "created_at": "2020-10-05T16:33:24Z",
+    "event": "repository_dispatch",
+    "head_branch": "master",
+    "head_commit": {
+      "id": "3484a3fb816e0859fd6e1cea078d76385ff50625",
+      "message": "build(test): check workflow run event payload",
+      "timestamp": "2020-10-05T16:32:07Z"
+    },
+    "head_repository": {
+      "fork": false,
+      "full_name": "octo-org/octo-repo",
+      "html_url": "https://github.com/octo-org/octo-repo",
+      "id": 300029405,
+      "name": "octo-repo",
+      "owner": {
+        "id": 41548062,
+        "login": "octo-org",
+        "site_admin": false,
+        "type": "Organization"
+      },
+      "private": false
+    },
+    "head_sha": "3484a3fb816e0859fd6e1cea078d76385ff50625",
+    "path": ".github/workflows/test.yml",
+    "display_title": "ci(action): update actions/setup-node digest to 8c91899",
+    "html_url": "https://github.com/octo-org/octo-repo/actions/runs/289782451",
+    "id": 289782451,
+    "pull_requests": [],
+    "repository": {
+      "fork": false,
+      "full_name": "octo-org/octo-repo",
+      "html_url": "https://github.com/octo-org/octo-repo",
+      "id": 300029405,
+      "name": "octo-repo",
+      "owner": {
+        "id": 41548062,
+        "login": "octo-org",
+        "site_admin": false,
+        "type": "Organization"
+      },
+      "private": false
+    },
+    "run_number": 163,
+    "run_attempt": 1,
+    "run_started_at": "2020-10-05T16:33:49Z",
+    "status": "completed",
+    "updated_at": "2020-10-05T16:33:49Z",
+    "workflow_id": 2823525,
+    "actor": {
+      "id": 15669918,
+      "login": "Codertocat",
+      "site_admin": false,
+      "type": "User"
+    },
+    "triggering_actor": {
+      "id": 15669918,
+      "login": "Codertocat",
+      "site_admin": false,
+      "type": "User"
+    }
+  }
+}
