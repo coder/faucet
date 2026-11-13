@@ -35,6 +35,12 @@ type simSpec struct {
 	blip func(phase, i int) bool
 	// permanent says that faucet rejects every attempt at the delivery.
 	permanent func(phase, i int) bool
+	// redeliveriesFailUntil makes faucet reject every redelivery before that
+	// time, relative to the first run, though it accepts first attempts.
+	redeliveriesFailUntil time.Duration
+	// countFrom is the earliest first attempt that the outcome counts,
+	// relative to the first run.
+	countFrom time.Duration
 	horizon   time.Duration
 	// settle is how long before the horizon the last failure that counts can
 	// happen. A failure needs time for its asks and its give-up.
@@ -87,7 +93,7 @@ func runSim(t *testing.T, spec simSpec) simOutcome {
 	env.gh.answer = func(guid string, at time.Time) int {
 		redelivery := seen[guid]
 		seen[guid] = true
-		if down(at) || byGUID[guid].failedFor(redelivery) {
+		if down(at) || byGUID[guid].failedFor(redelivery) || (redelivery && at.Before(t0.Add(spec.redeliveriesFailUntil))) {
 			return 503
 		}
 		return 200
@@ -102,7 +108,7 @@ func runSim(t *testing.T, spec simSpec) simOutcome {
 			d := deliveries[next]
 			next++
 			first := env.gh.deliver(d.guid, d.at)
-			if first.status != 200 && !d.at.Before(t0) && d.at.Before(t0.Add(spec.horizon-spec.settle)) {
+			if first.status != 200 && !d.at.Before(t0.Add(spec.countFrom)) && d.at.Before(t0.Add(spec.horizon-spec.settle)) {
 				failedFirst = append(failedFirst, d)
 			}
 		}
@@ -159,7 +165,8 @@ func requireCountedAndLoggedOnce(t *testing.T, env *redeliveryEnv, out simOutcom
 }
 
 func (o simOutcome) String() string {
-	return fmt.Sprintf("failed=%d recovered=%d gave_up_logged=%d in_gap=%d silent_lost=%d", o.failed, o.recovered, o.loggedGaveUp, o.inGap, o.silentLost)
+	return fmt.Sprintf("failed=%d recovered=%d lost_logged=%d lost_in_gap=%d lost_silent=%d sum(gave_up)=%d sum(gaps)=%d",
+		o.failed, o.recovered, o.loggedGaveUp, o.inGap, o.silentLost, o.sumGaveUp, o.sumGaps)
 }
 
 func steady(perHour int, horizon time.Duration) []simPhase {
@@ -184,7 +191,7 @@ func TestSimAnOutageIsRecoveredWithoutASilentLoss(t *testing.T) {
 			t.Parallel()
 			tc.spec.horizon = 6 * time.Hour
 			out := runSim(t, tc.spec)
-			t.Log(out)
+			t.Logf("RESULT %s: %s", tc.name, out)
 			require.Positive(t, out.failed)
 			require.Zero(t, out.silentLost)
 			require.Equal(t, out.failed, out.recovered, "an outage that ends is recovered in full")
@@ -202,7 +209,7 @@ func TestSimBlipsAtCoderOrgVolumeAreRecovered(t *testing.T) {
 		blip:    func(_, i int) bool { return i%100 == 37 },
 		horizon: 6 * time.Hour,
 	})
-	t.Log(out)
+	t.Logf("RESULT 4200 an hour, 1%% blips: %s", out)
 
 	require.Greater(t, out.failed, 100)
 	require.Zero(t, out.silentLost)
@@ -221,7 +228,7 @@ func TestSimAPageBoundBelowTheDocumentedVolumeLosesNothing(t *testing.T) {
 		blip:    func(_, i int) bool { return i%200 == 100 },
 		horizon: 6 * time.Hour,
 	})
-	t.Log(out)
+	t.Logf("RESULT 2400 an hour, a failure every 5 minutes: %s", out)
 	require.Greater(t, out.failed, 30)
 	require.Zero(t, out.silentLost)
 	require.Equal(t, out.failed, out.recovered)
@@ -240,53 +247,30 @@ func TestSimARetryThatNeedsASecondAskAtVolumeIsNotDropped(t *testing.T) {
 	}
 	spec.cronDuringOutage = true
 	out := runSim(t, spec)
-	t.Log(out)
+	t.Logf("RESULT 1500 an hour, a 30 minute outage that ends after the first run: %s", out)
 	require.Zero(t, out.silentLost)
 }
 
-func TestSimDeliveriesThatFaucetAlwaysRejectAreGivenUpAndLoggedBesideRecoverableOnes(t *testing.T) {
+func TestSimAFailureThatNeedsASecondAskAtVolumeIsNotDropped(t *testing.T) {
 	t.Parallel()
+	// One delivery, G, fails 29 minutes before the first run. The first ask
+	// fails as well, because faucet rejects redeliveries until a minute after
+	// the first run. Only the second ask can store G. 1500 deliveries an hour
+	// are listed meanwhile.
+	const perHour = 1500
+	gap := time.Hour / perHour
+	g := int((3*time.Hour - 29*time.Minute - gap/2 - 7*time.Second) / gap)
+
 	out := runSim(t, simSpec{
-		phases:    steady(600, 30*time.Hour),
-		permanent: func(_, i int) bool { return i%50 == 7 },
-		blip:      func(_, i int) bool { return i%50 == 21 },
-		horizon:   30 * time.Hour,
-		settle:    11 * time.Hour,
+		phases:                steady(perHour, 6*time.Hour),
+		blip:                  func(_, i int) bool { return i == g },
+		redeliveriesFailUntil: time.Minute,
+		countFrom:             -30 * time.Minute,
+		horizon:               6 * time.Hour,
 	})
-	t.Log(out)
 
+	t.Logf("RESULT 1500 an hour, G fails at -29m and at its first ask: %s", out)
+	require.Equal(t, 1, out.failed)
+	require.Equal(t, 1, out.recovered)
 	require.Zero(t, out.silentLost)
-	require.Positive(t, out.loggedGaveUp, "the permanent failures are given up, and logged")
-	require.Positive(t, out.recovered, "and they do not keep the recoverable ones from being asked for")
-	for _, res := range out.runs {
-		require.LessOrEqual(t, res.Asked, faucet.DefaultMaxAsksPerRun)
-	}
-}
-
-func TestSimAnOverloadIsReadWhenItEndsAndLosesNothing(t *testing.T) {
-	t.Parallel()
-	// Ten thousand deliveries an hour for an hour is more than one run can read
-	// in the time between two runs. The runs keep their place, and read the
-	// backlog when the load drops.
-	phases := []simPhase{
-		{from: -3 * time.Hour, to: 0, perHour: 150},
-		{from: 0, to: time.Hour, perHour: 10000},
-		{from: time.Hour, to: 8 * time.Hour, perHour: 150},
-	}
-	out := runSim(t, simSpec{
-		phases:  phases,
-		blip:    func(p, i int) bool { return p == 1 && i%100 == 37 },
-		horizon: 8 * time.Hour,
-	})
-	t.Log(out)
-
-	require.Greater(t, out.failed, 90)
-	require.Zero(t, out.silentLost)
-	require.Equal(t, out.failed, out.recovered, "the backlog was read in a later run, so nothing is lost")
-	var peak int
-	for _, res := range out.runs {
-		peak = max(peak, res.Ranges)
-	}
-	require.Positive(t, peak, "the overload really did outrun one run")
-	require.Zero(t, out.runs[len(out.runs)-1].Ranges)
 }

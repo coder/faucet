@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -22,8 +23,74 @@ import (
 
 const (
 	testCronSecret = "cron-test-0123456789abcdefghij"
+	testHookToken  = "ghp_hook0123456789abcdefghijklmnopqrstuvwx"
 	purgePath      = "/cron/purge"
+	redeliverPath  = "/cron/redeliver"
 )
+
+// cronRedeliveryStore answers a redelivery run with what the test set, so a
+// test reads what the route reports without a database.
+type cronRedeliveryStore struct {
+	mu        sync.Mutex
+	busy      bool
+	settle    faucet.SettleResult
+	settleErr error
+	acquired  int
+}
+
+var _ faucet.RedeliveryStore = (*cronRedeliveryStore)(nil)
+
+func (s *cronRedeliveryStore) AcquireRedeliveryLease(context.Context, string, time.Time, time.Duration) (faucet.RedeliveryScan, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.busy {
+		return faucet.RedeliveryScan{}, false, nil
+	}
+	s.acquired++
+	return faucet.RedeliveryScan{Epoch: 1}, true, nil
+}
+
+func (*cronRedeliveryStore) ReleaseRedeliveryLease(context.Context, int64) error { return nil }
+
+func (*cronRedeliveryStore) ApplyRedeliveryScan(context.Context, faucet.ScanStep) (faucet.ScanResult, error) {
+	return faucet.ScanResult{}, nil
+}
+
+func (s *cronRedeliveryStore) SettleRedeliveries(context.Context, faucet.SettleRequest) (faucet.SettleResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.settle, s.settleErr
+}
+
+func (*cronRedeliveryStore) ClaimRedelivery(context.Context, faucet.ClaimRequest) (faucet.RedeliveryClaim, bool, error) {
+	return faucet.RedeliveryClaim{}, false, nil
+}
+
+func (*cronRedeliveryStore) PurgeRedeliveries(context.Context, time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (s *cronRedeliveryStore) runs() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.acquired
+}
+
+type cronHooks struct {
+	mu    sync.Mutex
+	lists int
+}
+
+func (*cronHooks) Hook() string { return "/orgs/octo-org/hooks/9" }
+
+func (h *cronHooks) ListDeliveries(context.Context, string) (faucet.DeliveryPage, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lists++
+	return faucet.DeliveryPage{}, nil
+}
+
+func (*cronHooks) Redeliver(context.Context, int64) error { return nil }
 
 type cronStore struct {
 	faucet.Store
@@ -53,14 +120,18 @@ func (s *cronStore) purgeTimes() []time.Time {
 
 type cronServer struct {
 	*httptest.Server
-	store *cronStore
-	clock *quartz.Mock
-	logs  *syncBuffer
+	store      *cronStore
+	redelivery *cronRedeliveryStore
+	hooks      *cronHooks
+	clock      *quartz.Mock
+	logs       *syncBuffer
 }
 
 type cronOptions struct {
 	secret    string
 	retention time.Duration
+	// redelivery turns on redelivery, with the stores above.
+	redelivery bool
 }
 
 func newCronServer(t *testing.T, opts cronOptions) *cronServer {
@@ -75,17 +146,22 @@ func newCronServer(t *testing.T, opts cronOptions) *cronServer {
 	}
 
 	authorizer := faucet.TokenAuthorizer{BaseURL: "http://127.0.0.1:1"}
-	svc, err := faucet.New(faucet.Deps{
+	deps := faucet.Deps{
 		Store: store, Secret: []byte(testSecret), Logger: logger, Clock: clock,
 		Authorizer:    authorizer,
 		PrincipalFrom: principalFrom,
-	})
+	}
+	redelivery, hooks := &cronRedeliveryStore{}, &cronHooks{}
+	if opts.redelivery {
+		deps.Redelivery = &faucet.RedeliveryDeps{Store: redelivery, Hooks: hooks}
+	}
+	svc, err := faucet.New(deps)
 	require.NoError(t, err)
 
-	cron := cronRoutes{secret: []byte(opts.secret), svc: svc, retention: retention, clock: clock, logger: logger}
+	cron := cronRoutes{secret: []byte(opts.secret), svc: svc, retention: retention, redelivers: opts.redelivery, clock: clock, logger: logger}
 	srv := httptest.NewServer(newRouter(svc, authorizer, cron, logger))
 	t.Cleanup(srv.Close)
-	return &cronServer{Server: srv, store: store, clock: clock, logs: logs}
+	return &cronServer{Server: srv, store: store, redelivery: redelivery, hooks: hooks, clock: clock, logs: logs}
 }
 
 func (s *cronServer) get(t *testing.T, method, path string, authHeader *string) (status int, challenge, body string) {
@@ -120,7 +196,7 @@ func (s *cronServer) requireNoSecrets(t *testing.T, texts ...string) {
 func TestCronRoutesRefuseARequestWithoutTheRightSecret(t *testing.T) {
 	t.Parallel()
 
-	srv := newCronServer(t, cronOptions{secret: testCronSecret})
+	srv := newCronServer(t, cronOptions{secret: testCronSecret, redelivery: true})
 	wrong := map[string]*string{
 		"no header":                       nil,
 		"empty header":                    new(string),
@@ -135,14 +211,18 @@ func TestCronRoutesRefuseARequestWithoutTheRightSecret(t *testing.T) {
 		"an empty token":                  ptr("Bearer "),
 		"a token over 1024 bytes":         bearer(strings.Repeat("a", 1025)),
 	}
-	for name, header := range wrong {
-		status, challenge, body := srv.get(t, http.MethodGet, purgePath, header)
-		require.Equal(t, http.StatusUnauthorized, status, name)
-		require.Equal(t, "Bearer", challenge, name)
-		require.Equal(t, "unauthorized\n", body, "%s: one body for every refusal, so there is no oracle", name)
-		srv.requireNoSecrets(t, body)
+	for _, path := range []string{purgePath, redeliverPath} {
+		for name, header := range wrong {
+			status, challenge, body := srv.get(t, http.MethodGet, path, header)
+			require.Equal(t, http.StatusUnauthorized, status, path+" "+name)
+			require.Equal(t, "Bearer", challenge, name)
+			require.Equal(t, "unauthorized\n", body, "%s: one body for every refusal, so there is no oracle", name)
+			srv.requireNoSecrets(t, body)
+		}
 	}
 	require.Empty(t, srv.store.purgeTimes(), "a refused request must not purge")
+	require.Zero(t, srv.redelivery.runs(), "a refused request must not start a redelivery run")
+	require.Zero(t, srv.hooks.lists, "and must not call GitHub")
 }
 
 func ptr(s string) *string { return &s }
@@ -150,30 +230,36 @@ func ptr(s string) *string { return &s }
 func TestCronRoutesRunForTheRightSecretAndOnlyForGet(t *testing.T) {
 	t.Parallel()
 
-	srv := newCronServer(t, cronOptions{secret: testCronSecret})
-	status, _, body := srv.get(t, http.MethodGet, purgePath, bearer(testCronSecret))
-	require.Equal(t, http.StatusOK, status, body)
-	srv.requireNoSecrets(t, body)
+	srv := newCronServer(t, cronOptions{secret: testCronSecret, redelivery: true})
+	for _, path := range []string{purgePath, redeliverPath} {
+		status, _, body := srv.get(t, http.MethodGet, path, bearer(testCronSecret))
+		require.Equal(t, http.StatusOK, status, body)
+		srv.requireNoSecrets(t, body)
 
-	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
-		status, _, _ := srv.get(t, method, purgePath, bearer(testCronSecret))
-		require.Equal(t, http.StatusMethodNotAllowed, status, method)
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+			status, _, _ := srv.get(t, method, path, bearer(testCronSecret))
+			require.Equal(t, http.StatusMethodNotAllowed, status, path+" "+method)
+		}
 	}
 	require.Len(t, srv.store.purgeTimes(), 1, "only the GET ran the purge")
+	require.Equal(t, 1, srv.redelivery.runs(), "only the GET ran redelivery")
 }
 
 func TestCronRoutesAnswer503AndRunNothingWithoutACronSecret(t *testing.T) {
 	t.Parallel()
 
-	srv := newCronServer(t, cronOptions{secret: ""})
-	for name, header := range map[string]*string{
-		"no header": nil, "an empty bearer": ptr("Bearer "), "a guess": bearer("anything"),
-	} {
-		status, _, body := srv.get(t, http.MethodGet, purgePath, header)
-		require.Equal(t, http.StatusServiceUnavailable, status, name)
-		srv.requireNoSecrets(t, body)
+	srv := newCronServer(t, cronOptions{secret: "", redelivery: true})
+	for _, path := range []string{purgePath, redeliverPath} {
+		for name, header := range map[string]*string{
+			"no header": nil, "an empty bearer": ptr("Bearer "), "a guess": bearer("anything"),
+		} {
+			status, _, body := srv.get(t, http.MethodGet, path, header)
+			require.Equal(t, http.StatusServiceUnavailable, status, path+" "+name)
+			srv.requireNoSecrets(t, body)
+		}
 	}
 	require.Empty(t, srv.store.purgeTimes())
+	require.Zero(t, srv.redelivery.runs())
 
 	status, _, _ := srv.get(t, http.MethodGet, "/healthz", nil)
 	require.Equal(t, http.StatusOK, status, "the rest of the server runs")
@@ -210,6 +296,68 @@ func TestCronPurgeFailureIsAGenericServerError(t *testing.T) {
 	require.Contains(t, srv.logs.String(), "db.internal", "the log keeps it")
 }
 
+func TestCronRedeliverReportsEveryOutcome(t *testing.T) {
+	t.Parallel()
+
+	srv := newCronServer(t, cronOptions{secret: testCronSecret, redelivery: true})
+	srv.redelivery.settle = faucet.SettleResult{
+		Recovered: []string{"g-1", "g-2"},
+		GaveUp: []faucet.GaveUp{
+			{GUID: "g-3", Reason: faucet.GiveUpLimit, Asks: faucet.MaxAsksPerDelivery},
+			{GUID: "g-4", Reason: faucet.GiveUpExpired},
+		},
+		Pending: 3,
+	}
+
+	status, _, body := srv.get(t, http.MethodGet, redeliverPath, bearer(testCronSecret))
+
+	require.Equal(t, http.StatusOK, status, body)
+	require.JSONEq(t, `{
+		"busy": false, "pages": 1, "attempts": 0, "tracked": 0, "asked": 0,
+		"recovered": 2, "gave_up": {"limit": 1, "expired": 1}, "gaps": 1, "pending": 3, "ranges": 0
+	}`, body, "recoveries, both kinds of give-up and the gap before tracking are counted in the reply")
+	require.Equal(t, 1, strings.Count(srv.logs.String(), "g-3"), "a give-up is logged once")
+	srv.requireNoSecrets(t, body)
+
+	srv.redelivery.mu.Lock()
+	srv.redelivery.busy = true
+	srv.redelivery.mu.Unlock()
+	status, _, body = srv.get(t, http.MethodGet, redeliverPath, bearer(testCronSecret))
+	require.Equal(t, http.StatusOK, status)
+	require.JSONEq(t, `{
+		"busy": true, "pages": 0, "attempts": 0, "tracked": 0, "asked": 0,
+		"recovered": 0, "gave_up": {"limit": 0, "expired": 0}, "gaps": 0, "pending": 0, "ranges": 0
+	}`, body, "a run that finds another one holding the lease says so and does nothing")
+}
+
+func TestCronRedeliverIs503WithoutHookConfigAfterTheSecretIsChecked(t *testing.T) {
+	t.Parallel()
+
+	srv := newCronServer(t, cronOptions{secret: testCronSecret})
+
+	status, _, body := srv.get(t, http.MethodGet, redeliverPath, bearer(testCronSecret))
+	require.Equal(t, http.StatusServiceUnavailable, status)
+	srv.requireNoSecrets(t, body)
+	status, _, _ = srv.get(t, http.MethodGet, redeliverPath, bearer("wrong-secret-0123456789abcdef"))
+	require.Equal(t, http.StatusUnauthorized, status, "a caller without the secret learns nothing about the config")
+	status, _, _ = srv.get(t, http.MethodGet, purgePath, bearer(testCronSecret))
+	require.Equal(t, http.StatusOK, status, "purge does not need the hook config")
+}
+
+func TestCronRedeliverFailureIsAGenericServerError(t *testing.T) {
+	t.Parallel()
+
+	srv := newCronServer(t, cronOptions{secret: testCronSecret, redelivery: true})
+	srv.redelivery.settleErr = xerrors.New("connection to db.internal:5432 refused")
+
+	status, _, body := srv.get(t, http.MethodGet, redeliverPath, bearer(testCronSecret))
+
+	require.Equal(t, http.StatusInternalServerError, status)
+	require.NotContains(t, body, "db.internal", "the response does not repeat the error")
+	require.Contains(t, srv.logs.String(), "db.internal", "the log keeps it")
+	srv.requireNoSecrets(t, body)
+}
+
 func TestLoadConfigCron(t *testing.T) {
 	t.Parallel()
 
@@ -227,6 +375,7 @@ func TestLoadConfigCron(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, cfg.cronSecret, "cron is off without CRON_SECRET")
 	require.Equal(t, 30*24*time.Hour, cfg.retention, "retention defaults to 30 days")
+	require.Nil(t, cfg.hookAdmin, "redelivery is off without the hook variables")
 
 	cfg, err = load(map[string]string{envCronSecret: testCronSecret, envRetentionDays: "7"})
 	require.NoError(t, err)
@@ -246,6 +395,59 @@ func TestLoadConfigCron(t *testing.T) {
 		for _, value := range extra {
 			if len(value) >= 8 {
 				require.NotContains(t, err.Error(), value, "%s: the error does not echo the value", name)
+			}
+		}
+	}
+}
+
+func TestLoadConfigHookAdmin(t *testing.T) {
+	t.Parallel()
+
+	load := func(extra map[string]string) (config, error) {
+		env := map[string]string{envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret}
+		for k, v := range extra {
+			env[k] = v
+		}
+		return loadConfig(func(name string) string { return env[name] })
+	}
+	org := map[string]string{envHookToken: testHookToken, envHookOrg: "octo-org", envHookID: "5"}
+	repo := map[string]string{envHookToken: testHookToken, envHookRepo: "octo/repo", envHookID: "5"}
+
+	for name, env := range map[string]map[string]string{"an org hook": org, "a repo hook": repo} {
+		cfg, err := load(env)
+		require.NoError(t, err, name)
+		require.NotNil(t, cfg.hookAdmin, name)
+		require.NotContains(t, fmt.Sprintf("%+v %#v", cfg.hookAdmin, cfg.hookAdmin), testHookToken, name)
+	}
+
+	partial := func(drop string) map[string]string {
+		env := map[string]string{}
+		for k, v := range org {
+			if k != drop {
+				env[k] = v
+			}
+		}
+		return env
+	}
+	for name, tc := range map[string]struct {
+		env  map[string]string
+		want string
+	}{
+		"a token without an id":      {partial(envHookID), envHookID},
+		"an id without a token":      {partial(envHookToken), envHookToken},
+		"a token and an id only":     {partial(envHookOrg), envHookOrg},
+		"an org and a repo":          {map[string]string{envHookToken: testHookToken, envHookOrg: "o", envHookRepo: "o/r", envHookID: "5"}, envHookRepo},
+		"an id that is not a number": {map[string]string{envHookToken: testHookToken, envHookOrg: "o", envHookID: "five"}, envHookID},
+		"an id of zero":              {map[string]string{envHookToken: testHookToken, envHookOrg: "o", envHookID: "0"}, envHookID},
+		"a token with a space":       {map[string]string{envHookToken: "ghp_a b", envHookOrg: "o", envHookID: "5"}, "FAUCET_HOOK_"},
+		"an invalid org":             {map[string]string{envHookToken: testHookToken, envHookOrg: "o/../x", envHookID: "5"}, "FAUCET_HOOK_"},
+		"an invalid repo":            {map[string]string{envHookToken: testHookToken, envHookRepo: "norepo", envHookID: "5"}, "FAUCET_HOOK_"},
+	} {
+		_, err := load(tc.env)
+		require.ErrorContains(t, err, tc.want, name)
+		for _, value := range tc.env {
+			if len(value) > 3 {
+				require.NotContains(t, err.Error(), value, "%s: the error names variables, never values", name)
 			}
 		}
 	}

@@ -18,19 +18,22 @@ import (
 // cronTimeout keeps a run inside the server's write deadline.
 const cronTimeout = 25 * time.Second
 
-// cronRoutes serves the job that Vercel Cron triggers with GET and
+// cronRoutes serves the jobs that Vercel Cron triggers with GET and
 // Authorization: Bearer $CRON_SECRET.
 type cronRoutes struct {
 	// secret is CRON_SECRET. Empty means the routes answer 503 and run nothing.
 	secret    []byte
 	svc       *faucet.Service
 	retention time.Duration
-	clock     quartz.Clock
-	logger    slog.Logger
+	// redelivers says whether the service has redelivery.
+	redelivers bool
+	clock      quartz.Clock
+	logger     slog.Logger
 }
 
 func (c cronRoutes) mount(r chi.Router) {
 	r.Get("/cron/purge", c.guard(c.purge))
+	r.Get("/cron/redeliver", c.guard(c.redeliver))
 }
 
 // guard runs next only for the right secret. Both sides are hashed first, so
@@ -67,6 +70,35 @@ func (c cronRoutes) purge(w http.ResponseWriter, r *http.Request) {
 		Deleted       int64 `json:"deleted"`
 		PurgedThrough int64 `json:"purged_through"`
 	}{res.Deleted, res.PurgedThrough})
+}
+
+func (c cronRoutes) redeliver(w http.ResponseWriter, r *http.Request) {
+	if !c.redelivers {
+		http.Error(w, "redelivery is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	res, err := c.svc.Redeliver(r.Context())
+	if err != nil {
+		c.logger.Error(r.Context(), "cron redelivery failed", slog.Error(err))
+		http.Error(w, "redelivery failed", http.StatusInternalServerError)
+		return
+	}
+	type gaveUp struct {
+		Limit   int `json:"limit"`
+		Expired int `json:"expired"`
+	}
+	writeJSON(w, struct {
+		Busy      bool   `json:"busy"`
+		Pages     int    `json:"pages"`
+		Attempts  int    `json:"attempts"`
+		Tracked   int    `json:"tracked"`
+		Asked     int    `json:"asked"`
+		Recovered int    `json:"recovered"`
+		GaveUp    gaveUp `json:"gave_up"`
+		Gaps      int    `json:"gaps"`
+		Pending   int    `json:"pending"`
+		Ranges    int    `json:"ranges"`
+	}{res.Busy, res.Pages, res.Attempts, res.Tracked, res.Asked, res.Recovered, gaveUp{res.GaveUpLimit, res.GaveUpExpired}, res.Gaps, res.Pending, res.Ranges})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
