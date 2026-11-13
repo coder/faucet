@@ -117,7 +117,7 @@ func TestTokenAuthorizerRejectsBadRepoBeforeCallingGitHub(t *testing.T) {
 
 	bad := []string{
 		"", "o", "o/", "/r", "o/r/x", "o r/x", "o/r x", "o/r?x=1", "o/r#f", "o/r\n", "o/.", "o/..",
-		"../r", "o/%2e%2e", "o\\r/x", "-o/r", "_o/r", "o/r%2fx", "ö/r", "o/ü",
+		"../r", "o/%2e%2e", "o\\r/x", "-o/r", "_o/r", "o.b/r", "o/r%2fx", "ö/r", "o/ü",
 		strings.Repeat("o", 40) + "/r", "o/" + strings.Repeat("r", 101), "http://evil.example/x/y",
 	}
 	for _, repo := range bad {
