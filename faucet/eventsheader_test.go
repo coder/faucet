@@ -63,6 +63,7 @@ func TestRequireEventName(t *testing.T) {
 		{name: "a batch member that is not an object", method: http.MethodPost, body: `[` + rpcBody("1", "events/list", `{}`) + `,7]`, wantStatus: http.StatusBadRequest, wantID: "null", wantCode: jsonrpc.CodeInvalidRequest, wantMessage: "not a JSON object"},
 		{name: "null", method: http.MethodPost, body: `null`, wantStatus: wantMatch},
 		{name: "name in another case is not the SDK's name", method: http.MethodPost, body: rpcBody("6", "events/poll", `{"name":"pr.closed","Name":"ci.run_completed"}`), header: "ci.run_completed", wantStatus: http.StatusBadRequest, wantID: "6", wantMessage: "does not match"},
+		{name: "an empty name in another case does not hide the real one", method: http.MethodPost, body: rpcBody("6", "events/poll", `{"name":"ci.run_completed","Name":""}`), wantStatus: http.StatusBadRequest, wantID: "6", wantMessage: "missing"},
 		{name: "last duplicate name wins like in the SDK", method: http.MethodPost, body: rpcBody("6", "events/poll", `{"name":"pr.closed","name":"ci.run_completed"}`), header: "ci.run_completed", wantStatus: wantMatch},
 		{name: "method in another case is not an events method", method: http.MethodPost, body: `{"jsonrpc":"2.0","id":6,"Method":"events/poll","params":` + pollA + `}`, wantStatus: wantMatch},
 		{name: "notification", method: http.MethodPost, body: `{"jsonrpc":"2.0","method":"events/poll","params":` + pollA + `}`, wantStatus: http.StatusBadRequest, wantID: "null", wantMessage: "missing"},
