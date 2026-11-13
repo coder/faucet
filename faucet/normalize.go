@@ -9,23 +9,17 @@ import (
 
 const sourceGitHub = "github"
 
-// fields is what a rule pulls out of one payload. Everything else on the Event
-// comes from the envelope or the delivery.
 type fields struct {
 	prs     []int32
 	headSHA string
 	data    map[string]any
 }
 
-// rule turns the payload of one "event.action" pair into an Event type and its
-// fields. extract reports false when the payload is not one faucet wants.
 type rule struct {
 	eventType string
 	extract   func(payload []byte) (f fields, ok bool, err error)
 }
 
-// rules is the whole contract with GitHub: one row for each webhook that
-// faucet turns into an event. Add a row here to handle a new one.
 var rules = map[string]rule{
 	"workflow_run.completed":        {eventType: "ci.run_completed", extract: decode(workflowRunCompleted)},
 	"check_run.completed":           {eventType: "ci.check_completed", extract: decode(checkRunCompleted)},
@@ -45,8 +39,7 @@ type envelope struct {
 //
 // It returns a nil Event and a nil error when faucet ignores the webhook: an
 // event name or action it has no rule for, or a comment on a plain issue. It
-// returns an error when the payload of a handled webhook is malformed. Event
-// names that no rule handles are never parsed.
+// returns an error when the payload of a handled webhook is malformed.
 func Normalize(eventName string, payload []byte, deliveryID string) (*Event, error) {
 	ev, ok, err := buildEvent(eventName, payload, deliveryID)
 	if err != nil || !ok {
@@ -112,7 +105,6 @@ func handlesEvent(eventName string) bool {
 	return false
 }
 
-// decode adapts a function of one typed payload to a rule's extract.
 func decode[P any](f func(P) (fields, bool)) func([]byte) (fields, bool, error) {
 	return func(payload []byte) (fields, bool, error) {
 		var p P

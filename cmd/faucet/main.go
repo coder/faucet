@@ -40,8 +40,6 @@ type config struct {
 	port        string
 }
 
-// loadConfig is the only place faucet reads its environment. Errors name the
-// variable and never repeat its value.
 func loadConfig(getenv func(string) string) (config, error) {
 	var missing []string
 	for _, name := range []string{envDatabaseURL, envSecret} {
@@ -99,8 +97,7 @@ func run() error {
 	return serve(ctx, logger, cfg.port, newRouter(svc))
 }
 
-// openDatabase does not connect. It drops the parser's error because lib/pq
-// copies the connection string, password included, into it.
+// openDatabase drops the parse error because lib/pq can echo the password in it.
 func openDatabase(url string) (*sql.DB, error) {
 	connector, err := pq.NewConnector(url)
 	if err != nil {

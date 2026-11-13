@@ -90,8 +90,6 @@ func newHarness(t *testing.T) *harness {
 	return &harness{t: t, store: store, logs: logs, handler: svc.WebhookHandler()}
 }
 
-// serve runs req through the handler and checks the one rule that holds for
-// every response: the secret is in neither the response nor the logs.
 func (h *harness) serve(req *http.Request) *httptest.ResponseRecorder {
 	h.t.Helper()
 	rec := httptest.NewRecorder()

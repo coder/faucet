@@ -11,9 +11,7 @@ import (
 	"github.com/coder/faucet/faucet"
 )
 
-// The fixtures in testdata are trimmed samples from
-// github.com/octokit/webhooks. They keep the structure and field names GitHub
-// sends and drop the URL templates and nested repository objects.
+// Fixtures in testdata are trimmed samples from github.com/octokit/webhooks.
 func fixture(t *testing.T, name string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("testdata", name+".json"))
@@ -21,7 +19,6 @@ func fixture(t *testing.T, name string) []byte {
 	return b
 }
 
-// mutate decodes a fixture, applies edit to the top-level object, and encodes it again.
 func mutate(t *testing.T, name string, edit func(doc map[string]any)) []byte {
 	t.Helper()
 	var doc map[string]any

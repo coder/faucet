@@ -26,7 +26,7 @@ const (
 // WebhookHandler returns the handler for GitHub webhook deliveries.
 //
 // A delivery is rejected until its HMAC-SHA256 signature matches the secret.
-// Only then are the other headers and the payload read. Responses:
+// Responses:
 //
 //	405 not a POST
 //	401 missing or wrong signature
@@ -104,8 +104,6 @@ func (s *Service) serveWebhook(w http.ResponseWriter, r *http.Request) {
 	reply(w, http.StatusOK, "stored")
 }
 
-// parseSignature decodes an "sha256=<hex>" header value. It reports false for
-// anything else, so a malformed header is rejected before the body is read.
 func parseSignature(header string) ([]byte, bool) {
 	digest, ok := strings.CutPrefix(header, signaturePrefix)
 	if !ok {
@@ -124,14 +122,12 @@ func sign(secret, body []byte) []byte {
 	return mac.Sum(nil)
 }
 
-// reject replies with msg and logs it. It logs no request header or body.
 func (s *Service) reject(w http.ResponseWriter, r *http.Request, status int, msg string) {
 	s.logger.Warn(r.Context(), "webhook rejected", slog.F("status", status), slog.F("reason", msg))
 	reply(w, status, msg)
 }
 
-// reply writes msg as plain text. It uses http.Error for every status so all
-// responses carry the same headers.
+// reply uses http.Error even for 2xx so every response carries the same headers.
 func reply(w http.ResponseWriter, status int, msg string) {
 	http.Error(w, msg, status)
 }

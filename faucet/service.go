@@ -8,15 +8,12 @@ import (
 	"cdr.dev/slog/v3"
 )
 
-// minSecretBytes is the shortest webhook secret New accepts.
 const minSecretBytes = 16
 
-// Deps are the collaborators a Service needs. New checks them once, so nothing
-// else reads the environment or starts work behind the caller's back.
+// Deps are the collaborators a Service needs.
 type Deps struct {
 	Store Store
-	// Secret is the GitHub webhook secret. It is the HMAC key that proves a
-	// request came from GitHub, so it must never be logged or returned.
+	// Secret is the GitHub webhook secret and the HMAC key. Never log or return it.
 	Secret []byte
 	Logger slog.Logger
 }
