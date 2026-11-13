@@ -79,6 +79,7 @@ class Stack {
     closeSync(log);
     const firstLine = await new Promise<string>((resolveLine, reject) => {
       parent.once('error', reject);
+      parent.once('exit', () => reject(new Error('the parent exited before it reported the app pid')));
       parent.stdout?.once('data', (chunk: Buffer) => resolveLine(chunk.toString()));
     });
     const appPid = Number(firstLine.trim());
