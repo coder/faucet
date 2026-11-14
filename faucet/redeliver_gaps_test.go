@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -151,14 +153,14 @@ func (a dateAdmin) ListDeliveries(ctx context.Context, cursor string) (faucet.De
 	return page, err
 }
 
-// useHooks replaces the service with one that lists deliveries through hooks,
-// on the same store and logs.
-func (e *redeliveryEnv) useHooks(hooks faucet.HookAdmin) {
+// use replaces the service with one that runs on store and hooks, with the
+// same clock and logs.
+func (e *redeliveryEnv) use(store faucet.RedeliveryStore, hooks faucet.HookAdmin) {
 	e.t.Helper()
 	deps := testDeps(e.store)
 	deps.Clock = e.clock
 	deps.Logger = slog.Make(e.logs)
-	deps.Redelivery = &faucet.RedeliveryDeps{Store: e.store, Hooks: hooks}
+	deps.Redelivery = &faucet.RedeliveryDeps{Store: store, Hooks: hooks}
 	svc, err := faucet.New(deps)
 	require.NoError(e.t, err)
 	e.svc = svc
@@ -171,7 +173,7 @@ func TestADateAheadOfGitHubsListDoesNotHideTheNextFailure(t *testing.T) {
 		t.Run(ahead.String(), func(t *testing.T) {
 			t.Parallel()
 			env := newRedeliveryEnv(t)
-			env.useHooks(dateAdmin{HookAdmin: env.gh, shift: ahead})
+			env.use(env.store, dateAdmin{HookAdmin: env.gh, shift: ahead})
 			for range 3 {
 				require.Zero(t, env.run().Tracked)
 				env.advance(cronEvery)
@@ -192,7 +194,7 @@ func TestAMissingDateRecordsNoGapOnEveryEmptyRun(t *testing.T) {
 	t.Run("a new hook", func(t *testing.T) {
 		t.Parallel()
 		env := newRedeliveryEnv(t)
-		env.useHooks(dateAdmin{HookAdmin: env.gh, missing: true})
+		env.use(env.store, dateAdmin{HookAdmin: env.gh, missing: true})
 		var gaps int
 		for range 5 {
 			gaps += env.run().Gaps
@@ -214,7 +216,7 @@ func TestAMissingDateRecordsNoGapOnEveryEmptyRun(t *testing.T) {
 	t.Run("a hook quiet for longer than GitHub keeps attempts", func(t *testing.T) {
 		t.Parallel()
 		env := newRedeliveryEnv(t)
-		env.useHooks(dateAdmin{HookAdmin: env.gh, missing: true})
+		env.use(env.store, dateAdmin{HookAdmin: env.gh, missing: true})
 		env.gh.record("g1", env.gh.now().Add(-time.Minute), http200)
 		env.run()
 		env.advance(faucet.GitHubDeliveryRetention + time.Hour)
@@ -226,4 +228,73 @@ func TestAMissingDateRecordsNoGapOnEveryEmptyRun(t *testing.T) {
 		}
 		require.Zero(t, gaps)
 	})
+}
+
+// purgeSpy records when a run purges, and whether the run still has its context.
+type purgeSpy struct {
+	*fakeRedeliveryStore
+	mu    sync.Mutex
+	at    time.Time
+	alive bool
+	calls int
+}
+
+func (s *purgeSpy) PurgeRedeliveries(ctx context.Context, before time.Time) (int64, error) {
+	s.mu.Lock()
+	s.calls++
+	s.at, s.alive = time.Now(), ctx.Err() == nil
+	s.mu.Unlock()
+	return s.fakeRedeliveryStore.PurgeRedeliveries(ctx, before)
+}
+
+func TestARequestInFlightIsCanceledAtNinetyPercentOfTheTimeSoThePurgeRuns(t *testing.T) {
+	t.Parallel()
+
+	const limit = 4 * time.Second
+	env := newRedeliveryEnv(t)
+	spy := &purgeSpy{fakeRedeliveryStore: env.store}
+	env.use(spy, env.gh)
+	env.gh.record("g1", env.gh.now().Add(-time.Minute), 503)
+	env.gh.askDelay = time.Hour // the one request never answers
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+
+	start := time.Now()
+	res, err := env.svc.Redeliver(ctx)
+
+	require.ErrorContains(t, err, "request redelivery", "the request that did not answer is canceled and counted as a failed one")
+	require.Zero(t, res.Asked)
+	spy.mu.Lock()
+	defer spy.mu.Unlock()
+	require.Equal(t, 1, spy.calls)
+	require.True(t, spy.alive, "the purge runs inside the run's time")
+	purgedAfter := spy.at.Sub(start)
+	require.Greater(t, purgedAfter, limit*85/100, "a request in flight is not canceled before 90 percent of the time has passed")
+	require.Less(t, purgedAfter, limit*975/1000, "the purge keeps the last tenth of the time")
+}
+
+func TestAnAttemptThatGotNoAnswerOrARedirectIsAFailureAndOnlyA2xxIsNot(t *testing.T) {
+	t.Parallel()
+
+	for status, failure := range map[int]bool{
+		0:   true, // GitHub got no HTTP response at all
+		301: true,
+		302: true,
+		400: true,
+		503: true,
+		200: false,
+		204: false,
+		299: false,
+	} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t)
+			env.gh.record("g1", env.gh.now().Add(-time.Minute), status)
+
+			res := env.run()
+
+			require.Equal(t, failure, res.Tracked == 1, "status %d", status)
+			require.Equal(t, failure, env.stored("g1"), "a failure is asked for until faucet stores it")
+		})
+	}
 }
