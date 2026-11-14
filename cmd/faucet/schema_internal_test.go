@@ -19,7 +19,10 @@ const testDatabaseURLEnv = "FAUCET_TEST_DATABASE_URL"
 
 // A Vercel preview runs the code of any branch and can reach the same database
 // as production. Only production may change the schema, so a deployment of an
-// unmerged migration cannot break the instances that serve production.
+// unmerged migration cannot break the instances that serve production. Vercel
+// sets VERCEL on every deployment, but VERCEL_ENV only when the project
+// exposes its system environment variables, so a process on Vercel without
+// VERCEL_ENV cannot tell that it is in production and must not migrate.
 func TestPrepareSchemaMigratesOnlyInProduction(t *testing.T) {
 	t.Parallel()
 	adminURL := os.Getenv(testDatabaseURLEnv)
@@ -35,30 +38,49 @@ func TestPrepareSchemaMigratesOnlyInProduction(t *testing.T) {
 		require.NoError(t, db.QueryRowContext(ctx, `SELECT to_regclass($1::text) IS NOT NULL`, pgstore.MigrationsTable).Scan(&exists))
 		return exists
 	}
+	deploymentOf := func(t *testing.T, vercel, vercelEnv string) deployment {
+		t.Helper()
+		cfg, err := loadConfig(func(name string) string {
+			return map[string]string{
+				envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret,
+				envVercel: vercel, envVercelEnv: vercelEnv,
+			}[name]
+		})
+		require.NoError(t, err)
+		return cfg.deployment
+	}
 
-	for _, vercelEnv := range []string{"", "production"} {
-		t.Run("Migrates/"+vercelEnv, func(t *testing.T) {
+	for _, c := range []struct{ name, vercel, vercelEnv string }{
+		{"NotOnVercel", "", ""},
+		{"Production", "1", "production"},
+	} {
+		t.Run("Migrates/"+c.name, func(t *testing.T) {
 			t.Parallel()
 			db := newScratchDatabase(t, adminURL)
-			require.NoError(t, prepareSchema(ctx, db, db, vercelEnv))
+			require.NoError(t, prepareSchema(ctx, db, db, deploymentOf(t, c.vercel, c.vercelEnv)))
 			require.NoError(t, pgstore.CheckSchema(ctx, db))
 		})
 	}
-	for _, vercelEnv := range []string{"preview", "development"} {
-		t.Run("RefusesToMigrate/"+vercelEnv, func(t *testing.T) {
+	for _, c := range []struct{ name, vercel, vercelEnv, want string }{
+		{"Preview", "1", "preview", "VERCEL_ENV=preview"},
+		{"Development", "1", "development", "VERCEL_ENV=development"},
+		{"PreviewWithoutVercel", "", "preview", "VERCEL_ENV=preview"},
+		{"OnVercelWithoutVercelEnv", "1", "", "VERCEL is set and VERCEL_ENV is not"},
+	} {
+		t.Run("RefusesToMigrate/"+c.name, func(t *testing.T) {
 			t.Parallel()
 			db := newScratchDatabase(t, adminURL)
-			err := prepareSchema(ctx, db, db, vercelEnv)
+			err := prepareSchema(ctx, db, db, deploymentOf(t, c.vercel, c.vercelEnv))
 			require.ErrorIs(t, err, pgstore.ErrSchemaNotCurrent)
-			require.ErrorContains(t, err, envVercel+"="+vercelEnv)
+			require.ErrorContains(t, err, c.want)
 			require.False(t, hasMigrationsTable(t, db), "the process changed the schema")
 		})
 	}
-	t.Run("ServesAMigratedDatabase/preview", func(t *testing.T) {
+	t.Run("ServesAMigratedDatabase/OnVercelWithoutVercelEnv", func(t *testing.T) {
 		t.Parallel()
 		db := newScratchDatabase(t, adminURL)
 		require.NoError(t, pgstore.Migrate(ctx, db))
-		require.NoError(t, prepareSchema(ctx, db, db, "preview"))
+		require.NoError(t, prepareSchema(ctx, db, db, deploymentOf(t, "1", "")))
 	})
 }
 

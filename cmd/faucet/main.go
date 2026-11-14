@@ -33,9 +33,11 @@ const (
 	// migrations run over it, because they take a session-level advisory lock
 	// that a transaction-mode pooler does not keep.
 	envDatabaseURLUnpooled = "DATABASE_URL_UNPOOLED"
-	// envVercel is "production", "preview" or "development" on Vercel and unset
-	// elsewhere.
-	envVercel     = "VERCEL_ENV"
+	// envVercel is set on every Vercel deployment. envVercelEnv is "production",
+	// "preview" or "development" there, and is unset when the project does not
+	// expose its system environment variables.
+	envVercel     = "VERCEL"
+	envVercelEnv  = "VERCEL_ENV"
 	envSecret     = "GITHUB_WEBHOOK_SECRET" //nolint:gosec // The name of an environment variable, not a credential.
 	envPort       = "PORT"
 	defaultPort   = "8080"
@@ -77,11 +79,10 @@ type config struct {
 	// names the variable it came from, for errors.
 	migrateURL string
 	migrateVar string
-	// vercelEnv is the value of VERCEL_ENV.
-	vercelEnv string
-	secret    string
-	port      string
-	githubAPI string
+	deployment deployment
+	secret     string
+	port       string
+	githubAPI  string
 	// cronSecret is empty when the cron routes are off.
 	cronSecret string
 	retention  time.Duration
@@ -116,7 +117,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if err := (faucet.TokenAuthorizer{BaseURL: githubAPI}).Validate(); err != nil {
 		return config{}, xerrors.Errorf("%s: %w", envAPIURL, err)
 	}
-	cfg := config{databaseURL: getenv(envDatabaseURL), vercelEnv: getenv(envVercel), secret: getenv(envSecret), port: port, githubAPI: githubAPI}
+	cfg := config{databaseURL: getenv(envDatabaseURL), deployment: deployment{onVercel: getenv(envVercel) != "", env: getenv(envVercelEnv)}, secret: getenv(envSecret), port: port, githubAPI: githubAPI}
 	cfg.migrateURL, cfg.migrateVar = cfg.databaseURL, envDatabaseURL
 	if direct := getenv(envDatabaseURLUnpooled); direct != "" {
 		cfg.migrateURL, cfg.migrateVar = direct, envDatabaseURLUnpooled
@@ -257,7 +258,31 @@ func migrateSchema(ctx context.Context, cfg config, db *sql.DB) error {
 		return xerrors.Errorf("%s: %w", cfg.migrateVar, err)
 	}
 	defer func() { _ = migrateDB.Close() }()
-	return prepareSchema(ctx, db, migrateDB, cfg.vercelEnv)
+	return prepareSchema(ctx, db, migrateDB, cfg.deployment)
+}
+
+// deployment says where the process runs.
+type deployment struct {
+	onVercel bool
+	// env is the value of VERCEL_ENV.
+	env string
+}
+
+// migrates reports whether the process may change the schema. VERCEL_ENV
+// decides when it is set. On Vercel without it, the process cannot tell that
+// it is in production, so it does not migrate.
+func (d deployment) migrates() bool {
+	if d.env != "" {
+		return d.env == "production"
+	}
+	return !d.onVercel
+}
+
+func (d deployment) String() string {
+	if d.env == "" {
+		return envVercel + " is set and " + envVercelEnv + " is not"
+	}
+	return envVercelEnv + "=" + d.env
 }
 
 // prepareSchema migrates the database over migrateDB when the process runs
@@ -266,16 +291,16 @@ func migrateSchema(ctx context.Context, cfg config, db *sql.DB) error {
 // preview runs the code of any branch, and can reach the production database,
 // so a preview that migrated would leave production instances running against
 // a schema they do not know.
-func prepareSchema(ctx context.Context, db, migrateDB *sql.DB, vercelEnv string) error {
+func prepareSchema(ctx context.Context, db, migrateDB *sql.DB, dep deployment) error {
 	ctx, cancel := context.WithTimeout(ctx, dbSetupTimeout)
 	defer cancel()
 
 	if err := db.PingContext(ctx); err != nil {
 		return xerrors.Errorf("connect to database: %w", err)
 	}
-	if vercelEnv != "" && vercelEnv != "production" {
+	if !dep.migrates() {
 		if err := pgstore.CheckSchema(ctx, db); err != nil {
-			return xerrors.Errorf("%s=%s never migrates the database, so the schema must be current already: %w", envVercel, vercelEnv, err)
+			return xerrors.Errorf("%s never migrates the database, so the schema must be current already: %w", dep, err)
 		}
 		return nil
 	}
