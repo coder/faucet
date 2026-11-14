@@ -113,12 +113,24 @@ func TestDeliverDueStallingGapEndpointsDoNotStarveAHealthyGap(t *testing.T) {
 	// its gaps over. A gap that no worker took stays recorded for the next run.
 	sent := got.GapsSent
 	for range stalling + 1 {
-		if sent == stalling+1 {
+		if sent >= stalling+1 {
 			break
 		}
 		sent += d.deliverDue().GapsSent
 	}
-	require.Equal(t, stalling+1, sent, "no gap is lost: the run sends it, or a later run does")
+	require.Equal(t, stalling+1, sent, "the runs count every gap")
+	requireEachGapSentOnce(t, d.rcv, paths...)
+	requireEachGapSentOnce(t, healthyRcv, "/ok")
+}
+
+// requireEachGapSentOnce checks what a receiver saw, not what the runs counted:
+// a count cannot tell a gap that went out twice from one that did not go out,
+// when the two cancel in the sum.
+func requireEachGapSentOnce(t *testing.T, rcv *hookReceiver, paths ...string) {
+	t.Helper()
+	for _, path := range paths {
+		require.Len(t, rcv.envelopesOf(path, "gap"), 1, "the subscription at %s gets its gap envelope once: no run loses it or sends it again", path)
+	}
 }
 
 // A host whose subscribers all call back to one origin sends with 2 of the 8
