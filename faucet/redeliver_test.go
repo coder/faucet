@@ -367,7 +367,7 @@ func TestSlowAsksStopStartingInTimeForARequestInFlightToEndAndForThePurge(t *tes
 	defer cancel()
 
 	res, err := env.svc.Redeliver(ctx)
-	require.NoError(t, err, "no ask is in flight when the time ends, so none is cancelled and none is lost")
+	require.NoError(t, err, "no ask is in flight when the time ends, so none is canceled and none is lost")
 	require.Positive(t, res.Asked)
 	require.Less(t, res.Asked, 30)
 	require.Equal(t, 30, res.Pending)

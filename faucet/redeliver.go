@@ -41,13 +41,13 @@ const (
 // page limit does, and the next run reads on.
 const (
 	// redeliveryScanShare is the share for reading the list. A page in flight
-	// when it ends is cancelled and not counted.
+	// when it ends is canceled and not counted.
 	redeliveryScanShare = 0.5
 	// redeliveryAskStartShare is the share after which no ask starts, so that
 	// an ask that started before it has time to finish.
 	redeliveryAskStartShare = 0.8
 	// redeliveryAskEndShare is the share at which an ask in flight is
-	// cancelled. The purge has the rest.
+	// canceled. The purge has the rest.
 	redeliveryAskEndShare = 0.9
 )
 

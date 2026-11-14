@@ -291,7 +291,7 @@ func steadyCapacity(perRun int, covered time.Duration) int {
 	return (perRun - 2) * int(time.Hour/covered)
 }
 
-func TestSimTheStatedCapacityKeepsUpAndAtenthMoreDoesNot(t *testing.T) {
+func TestSimTheStatedCapacityKeepsUpAndATenthMoreDoesNot(t *testing.T) {
 	t.Parallel()
 	// The same law at a tenth of the scale: pages of 10 attempts, 20 a run.
 	const pages, pageSize = 20, 10
