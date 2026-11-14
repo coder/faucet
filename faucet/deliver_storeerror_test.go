@@ -16,8 +16,10 @@ import (
 var errStoreDown = xerrors.New("store down: connection reset by peer")
 
 // settle is how long the first worker has to record its error before the other
-// call returns. The store has no signal for it. A worker that is late only makes
-// the test run the other order, and never makes it fail.
+// call returns. The store has no signal for it. In the test of the claim race, a
+// worker that is late only makes the test run the other order. In the test of
+// the first failure it makes the test fail, so settle is long against the few
+// microseconds that the record takes.
 const settle = 100 * time.Millisecond
 
 // signal is a one-shot event that a test waits for.
@@ -30,11 +32,19 @@ func newSignal() *signal { return &signal{done: make(chan struct{})} }
 
 func (s *signal) fire() { s.once.Do(func() { close(s.done) }) }
 
-func (s *signal) await(t *testing.T, what string) {
-	t.Helper()
+// wait reports whether the signal fired before a hung test would give up.
+func (s *signal) wait() bool {
 	select {
 	case <-s.done:
+		return true
 	case <-time.After(10 * time.Second):
+		return false
+	}
+}
+
+func (s *signal) await(t *testing.T, what string) {
+	t.Helper()
+	if !s.wait() {
 		t.Fatalf("%s never happened", what)
 	}
 }
@@ -202,28 +212,34 @@ func TestDeliverDueLogsAFailedSweepOfPreviousSecretsUnlessTheEndOfTheRunCausedIt
 	}
 }
 
-// claimEndsStore ends the run inside one kind of claim, as the cancel cuts a
-// Postgres query short.
-type claimEndsStore struct {
+// claimFailsStore fails one kind of claim with what fail returns.
+type claimFailsStore struct {
 	faucet.Store
-	endRun func()
-	gap    bool
+	fail func(ctx context.Context) error
+	gap  bool
 }
 
-func (s *claimEndsStore) ClaimGap(ctx context.Context, now time.Time, lease time.Duration, skip []string) (faucet.GapClaim, bool, error) {
+func (s *claimFailsStore) ClaimGap(ctx context.Context, now time.Time, lease time.Duration, skip []string) (faucet.GapClaim, bool, error) {
 	if !s.gap {
 		return s.Store.ClaimGap(ctx, now, lease, skip)
 	}
-	s.endRun()
-	return faucet.GapClaim{}, false, ctx.Err()
+	return faucet.GapClaim{}, false, s.fail(ctx)
 }
 
-func (s *claimEndsStore) ClaimDelivery(ctx context.Context, now time.Time, lease time.Duration, skip []string) (faucet.DeliveryClaim, bool, error) {
+func (s *claimFailsStore) ClaimDelivery(ctx context.Context, now time.Time, lease time.Duration, skip []string) (faucet.DeliveryClaim, bool, error) {
 	if s.gap {
 		return s.Store.ClaimDelivery(ctx, now, lease, skip)
 	}
-	s.endRun()
-	return faucet.DeliveryClaim{}, false, ctx.Err()
+	return faucet.DeliveryClaim{}, false, s.fail(ctx)
+}
+
+// endsRunInClaim ends the run inside the claim, as the cancel cuts a Postgres
+// query short.
+func endsRunInClaim(endRun func()) func(context.Context) error {
+	return func(ctx context.Context) error {
+		endRun()
+		return ctx.Err()
+	}
 }
 
 func TestDeliverDueIsIncompleteNotFailedWhenTheEndOfTheRunCutsAClaimShort(t *testing.T) {
@@ -241,7 +257,7 @@ func TestDeliverDueIsIncompleteNotFailedWhenTheEndOfTheRunCutsAClaimShort(t *tes
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			d := newDeliverHarness(t, func(deps *faucet.Deps) {
-				deps.Store = &claimEndsStore{Store: deps.Store, endRun: cancel, gap: tc.gap}
+				deps.Store = &claimFailsStore{Store: deps.Store, fail: endsRunInClaim(cancel), gap: tc.gap}
 			})
 
 			res, err := d.svc.DeliverDue(ctx)
@@ -249,4 +265,90 @@ func TestDeliverDueIsIncompleteNotFailedWhenTheEndOfTheRunCutsAClaimShort(t *tes
 			require.True(t, res.Incomplete)
 		})
 	}
+}
+
+// A store call can fail with an error that wraps a context error for a reason
+// of its own, such as a timeout inside the store. The run's context is then
+// alive, so the failure is real and stays the run's error.
+func TestDeliverDueKeepsAContextLookingClaimErrorWhileTheRunIsAlive(t *testing.T) {
+	t.Parallel()
+
+	for _, claim := range []struct {
+		name string
+		gap  bool
+	}{
+		{"a gap claim", true},
+		{"a delivery claim", false},
+	} {
+		for _, cause := range []struct {
+			name string
+			err  error
+		}{
+			{"a timeout of the store's own", context.DeadlineExceeded},
+			{"a cancel of the store's own", context.Canceled},
+		} {
+			t.Run(claim.name+" with "+cause.name, func(t *testing.T) {
+				t.Parallel()
+				d := newDeliverHarness(t, func(deps *faucet.Deps) {
+					deps.Store = &claimFailsStore{Store: deps.Store, gap: claim.gap, fail: func(context.Context) error {
+						return xerrors.Errorf("claim: %w", cause.err)
+					}}
+				})
+
+				_, err := d.svc.DeliverDue(d.ctx)
+				require.ErrorIs(t, err, cause.err, "the run's own context is alive, so this is a store failure and not the end of the run")
+			})
+		}
+	}
+}
+
+var (
+	errFirstFailure = xerrors.New("the first store failure")
+	errLaterFailure = xerrors.New("a later store failure")
+)
+
+// twoFailuresStore plays two workers of one run whose results the store fails
+// to record. The first worker to arrive fails once the other has arrived, and
+// the other fails settle after that.
+type twoFailuresStore struct {
+	faucet.Store
+	arrivals            atomic.Int32
+	bothIn, firstFailed *signal
+}
+
+func (s *twoFailuresStore) FinishDelivery(context.Context, faucet.DeliveryRef, time.Time, faucet.Finish) (faucet.FinishResult, error) {
+	if s.arrivals.Add(1) == 1 {
+		if !s.bothIn.wait() {
+			return faucet.FinishResult{}, xerrors.New("the second worker never arrived")
+		}
+		s.firstFailed.fire()
+		return faucet.FinishResult{}, errFirstFailure
+	}
+	s.bothIn.fire()
+	if !s.firstFailed.wait() {
+		return faucet.FinishResult{}, xerrors.New("the first worker never failed")
+	}
+	time.Sleep(settle)
+	return faucet.FinishResult{}, errLaterFailure
+}
+
+// The first failure is the cause that the operator needs. Later ones can be its
+// echoes.
+func TestDeliverDueReturnsTheFirstStoreFailureWhenWorkersFailInTurn(t *testing.T) {
+	t.Parallel()
+
+	store := &twoFailuresStore{bothIn: newSignal(), firstFailed: newSignal()}
+	d := newDeliverHarness(t, func(deps *faucet.Deps) {
+		store.Store = deps.Store
+		deps.Store = store
+	})
+	d.ledgerSkip = true
+	d.subscribeEndpoint(d.endpoint("/hook"))
+	d.advance(time.Second)
+	d.newRunEvent()
+	d.newRunEvent()
+
+	_, err := d.svc.DeliverDue(d.ctx)
+	require.ErrorIs(t, err, errFirstFailure, "the failure that came first is the run's error")
+	require.NotErrorIs(t, err, errLaterFailure, "a later failure does not replace it")
 }
