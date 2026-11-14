@@ -165,3 +165,36 @@ func TestCheckSchemaAcceptsOnlyTheNewestVersionAndWritesNothing(t *testing.T) {
 		require.ErrorIs(t, pgstore.CheckSchema(ctx, db), pgstore.ErrSchemaNotCurrent)
 	})
 }
+
+func TestStoreCallThatItsContextCutShortWrapsTheContextError(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	tx, err := db.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	_, err = tx.Exec("LOCK TABLE faucet_subscriptions IN ACCESS EXCLUSIVE MODE")
+	require.NoError(t, err)
+
+	for name, c := range map[string]struct {
+		newContext func() (context.Context, context.CancelFunc)
+		want       error
+	}{
+		"canceled": {func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(300*time.Millisecond, cancel)
+			return ctx, cancel
+		}, context.Canceled},
+		"deadline": {func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 300*time.Millisecond)
+		}, context.DeadlineExceeded},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := c.newContext()
+			defer cancel()
+			_, err := store.ScanTargets(ctx, time.Now(), 10, 10)
+			require.ErrorIs(t, err, c.want, "the statement waits on the lock until the context ends it")
+		})
+	}
+}
