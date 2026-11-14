@@ -70,6 +70,7 @@ type webhookState struct {
 	nonceKey              []byte
 	logger                slog.Logger
 	terminated            struct{ sent, failed atomic.Uint64 }
+	warned                windowWarnings
 }
 
 func newWebhookState(d WebhookDeps, clock quartz.Clock, logger slog.Logger) (*webhookState, error) {

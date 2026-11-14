@@ -301,3 +301,39 @@ func TestKeyChangeThenRenewalStillSendsTerminatedEnvelopeWithTheCurrentSecret(t 
 	require.Equal(t, 1, requests[0].signatureCount())
 	d.requireUnreadablePreviousSkipped(next, ep.secret, renewed)
 }
+
+func TestWindowThatRepeatsTheCurrentSecretSendsOneSignature(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	ep := d.endpoint("/hook")
+	d.subscribeEndpoint(ep)
+	d.store.repeatCurrentSecretAsPrevious(d.rows()[0].KeyHash, d.clock.Now().Add(10*time.Minute))
+	d.advance(time.Second)
+
+	d.newRunEvent()
+	require.Equal(t, 1, d.deliverDue().Delivered)
+	got := d.rcv.requests("/hook")[0]
+	require.True(t, got.signatureValid(ep.secret))
+	require.Equal(t, 1, got.signatureCount(), "one secret signs once, however many rows hold it")
+}
+
+func TestUnreadablePreviousSecretIsLoggedOncePerWindow(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	d.ledgerSkip = true
+	ep := d.endpoint("/hook")
+	d.subscribeEndpoint(ep)
+	d.advance(time.Second)
+	next := d.underNewKey()
+	next.subscribe(subscribeTo(ep.args, d.rcv.url(ep.path), newSecret(t, 32)))
+
+	for range 3 {
+		d.advance(time.Second)
+		d.newRunEvent()
+		require.Equal(t, 1, next.deliverDue().Delivered)
+	}
+	require.Equal(t, 1, strings.Count(next.logs.String(), "the previous secret of a rotation does not open"),
+		"three sends in one window log the unreadable previous secret once")
+}

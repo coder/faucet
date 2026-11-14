@@ -269,3 +269,14 @@ func (s *fakeStore) hasSomethingToReadLocked(key faucet.SubscriptionKeyHash, sub
 		return e.RepoID == sub.RepoID && e.Type == sub.EventType && e.ID > s.scanned[key]
 	})
 }
+
+// repeatCurrentSecretAsPrevious gives the row a previous secret that opens to
+// the same secret as its current one, as a row sealed before windows existed
+// has after its first refresh with the same secret.
+func (s *fakeStore) repeatCurrentSecretAsPrevious(key faucet.SubscriptionKeyHash, until time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sub := s.subs[key]
+	sub.PreviousSecretEnc, sub.PreviousSecretUntil = slices.Clone(sub.SecretEnc), until
+	s.subs[key] = sub
+}

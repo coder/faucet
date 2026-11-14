@@ -2,6 +2,7 @@ package faucet
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"cdr.dev/slog/v3"
@@ -32,13 +33,41 @@ func (c DeliveryClaim) sealedSecrets() sealedSecrets {
 	return sealedSecrets{current: c.SecretEnc, previous: c.PreviousSecretEnc, previousUntil: c.PreviousSecretUntil}
 }
 
+// windowWarnings remembers the rotation windows that a warning went out for, so
+// that a window whose previous secret does not open logs once, not once per
+// send. It forgets a window when it ends.
+type windowWarnings struct {
+	mu    sync.Mutex
+	until map[SubscriptionKeyHash]time.Time
+}
+
+// first says whether the window of key that ends at until has no warning yet,
+// and records it.
+func (w *windowWarnings) first(key SubscriptionKeyHash, until, now time.Time) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for k, end := range w.until {
+		if !now.Before(end) {
+			delete(w.until, k)
+		}
+	}
+	if seen, ok := w.until[key]; ok && seen.Equal(until) {
+		return false
+	}
+	if w.until == nil {
+		w.until = map[SubscriptionKeyHash]time.Time{}
+	}
+	w.until[key] = until
+	return true
+}
+
 // signingSecrets opens the secrets that sign a send at now: the current one,
 // and the previous one while now is before its end. A previous secret that the
 // store has not cleared yet, but whose window ended, signs nothing. The error
 // is that of openSecret for the current secret, which holds no secret.
 //
-// A previous secret that does not open is skipped with a log line, and the
-// current secret signs alone. The store cannot open it, so a renewal under
+// A previous secret that does not open is skipped, with one log line per
+// subscription and window, and the current secret signs alone. The store cannot open it, so a renewal under
 // another FAUCET_WEBHOOK_KEY moves a ciphertext of the old key there. It must
 // never end a delivery or the subscription, which the current secret serves.
 func (wh *webhookState) signingSecrets(ctx context.Context, now time.Time, key SubscriptionKeyHash, sealed sealedSecrets) ([]subscriberSecret, error) {
@@ -52,8 +81,10 @@ func (wh *webhookState) signingSecrets(ctx context.Context, now time.Time, key S
 	}
 	previous, err := openSecret(wh.aead, sealed.previous, key[:])
 	if err != nil {
-		wh.logger.Warn(ctx, "the previous secret of a rotation does not open, signing with the current secret only",
-			slog.F("subscription", key.ID()))
+		if wh.warned.first(key, sealed.previousUntil, now) {
+			wh.logger.Warn(ctx, "the previous secret of a rotation does not open, signing with the current secret only",
+				slog.F("subscription", key.ID()))
+		}
 		return secrets, nil
 	}
 	return append(secrets, previous), nil
