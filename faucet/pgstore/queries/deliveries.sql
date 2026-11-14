@@ -4,7 +4,7 @@ WITH head AS (
   FROM faucet_events
 )
 SELECT
-  s.key_hash, s.event_type, s.arguments, s.repo_id, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.scanned_through,
+  s.key_hash, s.principal, s.event_type, s.arguments, s.repo_id, s.scanned_through,
   (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash)::int AS pending
 FROM faucet_subscriptions s, head
 WHERE s.expires_at > sqlc.arg(now)
@@ -22,7 +22,8 @@ LIMIT sqlc.arg(row_limit);
 
 -- name: AdvanceScan :execrows
 UPDATE faucet_subscriptions
-SET scanned_through = sqlc.arg(new_scanned_through)
+SET scanned_through = sqlc.arg(new_scanned_through),
+    gap_through = GREATEST(gap_through, sqlc.arg(gap_through)::bigint)
 WHERE key_hash = sqlc.arg(key_hash)
   AND scanned_through = sqlc.arg(expected_scanned_through)
   AND expires_at > sqlc.arg(now);
@@ -41,6 +42,7 @@ WITH due AS (
   WHERE s.expires_at > sqlc.arg(now)
     AND d.next_attempt_at <= sqlc.arg(now)
     AND (d.lease_until IS NULL OR d.lease_until <= sqlc.arg(now))
+    AND COALESCE(substring(s.callback_url from '^[a-z][a-z0-9+.-]*://[^/?#]*'), '') <> ALL(sqlc.arg(skip_origins)::text[])
   ORDER BY d.next_attempt_at, d.event_id
   LIMIT 1
   FOR UPDATE OF d SKIP LOCKED
@@ -53,7 +55,7 @@ WITH due AS (
 )
 SELECT
   c.key_hash, c.event_id, c.message_id, c.attempts, c.enqueued_at,
-  s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.repo_id,
+  s.created_at AS incarnation, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.repo_id,
   (SELECT COALESCE(MIN(p.event_id), c.event_id) - 1 FROM faucet_deliveries p WHERE p.key_hash = c.key_hash)::bigint AS watermark,
   e.id AS stored_event_id, e.source, e.delivery_id, e.type, e.repo_id AS event_repo_id, e.prs, e.head_sha, COALESCE(e.data, 'null'::jsonb)::jsonb AS data, e.received_at
 FROM claimed c
@@ -97,4 +99,28 @@ WHERE (key_hash, event_id) IN (
 );
 
 -- name: LockSubscription :one
-SELECT 1::int AS locked FROM faucet_subscriptions WHERE key_hash = sqlc.arg(key_hash) FOR NO KEY UPDATE;
+SELECT created_at FROM faucet_subscriptions WHERE key_hash = sqlc.arg(key_hash) FOR NO KEY UPDATE;
+
+-- name: ClaimGap :one
+WITH due AS (
+  SELECT s.key_hash
+  FROM faucet_subscriptions s
+  WHERE s.gap_through > 0
+    AND s.expires_at > sqlc.arg(now)
+    AND (s.gap_lease_until IS NULL OR s.gap_lease_until <= sqlc.arg(now))
+    AND COALESCE(substring(s.callback_url from '^[a-z][a-z0-9+.-]*://[^/?#]*'), '') <> ALL(sqlc.arg(skip_origins)::text[])
+  ORDER BY s.gap_through, s.key_hash
+  LIMIT 1
+  FOR UPDATE SKIP LOCKED
+)
+UPDATE faucet_subscriptions s
+SET gap_lease_until = sqlc.arg(lease_until)
+FROM due
+WHERE s.key_hash = due.key_hash
+RETURNING s.key_hash, s.created_at AS incarnation, s.gap_through, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until;
+
+-- name: FinishGap :exec
+UPDATE faucet_subscriptions
+SET gap_through = CASE WHEN gap_through <= sqlc.arg(through)::bigint THEN 0 ELSE gap_through END,
+    gap_lease_until = NULL
+WHERE key_hash = sqlc.arg(key_hash) AND created_at = sqlc.arg(incarnation);

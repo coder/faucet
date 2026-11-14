@@ -104,6 +104,7 @@ type cronStore struct {
 	claims  []faucet.DeliveryClaim
 	failing error
 	cleared int64
+	expired int64
 }
 
 func (s *cronStore) ScanTargets(context.Context, time.Time, int32, int32) ([]faucet.ScanTarget, error) {
@@ -115,7 +116,7 @@ func (s *cronStore) ScanTargets(context.Context, time.Time, int32, int32) ([]fau
 func (s *cronStore) ExpireDeliveries(context.Context, time.Time) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return 0, s.failing
+	return s.expired, s.failing
 }
 
 func (s *cronStore) ClearExpiredPreviousSecrets(context.Context, time.Time) (int64, error) {
@@ -124,7 +125,13 @@ func (s *cronStore) ClearExpiredPreviousSecrets(context.Context, time.Time) (int
 	return s.cleared, s.failing
 }
 
-func (s *cronStore) ClaimDelivery(context.Context, time.Time, time.Duration) (faucet.DeliveryClaim, bool, error) {
+func (s *cronStore) ClaimGap(context.Context, time.Time, time.Duration, []string) (faucet.GapClaim, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return faucet.GapClaim{}, false, s.failing
+}
+
+func (s *cronStore) ClaimDelivery(context.Context, time.Time, time.Duration, []string) (faucet.DeliveryClaim, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.failing != nil || len(s.claims) == 0 {
@@ -150,7 +157,7 @@ func (s *cronStore) Purge(_ context.Context, before time.Time) (faucet.PurgeResu
 }
 
 func (*cronStore) DeleteExpiredSubscriptions(context.Context, time.Time) (int64, error) {
-	return 0, nil
+	return 2, nil
 }
 func (s *cronStore) purgeTimes() []time.Time {
 	s.mu.Lock()
@@ -318,17 +325,22 @@ func TestCronPurgeDeletesWhatIsOlderThanTheRetention(t *testing.T) {
 
 	for _, retention := range []time.Duration{30 * 24 * time.Hour, 7 * 24 * time.Hour} {
 		srv := newCronServer(t, cronOptions{secret: testCronSecret, retention: retention})
+		srv.store.expired = 5
 		status, _, body := srv.get(t, http.MethodGet, purgePath, bearer(testCronSecret))
 		require.Equal(t, http.StatusOK, status)
 
 		require.Equal(t, []time.Time{srv.clock.Now().Add(-retention)}, srv.store.purgeTimes())
 		var got struct {
-			Deleted       int64 `json:"deleted"`
-			PurgedThrough int64 `json:"purged_through"`
+			Deleted              int64 `json:"deleted"`
+			PurgedThrough        int64 `json:"purged_through"`
+			ExpiredSubscriptions int64 `json:"expired_subscriptions"`
+			EndedDeliveries      int64 `json:"ended_deliveries"`
 		}
 		require.NoError(t, json.Unmarshal([]byte(body), &got), body)
 		require.Equal(t, int64(3), got.Deleted)
 		require.Equal(t, int64(11), got.PurgedThrough)
+		require.Equal(t, int64(2), got.ExpiredSubscriptions, "the reply counts the expired subscriptions")
+		require.Equal(t, int64(5), got.EndedDeliveries, "and the deliveries that ended with them")
 	}
 }
 

@@ -450,7 +450,7 @@ func TestDeliverDueTakesBackADeliveryWhenALeaseRunsOut(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, won)
 		d.ledger.Enqueued++
-		claim, ok, err := d.store.ClaimDelivery(d.ctx, d.clock.Now(), faucet.DeliveryLease)
+		claim, ok, err := d.store.ClaimDelivery(d.ctx, d.clock.Now(), faucet.DeliveryLease, nil)
 		require.NoError(t, err)
 		require.True(t, ok, "the run that is about to crash holds the delivery")
 		return claim, targets[0]
@@ -479,7 +479,7 @@ func TestDeliverDueTakesBackADeliveryWhenALeaseRunsOut(t *testing.T) {
 		queue(d)
 		for attempt := 2; attempt <= faucet.MaxDeliveryAttempts; attempt++ {
 			d.advance(faucet.DeliveryLease)
-			_, ok, err := d.store.ClaimDelivery(d.ctx, d.clock.Now(), faucet.DeliveryLease)
+			_, ok, err := d.store.ClaimDelivery(d.ctx, d.clock.Now(), faucet.DeliveryLease, nil)
 			require.NoError(t, err)
 			require.True(t, ok, "attempt %d is claimed once the lease runs out", attempt)
 		}
@@ -886,4 +886,136 @@ func TestSubscribeReportsTheDeliveryStatusOfARefreshedSubscription(t *testing.T)
 	require.Nil(t, recovered.LastError, "a 2xx clears the failure")
 	require.Equal(t, deliveredAt.UTC().Format(time.RFC3339), recovered.LastDeliveryAt)
 	require.Empty(t, recovered.FailedSince)
+}
+
+func TestDeliverDueAnAttemptOfAnOlderSubscriptionDoesNotEndTheNewOnesDelivery(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	d.ledgerSkip = true
+	ep := d.endpoint("/hook")
+	d.subscribeEndpoint(ep)
+	d.advance(time.Second)
+	d.newRunEvent()
+
+	olderGate, newerGate := make(chan struct{}), make(chan struct{})
+	releaseOlder, releaseNewer := sync.OnceFunc(func() { close(olderGate) }), sync.OnceFunc(func() { close(newerGate) })
+	t.Cleanup(func() { releaseOlder(); releaseNewer() })
+	arrived := make(chan struct{}, 2)
+	d.rcv.answer("/hook", func(n int) int {
+		switch n {
+		case 1:
+			arrived <- struct{}{}
+			<-olderGate
+			return http.StatusGone
+		case 2:
+			arrived <- struct{}{}
+			<-newerGate
+			return http.StatusInternalServerError
+		}
+		return http.StatusOK
+	})
+	awaitRequest := func() {
+		t.Helper()
+		select {
+		case <-arrived:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the request never arrived")
+		}
+	}
+
+	older := d.runDeliverDue()
+	awaitRequest()
+	d.advance(time.Second)
+	require.Nil(t, d.unsubscribe(ep.args, d.rcv.url(ep.path)))
+	again := subscribeTo(ep.args, d.rcv.url(ep.path), ep.secret)
+	again.Cursor = raw("v1.0")
+	d.subscribe(again)
+	newer := d.runDeliverDue()
+	awaitRequest()
+
+	releaseOlder()
+	olderRes := older()
+	require.Equal(t, 1, olderRes.Superseded, "the older attempt belongs to a subscription that is gone")
+	require.Zero(t, olderRes.GaveUp[faucet.GiveUpEndpointGone], "its 410 ends nothing of the new subscription")
+	releaseNewer()
+	require.Equal(t, 1, newer().Retried, "the new subscription's own attempt records its own 500")
+
+	d.advance(16 * time.Second)
+	require.Equal(t, 1, d.deliverDue().Delivered, "the new subscription's event is still queued and goes out on retry")
+}
+
+func TestPurgeCountsTheDeliveriesThatEndWithAnExpiredSubscription(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	d.ledgerSkip = true
+	ep := d.endpoint("/hook")
+	d.rcv.answer("/hook", always(http.StatusInternalServerError))
+	d.subscribeEndpoint(ep)
+	d.advance(time.Second)
+	d.newRunEvent()
+	d.newRunEvent()
+	require.Equal(t, 2, d.deliverDue().Retried)
+	d.advance(11 * time.Minute)
+
+	res, err := d.svc.Purge(d.ctx, d.clock.Now().Add(-time.Minute))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, res.ExpiredSubscriptions)
+	require.EqualValues(t, 2, res.EndedDeliveries, "the two queued deliveries ended with their subscription, and the purge says so")
+	require.Empty(t, d.store.deliveryRows())
+	require.Equal(t, 1, strings.Count(d.logs.String(), "events purged"), "one log line")
+	require.Contains(t, d.logs.String(), "deliveries_ended=2")
+}
+
+func TestDeliverDueEndsASubscriptionWhoseArgumentsDoNotDecodeAndNeverRescansIt(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	ep := d.endpoint("/hook")
+	d.rcv.answer("/hook", always(http.StatusInternalServerError))
+	d.subscribeEndpoint(ep)
+	d.advance(time.Second)
+	d.newRunEvent()
+	require.Equal(t, 1, d.deliverDue().Retried)
+	d.store.corruptArguments(d.rows()[0].KeyHash)
+	d.newRunEvent()
+
+	res := d.deliverDue()
+	require.Equal(t, 1, res.GaveUp[faucet.GiveUpArgumentsUndecodable], "the delivery that was queued ends with the subscription and is counted")
+	require.Empty(t, d.rows(), "the subscription ended")
+	require.Empty(t, d.store.deliveryRows())
+
+	d.newRunEvent()
+	d.deliverDue()
+	d.deliverDue()
+	require.Equal(t, 1, strings.Count(d.logs.String(), "stored arguments do not decode"), "later runs do not read it again")
+}
+
+type finishFailsStore struct {
+	faucet.Store
+	before func()
+}
+
+func (s *finishFailsStore) FinishDelivery(context.Context, faucet.DeliveryRef, time.Time, faucet.Finish) (faucet.FinishResult, error) {
+	s.before()
+	return faucet.FinishResult{}, xerrors.New("connection reset by peer")
+}
+
+func TestDeliverDueReturnsAStoreErrorThatTheEndOfTheRunDidNotCause(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := newDeliverHarness(t, func(deps *faucet.Deps) {
+		deps.Store = &finishFailsStore{Store: deps.Store, before: cancel}
+	})
+	d.ledgerSkip = true
+	d.subscribeEndpoint(d.endpoint("/hook"))
+	d.advance(time.Second)
+	d.newRunEvent()
+
+	res, err := d.svc.DeliverDue(ctx)
+	require.ErrorContains(t, err, "connection reset by peer", "the run ended while the store failed for its own reason, and the failure is not hidden")
+	require.Equal(t, 1, res.Claimed)
 }

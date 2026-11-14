@@ -259,6 +259,27 @@ func (d *deliverHarness) subscribeEndpoint(e hookEndpoint) subscribed {
 	return d.subscribe(subscribeTo(e.args, d.rcv.url(e.path), e.secret))
 }
 
+// The goroutine never touches d.t: testing panics on a t call after the test
+// ends, and a failing test can leave the run behind.
+func (d *deliverHarness) runDeliverDue() func() faucet.DeliverResult {
+	d.t.Helper()
+	type outcome struct {
+		res faucet.DeliverResult
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := d.svc.DeliverDue(d.ctx)
+		done <- outcome{res, err}
+	}()
+	return func() faucet.DeliverResult {
+		d.t.Helper()
+		got := <-done
+		require.NoError(d.t, got.err)
+		return got.res
+	}
+}
+
 func (d *deliverHarness) advance(by time.Duration) { d.clock.Advance(by) }
 
 func (d *deliverHarness) newRunEvent(prs ...int32) faucet.Event {

@@ -68,7 +68,12 @@ describe('cron routes', () => {
 
     expect(reply.status).toBe(200);
     expect(reply.headers.get('content-type')).toContain('application/json');
-    expect(JSON.parse(reply.body)).toEqual({ deleted: expect.any(Number), purged_through: expect.any(Number) });
+    expect(JSON.parse(reply.body)).toEqual({
+      deleted: expect.any(Number),
+      purged_through: expect.any(Number),
+      expired_subscriptions: expect.any(Number),
+      ended_deliveries: expect.any(Number),
+    });
     expect(await deliveriesOf(cron, armed.repoId)).toEqual([]);
     expect(cron.leaksSecret(reply.body + JSON.stringify([...reply.headers]))).toBe(false);
   });

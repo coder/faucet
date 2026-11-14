@@ -11,7 +11,8 @@ import (
 	"github.com/coder/faucet/faucet/pgstore/database"
 )
 
-func (s *Store) ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32) ([]faucet.ScanTarget, error) {
+func (s *Store) ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32) (_ []faucet.ScanTarget, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	if maxPending <= 0 || limit <= 0 {
 		return nil, xerrors.New("max pending and limit must be positive")
 	}
@@ -26,16 +27,13 @@ func (s *Store) ScanTargets(ctx context.Context, now time.Time, maxPending, limi
 			return nil, err
 		}
 		targets[i] = faucet.ScanTarget{
-			KeyHash:             key,
-			EventType:           row.EventType,
-			Arguments:           row.Arguments,
-			RepoID:              row.RepoID,
-			CallbackURL:         row.CallbackUrl,
-			SecretEnc:           row.SecretEnc,
-			PreviousSecretEnc:   row.PreviousSecretEnc,
-			PreviousSecretUntil: row.PreviousSecretUntil.Time,
-			ScannedThrough:      row.ScannedThrough,
-			Pending:             row.Pending,
+			KeyHash:        key,
+			Principal:      row.Principal,
+			EventType:      row.EventType,
+			Arguments:      row.Arguments,
+			RepoID:         row.RepoID,
+			ScannedThrough: row.ScannedThrough,
+			Pending:        row.Pending,
 		}
 	}
 	return targets, nil
@@ -45,7 +43,8 @@ func (s *Store) ScanTargets(ctx context.Context, now time.Time, maxPending, limi
 // position the caller read from. A concurrent caller that read from the same
 // position waits on the row lock and then finds it moved, so only one of them
 // queues the deliveries.
-func (s *Store) EnqueueDeliveries(ctx context.Context, now time.Time, e faucet.Enqueue) (bool, error) {
+func (s *Store) EnqueueDeliveries(ctx context.Context, now time.Time, e faucet.Enqueue) (_ bool, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	if err := e.Validate(); err != nil {
 		return false, xerrors.Errorf("validate enqueue: %w", err)
 	}
@@ -58,6 +57,7 @@ func (s *Store) EnqueueDeliveries(ctx context.Context, now time.Time, e faucet.E
 
 	moved, err := q.AdvanceScan(ctx, database.AdvanceScanParams{
 		NewScannedThrough:      e.NewScannedThrough,
+		GapThrough:             e.GapThrough,
 		KeyHash:                e.Key[:],
 		ExpectedScannedThrough: e.ExpectedScannedThrough,
 		Now:                    now,
@@ -88,11 +88,12 @@ func (s *Store) EnqueueDeliveries(ctx context.Context, now time.Time, e faucet.E
 // caller, and the update in the same statement sets the lease and raises the
 // attempt, so a caller that arrives after the commit finds a held row and
 // skips it.
-func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Duration) (faucet.DeliveryClaim, bool, error) {
+func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Duration, skip []string) (_ faucet.DeliveryClaim, _ bool, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	if lease <= 0 {
 		return faucet.DeliveryClaim{}, false, xerrors.Errorf("lease must be positive, got %s", lease)
 	}
-	row, err := s.q.ClaimDelivery(ctx, database.ClaimDeliveryParams{Now: now, LeaseUntil: sql.NullTime{Time: now.Add(lease), Valid: true}})
+	row, err := s.q.ClaimDelivery(ctx, database.ClaimDeliveryParams{Now: now, LeaseUntil: sql.NullTime{Time: now.Add(lease), Valid: true}, SkipOrigins: nonNil(skip)})
 	if xerrors.Is(err, sql.ErrNoRows) {
 		return faucet.DeliveryClaim{}, false, nil
 	}
@@ -104,7 +105,7 @@ func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Dur
 		return faucet.DeliveryClaim{}, false, err
 	}
 	claim := faucet.DeliveryClaim{
-		Ref:                 faucet.DeliveryRef{Key: key, EventID: row.EventID, MessageID: row.MessageID, Attempt: row.Attempts},
+		Ref:                 faucet.DeliveryRef{Key: key, EventID: row.EventID, MessageID: row.MessageID, Attempt: row.Attempts, Incarnation: row.Incarnation},
 		MessageID:           row.MessageID,
 		EnqueuedAt:          row.EnqueuedAt,
 		CallbackURL:         row.CallbackUrl,
@@ -130,11 +131,59 @@ func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Dur
 	return claim, true, nil
 }
 
+// ClaimGap is one statement, like ClaimDelivery: the lease is set by the same
+// statement that selects the row, so a caller that arrives after the commit
+// finds a held gap and skips it.
+func (s *Store) ClaimGap(ctx context.Context, now time.Time, lease time.Duration, skip []string) (_ faucet.GapClaim, _ bool, err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	if lease <= 0 {
+		return faucet.GapClaim{}, false, xerrors.Errorf("lease must be positive, got %s", lease)
+	}
+	row, err := s.q.ClaimGap(ctx, database.ClaimGapParams{Now: now, LeaseUntil: sql.NullTime{Time: now.Add(lease), Valid: true}, SkipOrigins: nonNil(skip)})
+	if xerrors.Is(err, sql.ErrNoRows) {
+		return faucet.GapClaim{}, false, nil
+	}
+	if err != nil {
+		return faucet.GapClaim{}, false, xerrors.Errorf("claim gap: %w", err)
+	}
+	key, err := toKeyHash(row.KeyHash)
+	if err != nil {
+		return faucet.GapClaim{}, false, err
+	}
+	return faucet.GapClaim{
+		Ref:                 faucet.GapRef{Key: key, Incarnation: row.Incarnation, Through: row.GapThrough},
+		CallbackURL:         row.CallbackUrl,
+		SecretEnc:           row.SecretEnc,
+		PreviousSecretEnc:   row.PreviousSecretEnc,
+		PreviousSecretUntil: row.PreviousSecretUntil.Time,
+	}, true, nil
+}
+
+func (s *Store) FinishGap(ctx context.Context, ref faucet.GapRef) (err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	if err := s.q.FinishGap(ctx, database.FinishGapParams{Through: ref.Through, KeyHash: ref.Key[:], Incarnation: ref.Incarnation}); err != nil {
+		return xerrors.Errorf("finish gap: %w", err)
+	}
+	return nil
+}
+
+// nonNil turns a nil list into an empty one: lib/pq sends a nil slice as NULL,
+// and a comparison with NULL would match no row.
+func nonNil(list []string) []string {
+	if list == nil {
+		return []string{}
+	}
+	return list
+}
+
 // FinishDelivery takes the lock of the subscription row before it touches the
 // delivery. DeleteSubscription locks them in the other order (the subscription,
 // then the deliveries that cascade), and two transactions that took the two
-// locks in opposite orders could wait on each other.
-func (s *Store) FinishDelivery(ctx context.Context, ref faucet.DeliveryRef, now time.Time, f faucet.Finish) (faucet.FinishResult, error) {
+// locks in opposite orders could wait on each other. The lock also makes the
+// incarnation check hold: the row cannot be replaced between the check and the
+// update.
+func (s *Store) FinishDelivery(ctx context.Context, ref faucet.DeliveryRef, now time.Time, f faucet.Finish) (_ faucet.FinishResult, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	if ref.Attempt < 1 {
 		return faucet.FinishResult{}, xerrors.Errorf("attempt must be at least 1, got %d", ref.Attempt)
 	}
@@ -148,9 +197,11 @@ func (s *Store) FinishDelivery(ctx context.Context, ref faucet.DeliveryRef, now 
 	defer func() { _ = tx.Rollback() }()
 	q := s.q.WithTx(tx)
 
-	if _, err := q.LockSubscription(ctx, ref.Key[:]); xerrors.Is(err, sql.ErrNoRows) {
+	createdAt, err := q.LockSubscription(ctx, ref.Key[:])
+	if xerrors.Is(err, sql.ErrNoRows) || err == nil && !createdAt.Equal(ref.Incarnation) {
 		return faucet.FinishResult{}, nil
-	} else if err != nil {
+	}
+	if err != nil {
 		return faucet.FinishResult{}, xerrors.Errorf("lock subscription: %w", err)
 	}
 	result, err := finishLocked(ctx, q, ref, now, f)
@@ -216,7 +267,8 @@ func deleteDeadSubscription(ctx context.Context, q *database.Queries, key faucet
 	return 1 + others, nil
 }
 
-func (s *Store) ExpireDeliveries(ctx context.Context, now time.Time) (int64, error) {
+func (s *Store) ExpireDeliveries(ctx context.Context, now time.Time) (_ int64, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	deleted, err := s.q.ExpireDeliveries(ctx, now)
 	if err != nil {
 		return 0, xerrors.Errorf("expire deliveries: %w", err)

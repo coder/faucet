@@ -16,14 +16,16 @@ import (
 
 const advanceScan = `-- name: AdvanceScan :execrows
 UPDATE faucet_subscriptions
-SET scanned_through = $1
-WHERE key_hash = $2
-  AND scanned_through = $3
-  AND expires_at > $4
+SET scanned_through = $1,
+    gap_through = GREATEST(gap_through, $2::bigint)
+WHERE key_hash = $3
+  AND scanned_through = $4
+  AND expires_at > $5
 `
 
 type AdvanceScanParams struct {
 	NewScannedThrough      int64
+	GapThrough             int64
 	KeyHash                []byte
 	ExpectedScannedThrough int64
 	Now                    time.Time
@@ -32,6 +34,7 @@ type AdvanceScanParams struct {
 func (q *Queries) AdvanceScan(ctx context.Context, arg AdvanceScanParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, advanceScan,
 		arg.NewScannedThrough,
+		arg.GapThrough,
 		arg.KeyHash,
 		arg.ExpectedScannedThrough,
 		arg.Now,
@@ -50,19 +53,20 @@ WITH due AS (
   WHERE s.expires_at > $1
     AND d.next_attempt_at <= $1
     AND (d.lease_until IS NULL OR d.lease_until <= $1)
+    AND COALESCE(substring(s.callback_url from '^[a-z][a-z0-9+.-]*://[^/?#]*'), '') <> ALL($2::text[])
   ORDER BY d.next_attempt_at, d.event_id
   LIMIT 1
   FOR UPDATE OF d SKIP LOCKED
 ), claimed AS (
   UPDATE faucet_deliveries d
-  SET attempts = d.attempts + 1, lease_until = $2
+  SET attempts = d.attempts + 1, lease_until = $3
   FROM due
   WHERE d.key_hash = due.key_hash AND d.event_id = due.event_id
   RETURNING d.key_hash, d.event_id, d.message_id, d.attempts, d.enqueued_at
 )
 SELECT
   c.key_hash, c.event_id, c.message_id, c.attempts, c.enqueued_at,
-  s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.repo_id,
+  s.created_at AS incarnation, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.repo_id,
   (SELECT COALESCE(MIN(p.event_id), c.event_id) - 1 FROM faucet_deliveries p WHERE p.key_hash = c.key_hash)::bigint AS watermark,
   e.id AS stored_event_id, e.source, e.delivery_id, e.type, e.repo_id AS event_repo_id, e.prs, e.head_sha, COALESCE(e.data, 'null'::jsonb)::jsonb AS data, e.received_at
 FROM claimed c
@@ -71,8 +75,9 @@ LEFT JOIN faucet_events e ON e.id = c.event_id
 `
 
 type ClaimDeliveryParams struct {
-	Now        time.Time
-	LeaseUntil sql.NullTime
+	Now         time.Time
+	SkipOrigins []string
+	LeaseUntil  sql.NullTime
 }
 
 type ClaimDeliveryRow struct {
@@ -81,6 +86,7 @@ type ClaimDeliveryRow struct {
 	MessageID           string
 	Attempts            int32
 	EnqueuedAt          time.Time
+	Incarnation         time.Time
 	CallbackUrl         string
 	SecretEnc           []byte
 	PreviousSecretEnc   []byte
@@ -99,7 +105,7 @@ type ClaimDeliveryRow struct {
 }
 
 func (q *Queries) ClaimDelivery(ctx context.Context, arg ClaimDeliveryParams) (ClaimDeliveryRow, error) {
-	row := q.db.QueryRowContext(ctx, claimDelivery, arg.Now, arg.LeaseUntil)
+	row := q.db.QueryRowContext(ctx, claimDelivery, arg.Now, pq.Array(arg.SkipOrigins), arg.LeaseUntil)
 	var i ClaimDeliveryRow
 	err := row.Scan(
 		&i.KeyHash,
@@ -107,6 +113,7 @@ func (q *Queries) ClaimDelivery(ctx context.Context, arg ClaimDeliveryParams) (C
 		&i.MessageID,
 		&i.Attempts,
 		&i.EnqueuedAt,
+		&i.Incarnation,
 		&i.CallbackUrl,
 		&i.SecretEnc,
 		&i.PreviousSecretEnc,
@@ -122,6 +129,56 @@ func (q *Queries) ClaimDelivery(ctx context.Context, arg ClaimDeliveryParams) (C
 		&i.HeadSha,
 		&i.Data,
 		&i.ReceivedAt,
+	)
+	return i, err
+}
+
+const claimGap = `-- name: ClaimGap :one
+WITH due AS (
+  SELECT s.key_hash
+  FROM faucet_subscriptions s
+  WHERE s.gap_through > 0
+    AND s.expires_at > $2
+    AND (s.gap_lease_until IS NULL OR s.gap_lease_until <= $2)
+    AND COALESCE(substring(s.callback_url from '^[a-z][a-z0-9+.-]*://[^/?#]*'), '') <> ALL($3::text[])
+  ORDER BY s.gap_through, s.key_hash
+  LIMIT 1
+  FOR UPDATE SKIP LOCKED
+)
+UPDATE faucet_subscriptions s
+SET gap_lease_until = $1
+FROM due
+WHERE s.key_hash = due.key_hash
+RETURNING s.key_hash, s.created_at AS incarnation, s.gap_through, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until
+`
+
+type ClaimGapParams struct {
+	LeaseUntil  sql.NullTime
+	Now         time.Time
+	SkipOrigins []string
+}
+
+type ClaimGapRow struct {
+	KeyHash             []byte
+	Incarnation         time.Time
+	GapThrough          int64
+	CallbackUrl         string
+	SecretEnc           []byte
+	PreviousSecretEnc   []byte
+	PreviousSecretUntil sql.NullTime
+}
+
+func (q *Queries) ClaimGap(ctx context.Context, arg ClaimGapParams) (ClaimGapRow, error) {
+	row := q.db.QueryRowContext(ctx, claimGap, arg.LeaseUntil, arg.Now, pq.Array(arg.SkipOrigins))
+	var i ClaimGapRow
+	err := row.Scan(
+		&i.KeyHash,
+		&i.Incarnation,
+		&i.GapThrough,
+		&i.CallbackUrl,
+		&i.SecretEnc,
+		&i.PreviousSecretEnc,
+		&i.PreviousSecretUntil,
 	)
 	return i, err
 }
@@ -199,6 +256,24 @@ func (q *Queries) ExpireDeliveries(ctx context.Context, now time.Time) (int64, e
 	return result.RowsAffected()
 }
 
+const finishGap = `-- name: FinishGap :exec
+UPDATE faucet_subscriptions
+SET gap_through = CASE WHEN gap_through <= $1::bigint THEN 0 ELSE gap_through END,
+    gap_lease_until = NULL
+WHERE key_hash = $2 AND created_at = $3
+`
+
+type FinishGapParams struct {
+	Through     int64
+	KeyHash     []byte
+	Incarnation time.Time
+}
+
+func (q *Queries) FinishGap(ctx context.Context, arg FinishGapParams) error {
+	_, err := q.db.ExecContext(ctx, finishGap, arg.Through, arg.KeyHash, arg.Incarnation)
+	return err
+}
+
 const insertDeliveries = `-- name: InsertDeliveries :exec
 INSERT INTO faucet_deliveries (key_hash, event_id, message_id, enqueued_at, next_attempt_at)
 SELECT $1::bytea, e.event_id, m.message_id, $2::timestamptz, $2::timestamptz
@@ -224,14 +299,14 @@ func (q *Queries) InsertDeliveries(ctx context.Context, arg InsertDeliveriesPara
 }
 
 const lockSubscription = `-- name: LockSubscription :one
-SELECT 1::int AS locked FROM faucet_subscriptions WHERE key_hash = $1 FOR NO KEY UPDATE
+SELECT created_at FROM faucet_subscriptions WHERE key_hash = $1 FOR NO KEY UPDATE
 `
 
-func (q *Queries) LockSubscription(ctx context.Context, keyHash []byte) (int32, error) {
+func (q *Queries) LockSubscription(ctx context.Context, keyHash []byte) (time.Time, error) {
 	row := q.db.QueryRowContext(ctx, lockSubscription, keyHash)
-	var locked int32
-	err := row.Scan(&locked)
-	return locked, err
+	var created_at time.Time
+	err := row.Scan(&created_at)
+	return created_at, err
 }
 
 const recordDeliveryFailure = `-- name: RecordDeliveryFailure :exec
@@ -301,7 +376,7 @@ WITH head AS (
   FROM faucet_events
 )
 SELECT
-  s.key_hash, s.event_type, s.arguments, s.repo_id, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.scanned_through,
+  s.key_hash, s.principal, s.event_type, s.arguments, s.repo_id, s.scanned_through,
   (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash)::int AS pending
 FROM faucet_subscriptions s, head
 WHERE s.expires_at > $1
@@ -325,16 +400,13 @@ type ScanTargetsParams struct {
 }
 
 type ScanTargetsRow struct {
-	KeyHash             []byte
-	EventType           string
-	Arguments           json.RawMessage
-	RepoID              int64
-	CallbackUrl         string
-	SecretEnc           []byte
-	PreviousSecretEnc   []byte
-	PreviousSecretUntil sql.NullTime
-	ScannedThrough      int64
-	Pending             int32
+	KeyHash        []byte
+	Principal      string
+	EventType      string
+	Arguments      json.RawMessage
+	RepoID         int64
+	ScannedThrough int64
+	Pending        int32
 }
 
 func (q *Queries) ScanTargets(ctx context.Context, arg ScanTargetsParams) ([]ScanTargetsRow, error) {
@@ -348,13 +420,10 @@ func (q *Queries) ScanTargets(ctx context.Context, arg ScanTargetsParams) ([]Sca
 		var i ScanTargetsRow
 		if err := rows.Scan(
 			&i.KeyHash,
+			&i.Principal,
 			&i.EventType,
 			&i.Arguments,
 			&i.RepoID,
-			&i.CallbackUrl,
-			&i.SecretEnc,
-			&i.PreviousSecretEnc,
-			&i.PreviousSecretUntil,
 			&i.ScannedThrough,
 			&i.Pending,
 		); err != nil {

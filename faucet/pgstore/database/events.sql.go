@@ -128,7 +128,7 @@ func (q *Queries) DeleteExpiredSubscriptionsOf(ctx context.Context, arg DeleteEx
 const deleteLiveSubscription = `-- name: DeleteLiveSubscription :one
 DELETE FROM faucet_subscriptions
 WHERE key_hash = $1 AND principal = $2 AND expires_at > $3
-RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until
+RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until, gap_through, gap_lease_until
 `
 
 type DeleteLiveSubscriptionParams struct {
@@ -158,6 +158,8 @@ func (q *Queries) DeleteLiveSubscription(ctx context.Context, arg DeleteLiveSubs
 		&i.FailedSince,
 		&i.PreviousSecretEnc,
 		&i.PreviousSecretUntil,
+		&i.GapThrough,
+		&i.GapLeaseUntil,
 	)
 	return i, err
 }
@@ -456,7 +458,7 @@ ON CONFLICT (key_hash) DO UPDATE SET
   secret_enc = EXCLUDED.secret_enc,
   updated_at = EXCLUDED.updated_at,
   expires_at = EXCLUDED.expires_at
-RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until
+RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until, gap_through, gap_lease_until
 `
 
 type UpsertSubscriptionParams struct {
@@ -506,6 +508,8 @@ func (q *Queries) UpsertSubscription(ctx context.Context, arg UpsertSubscription
 		&i.FailedSince,
 		&i.PreviousSecretEnc,
 		&i.PreviousSecretUntil,
+		&i.GapThrough,
+		&i.GapLeaseUntil,
 	)
 	return i, err
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -25,9 +26,9 @@ func SignWebhook(secret, id string, timestamp time.Time, body []byte) (http.Head
 }
 
 // signWithSecrets is SignWebhook for one or more secrets. The signature header
-// holds one "v1," entry per secret, in the order given, space-delimited, as
-// Standard Webhooks defines for a rotation: a receiver accepts the message when
-// any entry verifies.
+// holds one "v1," entry per distinct signature, in the order given,
+// space-delimited, as Standard Webhooks defines for a rotation: a receiver
+// accepts the message when any entry verifies.
 func signWithSecrets(secrets []subscriberSecret, id string, timestamp time.Time, body []byte) (http.Header, error) {
 	switch {
 	case len(secrets) == 0:
@@ -38,8 +39,8 @@ func signWithSecrets(secrets []subscriberSecret, id string, timestamp time.Time,
 		return nil, xerrors.New("webhook timestamp must be after 1970")
 	}
 	seconds := strconv.FormatInt(timestamp.Unix(), 10)
-	signatures := make([]string, len(secrets))
-	for i, secret := range secrets {
+	signatures := make([]string, 0, len(secrets))
+	for _, secret := range secrets {
 		key, ok := decodeSecret(string(secret))
 		if !ok {
 			return nil, xerrors.New("webhook secret is not a whsec_ value of 24 to 64 bytes")
@@ -47,7 +48,9 @@ func signWithSecrets(secrets []subscriberSecret, id string, timestamp time.Time,
 		mac := hmac.New(sha256.New, key)
 		_, _ = mac.Write([]byte(id + "." + seconds + "."))
 		_, _ = mac.Write(body)
-		signatures[i] = "v1," + base64.StdEncoding.EncodeToString(mac.Sum(nil))
+		if signature := "v1," + base64.StdEncoding.EncodeToString(mac.Sum(nil)); !slices.Contains(signatures, signature) {
+			signatures = append(signatures, signature)
+		}
 	}
 
 	headers := http.Header{}

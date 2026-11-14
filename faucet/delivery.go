@@ -2,6 +2,8 @@ package faucet
 
 import (
 	"encoding/json"
+	"net/url"
+	"strings"
 	"time"
 
 	"golang.org/x/xerrors"
@@ -41,19 +43,14 @@ type DeliveryStatus struct {
 // the end of the log.
 type ScanTarget struct {
 	KeyHash SubscriptionKeyHash
+	// Principal owns the subscription. It lets the run end a subscription that
+	// it cannot read events for.
+	Principal string
 	// EventType and Arguments are the subscription's own.
 	EventType string
 	Arguments json.RawMessage
 	// RepoID is the repository the principal could read at the last subscribe.
 	RepoID int64
-	// CallbackURL and SecretEnc are the subscription's, for the gap envelope.
-	// SecretEnc is the sealed secret, never the plaintext.
-	CallbackURL string
-	SecretEnc   []byte
-	// PreviousSecretEnc and PreviousSecretUntil are the subscription's, for the
-	// same envelope: the rotation window that signs it too.
-	PreviousSecretEnc   []byte
-	PreviousSecretUntil time.Time
 	// ScannedThrough is the highest event ID the enqueue has read for it.
 	ScannedThrough int64
 	// Pending is the number of deliveries it holds that have not ended.
@@ -63,8 +60,9 @@ type ScanTarget struct {
 // NewDelivery is one event that a subscription is to receive.
 type NewDelivery struct {
 	EventID int64
-	// MessageID is the webhook-id of the delivery: random, one per (subscription,
-	// event), and the same on every attempt.
+	// MessageID is the webhook-id of the delivery: an HMAC of the subscription
+	// and the event, so it is the same on every attempt and in every incarnation
+	// of the subscription.
 	MessageID string
 }
 
@@ -77,6 +75,11 @@ type Enqueue struct {
 	ExpectedScannedThrough int64
 	NewScannedThrough      int64
 	Deliveries             []NewDelivery
+	// GapThrough is the purge mark when the caller read the subscription from
+	// below it, so that events were lost, and zero otherwise. The store records
+	// it as a gap the subscription is owed, in the same step as the new
+	// position, and keeps the higher mark when one is already owed.
+	GapThrough int64
 }
 
 // Validate checks the fields a caller supplies to Store.EnqueueDeliveries.
@@ -86,6 +89,8 @@ func (e Enqueue) Validate() error {
 		return xerrors.New("expected position must not be negative")
 	case e.NewScannedThrough < e.ExpectedScannedThrough:
 		return xerrors.New("the position must not move back")
+	case e.GapThrough < 0:
+		return xerrors.New("gap mark must not be negative")
 	}
 	for _, d := range e.Deliveries {
 		switch {
@@ -100,14 +105,20 @@ func (e Enqueue) Validate() error {
 
 // DeliveryRef names one attempt of one delivery. Store.FinishDelivery changes
 // a delivery only for the attempt that the claim returned, and only while the
-// row still has the message ID that the claim saw, so a subscription that was
-// deleted and made again does not take over the result of an older attempt.
+// subscription is still the incarnation that the claim saw. A subscription that
+// was deleted and made again queues the same event under the same message ID
+// and may reach the same attempt number, so the attempt number alone would let
+// the result of an older attempt end the new delivery.
 type DeliveryRef struct {
 	Key       SubscriptionKeyHash
 	EventID   int64
 	MessageID string
 	// Attempt counts from 1 and rises at every claim.
 	Attempt int32
+	// Incarnation is the CreatedAt of the subscription row that the claim read.
+	// A refresh keeps it, and a deleted subscription that is made again has a
+	// new one.
+	Incarnation time.Time
 }
 
 // DeliveryClaim is a delivery that a run now owns for DeliveryLease.
@@ -129,6 +140,41 @@ type DeliveryClaim struct {
 	Watermark int64
 	// Event is nil when a purge deleted the event.
 	Event *Event
+}
+
+// GapRef names one claim of a gap envelope. Store.FinishGap ends only the gap
+// of the subscription incarnation that the claim saw.
+type GapRef struct {
+	Key SubscriptionKeyHash
+	// Incarnation is the CreatedAt of the subscription row that the claim read.
+	Incarnation time.Time
+	// Through is the purge mark that the envelope carries as its cursor.
+	Through int64
+}
+
+// GapClaim is a gap envelope that a run now owns for DeliveryLease, with the
+// subscription's callback and secrets as of the claim.
+type GapClaim struct {
+	Ref GapRef
+	// CallbackURL and SecretEnc are the subscription's. SecretEnc is the sealed
+	// secret, never the plaintext.
+	CallbackURL string
+	SecretEnc   []byte
+	// PreviousSecretEnc and PreviousSecretUntil are the rotation window that
+	// signs the envelope too.
+	PreviousSecretEnc   []byte
+	PreviousSecretUntil time.Time
+}
+
+// CallbackOrigin is the scheme, host and port of a callback URL, in the form
+// that the skip list of Store.ClaimDelivery and Store.ClaimGap names. It is empty
+// for a URL that does not parse.
+func CallbackOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
 }
 
 // FinishKind says how an attempt ended.
@@ -202,6 +248,7 @@ const (
 	GiveUpRepoMismatch            GiveUpReason = "repo_mismatch"
 	GiveUpSecretUnreadable        GiveUpReason = "secret_unreadable"
 	GiveUpSubscriptionExpired     GiveUpReason = "subscription_expired"
+	GiveUpArgumentsUndecodable    GiveUpReason = "arguments_undecodable"
 )
 
 // DeliverResult counts what one DeliverDue run did. Every delivery that ended
@@ -210,9 +257,11 @@ type DeliverResult struct {
 	// Enqueued is the deliveries queued for events that the run read.
 	Enqueued int
 	// Gaps is the subscriptions that missed events because a purge deleted
-	// them before the run read them. Each one gets a gap envelope, once:
-	// GapsSent is the envelopes the endpoint answered with 2xx, and GapsFailed
-	// the ones it did not, with no retry. Gaps is the sum of the two.
+	// them before the run read them, and for which the run queued a gap
+	// envelope. GapsSent and GapsFailed count the envelopes that the run
+	// attempted, which can include one that an earlier run queued but did not
+	// send: the endpoint answered with 2xx, or it did not, with no retry. A gap
+	// that no worker took stays queued for the next run, and Incomplete says so.
 	Gaps       int
 	GapsSent   int
 	GapsFailed int

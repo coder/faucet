@@ -116,6 +116,12 @@ type PurgeResult struct {
 	Deleted int64
 	// PurgedThrough is the purge mark after the call.
 	PurgedThrough int64
+	// ExpiredSubscriptions and EndedDeliveries are what Service.Purge removed
+	// with the expired subscriptions: the subscriptions, and the deliveries that
+	// they still held and that no run was sending. A run that held one of those
+	// deliveries counts it as superseded. Store.Purge leaves both at zero.
+	ExpiredSubscriptions int64
+	EndedDeliveries      int64
 }
 
 func hasNUL(v any) bool {
@@ -211,20 +217,35 @@ type Store interface {
 	// EnqueueDeliveries queues e.Deliveries and moves the subscription's read
 	// position to e.NewScannedThrough in one transaction, and only if the
 	// subscription is live at now and still at e.ExpectedScannedThrough. It
-	// reports whether it did. The queued deliveries are due at now.
+	// reports whether it did. The queued deliveries are due at now. A non-zero
+	// e.GapThrough is recorded as a gap that ClaimGap hands out.
 	EnqueueDeliveries(ctx context.Context, now time.Time, e Enqueue) (bool, error)
 	// ClaimDelivery takes the due delivery with the earliest due time, of a
 	// subscription that is live at now, and no other caller holds. A delivery
 	// is due when its next attempt time is at or before now, and held while
 	// its lease runs. The call sets the lease to now+lease and raises the
 	// attempt count by one in one step, so no two callers hold one attempt.
-	// ok is false when nothing is due.
-	ClaimDelivery(ctx context.Context, now time.Time, lease time.Duration) (claim DeliveryClaim, ok bool, err error)
+	// It passes over the deliveries whose subscription's CallbackOrigin is in
+	// skip, so a caller can keep one endpoint from taking all its workers. ok
+	// is false when nothing else is due.
+	ClaimDelivery(ctx context.Context, now time.Time, lease time.Duration, skip []string) (claim DeliveryClaim, ok bool, err error)
+	// ClaimGap takes a gap envelope that no other caller holds, of a
+	// subscription that is live at now and whose CallbackOrigin is not in skip,
+	// and sets its lease to now+lease. The gap is the one that
+	// EnqueueDeliveries recorded: it stays owed until FinishGap, so a gap that no
+	// run took, or whose run died, goes to the next run. The claim carries the
+	// subscription's secrets as of now. ok is false when no gap can be taken.
+	ClaimGap(ctx context.Context, now time.Time, lease time.Duration, skip []string) (claim GapClaim, ok bool, err error)
+	// FinishGap ends the gap in ref and releases its lease. It changes nothing
+	// for a subscription that is gone or is another incarnation. A gap with a
+	// mark above ref.Through, recorded since the claim, stays owed.
+	FinishGap(ctx context.Context, ref GapRef) error
 	// FinishDelivery records how the attempt in ref ended. It changes nothing
 	// and reports Accepted=false unless ref.Attempt is the delivery's current
-	// attempt. Delivered and Failure update the subscription's DeliveryStatus
-	// at now: a delivered attempt sets LastDeliveryAt and clears the failure,
-	// and a failure sets LastError and keeps the earlier FailedSince.
+	// attempt and the subscription's CreatedAt is ref.Incarnation. Delivered and
+	// Failure update the subscription's DeliveryStatus at now: a delivered
+	// attempt sets LastDeliveryAt and clears the failure, and a failure sets
+	// LastError and keeps the earlier FailedSince.
 	FinishDelivery(ctx context.Context, ref DeliveryRef, now time.Time, f Finish) (FinishResult, error)
 	// ExpireDeliveries deletes the deliveries of subscriptions that expired at
 	// or before now, except the ones that a claim holds, and returns how many

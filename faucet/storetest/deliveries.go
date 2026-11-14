@@ -23,12 +23,18 @@ var deliverySubtests = []subtest{
 	{"EnqueueDeliveriesWinsOnceUnderConcurrency", enqueueDeliveriesWinsOnceUnderConcurrency},
 	{"EnqueueDeliveriesValidatesInput", enqueueDeliveriesValidatesInput},
 	{"ClaimDeliveryReturnsTheDeliveryWithItsEventSecretAndWatermark", claimDeliveryReturnsTheDeliveryWithItsEventSecretAndWatermark},
-	{"ScanTargetsAndClaimsCarryThePreviousSecret", scanTargetsAndClaimsCarryThePreviousSecret},
+	{"ClaimsCarryThePreviousSecret", claimsCarryThePreviousSecret},
+	{"ClaimDeliveryPassesOverTheOriginsItIsToldTo", claimDeliveryPassesOverTheOriginsItIsToldTo},
+	{"ClaimGapHandsOutARecordedGapToOneCallerUntilItIsFinished", claimGapHandsOutARecordedGapToOneCallerUntilItIsFinished},
+	{"FinishGapIgnoresAnOlderIncarnationAndKeepsANewerGap", finishGapIgnoresAnOlderIncarnationAndKeepsANewerGap},
+	{"EnqueueDeliveriesKeepsAnOwedGapAndItsHigherMark", enqueueDeliveriesKeepsAnOwedGapAndItsHigherMark},
+	{"ClaimGapSkipsExpiredSubscriptions", claimGapSkipsExpiredSubscriptions},
 	{"ClaimDeliveryGivesOneAttemptToOneCaller", claimDeliveryGivesOneAttemptToOneCaller},
 	{"ClaimDeliveryLeaseRunsOutAndTheNextAttemptCounts", claimDeliveryLeaseRunsOutAndTheNextAttemptCounts},
 	{"ClaimDeliverySkipsExpiredSubscriptions", claimDeliverySkipsExpiredSubscriptions},
 	{"ClaimDeliveryReturnsNoEventAfterAPurge", claimDeliveryReturnsNoEventAfterAPurge},
 	{"FinishDeliveryNeedsTheCurrentAttempt", finishDeliveryNeedsTheCurrentAttempt},
+	{"FinishDeliveryIgnoresAnAttemptOfAnOlderIncarnation", finishDeliveryIgnoresAnAttemptOfAnOlderIncarnation},
 	{"FinishDeliveryRetryReschedulesAndRecordsTheFailure", finishDeliveryRetryReschedulesAndRecordsTheFailure},
 	{"FinishDeliveryDeliveredEndsTheDeliveryAndClearsTheFailure", finishDeliveryDeliveredEndsTheDeliveryAndClearsTheFailure},
 	{"FinishDeliveryGiveUpRecordsOnlyWhatTheEndpointSaid", finishDeliveryGiveUpRecordsOnlyWhatTheEndpointSaid},
@@ -87,9 +93,18 @@ func (r *rig) enqueue(events ...faucet.Event) {
 	r.scanned = e.NewScannedThrough
 }
 
+func (r *rig) recordGap(through int64) {
+	r.t.Helper()
+	e := faucet.Enqueue{Key: r.sub.KeyHash, ExpectedScannedThrough: r.scanned, NewScannedThrough: through, GapThrough: through}
+	won, err := r.s.EnqueueDeliveries(r.ctx, r.now, e)
+	require.NoError(r.t, err)
+	require.True(r.t, won)
+	r.scanned = through
+}
+
 func (r *rig) claim(now time.Time) (faucet.DeliveryClaim, bool) {
 	r.t.Helper()
-	claim, ok, err := r.s.ClaimDelivery(r.ctx, now, testLease)
+	claim, ok, err := r.s.ClaimDelivery(r.ctx, now, testLease, nil)
 	require.NoError(r.t, err)
 	return claim, ok
 }
@@ -156,12 +171,11 @@ func scanTargetsListsLiveSubscriptionsBehindTheHead(t *testing.T, s faucet.Store
 	require.Len(t, targets, 2, "the caught up subscription and the lapsed one are not targets")
 	require.Equal(t, r.sub.KeyHash, targets[0].KeyHash, "the subscription furthest behind comes first")
 	require.Equal(t, ahead.KeyHash, targets[1].KeyHash)
+	require.Equal(t, r.sub.Principal, targets[0].Principal, "a target names the principal that owns it")
 	first := targets[0]
 	require.Equal(t, "ci.run_completed", first.EventType)
 	require.JSONEq(t, `{"repo":"octo/repo"}`, string(first.Arguments))
 	require.EqualValues(t, 42, first.RepoID)
-	require.Equal(t, r.sub.CallbackURL, first.CallbackURL, "the target carries where a gap envelope goes")
-	require.Equal(t, r.sub.SecretEnc, first.SecretEnc, "and the sealed secret that signs it")
 	require.EqualValues(t, 0, first.ScannedThrough)
 	require.Zero(t, first.Pending)
 
@@ -356,7 +370,7 @@ func claimDeliveryGivesOneAttemptToOneCaller(t *testing.T, s faucet.Store) {
 	for n := range callers {
 		wg.Go(func() {
 			<-start
-			claim, ok, err := s.ClaimDelivery(r.ctx, r.now, testLease)
+			claim, ok, err := s.ClaimDelivery(r.ctx, r.now, testLease, nil)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -433,15 +447,39 @@ func finishDeliveryNeedsTheCurrentAttempt(t *testing.T, s faucet.Store) {
 	require.Error(t, err, "attempt 0 is no attempt, and a delivery that no one has claimed is at 0")
 	require.Equal(t, faucet.DeliveryStatus{}, r.status(), "a refused finish writes no status")
 	reborn := claim.Ref
-	reborn.MessageID = "msg_from_an_older_subscription"
+	reborn.MessageID = "msg_of_another_delivery"
 	require.False(t, r.finish(reborn, r.now, faucet.Finish{Kind: faucet.FinishDelivered}).Accepted,
-		"a row with another message ID belongs to another incarnation of the subscription")
+		"a row with another message ID is not the delivery that the claim saw")
 	again := r.mustClaim(r.now.Add(testLease))
 	require.EqualValues(t, 2, again.Ref.Attempt, "the delivery is still queued")
 
 	gone := claim.Ref
 	gone.EventID = claim.Ref.EventID + 1000
 	require.False(t, r.finish(gone, r.now, faucet.Finish{Kind: faucet.FinishDelivered}).Accepted, "an unknown delivery")
+}
+
+func finishDeliveryIgnoresAnAttemptOfAnOlderIncarnation(t *testing.T, s faucet.Store) {
+	r := newRig(t, s, 1)
+	r.enqueue(r.events...)
+	older := r.mustClaim(r.now)
+
+	deleted, err := s.DeleteSubscription(r.ctx, r.sub.Principal, r.sub.KeyHash)
+	require.NoError(t, err)
+	require.True(t, deleted)
+	r.now = r.now.Add(time.Second)
+	_, err = s.UpsertSubscription(r.ctx, r.sub, r.now, 10)
+	require.NoError(t, err)
+	r.scanned = 0
+	r.enqueue(r.events...)
+	newer := r.mustClaim(r.now)
+	require.Equal(t, older.Ref.MessageID, newer.Ref.MessageID)
+	require.Equal(t, older.Ref.Attempt, newer.Ref.Attempt)
+
+	res := r.finish(older.Ref, r.now, faucet.Finish{Kind: faucet.FinishGiveUp})
+	require.False(t, res.Accepted, "the result of the older incarnation's attempt ends nothing of the new one")
+	require.Zero(t, res.Removed)
+	require.True(t, r.finish(newer.Ref, r.now, faucet.Finish{Kind: faucet.FinishDelivered}).Accepted,
+		"the delivery was still queued for the new incarnation's own attempt")
 }
 
 func finishDeliveryRetryReschedulesAndRecordsTheFailure(t *testing.T, s faucet.Store) {
@@ -695,7 +733,7 @@ func scanPositionStartsAtTheCursorAndSurvivesARefresh(t *testing.T, s faucet.Sto
 	}
 }
 
-func scanTargetsAndClaimsCarryThePreviousSecret(t *testing.T, s faucet.Store) {
+func claimsCarryThePreviousSecret(t *testing.T, s faucet.Store) {
 	r := newRig(t, s, 1)
 	rotated := r.sub
 	rotated.SecretEnc = []byte("sealed-2")
@@ -704,17 +742,19 @@ func scanTargetsAndClaimsCarryThePreviousSecret(t *testing.T, s faucet.Store) {
 	require.NoError(t, err)
 	until := r.now.Add(5 * time.Minute)
 
-	targets := r.targets(r.now, 10)
-	require.Len(t, targets, 1)
-	require.Equal(t, []byte("sealed-2"), targets[0].SecretEnc)
-	require.Equal(t, []byte("sealed-1"), targets[0].PreviousSecretEnc, "the scan target carries the secret that the gap envelope is also signed with")
-	require.True(t, until.Equal(targets[0].PreviousSecretUntil), "got %s", targets[0].PreviousSecretUntil)
-
 	r.enqueue(r.events...)
 	claim := r.mustClaim(r.now)
 	require.Equal(t, []byte("sealed-2"), claim.SecretEnc)
 	require.Equal(t, []byte("sealed-1"), claim.PreviousSecretEnc, "the claim carries the secret that the delivery is also signed with")
 	require.True(t, until.Equal(claim.PreviousSecretUntil), "got %s", claim.PreviousSecretUntil)
+
+	r.recordGap(r.scanned)
+	gap, ok, err := s.ClaimGap(r.ctx, r.now, testLease, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, []byte("sealed-2"), gap.SecretEnc)
+	require.Equal(t, []byte("sealed-1"), gap.PreviousSecretEnc, "the gap claim carries the secret that the envelope is also signed with")
+	require.True(t, until.Equal(gap.PreviousSecretUntil), "got %s", gap.PreviousSecretUntil)
 }
 
 // purgeLeavesBelowTheMarkOnlyTheSubscriptionsThatLostEvents pins what a gap
@@ -765,4 +805,129 @@ func purgeLeavesBelowTheMarkOnlyTheSubscriptionsThatLostEvents(t *testing.T, s f
 	require.Equal(t, faucet.PurgeResult{Deleted: 2, PurgedThrough: later.ID}, res)
 	require.Equal(t, map[faucet.SubscriptionKeyHash]int64{quiet.KeyHash: other2.ID, lossy.KeyHash: 0}, positions(),
 		"the second purge deleted the survivor of repository 42, so that subscription now lost an event, and the first loss of the other is not forgotten")
+}
+
+func claimDeliveryPassesOverTheOriginsItIsToldTo(t *testing.T, s faucet.Store) {
+	r := newRig(t, s, 1)
+	r.enqueue(r.events...)
+	other := newSubscription("octocat", "https://other.example.test/hook", r.now.Add(time.Hour))
+	other.Cursor = 0
+	_, err := s.UpsertSubscription(r.ctx, other, r.now, 10)
+	require.NoError(t, err)
+	won, err := s.EnqueueDeliveries(r.ctx, r.now, faucet.Enqueue{
+		Key: other.KeyHash, NewScannedThrough: r.events[0].ID,
+		Deliveries: []faucet.NewDelivery{{EventID: r.events[0].ID, MessageID: "msg_other"}},
+	})
+	require.NoError(t, err)
+	require.True(t, won)
+
+	skip := []string{faucet.CallbackOrigin(r.sub.CallbackURL)}
+	claim, ok, err := s.ClaimDelivery(r.ctx, r.now, testLease, skip)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, other.KeyHash, claim.Ref.Key, "the delivery of the skipped origin is passed over, although it is due first")
+	_, ok, err = s.ClaimDelivery(r.ctx, r.now, testLease, skip)
+	require.NoError(t, err)
+	require.False(t, ok, "only a delivery of the skipped origin is left")
+	claim, ok, err = s.ClaimDelivery(r.ctx, r.now, testLease, []string{})
+	require.NoError(t, err)
+	require.True(t, ok, "with nothing to skip it is claimed")
+	require.Equal(t, r.sub.KeyHash, claim.Ref.Key)
+}
+
+func claimGapHandsOutARecordedGapToOneCallerUntilItIsFinished(t *testing.T, s faucet.Store) {
+	r := newRig(t, s, 0)
+	claimAt := func(now time.Time, skip []string) (faucet.GapClaim, bool) {
+		t.Helper()
+		claim, ok, err := s.ClaimGap(r.ctx, now, testLease, skip)
+		require.NoError(t, err)
+		return claim, ok
+	}
+	_, ok := claimAt(r.now, nil)
+	require.False(t, ok, "no gap is owed")
+
+	r.recordGap(5)
+	claim, ok := claimAt(r.now, nil)
+	require.True(t, ok)
+	require.Equal(t, r.sub.KeyHash, claim.Ref.Key)
+	require.EqualValues(t, 5, claim.Ref.Through)
+	require.True(t, r.now.Equal(claim.Ref.Incarnation), "got %s", claim.Ref.Incarnation)
+	require.Equal(t, r.sub.CallbackURL, claim.CallbackURL, "the claim carries where the envelope goes")
+	require.Equal(t, r.sub.SecretEnc, claim.SecretEnc, "and the sealed secret that signs it, as of the claim")
+
+	_, ok = claimAt(r.now, nil)
+	require.False(t, ok, "a claimed gap is held for its lease")
+	later := r.now.Add(testLease)
+	_, ok = claimAt(later, []string{faucet.CallbackOrigin(r.sub.CallbackURL)})
+	require.False(t, ok, "a skipped origin gets no gap")
+	_, ok = claimAt(later, nil)
+	require.True(t, ok, "a run that died leaves the gap to the next run after the lease")
+
+	require.NoError(t, s.FinishGap(r.ctx, claim.Ref))
+	_, ok = claimAt(later.Add(10*testLease), nil)
+	require.False(t, ok, "a finished gap is not owed any more")
+}
+
+func finishGapIgnoresAnOlderIncarnationAndKeepsANewerGap(t *testing.T, s faucet.Store) {
+	r := newRig(t, s, 0)
+	claim := func() faucet.GapClaim {
+		t.Helper()
+		claim, ok, err := s.ClaimGap(r.ctx, r.now, testLease, nil)
+		require.NoError(t, err)
+		require.True(t, ok, "a gap is owed")
+		return claim
+	}
+	r.recordGap(5)
+	first := claim()
+	r.recordGap(9)
+	require.NoError(t, s.FinishGap(r.ctx, first.Ref))
+	second := claim()
+	require.EqualValues(t, 9, second.Ref.Through, "a gap that grew while it was in flight stays owed, at its new mark, with no lease")
+
+	deleted, err := s.DeleteSubscription(r.ctx, r.sub.Principal, r.sub.KeyHash)
+	require.NoError(t, err)
+	require.True(t, deleted)
+	r.now = r.now.Add(time.Second)
+	_, err = s.UpsertSubscription(r.ctx, r.sub, r.now, 10)
+	require.NoError(t, err)
+	r.scanned = 0
+	r.recordGap(second.Ref.Through)
+	require.NoError(t, s.FinishGap(r.ctx, second.Ref))
+	third := claim()
+	require.EqualValues(t, second.Ref.Through, third.Ref.Through, "the end of an older incarnation's gap leaves the new subscription's gap owed, also at the same mark")
+}
+
+func enqueueDeliveriesKeepsAnOwedGapAndItsHigherMark(t *testing.T, s faucet.Store) {
+	r := newRig(t, s, 2)
+	r.enqueue(r.events[0])
+	r.recordGap(r.scanned)
+	r.enqueue(r.events[1])
+	first, ok, err := s.ClaimGap(r.ctx, r.now, testLease, nil)
+	require.NoError(t, err)
+	require.True(t, ok, "a later enqueue with no gap does not clear the gap that is owed")
+	require.EqualValues(t, r.events[0].ID, first.Ref.Through)
+	require.NoError(t, s.FinishGap(r.ctx, first.Ref))
+
+	r.recordGap(r.scanned)
+	lower := faucet.Enqueue{Key: r.sub.KeyHash, ExpectedScannedThrough: r.scanned, NewScannedThrough: r.scanned, GapThrough: r.events[0].ID}
+	won, err := s.EnqueueDeliveries(r.ctx, r.now, lower)
+	require.NoError(t, err)
+	require.True(t, won)
+	second, ok, err := s.ClaimGap(r.ctx, r.now, testLease, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.EqualValues(t, r.events[1].ID, second.Ref.Through, "a lower mark does not lower the one that is owed")
+}
+
+func claimGapSkipsExpiredSubscriptions(t *testing.T, s faucet.Store) {
+	r := newRig(t, s, 0)
+	r.recordGap(5)
+
+	_, ok, err := s.ClaimGap(r.ctx, r.sub.ExpiresAt, testLease, nil)
+	require.NoError(t, err)
+	require.False(t, ok, "an expired subscription is owed no gap: it is gone, and a purge deletes it")
+	claim, ok, err := s.ClaimGap(r.ctx, r.sub.ExpiresAt.Add(-time.Second), testLease, nil)
+	require.NoError(t, err)
+	require.True(t, ok, "one second before its expiry it is")
+	require.EqualValues(t, 5, claim.Ref.Through, "the refused claim took no lease")
 }
