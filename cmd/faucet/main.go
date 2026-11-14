@@ -31,11 +31,14 @@ const (
 	// envDatabaseURLUnpooled is the direct connection that Neon's Vercel
 	// integration sets next to DATABASE_URL, which is the pooled one.
 	envDatabaseURLUnpooled = "DATABASE_URL_UNPOOLED"
-	envSecret              = "GITHUB_WEBHOOK_SECRET" //nolint:gosec // The name of an environment variable, not a credential.
-	envPort                = "PORT"
-	defaultPort            = "8080"
-	envAPIURL              = "FAUCET_GITHUB_API_URL"
-	defaultAPIURL          = "https://api.github.com"
+	// envVercel is "production", "preview" or "development" on Vercel and unset
+	// elsewhere.
+	envVercel     = "VERCEL_ENV"
+	envSecret     = "GITHUB_WEBHOOK_SECRET" //nolint:gosec // The name of an environment variable, not a credential.
+	envPort       = "PORT"
+	defaultPort   = "8080"
+	envAPIURL     = "FAUCET_GITHUB_API_URL"
+	defaultAPIURL = "https://api.github.com"
 
 	envCronSecret    = "CRON_SECRET" //nolint:gosec // The name of an environment variable, not a credential.
 	envRetentionDays = "FAUCET_RETENTION_DAYS"
@@ -49,8 +52,13 @@ const (
 	minCronSecretBytes   = 16
 
 	// maxOpenConns keeps a burst of requests under the connection limit of a
-	// database that the server reaches directly.
-	maxOpenConns = 10
+	// database that the server reaches directly. Idle connections close after
+	// maxConnIdleTime and at most maxIdleConns stay open, because a Vercel
+	// instance can freeze while it holds them, and a frozen connection holds a
+	// server slot until the database times it out.
+	maxOpenConns    = 10
+	maxIdleConns    = 2
+	maxConnIdleTime = 10 * time.Second
 
 	dbSetupTimeout  = 30 * time.Second
 	shutdownTimeout = 15 * time.Second
@@ -64,9 +72,11 @@ type config struct {
 	databaseURL string
 	// databaseVar names the variable that databaseURL came from, for errors.
 	databaseVar string
-	secret      string
-	port        string
-	githubAPI   string
+	// vercelEnv is the value of VERCEL_ENV.
+	vercelEnv string
+	secret    string
+	port      string
+	githubAPI string
 	// cronSecret is empty when the cron routes are off.
 	cronSecret string
 	retention  time.Duration
@@ -101,7 +111,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if err := (faucet.TokenAuthorizer{BaseURL: githubAPI}).Validate(); err != nil {
 		return config{}, xerrors.Errorf("%s: %w", envAPIURL, err)
 	}
-	cfg := config{databaseURL: getenv(envDatabaseURL), databaseVar: envDatabaseURL, secret: getenv(envSecret), port: port, githubAPI: githubAPI}
+	cfg := config{databaseURL: getenv(envDatabaseURL), databaseVar: envDatabaseURL, vercelEnv: getenv(envVercel), secret: getenv(envSecret), port: port, githubAPI: githubAPI}
 	// Under load, Neon's pooled URL fails some of the queries that lib/pq
 	// sends with parameters ("unnamed prepared statement does not exist"),
 	// because lib/pq parses and binds in two batches and the pooler changes
@@ -205,6 +215,8 @@ func run() error {
 	}
 	defer func() { _ = db.Close() }()
 	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxIdleConns)
+	db.SetConnMaxIdleTime(maxConnIdleTime)
 
 	github := faucet.TokenAuthorizer{BaseURL: cfg.githubAPI, Client: &http.Client{Timeout: githubTimeout}}
 	clock := quartz.NewReal()
@@ -225,7 +237,7 @@ func run() error {
 	if err != nil {
 		return xerrors.Errorf("create service: %w", err)
 	}
-	if err := migrateDatabase(ctx, db); err != nil {
+	if err := prepareSchema(ctx, db, cfg.vercelEnv); err != nil {
 		return err
 	}
 	cron := cronRoutes{
@@ -234,12 +246,23 @@ func run() error {
 	return serve(ctx, logger, cfg.port, newRouter(svc, github, cron, logger))
 }
 
-func migrateDatabase(ctx context.Context, db *sql.DB) error {
+// prepareSchema migrates the database when the process runs outside Vercel or
+// in production. In any other Vercel environment it only checks that the schema
+// is current and refuses to start otherwise. A preview runs the code of any
+// branch, and can reach the production database, so a preview that migrated
+// would leave production instances running against a schema they do not know.
+func prepareSchema(ctx context.Context, db *sql.DB, vercelEnv string) error {
 	ctx, cancel := context.WithTimeout(ctx, dbSetupTimeout)
 	defer cancel()
 
 	if err := db.PingContext(ctx); err != nil {
 		return xerrors.Errorf("connect to database: %w", err)
+	}
+	if vercelEnv != "" && vercelEnv != "production" {
+		if err := pgstore.CheckSchema(ctx, db); err != nil {
+			return xerrors.Errorf("%s=%s never migrates the database: %w", envVercel, vercelEnv, err)
+		}
+		return nil
 	}
 	if err := pgstore.Migrate(ctx, db); err != nil {
 		return xerrors.Errorf("migrate database: %w", err)
