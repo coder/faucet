@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -762,4 +763,40 @@ func TestWaitWithTheRealAuthorizer(t *testing.T) {
 	require.Contains(t, msg, "could not verify repository access")
 	h.requireNoLeak(msg)
 	require.Len(t, h.store.pollQueries(), 1, "only the allowed call read events")
+}
+
+func TestWaitRefusesAWaitBeyondTheLoginsLimitAndAdmitsOneAgainWhenOneEnds(t *testing.T) {
+	t.Parallel()
+	var login atomic.Value
+	login.Store("octocat")
+	h := newWaitHarness(t, func(d *faucet.Deps) {
+		d.MaxWaitsPerLogin = 2
+		d.PrincipalFrom = func(context.Context) (faucet.Principal, error) {
+			return faucet.NewPrincipal(login.Load().(string), testToken)
+		}
+	})
+	short := args("repo", testRepo, "types", []string{"ci.run_completed"}, "timeout_s", 1)
+	startParked := func() <-chan callOutcome {
+		out := h.callAsync(h.ctx, short)
+		h.timers.MustWait(h.ctx).MustRelease(h.ctx)
+		return out
+	}
+
+	open := []<-chan callOutcome{startParked(), startParked()}
+	refused := h.call(short).failure(t)
+	require.Contains(t, refused, "too many waits")
+	h.requireNoLeak(refused)
+
+	login.Store("hubot")
+	open = append(open, startParked())
+
+	h.clock.Advance(time.Second).MustWait(h.ctx)
+	for _, out := range open {
+		h.await(out).success(t)
+	}
+
+	login.Store("octocat")
+	again := startParked()
+	h.clock.Advance(time.Second).MustWait(h.ctx)
+	h.await(again).success(t)
 }

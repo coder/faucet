@@ -150,11 +150,22 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	}
 	logger := s.logger.With(slog.F("repo", in.Repo))
 
-	repoID, err := s.authorize(ctx, logger, "wait", in.Repo)
+	p, err := s.principal(ctx, logger, "wait")
+	if err != nil {
+		return nil, waitOutput{}, err
+	}
+	repoID, err := s.authorizeRepo(ctx, logger, p, "wait", in.Repo)
 	if err != nil {
 		return nil, waitOutput{}, err
 	}
 	req.query.RepoID = repoID
+
+	release, ok := s.waits.acquire(p.Login)
+	if !ok {
+		logger.Info(ctx, "wait refused, too many open", slog.F("login", p.Login))
+		return nil, waitOutput{}, errTooManyWaits
+	}
+	defer release()
 
 	req.query.After, err = s.startCursor(ctx, req)
 	if err != nil {

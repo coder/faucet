@@ -32,6 +32,11 @@ type Deps struct {
 	// Redelivery turns on Service.Redeliver. Nil leaves it off, and Redeliver
 	// then returns ErrNoRedelivery.
 	Redelivery *RedeliveryDeps
+	// MaxWaitsPerLogin caps how many wait_for_github_events calls one login
+	// holds open at once in this process, so a client that opens waits and
+	// drops its connection cannot pile them up. Zero means 10. A negative value
+	// removes the cap. The call over the cap fails at once.
+	MaxWaitsPerLogin int
 }
 
 type WebhookDeps struct {
@@ -66,6 +71,7 @@ type Service struct {
 	clock         quartz.Clock
 	webhook       *webhookState
 	redelivery    *redeliveryState
+	waits         *waitLimiter
 	listed        []eventDescriptor
 }
 
@@ -90,6 +96,7 @@ func New(d Deps) (*Service, error) {
 		authorizer:    d.Authorizer,
 		principalFrom: d.PrincipalFrom,
 		clock:         d.Clock,
+		waits:         newWaitLimiter(d.MaxWaitsPerLogin),
 		listed:        describeEvents([]string{deliveryPoll}),
 	}
 	if d.Webhook != nil {
