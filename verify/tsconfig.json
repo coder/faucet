@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["e2e.config.ts", "tests", "env.mjs", "runstate.mjs"]
+  "include": ["e2e.config.ts", "tests", "env.mjs", "group.mjs", "runstate.mjs"]
 }

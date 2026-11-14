@@ -9,11 +9,11 @@ import { delimiter, dirname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { parseArgs, promisify } from 'node:util';
 import { childEnv } from './env.mjs';
+import { endGroup } from './group.mjs';
 import { CALLBACK_ORIGIN, ENDPOINT_SAYS, runDir, stateFile } from './runstate.mjs';
 
 const execFileAsync = promisify(execFile);
 const STOP_MS = 20_000;
-const GROUP_STOP_MS = 10_000;
 const POSTGRES_START_MS = 60_000;
 const DB_PORT = 5432;
 const SOCKET_PATH_MAX = 100;
@@ -434,24 +434,6 @@ function stopWhenLifelineEnds(abort) {
   process.stdin.resume();
 }
 
-function groupExists(pgid) {
-  try {
-    process.kill(-pgid, 0);
-    return true;
-  } catch (err) {
-    return err.code === 'EPERM';
-  }
-}
-
-// Postgres treats SIGINT as a fast shutdown, so the group gets it first and SIGKILL only when something ignores it.
-async function endGroup(pgid) {
-  if (!groupExists(pgid)) return;
-  process.kill(-pgid, 'SIGINT');
-  const deadline = Date.now() + GROUP_STOP_MS;
-  while (groupExists(pgid) && Date.now() < deadline) await sleep(100);
-  if (groupExists(pgid)) process.kill(-pgid, 'SIGKILL');
-}
-
 // The runner starts this watchdog, which runs the stack in a process group of its own. Each of the three ends the next when
 // it dies: the watchdog ends the stack's group, the stack process ends itself when the pipe from the watchdog closes, and the
 // watchdog ends the stack when the runner is gone.
@@ -474,8 +456,11 @@ async function supervise({ port, detach }) {
     }, PARENT_POLL_MS).unref();
   }
   const [code, killedBy] = await once(stack, 'exit');
-  await endGroup(stack.pid);
-  if (killedBy !== null) rmSync(runDir(port), RM_OPTIONS);
+  try {
+    await endGroup(stack.pid);
+  } finally {
+    if (killedBy !== null) rmSync(runDir(port), RM_OPTIONS);
+  }
   return code ?? 1;
 }
 
