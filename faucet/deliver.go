@@ -123,9 +123,6 @@ func (s *Service) DeliverDue(ctx context.Context) (DeliverResult, error) {
 	}
 	run.sweepPreviousSecrets(ctx)
 	err := run.send(ctx)
-	if err != nil {
-		err = run.unlessEnded(ctx, err)
-	}
 	res := run.result
 	logger := s.logger.Debug
 	if res.Claimed > 0 || res.Enqueued > 0 || res.GaveUpTotal() > 0 {
@@ -197,6 +194,11 @@ func (g *endpointGate) leave(origin string) {
 	}
 }
 
+// The claims are the only store calls of the send phase that the run's context
+// bounds, so they tell the end of the run from a store failure here. A worker
+// whose claim the end cut short claims nothing and stops, and the run is
+// incomplete. The error of the send phase then holds only store failures, and
+// no order of the workers' errors can put the end of the run before one.
 func (r *deliveryRun) claimDelivery(ctx context.Context) (DeliveryClaim, bool, error) {
 	r.claimMu.Lock()
 	defer r.claimMu.Unlock()
@@ -204,7 +206,7 @@ func (r *deliveryRun) claimDelivery(ctx context.Context) (DeliveryClaim, bool, e
 	if ok {
 		r.gate.enter(CallbackOrigin(claim.CallbackURL))
 	}
-	return claim, ok, err
+	return claim, ok, r.unlessEnded(ctx, err)
 }
 
 func (r *deliveryRun) claimGap(ctx context.Context) (GapClaim, bool, error) {
@@ -214,7 +216,7 @@ func (r *deliveryRun) claimGap(ctx context.Context) (GapClaim, bool, error) {
 	if ok {
 		r.gate.enter(CallbackOrigin(claim.CallbackURL))
 	}
-	return claim, ok, err
+	return claim, ok, r.unlessEnded(ctx, err)
 }
 
 func (r *deliveryRun) add(update func(*DeliverResult)) {
@@ -226,7 +228,9 @@ func (r *deliveryRun) add(update func(*DeliverResult)) {
 // unlessEnded drops an error that the end of the run's context caused, and
 // says the run is incomplete instead. A store call that the deadline cut short
 // is no store failure, and the run's result is still what it did. Any other
-// error stays the run's error, also when the context ended meanwhile.
+// error stays the run's error, also when the context ended meanwhile. It is for
+// the error of a call that ran under the run's context. A call under a context
+// of its own, such as a recorded result, keeps its error whatever it is.
 func (r *deliveryRun) unlessEnded(ctx context.Context, err error) error {
 	if ctx.Err() == nil || !xerrors.Is(err, context.Canceled) && !xerrors.Is(err, context.DeadlineExceeded) {
 		return err
@@ -388,12 +392,13 @@ func (r *deliveryRun) sweepExpired(ctx context.Context) error {
 // the sends that follow stay correct.
 func (r *deliveryRun) sweepPreviousSecrets(ctx context.Context) {
 	cleared, err := r.svc.store.ClearExpiredPreviousSecrets(ctx, r.svc.clock.Now())
-	switch {
-	case err != nil && ctx.Err() != nil:
-		r.add(func(res *DeliverResult) { res.Incomplete = true })
-	case err != nil:
-		r.svc.logger.Error(ctx, "clear expired previous secrets", slog.Error(err))
-	case cleared > 0:
+	if err != nil {
+		if err = r.unlessEnded(ctx, err); err != nil {
+			r.svc.logger.Error(ctx, "clear expired previous secrets", slog.Error(err))
+		}
+		return
+	}
+	if cleared > 0 {
 		r.svc.logger.Info(ctx, "previous secrets of ended rotations removed", slog.F("count", cleared))
 		r.add(func(res *DeliverResult) { res.PreviousSecretsCleared += int(cleared) })
 	}
