@@ -869,6 +869,44 @@ func TestUnsubscribeRemovesOnlyTheCallersSubscription(t *testing.T) {
 	require.Len(t, h.rows(), 1)
 }
 
+func TestUnsubscribeOfASubscriptionThatExpiredIsNotFound(t *testing.T) {
+	t.Parallel()
+
+	h := newWebhookHarness(t)
+	h.subscribe(subscribeTo(repoArgs(), callbackURL, newSecret(t, 32)))
+	h.clock.Advance(11 * time.Minute)
+	require.Len(t, h.rows(), 1, "the lapsed row stays until a purge, and counts as absent")
+
+	gone := h.unsubscribe(repoArgs(), callbackURL)
+	require.NotNil(t, gone, "unsubscribe of a lapsed subscription answers like one that never existed")
+	require.EqualValues(t, codeNotFound, gone.Code)
+}
+
+func TestUnsubscribeEndsAShaSubscriptionToCommentEventsThatAnOlderVersionStored(t *testing.T) {
+	t.Parallel()
+
+	h := newWebhookHarness(t)
+	arguments := json.RawMessage(`{"repo":"` + testRepo + `","sha":"` + testShaA + `"}`)
+	_, err := h.store.UpsertSubscription(h.ctx, faucet.Subscription{
+		KeyHash:     faucet.NewSubscriptionKeyHash("octocat", callbackURL, "pr.comment_created", arguments),
+		Principal:   "octocat",
+		CallbackURL: callbackURL,
+		EventType:   "pr.comment_created",
+		Arguments:   arguments,
+		RepoID:      repoID,
+		SecretEnc:   []byte("sealed"),
+		ExpiresAt:   h.clock.Now().Add(5 * time.Minute),
+	}, h.clock.Now(), 100)
+	require.NoError(t, err)
+	require.Len(t, h.rows(), 1)
+
+	_, err = h.call(methodUnsubscribe, &rawParams{
+		Name: "pr.comment_created", Arguments: raw(args("repo", testRepo, "sha", testShaA)), Delivery: raw(map[string]any{"url": callbackURL}),
+	})
+	require.NoError(t, err, "a sha that subscribe now refuses still names the subscription that it once stored")
+	require.Empty(t, h.rows())
+}
+
 func TestUnsubscribeDoesNotNeedRepositoryAccess(t *testing.T) {
 	t.Parallel()
 
@@ -1108,6 +1146,39 @@ func TestSubscribeGrantStaysFromTheFloorToTheCapForAnyInteger(t *testing.T) {
 	}
 }
 
+func TestSubscribeReadsAnyJSONNumberWhoseValueIsAnInteger(t *testing.T) {
+	t.Parallel()
+
+	h := newWebhookHarness(t)
+	secret := newSecret(t, 32)
+	grantOf := func(ttl string) time.Duration {
+		params := subscribeTo(repoArgs(), callbackURL, secret)
+		params.TTLMs = json.RawMessage(ttl)
+		grant, err := time.Parse(time.RFC3339, h.subscribe(params).RefreshBefore)
+		require.NoError(t, err)
+		return grant.Sub(h.clock.Now())
+	}
+	for ttl, want := range map[string]time.Duration{
+		"60000": time.Minute, "6e4": time.Minute, "6E4": time.Minute, "60000.0": time.Minute, "60.0e3": time.Minute,
+		"1e3": 30 * time.Second, "-1e3": 30 * time.Second, "-1e999": 30 * time.Second,
+		"1e999": 10 * time.Minute, "99999999999999999999": 10 * time.Minute,
+	} {
+		require.Equal(t, want, grantOf(ttl), "ttlMs %s", ttl)
+	}
+
+	for _, ttl := range []string{"60000.5", "1e-1", `"60000"`, "true", "[60000]", "{}"} {
+		params := subscribeTo(repoArgs(), callbackURL, secret)
+		params.TTLMs = json.RawMessage(ttl)
+		require.EqualValues(t, codeInvalidParams, h.subscribeError(params).Code, "ttlMs %s is not an integer", ttl)
+	}
+
+	params := subscribeTo(repoArgs(), callbackURL, secret)
+	params.Cursor, params.MaxAgeMs = cursorOf("v1.0"), json.RawMessage("1e3")
+	h.subscribe(params)
+	params.MaxAgeMs = json.RawMessage("1.5")
+	require.EqualValues(t, codeInvalidParams, h.subscribeError(params).Code)
+}
+
 func TestSubscribeChecksRepositoryAccessAgainOnEveryRenewal(t *testing.T) {
 	t.Parallel()
 
@@ -1128,6 +1199,29 @@ func TestSubscribeChecksRepositoryAccessAgainOnEveryRenewal(t *testing.T) {
 	d.authz.mu.Unlock()
 	d.subscribeEndpoint(ep)
 	require.Greater(t, d.rows()[0].ExpiresAt, granted[0].ExpiresAt, "with access back, the subscribe is granted again")
+}
+
+// authenticating gives an Authorizer the step of resolving a token that
+// AccessCache wraps.
+type authenticating struct{ faucet.Authorizer }
+
+func (authenticating) Authenticate(_ context.Context, token string) (faucet.Principal, error) {
+	return faucet.NewPrincipal("octocat", token)
+}
+
+func TestSubscribeRenewalChecksAccessAgainWhateverTheAccessCacheRemembers(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t, func(deps *faucet.Deps) {
+		deps.Authorizer = faucet.NewAccessCache(authenticating{deps.Authorizer}, deps.Clock)
+	})
+	ep := d.endpoint("/hook")
+	d.subscribeEndpoint(ep)
+
+	d.revoke()
+	rpcErr := d.subscribeError(d.renewalParams(ep, newSecret(t, 32)))
+	require.EqualValues(t, codeForbidden, rpcErr.Code, "the cache holds the first grant for a minute, and a renewal asks GitHub anyway")
+	require.Empty(t, d.rows())
 }
 
 func TestSubscribeAndUnsubscribeReadMembersByExactName(t *testing.T) {
@@ -1178,6 +1272,23 @@ func TestSubscribeAndUnsubscribeReadMembersByExactName(t *testing.T) {
 			require.EqualValues(t, codeInvalidParams, h.callError(method, &rawParams{Whole: whole}).Code, method)
 		}
 		requireNothingStored(t, h, "a repeated name")
+	})
+
+	t.Run("a repeated member inside delivery is refused", func(t *testing.T) {
+		t.Parallel()
+
+		h := newWebhookHarness(t)
+		for _, repeated := range []string{
+			`"url":"` + url("a") + `","url":"` + url("b") + `","secret":"` + secret + `"`,
+			`"url":"` + url("a") + `","secret":"` + secret + `","secret":"` + secret + `"`,
+			`"mode":"webhook","mode":"webhook","url":"` + url("a") + `","secret":"` + secret + `"`,
+		} {
+			whole := json.RawMessage(`{"name":"ci.run_completed","arguments":` + repo + `,"delivery":{` + repeated + `}}`)
+			require.EqualValues(t, codeInvalidParams, h.subscribeError(&rawParams{Whole: whole}).Code, repeated)
+		}
+		whole := json.RawMessage(`{"name":"ci.run_completed","arguments":` + repo + `,"delivery":{"url":"` + url("a") + `","url":"` + url("b") + `"}}`)
+		require.EqualValues(t, codeInvalidParams, h.callError(methodUnsubscribe, &rawParams{Whole: whole}).Code)
+		requireNothingStored(t, h, "a repeated member of delivery")
 	})
 
 	t.Run("the other members are read by exact name too", func(t *testing.T) {

@@ -248,7 +248,7 @@ func (q *Queries) GetEventByDelivery(ctx context.Context, deliveryID string) (Fa
 }
 
 const insertEvent = `-- name: InsertEvent :one
-INSERT INTO faucet_events (source, delivery_id, type, repo_id, prs, head_sha, data)
+INSERT INTO faucet_events (source, delivery_id, type, repo_id, prs, head_sha, data, received_at)
 VALUES (
   $1,
   $2,
@@ -256,7 +256,8 @@ VALUES (
   $4,
   $5::int[],
   NULLIF($6::text, ''),
-  $7::text::jsonb
+  $7::text::jsonb,
+  clock_timestamp()
 )
 ON CONFLICT (delivery_id) DO NOTHING
 RETURNING id, source, delivery_id, type, repo_id, prs, head_sha, data, received_at

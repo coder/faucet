@@ -1,6 +1,8 @@
 package faucet_test
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +22,8 @@ import (
 	standardwebhooks "github.com/standard-webhooks/standard-webhooks/libraries/go"
 	"github.com/stretchr/testify/require"
 
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/sloghuman"
 	"github.com/coder/faucet/faucet"
 )
 
@@ -403,6 +407,31 @@ func TestVerifierGetsTheSubscriptionAndASignerButNotTheSecret(t *testing.T) {
 	}
 }
 
+func TestCallbackRequestKeepsItsURLOutOfEveryLogFormat(t *testing.T) {
+	t.Parallel()
+
+	h := newWebhookHarness(t)
+	h.subscribe(subscribeTo(repoArgs(), callbackURL+"?token=r3c31v3r", newSecret(t, 32)))
+	require.Len(t, h.verifier.requests, 1)
+	req := h.verifier.requests[0]
+
+	type embedderState struct{ Pending faucet.CallbackRequest }
+	for name, value := range map[string]any{
+		"the request": req, "a pointer to it": &req, "a struct that holds it": embedderState{req},
+		"a list of requests": []faucet.CallbackRequest{req},
+	} {
+		var human bytes.Buffer
+		slog.Make(sloghuman.Sink(&human)).Info(context.Background(), "verifying", slog.F("request", value))
+		encoded, err := json.Marshal(value)
+		require.NoError(t, err)
+		for sink, out := range map[string]string{"sloghuman": human.String(), "encoding/json": string(encoded)} {
+			require.NotContains(t, out, "r3c31v3r", "%s of %s: the URL can hold a token", sink, name)
+			require.NotContains(t, out, "hooks.example.test", "%s of %s", sink, name)
+			require.Contains(t, out, "octocat", "%s of %s still names the login", sink, name)
+		}
+	}
+}
+
 func TestNewCallbackHandshakeNeedsAClient(t *testing.T) {
 	t.Parallel()
 
@@ -542,6 +571,62 @@ func TestHandshakeManyLoginsStillCannotFloodOneHost(t *testing.T) {
 	require.EqualValues(t, 60, gateway.hits.Load(), "the host gets at most 60 verification requests at once, whoever asks")
 	require.Equal(t, 10, limited, "and the ones past that are refused")
 	requireNothingStored(t, h, "a refused handshake")
+}
+
+func TestHandshakeALoginOverItsLimitSpendsNothingOfTheHost(t *testing.T) {
+	t.Parallel()
+
+	secret := newSecret(t, 32)
+	gateway := sharedGateway(t, secret)
+	h := newHandshakeHarness(t, gateway.target, resolveToLoopback())
+	failing := func(login string, i int) *jsonrpc.Error {
+		h.as(login)
+		return h.subscribeError(subscribeTo(repoArgs(), fmt.Sprintf("%s/x-%s-%d", gateway.url, login, i), secret))
+	}
+
+	for i := range 5 {
+		require.EqualValues(t, codeCallbackEndpoint, failing("octocat", i).Code)
+	}
+	for i := 5; i < 205; i++ {
+		require.EqualValues(t, codeResourceExhausted, failing("octocat", i).Code, "attempt %d is over the login's limit", i)
+	}
+	for login := range 11 {
+		for i := range 5 {
+			require.EqualValues(t, codeCallbackEndpoint, failing(fmt.Sprintf("user-%d", login), i).Code,
+				"the 200 refused attempts took no token of the host, so the other logins still get the other 55")
+		}
+	}
+	require.EqualValues(t, 60, gateway.hits.Load())
+	require.EqualValues(t, codeResourceExhausted, failing("user-99", 0).Code, "and the host is then empty")
+}
+
+func TestHandshakeHostRefillsOnePerSecondAndKeepsTheTokensOfLoginsItRefused(t *testing.T) {
+	t.Parallel()
+
+	secret := newSecret(t, 32)
+	gateway := sharedGateway(t, secret)
+	h := newHandshakeHarness(t, gateway.target, resolveToLoopback())
+	failing := func(login string, i int) *jsonrpc.Error {
+		h.as(login)
+		return h.subscribeError(subscribeTo(repoArgs(), fmt.Sprintf("%s/x-%s-%d", gateway.url, login, i), secret))
+	}
+
+	for login := range 12 {
+		for i := range 5 {
+			require.EqualValues(t, codeCallbackEndpoint, failing(fmt.Sprintf("user-%d", login), i).Code)
+		}
+	}
+	for i := range 6 {
+		require.EqualValues(t, codeResourceExhausted, failing("octocat", i).Code, "the empty host refuses octocat")
+	}
+
+	h.clock.Advance(5 * time.Second)
+	for i := 10; i < 15; i++ {
+		require.EqualValues(t, codeCallbackEndpoint, failing("octocat", i).Code,
+			"the host refused octocat and gave back its tokens, and 5 seconds gave the host 5")
+	}
+	require.EqualValues(t, 65, gateway.hits.Load())
+	require.EqualValues(t, codeResourceExhausted, failing("user-99", 0).Code, "5 seconds gave the host 5 tokens and no more")
 }
 
 func TestHandshakeAnsweredHandshakesDoNotUseUpTheHostLimit(t *testing.T) {

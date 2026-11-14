@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"net/url"
 	"os"
 	"testing"
@@ -61,6 +62,43 @@ func TestRedeliveryStoreOverBinaryParameters(t *testing.T) {
 	storetest.RunRedelivery(t, func(t *testing.T) storetest.RedeliveryStore {
 		return pgstore.New(newDatabase(t, adminURL))
 	})
+}
+
+// CursorAt(t) is the highest ID received before t, which is only a prefix of
+// the log if a later ID never carries an earlier time. A time taken when the
+// transaction starts breaks that for an insert that then waits for the lock.
+func TestInsertEventIsStampedWhenItIsWrittenNotWhenItsTransactionStarts(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	blocker, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = blocker.Rollback() }()
+	_, err = blocker.ExecContext(ctx, `LOCK TABLE faucet_events IN ACCESS EXCLUSIVE MODE`)
+	require.NoError(t, err)
+
+	type inserted struct {
+		ev  faucet.Event
+		err error
+	}
+	done := make(chan inserted, 1)
+	go func() {
+		ev, _, err := store.InsertEvent(ctx, faucet.Event{
+			Source: "github", DeliveryID: "stamp-1", Type: "ci.run_completed", RepoID: 1, Data: json.RawMessage(`{}`),
+		})
+		done <- inserted{ev, err}
+	}()
+	time.Sleep(400 * time.Millisecond)
+	released := time.Now()
+	require.NoError(t, blocker.Commit())
+
+	got := <-done
+	require.NoError(t, got.err)
+	require.True(t, got.ev.ReceivedAt.After(released.Add(-100*time.Millisecond)),
+		"received_at %s is from before the insert could run, which was released at %s", got.ev.ReceivedAt, released)
 }
 
 func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {

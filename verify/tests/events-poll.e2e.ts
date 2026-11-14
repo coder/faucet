@@ -173,7 +173,6 @@ describe('events poll', () => {
       [RUN, { sha }, [delivered.run]],
       [RUN, { sha: sha.toUpperCase() }, [delivered.run]],
       [RUN, { sha: 'f'.repeat(40) }, []],
-      ['pr.comment_created', { sha }, []],
       ['pr.comment_created', { pr: 7 }, [delivered.comment]],
       ['ci.check_completed', { pr: 8 }, [delivered.check]],
       [RUN, { pr: 8 }, []],
@@ -185,6 +184,14 @@ describe('events poll', () => {
       const result = await pollRepo(faucet, name, repoId, { cursor }, args);
       expect(ids(result), `${name} ${JSON.stringify(args)}`).toEqual(expected);
     }
+  });
+
+  test('a sha for pr.comment_created is a -32602 error, because a comment names no head commit', async ({ faucet }) => {
+    const reply = await poll(faucet, 'pr.comment_created', { repo: repoOf(newRepoId()), sha: 'a'.repeat(40) });
+
+    expect(reply.status).toBe(400);
+    expect(reply.error?.code).toBe(-32602);
+    expect(reply.error?.message).toContain('sha');
   });
 
   test('the events of another repository never appear', async ({ faucet }) => {
