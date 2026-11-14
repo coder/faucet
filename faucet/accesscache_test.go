@@ -169,6 +169,11 @@ func TestAccessCacheRemembersASuccessAndNothingElse(t *testing.T) {
 	id, err := cache.RepoID(ctx, p, "octo/private")
 	require.NoError(t, err, "a repository that was denied is allowed at once when GitHub allows it")
 	require.EqualValues(t, 77, id)
+	_, repoCallsBefore := checker.calls()
+	_, err = cache.RepoID(ctx, p, "octo/private")
+	require.NoError(t, err)
+	_, repoCalls := checker.calls()
+	require.Equal(t, repoCallsBefore, repoCalls, "the new grant is remembered, which a marker left by the denied polls would prevent")
 
 	checker.err = errors.New("GitHub rate limit reached")
 	_, err = cache.RepoID(ctx, p, otherRepo)
@@ -255,6 +260,12 @@ func TestAccessCacheForgetsAGrantThatARenewalFindsWithdrawn(t *testing.T) {
 		require.ErrorIs(t, err, faucet.ErrInvalidToken)
 		_, err = cache.Authenticate(ctx, testToken)
 		require.ErrorIs(t, err, faucet.ErrInvalidToken, "the remembered login of a rejected token is gone too")
+		checker.err = nil
+		_, repoCallsBefore := checker.calls()
+		_, err = cache.RepoID(ctx, principal(t), testRepo)
+		require.NoError(t, err)
+		_, repoCalls := checker.calls()
+		require.Equal(t, repoCallsBefore+1, repoCalls, "and so is the remembered grant of the repository, for a host that has its own Authenticate")
 	})
 
 	t.Run("GitHub cannot be reached", func(t *testing.T) {
