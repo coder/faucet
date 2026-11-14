@@ -102,22 +102,26 @@ func (c cronRoutes) deliver(w http.ResponseWriter, r *http.Request) {
 	}{res.Enqueued, res.Gaps, res.GapsSent, res.GapsFailed, res.Claimed, res.Sent, res.Delivered, res.Retried, res.GaveUp, res.Superseded, res.PreviousSecretsCleared, res.Incomplete})
 }
 
+// redeliver answers with the counts of the run, also when the run failed: the
+// run records each outcome as it makes it, and the reply must count them all.
+// A failed run is a 500 with an error member that names nothing, because the
+// error can carry a host or a cursor. The log has it.
 func (c cronRoutes) redeliver(w http.ResponseWriter, r *http.Request) {
 	if !c.redelivers {
 		http.Error(w, "redelivery is not configured", http.StatusServiceUnavailable)
 		return
 	}
 	res, err := c.svc.Redeliver(r.Context())
+	status, failure := http.StatusOK, ""
 	if err != nil {
 		c.logger.Error(r.Context(), "cron redelivery failed", slog.Error(err))
-		http.Error(w, "redelivery failed", http.StatusInternalServerError)
-		return
+		status, failure = http.StatusInternalServerError, "redelivery failed"
 	}
 	type gaveUp struct {
 		Limit   int `json:"limit"`
 		Expired int `json:"expired"`
 	}
-	writeJSON(w, struct {
+	writeJSONStatus(w, status, struct {
 		Busy      bool   `json:"busy"`
 		Pages     int    `json:"pages"`
 		Attempts  int    `json:"attempts"`
@@ -128,10 +132,14 @@ func (c cronRoutes) redeliver(w http.ResponseWriter, r *http.Request) {
 		Gaps      int    `json:"gaps"`
 		Pending   int    `json:"pending"`
 		Ranges    int    `json:"ranges"`
-	}{res.Busy, res.Pages, res.Attempts, res.Tracked, res.Asked, res.Recovered, gaveUp{res.GaveUpLimit, res.GaveUpExpired}, res.Gaps, res.Pending, res.Ranges})
+		Error     string `json:"error,omitempty"`
+	}{res.Busy, res.Pages, res.Attempts, res.Tracked, res.Asked, res.Recovered, gaveUp{res.GaveUpLimit, res.GaveUpExpired}, res.Gaps, res.Pending, res.Ranges, failure})
 }
 
-func writeJSON(w http.ResponseWriter, v any) {
+func writeJSON(w http.ResponseWriter, v any) { writeJSONStatus(w, http.StatusOK, v) }
+
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }

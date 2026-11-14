@@ -37,6 +37,7 @@ type cronRedeliveryStore struct {
 	busy      bool
 	settle    faucet.SettleResult
 	settleErr error
+	purgeErr  error
 	acquired  int
 }
 
@@ -68,8 +69,10 @@ func (*cronRedeliveryStore) ClaimRedelivery(context.Context, faucet.ClaimRequest
 	return faucet.RedeliveryClaim{}, false, nil
 }
 
-func (*cronRedeliveryStore) PurgeRedeliveries(context.Context, time.Time) (int64, error) {
-	return 0, nil
+func (s *cronRedeliveryStore) PurgeRedeliveries(context.Context, time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return 0, s.purgeErr
 }
 
 func (s *cronRedeliveryStore) runs() int {
@@ -400,6 +403,29 @@ func TestCronRedeliverFailureIsAGenericServerError(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, status)
 	require.NotContains(t, body, "db.internal", "the response does not repeat the error")
 	require.Contains(t, srv.logs.String(), "db.internal", "the log keeps it")
+	srv.requireNoSecrets(t, body)
+}
+
+func TestCronRedeliverFailureStillReportsTheOutcomesItRecorded(t *testing.T) {
+	t.Parallel()
+
+	srv := newCronServer(t, cronOptions{secret: testCronSecret, redelivery: true})
+	srv.redelivery.settle = faucet.SettleResult{
+		Recovered: []string{"g-1", "g-2"},
+		GaveUp:    []faucet.GaveUp{{GUID: "g-3", Reason: faucet.GiveUpLimit, Asks: faucet.MaxAsksPerDelivery}},
+		Pending:   3,
+	}
+	srv.redelivery.purgeErr = xerrors.New("connection to db.internal:5432 refused")
+
+	status, _, body := srv.get(t, http.MethodGet, redeliverPath, bearer(testCronSecret))
+
+	require.Equal(t, http.StatusInternalServerError, status, "a failed run is still a failure")
+	require.JSONEq(t, `{
+		"busy": false, "pages": 1, "attempts": 0, "tracked": 0, "asked": 0,
+		"recovered": 2, "gave_up": {"limit": 1, "expired": 0}, "gaps": 1, "pending": 3, "ranges": 0,
+		"error": "redelivery failed"
+	}`, body, "the outcomes that the run recorded before it failed are in the reply, and the log has them too")
+	require.NotContains(t, body, "db.internal")
 	srv.requireNoSecrets(t, body)
 }
 
