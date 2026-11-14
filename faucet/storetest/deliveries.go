@@ -43,6 +43,8 @@ var deliverySubtests = []subtest{
 	{"DeletingASubscriptionEndsItsDeliveries", deletingASubscriptionEndsItsDeliveries},
 	{"ScanPositionStartsAtTheCursorAndSurvivesARefresh", scanPositionStartsAtTheCursorAndSurvivesARefresh},
 	{"PurgeLeavesBelowTheMarkOnlyTheSubscriptionsThatLostEvents", purgeLeavesBelowTheMarkOnlyTheSubscriptionsThatLostEvents},
+	{"PurgeMovesASubscriptionPastEventsOfAnotherTypeOfItsRepository", purgeMovesASubscriptionPastEventsOfAnotherTypeOfItsRepository},
+	{"ClaimDeliveryCarriesTheRepositoryTheSubscriptionIsGrantedNow", claimDeliveryCarriesTheRepositoryTheSubscriptionIsGrantedNow},
 }
 
 // rig is one subscription of repository 42 at cursor 0, and a log of events.
@@ -893,4 +895,48 @@ func finishGapIgnoresAnOlderIncarnationAndKeepsANewerGap(t *testing.T, s faucet.
 	require.NoError(t, s.FinishGap(r.ctx, second.Ref))
 	third := claim()
 	require.EqualValues(t, 12, third.Ref.Through, "the end of an older incarnation's gap leaves the new subscription's gap owed")
+}
+
+func purgeMovesASubscriptionPastEventsOfAnotherTypeOfItsRepository(t *testing.T, s faucet.Store) {
+	r := newRig(t, s, 0)
+	insert := func(deliveryID, eventType string) faucet.Event {
+		t.Helper()
+		ev := newEvent(deliveryID)
+		ev.Type = eventType
+		stored, inserted, err := s.InsertEvent(r.ctx, ev)
+		require.NoError(t, err)
+		require.True(t, inserted)
+		time.Sleep(2 * time.Millisecond)
+		return stored
+	}
+	otherType := insert("other-type", "pr.closed")
+	survivor := insert("survivor", "ci.run_completed")
+
+	_, err := s.Purge(r.ctx, survivor.ReceivedAt)
+	require.NoError(t, err)
+	targets := r.targets(r.now, 10)
+	require.Len(t, targets, 1)
+	require.Equal(t, otherType.ID, targets[0].ScannedThrough,
+		"the purge deleted no event of the subscription's type, so it moves to the mark and no gap is owed")
+
+	lost := insert("lost", "ci.run_completed")
+	_, err = s.Purge(r.ctx, lost.ReceivedAt.Add(time.Hour))
+	require.NoError(t, err)
+	for _, target := range r.targets(r.now, 10) {
+		require.Equal(t, otherType.ID, target.ScannedThrough, "a purge of an event of its own type leaves it below the mark: that is a gap")
+	}
+}
+
+func claimDeliveryCarriesTheRepositoryTheSubscriptionIsGrantedNow(t *testing.T, s faucet.Store) {
+	r := newRig(t, s, 1)
+	r.enqueue(r.events...)
+	moved := r.sub
+	moved.RepoID = 77
+	_, err := s.UpsertSubscription(r.ctx, moved, r.now, 10)
+	require.NoError(t, err)
+
+	claim := r.mustClaim(r.now)
+	require.EqualValues(t, 77, claim.RepoID, "the claim carries the repository that the subscription is granted now")
+	require.NotNil(t, claim.Event)
+	require.EqualValues(t, 42, claim.Event.RepoID, "and the event keeps its own, so that the run can tell they differ")
 }

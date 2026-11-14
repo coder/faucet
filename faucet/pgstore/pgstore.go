@@ -246,7 +246,10 @@ func (s *Store) DeleteLiveSubscription(ctx context.Context, principal string, ke
 		return faucet.Subscription{}, false, xerrors.Errorf("delete live subscription: %w", err)
 	}
 	deleted, err := toSubscription(row)
-	return deleted, err == nil, err
+	if err != nil {
+		return faucet.Subscription{}, false, xerrors.Errorf("the subscription was deleted and its row does not decode, so no envelope can be sent: %w", err)
+	}
+	return deleted, true, nil
 }
 
 func (s *Store) DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (int64, error) {
