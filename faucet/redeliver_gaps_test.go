@@ -3,7 +3,6 @@ package faucet_test
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -105,39 +104,38 @@ func TestAGapReachesGitHubsRetentionWhateverFaucetsClockSays(t *testing.T) {
 	}
 }
 
-func TestAQuietHookDrainsTheRangesThatABurstLeftOpen(t *testing.T) {
+func TestABurstThatARunCannotReadEndsEveryFailureRecoveredOrInACountedGap(t *testing.T) {
 	t.Parallel()
 
 	// A burst of 5 attempts a second for 500 seconds holds 25 pages, and a run
-	// reads 9. The failures are in its oldest part. After the burst the hook
-	// is silent: every run reads the overlap below the same newest attempt
-	// again, and that must neither open a range per run nor keep the pages from
-	// the range that holds the burst.
+	// reads 9. The failures are in its oldest part. The hook is silent after the
+	// burst, so every run reads the same newest pages, and what no run reads
+	// leaves GitHub's retention as a gap.
 	env := newRedeliveryEnv(t, func(o *envOptions) { o.maxPages = 9 })
+	env.clock.WithLogger(quartz.NoOpLogger)
 	env.run()
 	env.advance(time.Minute)
 	start := env.gh.now()
-	var failed []string
+	var failures []ghAttempt
 	for i := range 2500 {
-		guid := fmt.Sprintf("a-%04d", i)
 		status := http200
 		if i < 1000 && i%50 == 7 {
 			status = 503
-			failed = append(failed, guid)
 		}
-		env.gh.record(guid, start.Add(time.Duration(i)*200*time.Millisecond), status)
+		a := env.gh.record(fmt.Sprintf("a-%04d", i), start.Add(time.Duration(i)*200*time.Millisecond), status)
+		if status != http200 {
+			failures = append(failures, a)
+		}
 	}
 	env.advance(cronEvery)
 
-	var ranges []int
-	for range 8 {
-		ranges = append(ranges, env.run().Ranges)
+	for env.gh.now().Before(start.Add(faucet.GitHubDeliveryRetention + 3*time.Hour)) {
+		env.run()
 		env.advance(cronEvery)
 	}
 
-	require.True(t, allStored(env, failed), "every failure of the burst is asked for within a few runs of silence: %v", ranges)
-	require.Equal(t, 0, ranges[len(ranges)-1], "a quiet hook reads all that is open: %v", ranges)
-	require.LessOrEqual(t, slices.Max(ranges), 2, "a silent run opens no range for an overlap that a range already reads: %v", ranges)
+	requireNoSilentLoss(t, env, failures)
+	require.Zero(t, env.run().Ranges, "a range that no run read has expired by now")
 }
 
 // dateAdmin gives the pages of its HookAdmin another Date header: none, or one
@@ -386,4 +384,66 @@ func TestARangeThatGitHubStillListsIsReadNotClosedWhenFaucetsClockIsAhead(t *tes
 		}
 	}
 	require.Equal(t, 5, listed, "the scenario must have attempts between GitHub's end and the range's new end")
+}
+
+func TestALateAttemptIsReadWhileARangeStandsAtThePosition(t *testing.T) {
+	t.Parallel()
+
+	// Run A reads a burst that ends at T. Run B finds nothing newer, and its first
+	// page does not reach the overlap, so it opens a range at T that stays open:
+	// GitHub fails its range pages, or the burst is larger than its pages. Then L
+	// is listed, dated in the overlap just above where B's first page ended, and
+	// newAttempts arrive before run C. C must still read L.
+	for _, cause := range []string{"GitHub fails the range pages", "the burst is larger than the pages"} {
+		for _, gapAB := range []time.Duration{time.Minute, 3 * time.Minute, cronEvery} {
+			t.Run(fmt.Sprintf("%s,gapAB=%s", cause, gapAB), func(t *testing.T) {
+				t.Parallel()
+				var lost []int
+				for _, newAttempts := range []int{0, 1, 5, 20, 60, 99, 150} {
+					env := newRedeliveryEnv(t)
+					env.clock.WithLogger(quartz.NoOpLogger)
+					env.run()
+					env.advance(cronEvery)
+					top := env.gh.now().Add(-time.Second)
+					burst, every := 300, time.Second
+					if cause != "GitHub fails the range pages" {
+						burst, every = 3000, 100*time.Millisecond
+					}
+					for i := range burst {
+						env.gh.record(fmt.Sprintf("b-%05d", i), top.Add(-time.Duration(i)*every), http200)
+					}
+					env.run()
+					env.advance(gapAB)
+					if cause == "GitHub fails the range pages" {
+						env.gh.listFault = func(_ int, cursor string) error {
+							if cursor != "" {
+								return fmt.Errorf("GitHub answered the delivery list with status 502")
+							}
+							return nil
+						}
+					}
+					_, _ = env.svc.Redeliver(context.Background())
+					env.gh.listFault = nil
+
+					lateAt := top.Add(-98*every - every/2)
+					env.gh.record("L", lateAt, 503)
+					listed := env.gh.now()
+					for i := range newAttempts {
+						env.gh.record(fmt.Sprintf("n-%04d", i), listed.Add(time.Duration(i+1)*(cronEvery-time.Second)/time.Duration(newAttempts+1)), http200)
+					}
+					env.advance(cronEvery)
+					_, _ = env.svc.Redeliver(context.Background())
+					for range 6 {
+						env.advance(cronEvery)
+						env.run()
+					}
+
+					if !env.stored("L") {
+						lost = append(lost, newAttempts)
+					}
+				}
+				require.Empty(t, lost, "L is listed late inside the overlap, so a run must still read it when this many attempts are new")
+			})
+		}
+	}
 }
