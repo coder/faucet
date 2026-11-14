@@ -260,7 +260,7 @@ func prepareSchema(ctx context.Context, db *sql.DB, vercelEnv string) error {
 	}
 	if vercelEnv != "" && vercelEnv != "production" {
 		if err := pgstore.CheckSchema(ctx, db); err != nil {
-			return xerrors.Errorf("%s=%s never migrates the database: %w", envVercel, vercelEnv, err)
+			return xerrors.Errorf("%s=%s never migrates the database, so the schema must be current already: %w", envVercel, vercelEnv, err)
 		}
 		return nil
 	}

@@ -63,7 +63,7 @@ func Migrate(ctx context.Context, db *sql.DB) (err error) {
 // ErrSchemaNotCurrent means that the database is not at the newest migration
 // that this build embeds: it is behind, ahead, or marked dirty by a migration
 // that failed.
-var ErrSchemaNotCurrent = errors.New("database schema is not at the version of this build")
+var ErrSchemaNotCurrent = errors.New("database schema is not current")
 
 // CheckSchema returns ErrSchemaNotCurrent unless db is at the newest embedded
 // migration. It only reads: unlike Migrate it creates no table, so a process
@@ -88,9 +88,9 @@ func CheckSchema(ctx context.Context, db *sql.DB) error {
 	}
 	switch {
 	case dirty:
-		return xerrors.Errorf("%w: version %d is dirty, a migration failed", ErrSchemaNotCurrent, have)
+		return xerrors.Errorf("schema version %d is dirty, a migration failed: %w", have, ErrSchemaNotCurrent)
 	case have != int64(want):
-		return xerrors.Errorf("%w: it is at version %d and this build needs %d", ErrSchemaNotCurrent, have, want)
+		return xerrors.Errorf("schema is at version %d and this build needs %d: %w", have, want, ErrSchemaNotCurrent)
 	}
 	return nil
 }
