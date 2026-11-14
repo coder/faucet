@@ -358,3 +358,32 @@ func TestALateAttemptInsideTheOverlapIsReadWhateverNumberOfAttemptsAreNew(t *tes
 		}
 	}
 }
+
+func TestARangeThatGitHubStillListsIsReadNotClosedWhenFaucetsClockIsAhead(t *testing.T) {
+	t.Parallel()
+
+	// A failure every 10 minutes for 40 hours. Two pages read the newest 200 of
+	// them, and the rest stays a range whose new end is 33 hours 10 minutes old.
+	env := newRedeliveryEnv(t, func(o *envOptions) { o.maxPages = 2 })
+	env.gh.skew = -3 * time.Hour
+	env.run()
+	env.advance(40 * time.Hour)
+	failures := failEvery(env, 10*time.Minute, 40*time.Hour)
+	require.Equal(t, 1, env.run().Ranges)
+	newEnd := failures[len(failures)-200].at
+
+	// GitHub's retention now ends an hour below that new end, and faucet's
+	// clock puts the end two hours above it.
+	env.advance(72*time.Hour - 33*time.Hour - 10*time.Minute - time.Hour)
+	listedFrom := env.gh.now().Add(-faucet.GitHubDeliveryRetention)
+	env.run()
+
+	var listed int
+	for _, f := range failures {
+		if f.at.After(listedFrom) && f.at.Before(newEnd) {
+			listed++
+			require.True(t, env.tracked(f.guid), "%s is still listed, so the range that holds it must be read, not closed as a gap", f.guid)
+		}
+	}
+	require.Equal(t, 5, listed, "the scenario must have attempts between GitHub's end and the range's new end")
+}

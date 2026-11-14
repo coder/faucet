@@ -364,17 +364,17 @@ func (p pageRead) step(epoch int64, now time.Time) ScanStep {
 }
 
 // gapOf says which part of a range expired before a run read it. olderAt is
-// the range's old end. coveredFrom is how far down a read has got, or the
-// range's new end when it got nowhere. Only the part below the retention floor
-// is gone. A part above it that holds no attempt was quiet. A zero floor means
-// that nothing says what is gone.
+// the range's old end. coveredFrom is how far down a read has got, or zero when
+// it got nowhere. Only the part below the retention floor is gone. A part above
+// it that holds no attempt was quiet. A zero floor means that nothing says what
+// is gone.
 func gapOf(olderAt, floor, coveredFrom time.Time) *RedeliveryGap {
 	if floor.IsZero() {
 		return nil
 	}
-	to := coveredFrom
-	if floor.Before(to) {
-		to = floor
+	to := floor
+	if !coveredFrom.IsZero() && coveredFrom.Before(floor) {
+		to = coveredFrom
 	}
 	if !olderAt.Before(to) {
 		return nil
@@ -451,11 +451,7 @@ func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, er
 			step.Gap = &RedeliveryGap{From: r.floor, To: olderAt}
 		}
 	case head.finished():
-		covered := githubNow
-		if !head.oldest.IsZero() {
-			covered = head.oldest
-		}
-		step.Gap = gapOf(olderAt, r.floor, covered)
+		step.Gap = gapOf(olderAt, r.floor, head.oldest)
 	}
 	// The overlap is read again by every run, so that an attempt that GitHub
 	// lists late is seen. One case needs no new range for it: no attempt has
@@ -524,12 +520,8 @@ func (r *redeliveryRun) readRanges(ctx context.Context, ranges []RedeliveryRange
 				rg.Cursor = p.next
 				continue
 			}
-			covered := rg.NewerAt
-			if !p.oldest.IsZero() {
-				covered = p.oldest
-			}
 			step.CloseID = rg.ID
-			step.Gap = gapOf(rg.OlderAt, r.floor, covered)
+			step.Gap = gapOf(rg.OlderAt, r.floor, p.oldest)
 			if _, err := r.apply(ctx, step, gapExpiredUnread); err != nil {
 				return err
 			}
