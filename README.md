@@ -128,7 +128,7 @@ GitHub does not send a webhook again when faucet was down or answered with an er
 
 | Variable | Meaning |
 | --- | --- |
-| `FAUCET_HOOK_TOKEN` | A token that can list and redeliver the webhook's deliveries: a classic token with `admin:org_hook` (org hook) or the repository hook permission (repo hook), owned by a machine user. GitHub offers no narrower grant, and the same token can edit or delete the hook, so set it in production only. Faucet sends it only to the GitHub API URL, and only to two endpoints: `GET .../hooks/{id}/deliveries` and `POST .../deliveries/{attempt}/attempts`. |
+| `FAUCET_HOOK_TOKEN` | A token that can list and redeliver the webhook's deliveries: a classic token with `admin:org_hook` (org hook) or the repository hook permission (repo hook), owned by a machine user. GitHub offers no narrower grant, and the same token can edit or delete the hook, so set it for the Production target of Vercel only, with no Preview or Development target. Faucet sends it only to the GitHub API URL, and only to two endpoints: `GET .../hooks/{id}/deliveries` and `POST .../deliveries/{attempt}/attempts`. |
 | `FAUCET_HOOK_ORG` or `FAUCET_HOOK_REPO` | The webhook's owner: an organization, or `owner/name`. Set exactly one. |
 | `FAUCET_HOOK_ID` | The webhook's numeric ID. |
 
@@ -161,12 +161,12 @@ To embed faucet, set `Deps.Redelivery` to a `RedeliveryDeps`: a `RedeliveryStore
 
 `vercel.json` deploys `cmd/faucet` as a Vercel Go service (Go runtime, Beta) behind one catch-all rewrite, lets a request run for 90 seconds at most (an `/mcp` wait lasts 50 seconds at most, and the server's write deadline for it is 75), and schedules the cron routes: `/cron/deliver` every minute, `/cron/redeliver` every 10 minutes and `/cron/purge` every hour. A cron every minute needs the Pro plan. Vercel runs crons on production deployments only, and sends `Authorization: Bearer $CRON_SECRET`.
 
-**Previews are off, on purpose.** A preview runs the code of any branch. The Neon integration gives a preview the same database as production, and the server migrates at start. A preview of an unmerged migration would therefore change the production schema before anyone reviewed it, and every production instance that started afterwards would exit. `vercel.json` sets `git.deploymentEnabled` to `false` for every branch except `main`, and it holds for Git deployments only (a `vercel deploy` from a terminal skips it). Two more guards back it up:
+**Previews are off, on purpose.** A preview runs the code of any branch. The Neon integration gives a preview the same database as production, and the server migrates at start. A preview of an unmerged migration would therefore change the production schema before anyone reviewed it, and every production instance that started afterwards would exit. `vercel.json` sets `git.deploymentEnabled` to `false` for every branch except `main`, and it holds for Git deployments only (a `vercel deploy` from a terminal skips it). Vercel reads `git.deploymentEnabled` from the `vercel.json` of the commit that it builds, so a branch that was created before that file had the setting can still build a preview. Two more guards back it up:
 
 - The server migrates outside Vercel and when `VERCEL_ENV` is `production`. When `VERCEL` is set and `VERCEL_ENV` is anything else, it checks the schema, and exits at start unless the database is already at the newest migration. Vercel sets `VERCEL` on every deployment, but `VERCEL_ENV` only when the project exposes its system environment variables (Project Settings, Environment Variables, Automatically expose System Environment Variables). With that setting off, the server never migrates, so turn it on.
-- Keep the database variables and every secret below set for Production only. A preview must not read them.
+- Keep the database variables and every secret below set for Production only: remove the Preview and the Development targets. A preview must not read them, and a Development variable goes to every machine that runs `vercel env pull`.
 
-1. Create a Vercel project from this repository and attach a Neon Postgres database to it with the Vercel integration. The integration sets `DATABASE_URL` (pooled) and `DATABASE_URL_UNPOOLED` (direct), and the `POSTGRES_*` and `PG*` variables. Remove the Preview target from all of them. The server serves requests over the pooled `DATABASE_URL` and migrates over the direct `DATABASE_URL_UNPOOLED`, for the reasons that **Run the server** gives.
+1. Create a Vercel project from this repository and attach a Neon Postgres database to it with the Vercel integration. The integration sets `DATABASE_URL` (pooled) and `DATABASE_URL_UNPOOLED` (direct), and the `POSTGRES_*` and `PG*` variables. Remove the Preview and Development targets from all of them. The server serves requests over the pooled `DATABASE_URL` and migrates over the direct `DATABASE_URL_UNPOOLED`, for the reasons that **Run the server** gives.
 2. Set these variables for Production only, as sensitive:
 
    | Variable | Value |
@@ -177,7 +177,7 @@ To embed faucet, set `Deps.Redelivery` to a `RedeliveryDeps`: a `RedeliveryStore
    | `FAUCET_WEBHOOK_CALLBACK_VERIFICATION` | `handshake`. To use an allowlist instead, delete this variable and set `FAUCET_WEBHOOK_ALLOWED_ORIGINS`. |
 
    Redelivery stays off, and `/cron/redeliver` answers 503, until the GitHub webhook exists and you set `FAUCET_HOOK_TOKEN`, `FAUCET_HOOK_ORG` or `FAUCET_HOOK_REPO`, and `FAUCET_HOOK_ID` (see **Redeliver failed webhooks**).
-3. Deploy by pushing to `main`. Do not run `vercel deploy` by hand. On a project with no production deployment, a plain `vercel deploy` created a production deployment.
+3. Redeploy after you add or change a variable. A variable change applies only to deployments that are built after it, so a running deployment keeps the old value. Deploy by pushing to `main`. Do not run `vercel deploy` by hand. On a project with no production deployment, a plain `vercel deploy` created a production deployment.
 4. Set the GitHub webhook's payload URL to `https://<production domain>/webhook/github`. Do not put Vercel Deployment Protection on that domain, because GitHub and MCP clients cannot pass it.
 
 The server applies pending migrations when a production instance starts, over `DATABASE_URL_UNPOOLED` (or over `DATABASE_URL` when that is unset), before it serves a request.
