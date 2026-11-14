@@ -5,6 +5,10 @@
 -- attempts have left GitHub's list, so reading them again cannot revive it.
 CREATE TABLE faucet_redeliveries (
   guid             text PRIMARY KEY CHECK (guid <> ''),
+  -- The webhook whose delivery list the attempts come from. GitHub's
+  -- redelivery endpoint takes an attempt ID of that webhook alone, so a run
+  -- asks only for the deliveries of the webhook that it holds the lease for.
+  hook             text NOT NULL CHECK (hook <> ''),
   state            text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'recovered', 'gave_up')),
   reason           text CHECK (reason IN ('limit', 'expired')),
   -- The newest failed attempt known. GitHub's redelivery endpoint takes its ID.

@@ -38,6 +38,7 @@ func RunRedelivery(t *testing.T, newStore func(t *testing.T) RedeliveryStore) {
 		{"ScanPositionSurvivesBetweenRuns", scanPositionSurvivesBetweenRuns},
 		{"AFailedScanStepRecordsNothing", aFailedScanStepRecordsNothing},
 		{"ChangingTheHookClosesOpenRangesAsGaps", changingTheHookClosesOpenRangesAsGaps},
+		{"ClaimSkipsTheDeliveriesOfAnotherHook", claimSkipsTheDeliveriesOfAnotherHook},
 		{"PurgeKeepsPendingDeliveriesAndOpenRanges", purgeKeepsPendingDeliveriesAndOpenRanges},
 		{"RedeliveryInputsAreValidated", redeliveryInputsAreValidated},
 	}
@@ -390,6 +391,31 @@ func changingTheHookClosesOpenRangesAsGaps(t *testing.T, s RedeliveryStore) {
 	require.Len(t, other.ClosedGaps, 1)
 	require.True(t, t0.Add(-48*time.Hour).Equal(other.ClosedGaps[0].From))
 	require.True(t, t0.Add(-time.Hour).Equal(other.ClosedGaps[0].To))
+}
+
+func claimSkipsTheDeliveriesOfAnotherHook(t *testing.T, s RedeliveryStore) {
+	ctx := context.Background()
+	const otherHook = "/orgs/acme/hooks/8"
+	old := acquire(t, s, testHook, t0)
+	apply(t, s, faucet.ScanStep{Epoch: old.Epoch, Now: t0, Failed: []faucet.FailedAttempt{failedAt("guid-old", 1, t0)}})
+	require.NoError(t, s.ReleaseRedeliveryLease(ctx, old.Epoch))
+
+	replaced := acquire(t, s, otherHook, t0.Add(time.Minute))
+	apply(t, s, faucet.ScanStep{Epoch: replaced.Epoch, Now: t0.Add(time.Minute), Failed: []faucet.FailedAttempt{failedAt("guid-new", 7, t0.Add(time.Minute))}})
+
+	c, ok := claim(t, s, t0.Add(2*time.Minute))
+	require.True(t, ok)
+	require.Equal(t, "guid-new", c.GUID, "an attempt ID of the old hook means nothing to the new one")
+	_, ok = claim(t, s, t0.Add(2*time.Minute))
+	require.False(t, ok, "the delivery of the old hook is not due for anyone")
+	require.Equal(t, 2, settle(t, s, t0.Add(2*time.Minute)).Pending, "it stays pending until it is stored or expires")
+
+	require.NoError(t, s.ReleaseRedeliveryLease(ctx, replaced.Epoch))
+	back := acquire(t, s, testHook, t0.Add(3*time.Minute))
+	require.NoError(t, s.ReleaseRedeliveryLease(ctx, back.Epoch))
+	c, ok = claim(t, s, t0.Add(4*time.Minute))
+	require.True(t, ok, "the old hook's delivery is its own again when the old hook returns")
+	require.Equal(t, "guid-old", c.GUID)
 }
 
 func purgeKeepsPendingDeliveriesAndOpenRanges(t *testing.T, s RedeliveryStore) {

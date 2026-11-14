@@ -39,6 +39,7 @@ type FaucetPurgeMark struct {
 
 type FaucetRedelivery struct {
 	Guid           string
+	Hook           string
 	State          string
 	Reason         sql.NullString
 	LastAttemptID  int64

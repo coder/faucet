@@ -501,6 +501,34 @@ func TestAnEmptyListMovesThePositionToGitHubsClockNotFaucets(t *testing.T) {
 	}
 }
 
+func TestAReplacedHooksPendingDeliveriesAreNotAskedForOnTheNewHook(t *testing.T) {
+	t.Parallel()
+	env := newRedeliveryEnv(t)
+	env.gh.answer = func(string, time.Time) int { return 503 } // faucet stays down
+	env.gh.record("old-1", env.now().Add(-5*time.Minute), 503)
+	env.gh.record("old-2", env.now().Add(-4*time.Minute), 503)
+	require.Equal(t, 2, env.run().Asked)
+
+	// The host replaces the webhook. The new one has its own list, and an attempt
+	// ID of the old one is a 404 there.
+	env.gh.name = "/orgs/acme/hooks/8"
+	env.gh.attempts = nil
+	env.gh.record("new-1", env.now(), 503)
+	env.advance(cronEvery) // the second ask of both old deliveries is due
+
+	res, err := env.svc.Redeliver(context.Background())
+	require.NoError(t, err, "a request that the new hook would refuse is never sent")
+	require.Equal(t, 1, res.Asked, "the delivery of the new hook goes out")
+	require.Len(t, env.gh.askedTimes("new-1"), 1)
+	require.Len(t, env.gh.askedTimes("old-1"), 1, "the old hook's deliveries are not asked for again")
+	require.Equal(t, 3, res.Pending)
+
+	env.advance(faucet.GitHubDeliveryRetention)
+	res = env.run()
+	require.Equal(t, 3, res.GaveUpExpired, "the old deliveries end counted, as expired, with everything else that GitHub forgot")
+	require.Zero(t, res.Pending)
+}
+
 func TestRedeliverRecordsAGapWhenARangeExpiresUnread(t *testing.T) {
 	t.Parallel()
 	env := newRedeliveryEnv(t, func(o *envOptions) { o.maxPages = 1 })

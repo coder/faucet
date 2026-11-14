@@ -23,6 +23,7 @@ const (
 
 type fakeRedeliveryRow struct {
 	state     fakeRedeliveryState
+	hook      string
 	lastID    int64
 	lastAt    time.Time
 	firstAt   time.Time
@@ -167,7 +168,7 @@ func (s *fakeRedeliveryStore) ApplyRedeliveryScan(_ context.Context, step faucet
 		switch {
 		case !ok:
 			s.rows[f.GUID] = &fakeRedeliveryRow{
-				state: fakePending, lastID: f.AttemptID, lastAt: f.DeliveredAt, firstAt: f.DeliveredAt, nextAskAt: step.Now,
+				state: fakePending, hook: s.hook, lastID: f.AttemptID, lastAt: f.DeliveredAt, firstAt: f.DeliveredAt, nextAskAt: step.Now,
 			}
 			res.Tracked++
 		case row.state == fakePending:
@@ -274,7 +275,7 @@ func (s *fakeRedeliveryStore) ClaimRedelivery(_ context.Context, req faucet.Clai
 	)
 	for _, guid := range s.sortedGUIDsLocked() {
 		row := s.rows[guid]
-		due := row.state == fakePending && row.asks < req.MaxAsks && !row.nextAskAt.After(req.Now) &&
+		due := row.state == fakePending && row.hook == s.hook && row.asks < req.MaxAsks && !row.nextAskAt.After(req.Now) &&
 			row.firstAt.Add(req.Retention).After(req.Now) && !s.stored[guid]
 		if !due {
 			continue

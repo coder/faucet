@@ -42,8 +42,8 @@ WITH input AS (
   FROM input
   GROUP BY guid
 ), upserted AS (
-  INSERT INTO faucet_redeliveries AS r (guid, last_attempt_id, last_attempt_at, first_attempt_at, next_ask_at)
-  SELECT guid, last_id, last_at, first_at, sqlc.arg(now)::timestamptz FROM best
+  INSERT INTO faucet_redeliveries AS r (guid, hook, last_attempt_id, last_attempt_at, first_attempt_at, next_ask_at)
+  SELECT guid, (SELECT hook FROM faucet_redelivery_scan), last_id, last_at, first_at, sqlc.arg(now)::timestamptz FROM best
   ON CONFLICT (guid) DO UPDATE SET
     last_attempt_id = CASE
       WHEN (EXCLUDED.last_attempt_at, EXCLUDED.last_attempt_id) > (r.last_attempt_at, r.last_attempt_id)
@@ -108,6 +108,7 @@ WITH due AS (
   SELECT r.guid
   FROM faucet_redeliveries r
   WHERE r.state = 'pending'
+    AND r.hook = (SELECT hook FROM faucet_redelivery_scan)
     AND r.asks < sqlc.arg(max_asks)::integer
     AND r.next_ask_at <= sqlc.arg(now)::timestamptz
     AND r.first_attempt_at > sqlc.arg(not_before)::timestamptz
