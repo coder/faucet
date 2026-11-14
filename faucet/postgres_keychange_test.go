@@ -2,56 +2,17 @@ package faucet_test
 
 import (
 	"bytes"
-	"context"
-	"crypto/rand"
-	"database/sql"
-	"encoding/hex"
 	"encoding/json"
-	"net/url"
-	"os"
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 
 	"github.com/coder/faucet/faucet"
 	"github.com/coder/faucet/faucet/pgstore"
 )
 
-func postgresStore(t *testing.T) faucet.Store {
-	t.Helper()
-	adminURL := os.Getenv("FAUCET_TEST_DATABASE_URL")
-	if adminURL == "" {
-		if os.Getenv("CI") != "" {
-			t.Fatal("FAUCET_TEST_DATABASE_URL must be set in CI")
-		}
-		t.Skip("set FAUCET_TEST_DATABASE_URL to a Postgres URL")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	suffix := make([]byte, 8)
-	_, err := rand.Read(suffix)
-	require.NoError(t, err)
-	name := "faucet_test_" + hex.EncodeToString(suffix)
-	admin, err := sql.Open("postgres", adminURL)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = admin.Close() })
-	_, err = admin.ExecContext(ctx, "CREATE DATABASE "+pq.QuoteIdentifier(name))
-	require.NoError(t, err)
-	u, err := url.Parse(adminURL)
-	require.NoError(t, err)
-	u.Path = "/" + name
-	db, err := sql.Open("postgres", u.String())
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = db.Close()
-		_, err := admin.ExecContext(context.Background(), "DROP DATABASE "+pq.QuoteIdentifier(name)+" WITH (FORCE)")
-		require.NoError(t, err)
-	})
-	require.NoError(t, pgstore.Migrate(ctx, db))
-	return pgstore.New(db)
-}
+func postgresStore(t *testing.T) faucet.Store { return pgstore.New(postgresDB(t)) }
 
 func onPostgres(t *testing.T) (d *deliverHarness, store faucet.Store) {
 	t.Helper()
