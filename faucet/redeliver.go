@@ -226,8 +226,10 @@ type pageRead struct {
 	// newest is the time of the newest attempt on the page. oldest is the
 	// time of the oldest one at or after the bound, and zero when there is none.
 	newest, oldest time.Time
-	reachedBound   bool
-	next           string
+	// at is the page's DeliveryPage.At.
+	at           time.Time
+	reachedBound bool
+	next         string
 }
 
 // finished says that a read of the range this page belongs to has seen all of
@@ -240,7 +242,7 @@ func (r *redeliveryRun) read(ctx context.Context, cursor string, bound time.Time
 		return pageRead{}, xerrors.Errorf("list deliveries: %w", err)
 	}
 	r.res.Pages++
-	p := pageRead{next: page.Next}
+	p := pageRead{next: page.Next, at: page.At}
 	for _, d := range page.Deliveries {
 		if d.DeliveredAt.After(p.newest) {
 			p.newest = d.DeliveredAt
@@ -337,9 +339,12 @@ func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, er
 		return false, err
 	}
 	step := head.step(r.epoch, now)
+	// The position is a time of GitHub's: the newest attempt, or GitHub's clock
+	// when the list is empty. Faucet's clock does not belong here (see
+	// DeliveryPage.At).
 	step.Top = head.newest
 	if step.Top.IsZero() {
-		step.Top = now
+		step.Top = head.at
 	}
 	if head.finished() {
 		covered := now

@@ -46,6 +46,13 @@ type DeliveryPage struct {
 	Deliveries []HookDelivery
 	// Next is the cursor of the next, older page. It is empty on the last page.
 	Next string
+	// At is GitHub's own clock when it answered, which GitHub's Date header
+	// carries. It is zero when GitHub sent none. When the whole list is empty,
+	// Redeliver moves its position to At and never to the time of faucet's
+	// clock: the clocks differ, and a position ahead of GitHub's would make
+	// the next failed attempt look as if an earlier run had read it. A
+	// HookAdmin that leaves At zero leaves the position where it was.
+	At time.Time
 }
 
 // HookAdmin is the part of GitHub's webhook API that Service.Redeliver needs.
@@ -183,7 +190,9 @@ func (a GitHubHookAdmin) ListDeliveries(ctx context.Context, cursor string) (Del
 	if err != nil {
 		return DeliveryPage{}, err
 	}
-	page := DeliveryPage{Deliveries: make([]HookDelivery, len(raw)), Next: next}
+	// A missing or malformed Date leaves At zero.
+	at, _ := http.ParseTime(resp.Header.Get("Date"))
+	page := DeliveryPage{Deliveries: make([]HookDelivery, len(raw)), Next: next, At: at}
 	for i, d := range raw {
 		if d.ID <= 0 || d.GUID == "" || d.DeliveredAt.IsZero() {
 			return DeliveryPage{}, xerrors.New("GitHub returned a delivery without an ID, GUID or time")

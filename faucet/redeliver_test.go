@@ -430,6 +430,30 @@ func TestAnEmptyListIsCoveredSoTheFirstGapIsNotRecordedAgain(t *testing.T) {
 	require.Equal(t, 1, gaps)
 }
 
+func TestAnEmptyListMovesThePositionToGitHubsClockNotFaucets(t *testing.T) {
+	t.Parallel()
+
+	// skew is GitHub's clock minus faucet's. A position on faucet's clock puts
+	// the next failure of a GitHub that runs behind it under the read bound,
+	// where no run reads it and nothing counts it.
+	for _, skew := range []time.Duration{-time.Hour, -10 * time.Minute, -4 * time.Minute, 0, 10 * time.Minute} {
+		t.Run(skew.String(), func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t)
+			env.gh.skew = skew
+
+			require.Equal(t, 1, env.run().Gaps, "an empty list is the first run")
+			env.advance(time.Minute)
+			env.gh.record("g1", env.gh.now(), 503)
+
+			res := env.run()
+			require.Equal(t, 1, res.Tracked, "the failure is new on GitHub's clock, so the run reads it")
+			require.Equal(t, 1, res.Asked)
+			require.True(t, env.stored("g1"))
+		})
+	}
+}
+
 func TestRedeliverRecordsAGapWhenARangeExpiresUnread(t *testing.T) {
 	t.Parallel()
 	env := newRedeliveryEnv(t, func(o *envOptions) { o.maxPages = 1 })

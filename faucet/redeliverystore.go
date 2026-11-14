@@ -76,8 +76,9 @@ type RedeliveryGap struct {
 type RedeliveryScan struct {
 	// Epoch fences the run's writes. A later lease has a higher epoch.
 	Epoch int64
-	// Top is the time of the newest attempt that an earlier run read, or zero
-	// before the first run.
+	// Top is the time of the newest attempt that an earlier run read, or
+	// GitHub's clock when it read an empty list, or zero before the first
+	// run. It is always a time that GitHub gave, never one of faucet's clock.
 	Top time.Time
 	// Ranges are the open ranges, newest first.
 	Ranges []RedeliveryRange

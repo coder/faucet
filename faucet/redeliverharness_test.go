@@ -49,6 +49,9 @@ type fakeGitHub struct {
 	pageSize int
 	style    cursorStyle
 	name     string
+	// skew is GitHub's clock minus faucet's. Every time that GitHub gives is
+	// on its own clock, and a test that records an attempt gives GitHub's time.
+	skew time.Duration
 	// answer is the status that faucet gives a delivery of guid at that time.
 	// A 2xx also stores the event. The default is 200.
 	answer func(guid string, at time.Time) int
@@ -69,6 +72,9 @@ func newFakeGitHub(clock quartz.Clock, store *fakeRedeliveryStore) *fakeGitHub {
 }
 
 func (g *fakeGitHub) Hook() string { return g.name }
+
+// now is GitHub's clock.
+func (g *fakeGitHub) now() time.Time { return g.clock.Now().Add(g.skew) }
 
 const (
 	handledEvent  = "workflow_run"
@@ -127,7 +133,7 @@ func (g *fakeGitHub) recordLocked(guid string, at time.Time, status int, event, 
 }
 
 func (g *fakeGitHub) visibleLocked() []ghAttempt {
-	now := g.clock.Now()
+	now := g.now()
 	hi := sort.Search(len(g.attempts), func(i int) bool { return g.attempts[i].at.After(now) })
 	lo := sort.Search(len(g.attempts), func(i int) bool { return g.attempts[i].at.After(now.Add(-faucet.GitHubDeliveryRetention)) })
 	return g.attempts[lo:hi]
@@ -168,7 +174,7 @@ func (g *fakeGitHub) ListDeliveries(_ context.Context, cursor string) (faucet.De
 	}
 	start = max(start, 0)
 	end := max(start-g.pageSize, 0)
-	page := faucet.DeliveryPage{}
+	page := faucet.DeliveryPage{At: g.now()}
 	for i := start - 1; i >= end; i-- {
 		a := visible[i]
 		page.Deliveries = append(page.Deliveries, faucet.HookDelivery{
@@ -210,7 +216,7 @@ func (g *fakeGitHub) Redeliver(_ context.Context, attemptID int64) error {
 				return err
 			}
 		}
-		now := g.clock.Now()
+		now := g.now()
 		g.asks[a.guid] = append(g.asks[a.guid], now)
 		g.deliverLocked(a.guid, now, a.event, a.action)
 		return nil

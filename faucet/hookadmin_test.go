@@ -95,6 +95,27 @@ func TestGitHubHookAdminListsDeliveriesNewestFirstWithACursor(t *testing.T) {
 	require.Equal(t, "v1_29", calls[1].query.Get("cursor"))
 }
 
+func TestGitHubHookAdminTakesGitHubsClockFromTheDateHeader(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		date []string
+		want time.Time
+	}{
+		"a Date header":    {[]string{"Fri, 13 Nov 2026 10:06:00 GMT"}, time.Date(2026, 11, 13, 10, 6, 0, 0, time.UTC)},
+		"a malformed Date": {[]string{"yesterday"}, time.Time{}},
+		"no Date":          {nil, time.Time{}},
+	} {
+		stub := newHookStub(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header()["Date"] = tc.date // nil keeps net/http from adding its own
+			_, _ = fmt.Fprint(w, `[]`)
+		})
+		page, err := newHookAdmin(t, stub, orgHook).ListDeliveries(context.Background(), "")
+		require.NoError(t, err, name)
+		require.True(t, tc.want.Equal(page.At), "%s: %v", name, page.At)
+	}
+}
+
 func TestGitHubHookAdminLastPageHasNoNext(t *testing.T) {
 	t.Parallel()
 
