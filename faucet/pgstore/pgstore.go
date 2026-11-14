@@ -43,6 +43,9 @@ func endedBy(ctx context.Context, err error) error {
 // InsertEvent stores ev in one transaction that holds eventsLockKey until it
 // commits. Sequence values are therefore handed out and committed in the same
 // order, so a reader that sees ID n has seen every lower ID that will commit.
+// The row's time is taken at the insert, under the lock, and not by the
+// column default at the start of the transaction, so a higher ID never carries
+// an earlier time and CursorAt returns a prefix of the log.
 func (s *Store) InsertEvent(ctx context.Context, ev faucet.Event) (_ faucet.Event, _ bool, err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if err := ev.Validate(); err != nil {

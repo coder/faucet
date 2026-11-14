@@ -211,9 +211,10 @@ func (s *Service) authorizeRepo(ctx context.Context, logger slog.Logger, p Princ
 
 // startCursor picks where a wait begins. A given cursor wins. With a sha the
 // wait begins shaLookback ago. Otherwise it begins at the present, which is
-// the highest ID received before now. If the store's clock is behind ours that
-// can return an event from just before the call. It cannot skip one that
-// arrives later, because later events get higher IDs than any that exist now.
+// the highest ID received before now. If the store's clock is ahead of ours,
+// an event from just before the call can still carry a time after now, and the
+// wait returns it. It cannot skip one that arrives later, because later events
+// get higher IDs than any that exist now.
 func (s *Service) startCursor(ctx context.Context, req waitRequest) (int64, error) {
 	switch {
 	case req.cursor != nil:

@@ -2,7 +2,7 @@
 SELECT pg_advisory_xact_lock(sqlc.arg(key)::bigint);
 
 -- name: InsertEvent :one
-INSERT INTO faucet_events (source, delivery_id, type, repo_id, prs, head_sha, data)
+INSERT INTO faucet_events (source, delivery_id, type, repo_id, prs, head_sha, data, received_at)
 VALUES (
   sqlc.arg(source),
   sqlc.arg(delivery_id),
@@ -10,7 +10,8 @@ VALUES (
   sqlc.arg(repo_id),
   sqlc.arg(prs)::int[],
   NULLIF(sqlc.arg(head_sha)::text, ''),
-  sqlc.arg(data)::text::jsonb
+  sqlc.arg(data)::text::jsonb,
+  clock_timestamp()
 )
 ON CONFLICT (delivery_id) DO NOTHING
 RETURNING *;

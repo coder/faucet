@@ -161,7 +161,9 @@ type Store interface {
 	PollEvents(ctx context.Context, q PollQuery) (PollPage, error)
 	// CursorAt returns the highest event ID received before t, or 0 when there
 	// is none. It is never lower than the purge mark, so polling with it as
-	// the cursor returns the events from t on and is not reported as a gap.
+	// the cursor returns the events from t on and is not reported as a gap. It
+	// returns the events from t on only if InsertEvent stamps ReceivedAt in ID
+	// order: an event must never carry an earlier time than a lower ID.
 	CursorAt(ctx context.Context, t time.Time) (int64, error)
 	// Purge deletes the events received before the given time and raises the
 	// purge mark to the highest ID it deleted, in one transaction. The mark
