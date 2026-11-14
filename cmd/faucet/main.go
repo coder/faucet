@@ -138,6 +138,9 @@ func loadCronConfig(getenv func(string) string, cfg *config) error {
 	if cfg.cronSecret != "" && len(cfg.cronSecret) < minCronSecretBytes {
 		return xerrors.Errorf("%s must be at least %d bytes", envCronSecret, minCronSecretBytes)
 	}
+	if cfg.cronSecret != "" && !validBearerToken(cfg.cronSecret) {
+		return xerrors.Errorf("%s must be at most %d printable ASCII characters with no space, because the scheduler sends it as a bearer token", envCronSecret, maxTokenBytes)
+	}
 
 	days := defaultRetentionDays
 	if raw := getenv(envRetentionDays); raw != "" {

@@ -523,6 +523,53 @@ func TestLoadConfigCron(t *testing.T) {
 	}
 }
 
+// A secret that loadConfig accepts must be one that a request can carry in a
+// bearer header. Otherwise the server starts, and every cron call answers 401
+// for ever.
+func TestLoadConfigCronSecretIsOneThatARequestCanCarry(t *testing.T) {
+	t.Parallel()
+
+	load := func(secret string) (config, error) {
+		return loadConfig(func(name string) string {
+			return map[string]string{envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret, envCronSecret: secret}[name]
+		})
+	}
+	const sixteen = "0123456789abcdef"
+
+	accepted := map[string]string{
+		"hex":                     strings.Repeat("ab", 16),
+		"every printable symbol":  "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~",
+		"base64 with padding":     "c2VjcmV0LXNlY3JldC1zZWNyZXQ=",
+		"the longest a token can": strings.Repeat("a", maxTokenBytes),
+	}
+	for name, secret := range accepted {
+		cfg, err := load(secret)
+		require.NoError(t, err, name)
+		srv := newCronServer(t, cronOptions{secret: cfg.cronSecret})
+		status, _, body := srv.get(t, http.MethodGet, purgePath, bearer(secret))
+		require.Equal(t, http.StatusOK, status, "%s: the secret that startup accepted must open the routes: %s", name, body)
+	}
+
+	rejected := map[string]string{
+		"a space inside":     sixteen + " " + sixteen,
+		"a trailing newline": sixteen + "\n",
+		"a leading space":    " " + sixteen,
+		"a tab":              sixteen + "\t" + sixteen,
+		"a delete character": sixteen + "\x7f",
+		"a non-ASCII letter": sixteen + "é",
+		"one byte too long":  strings.Repeat("a", maxTokenBytes+1),
+		"a carriage return":  sixteen + "\r",
+		"a null byte":        sixteen + "\x00",
+		"a very long secret": strings.Repeat("a", 100*maxTokenBytes),
+	}
+	for name, secret := range rejected {
+		_, err := load(secret)
+		require.Error(t, err, name)
+		require.Contains(t, err.Error(), envCronSecret, "%s: the error names the variable", name)
+		require.NotContains(t, err.Error(), secret[:16], "%s: the error does not echo the value", name)
+	}
+}
+
 func TestLoadConfigHookAdmin(t *testing.T) {
 	t.Parallel()
 
