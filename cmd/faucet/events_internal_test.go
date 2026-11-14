@@ -67,7 +67,7 @@ func (s *testServer) connectEvents(ctx context.Context, t *testing.T, token stri
 	}
 	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
 		Endpoint:             s.URL + "/mcp",
-		HTTPClient:           &http.Client{Transport: eventNameTransport{next: bearerTransport{token}}},
+		HTTPClient:           &http.Client{Transport: eventNameTransport{next: bearerTransport{token, s.Client().Transport}}},
 		DisableStandaloneSSE: true,
 	}, nil)
 	require.NoError(t, err)
@@ -222,7 +222,7 @@ func postEventsPoll(t *testing.T, srv *testServer, token, name, params string) (
 	if name != "" {
 		req.Header.Set("Mcp-Name", name)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := srv.Client().Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)

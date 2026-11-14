@@ -56,6 +56,8 @@ type githubStub struct {
 	requests []string
 	auth     []string
 	userErr  int
+	// userHeader is set on the answer that userErr gives.
+	userHeader http.Header
 }
 
 // newGitHubStub knows alice and bob. Alice can read o/r and nobody can see
@@ -67,13 +69,16 @@ func newGitHubStub(t *testing.T) *githubStub {
 		stub.mu.Lock()
 		stub.requests = append(stub.requests, r.URL.Path)
 		stub.auth = append(stub.auth, r.Header.Get("Authorization"))
-		userErr := stub.userErr
+		userErr, userHeader := stub.userErr, stub.userHeader
 		stub.mu.Unlock()
 
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		login := map[string]string{aliceToken: "alice", bobToken: "bob"}[token]
 		switch {
 		case r.URL.Path == "/user" && userErr != 0:
+			for name, values := range userHeader {
+				w.Header()[name] = values
+			}
 			w.WriteHeader(userErr)
 		case login == "":
 			w.WriteHeader(http.StatusUnauthorized)
@@ -167,12 +172,18 @@ func (s *testServer) requireNoToken(t *testing.T, what string, texts ...string) 
 	}
 }
 
-type bearerTransport struct{ token string }
+// bearerTransport sends through the transport of one test server. The
+// default transport is shared by the parallel tests, and a server that closes
+// breaks the idle connections of every test that uses it.
+type bearerTransport struct {
+	token string
+	next  http.RoundTripper
+}
 
 func (b bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
 	r.Header.Set("Authorization", "Bearer "+b.token)
-	return http.DefaultTransport.RoundTrip(r)
+	return b.next.RoundTrip(r)
 }
 
 func (s *testServer) connect(ctx context.Context, t *testing.T, token string) *mcp.ClientSession {
@@ -180,7 +191,7 @@ func (s *testServer) connect(ctx context.Context, t *testing.T, token string) *m
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
 	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
 		Endpoint:             s.URL + "/mcp",
-		HTTPClient:           &http.Client{Transport: bearerTransport{token}},
+		HTTPClient:           &http.Client{Transport: bearerTransport{token, s.Client().Transport}},
 		DisableStandaloneSSE: true,
 	}, nil)
 	require.NoError(t, err)
@@ -215,7 +226,7 @@ func rawPost(t *testing.T, srv *testServer, header string) (status int, wwwAuthe
 	if header != "" {
 		req.Header["Authorization"] = []string{header}
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := srv.Client().Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
@@ -261,6 +272,39 @@ func TestMCPGitHubFailureIsABadGateway(t *testing.T) {
 	require.NotContains(t, body, "500")
 	srv.requireNoToken(t, "a response or the log", body)
 	require.Contains(t, srv.logs.String(), "could not check the GitHub token")
+}
+
+func TestMCPRateLimitedUserLookupIsABadGatewayNotAnInvalidToken(t *testing.T) {
+	t.Parallel()
+
+	for name, limited := range map[string]struct {
+		status int
+		header http.Header
+	}{
+		"429":                  {http.StatusTooManyRequests, nil},
+		"403 with no quota":    {http.StatusForbidden, http.Header{"X-Ratelimit-Remaining": {"0"}}},
+		"403 with Retry-After": {http.StatusForbidden, http.Header{"Retry-After": {"60"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := newTestServer(t)
+			srv.github.mu.Lock()
+			srv.github.userErr, srv.github.userHeader = limited.status, limited.header
+			srv.github.mu.Unlock()
+
+			status, challenge, body := rawPost(t, srv, "Bearer "+aliceToken)
+			require.Equal(t, http.StatusBadGateway, status, "a token that GitHub could not check is not a rejected token")
+			require.Empty(t, challenge)
+			require.NotContains(t, body, "unauthorized")
+		})
+	}
+
+	srv := newTestServer(t)
+	srv.github.mu.Lock()
+	srv.github.userErr = http.StatusForbidden
+	srv.github.mu.Unlock()
+	status, _, _ := rawPost(t, srv, "Bearer "+aliceToken)
+	require.Equal(t, http.StatusUnauthorized, status, "a plain 403 is a refusal, so the same lookup without a rate limit sign stays a 401")
 }
 
 func TestMCPToolWaitsForAllowedRepoOverHTTP(t *testing.T) {
@@ -406,7 +450,7 @@ func TestHealthAndWebhookDoNotNeedABearerToken(t *testing.T) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/healthz", nil)
 	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := srv.Client().Do(req)
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -419,7 +463,7 @@ func TestHealthAndWebhookDoNotNeedABearerToken(t *testing.T) {
 	req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	req.Header.Set("X-GitHub-Event", "ping")
 	req.Header.Set("X-GitHub-Delivery", "d-1")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err = srv.Client().Do(req)
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
