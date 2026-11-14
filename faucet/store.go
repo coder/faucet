@@ -116,6 +116,12 @@ type PurgeResult struct {
 	Deleted int64
 	// PurgedThrough is the purge mark after the call.
 	PurgedThrough int64
+	// ExpiredSubscriptions and EndedDeliveries are what Service.Purge removed
+	// with the expired subscriptions: the subscriptions, and the deliveries that
+	// they still held and that no run was sending. A run that held one of those
+	// deliveries counts it as superseded. Store.Purge leaves both at zero.
+	ExpiredSubscriptions int64
+	EndedDeliveries      int64
 }
 
 func hasNUL(v any) bool {

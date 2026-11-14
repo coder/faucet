@@ -118,7 +118,7 @@ The route answers `{"enqueued", "gaps", "gaps_sent", "gaps_failed", "claimed", "
 | `CRON_SECRET` | At least 16 bytes. Unset means every cron route answers 503 and runs nothing. A wrong or missing bearer token is 401. |
 | `FAUCET_RETENTION_DAYS` | Whole days, 1 to 3650. Default 30. |
 
-**`GET /cron/purge`** deletes the events received more than `FAUCET_RETENTION_DAYS` ago and answers `{"deleted": n, "purged_through": id}`. `purged_through` is the purge mark, the highest event ID any purge has deleted. A wait or poll whose cursor is below the mark reports `truncated: true`. It also deletes the webhook subscriptions that have expired, which the response does not count.
+**`GET /cron/purge`** deletes the events received more than `FAUCET_RETENTION_DAYS` ago and answers `{"deleted": n, "purged_through": id, "expired_subscriptions": n, "ended_deliveries": n}`. `purged_through` is the purge mark, the highest event ID any purge has deleted. A wait or poll whose cursor is below the mark reports `truncated: true`. It also deletes the webhook subscriptions that have expired, and the deliveries that they still held: the last two members count them, and the log line `events purged` names both.
 
 To embed faucet, call `Service.Purge(ctx, before)` on your own schedule. It has no auth. The host decides who may call it. A `Store` of your own must implement `Purge`, and `storetest` checks it.
 

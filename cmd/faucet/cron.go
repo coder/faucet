@@ -70,9 +70,11 @@ func (c cronRoutes) purge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, struct {
-		Deleted       int64 `json:"deleted"`
-		PurgedThrough int64 `json:"purged_through"`
-	}{res.Deleted, res.PurgedThrough})
+		Deleted              int64 `json:"deleted"`
+		PurgedThrough        int64 `json:"purged_through"`
+		ExpiredSubscriptions int64 `json:"expired_subscriptions"`
+		EndedDeliveries      int64 `json:"ended_deliveries"`
+	}{res.Deleted, res.PurgedThrough, res.ExpiredSubscriptions, res.EndedDeliveries})
 }
 
 func (c cronRoutes) deliver(w http.ResponseWriter, r *http.Request) {

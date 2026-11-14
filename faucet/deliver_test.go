@@ -957,3 +957,26 @@ func TestDeliverDueAnAttemptOfAnOlderSubscriptionDoesNotEndTheNewOnesDelivery(t 
 	d.advance(16 * time.Second)
 	require.Equal(t, 1, d.deliverDue().Delivered, "the new subscription's event is still queued and goes out on retry")
 }
+
+func TestPurgeCountsTheDeliveriesThatEndWithAnExpiredSubscription(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	d.ledgerSkip = true
+	ep := d.endpoint("/hook")
+	d.rcv.answer("/hook", always(http.StatusInternalServerError))
+	d.subscribeEndpoint(ep)
+	d.advance(time.Second)
+	d.newRunEvent()
+	d.newRunEvent()
+	require.Equal(t, 2, d.deliverDue().Retried)
+	d.advance(11 * time.Minute)
+
+	res, err := d.svc.Purge(d.ctx, d.clock.Now().Add(-time.Minute))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, res.ExpiredSubscriptions)
+	require.EqualValues(t, 2, res.EndedDeliveries, "the two queued deliveries ended with their subscription, and the purge says so")
+	require.Empty(t, d.store.deliveryRows())
+	require.Equal(t, 1, strings.Count(d.logs.String(), "events purged"), "one log line")
+	require.Contains(t, d.logs.String(), "deliveries_ended=2")
+}

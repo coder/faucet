@@ -16,7 +16,8 @@ import (
 //
 // Purge also deletes the webhook subscriptions that have expired, because
 // each holds a sealed secret that no longer has a use. It does that whether or
-// not webhook delivery is on.
+// not webhook delivery is on. The deliveries that such a subscription still
+// held end with it, and the result counts them in EndedDeliveries.
 //
 // Purge records the highest ID it deleted as the purge mark. A wait or poll
 // whose cursor is below the mark learns that events were lost, through
@@ -31,6 +32,10 @@ func (s *Service) Purge(ctx context.Context, before time.Time) (PurgeResult, err
 	if before.After(now) {
 		return PurgeResult{}, xerrors.New("purge time must not be in the future")
 	}
+	ended, err := s.store.ExpireDeliveries(ctx, now)
+	if err != nil {
+		return PurgeResult{}, xerrors.Errorf("end deliveries of expired subscriptions: %w", err)
+	}
 	subscriptions, err := s.store.DeleteExpiredSubscriptions(ctx, now)
 	if err != nil {
 		return PurgeResult{}, xerrors.Errorf("purge subscriptions: %w", err)
@@ -39,8 +44,9 @@ func (s *Service) Purge(ctx context.Context, before time.Time) (PurgeResult, err
 	if err != nil {
 		return PurgeResult{}, xerrors.Errorf("purge events: %w", err)
 	}
+	res.ExpiredSubscriptions, res.EndedDeliveries = subscriptions, ended
 	s.logger.Info(ctx, "events purged",
 		slog.F("deleted", res.Deleted), slog.F("purged_through", res.PurgedThrough), slog.F("before", before),
-		slog.F("expired_subscriptions_deleted", subscriptions))
+		slog.F("expired_subscriptions_deleted", subscriptions), slog.F("deliveries_ended", ended))
 	return res, nil
 }
