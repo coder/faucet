@@ -8,7 +8,7 @@ An agent waits for GitHub events on one repository through the `wait_for_github_
 - The token must be able to read the repository. A repository it cannot see and one that does not exist both give the tool error `repository not found or not accessible` and no events.
 - `repo` is `owner/name`, `types` holds at least one of the five event types, `timeout_s` is 1 to 50 (default 45), `sha` is 40 hex characters, `pr` and `cursor` are not negative. Anything else is a tool error that names the problem.
 - `types`, `sha` and `pr` narrow the events. A wait without `cursor` starts at the present, or ten minutes back when `sha` is set. A given `cursor` always wins.
-- The result is `events` (`id`, `type`, `repo_id`, `prs`, `head_sha`, `data`, `received_at`), `cursor` and `truncated`. Passing that cursor to the next call resumes without a gap or a repeat. `truncated` is true when a [purge](purge.md) deleted events after the cursor that the call passed, and its test is `tests/purge.e2e.ts`.
+- The result is `events` (`id`, `type`, `repo_id`, `prs`, `head_sha`, `data`, `received_at`), `cursor` and `truncated`. Passing that cursor to the next call, with the same repo and filters, resumes without a gap or a repeat. The cursor is the newest event of any repository, so an event at or below it that matches only a new filter is not returned. `truncated` is true when a [purge](purge.md) deleted events after the cursor that the call passed, and its test is `tests/purge.e2e.ts`.
 
 ## How to get to it (user POV)
 

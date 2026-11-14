@@ -22,7 +22,10 @@ type Deps struct {
 	// Authorizer decides which repositories a caller may wait on.
 	Authorizer Authorizer
 	// PrincipalFrom returns the caller the host application authenticated for
-	// this request. An error denies the request.
+	// this request. An error denies the request. It reads the context that
+	// go-sdk gives the handler. In stateful mode that is the context of the
+	// request that opened the session, not of each request, so a stateful host
+	// must keep the principal in its session. Serve stateless as cmd/faucet does.
 	PrincipalFrom func(context.Context) (Principal, error)
 	Clock         quartz.Clock
 	// Webhook turns on webhook delivery: events/subscribe, events/unsubscribe

@@ -69,15 +69,17 @@ type waitOutput struct {
 // The tool returns the events of one repository that match its filters, as
 // soon as there are any, or none when timeout_s runs out. Either way it
 // returns a cursor, and passing that cursor to the next call resumes exactly
-// where this one stopped. Without a cursor it starts at the present, or ten
-// minutes back when sha is set.
+// where this one stopped, as long as repo and the filters stay the same: the
+// cursor is the newest event of any repository, so an event at or below it that
+// matches only a new filter is never returned. Without a cursor it starts at
+// the present, or ten minutes back when sha is set.
 func (s *Service) Register(srv *mcp.Server) {
 	types := eventTypes()
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: toolName,
 		Description: "Wait for GitHub events on a repository, such as a CI run finishing or a pull request review, " +
 			"and return them as soon as they arrive. Returns no events and a cursor when timeout_s runs out; " +
-			"call again with that cursor to keep waiting. When truncated is true, a retention purge deleted events after " +
+			"call again with that cursor and the same repo and filters to keep waiting. When truncated is true, a retention purge deleted events after " +
 			"the cursor you passed, so some may be missing. Event types: " + strings.Join(types, ", ") + ".",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, Title: "Wait for GitHub events"},
 	}, s.waitForEvents)
