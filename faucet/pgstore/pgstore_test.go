@@ -198,12 +198,11 @@ func TestCheckSchemaAcceptsOnlyTheNewestVersionAndWritesNothing(t *testing.T) {
 	})
 }
 
-// A purge that has to wait for another purge must hold nothing yet. The test
-// stands in for the running purge by holding the purge-mark row, and probes
-// with a second transaction that wants an event the waiting purge would
-// delete. A purge that deleted before it waited would hold that row, and the
-// inserts and claims that need it would wait behind two purges, with a
-// deadlock possible between purges that take their rows in another order.
+// A purge that waits for another purge must hold no event row yet. The test
+// holds the purge-mark row as the running purge, and a second transaction
+// asks for an event that the waiting purge would delete. A purge that deleted
+// before it waited would hold that row, and the inserts behind it would wait
+// for two purges.
 func TestPurgeThatWaitsForAnotherPurgeHoldsNoEventRow(t *testing.T) {
 	t.Parallel()
 	db := newDatabase(t, testDatabaseURL(t))

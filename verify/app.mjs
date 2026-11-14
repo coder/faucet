@@ -452,10 +452,9 @@ async function endGroup(pgid) {
   if (groupExists(pgid)) process.kill(-pgid, 'SIGKILL');
 }
 
-// The watchdog is what the runner starts. It owns nothing but a stack process in a process group of its own, and every
-// process of the stack (faucet, go build, initdb, Postgres) belongs to that group. Whichever of the runner, the watchdog and
-// the stack process is killed, the stack's group still has a process that ends it: the watchdog on the stack's death, the
-// stack process on the watchdog's (the pipe it reads closes), and the watchdog on the runner's.
+// The runner starts this watchdog, which runs the stack in a process group of its own. Each of the three ends the next when
+// it dies: the watchdog ends the stack's group, the stack process ends itself when the pipe from the watchdog closes, and the
+// watchdog ends the stack when the runner is gone.
 async function supervise({ port, detach }) {
   const expected = process.env[PARENT_ENV] === undefined ? process.ppid : Number(process.env[PARENT_ENV]);
   if (!Number.isInteger(expected) || expected < 2) throw new Error(`${PARENT_ENV} must be a process ID`);
