@@ -58,6 +58,9 @@ type fakeGitHub struct {
 
 	asks      map[string][]time.Time
 	listCalls int
+	// askStarted and askDeadline are when the last redelivery request began,
+	// and the deadline of its context.
+	askStarted, askDeadline time.Time
 	// listFault and askFault inject a GitHub failure.
 	listFault func(call int, cursor string) error
 	askFault  func(guid string) error
@@ -215,6 +218,10 @@ func olderThan(a, b ghAttempt) bool {
 }
 
 func (g *fakeGitHub) Redeliver(ctx context.Context, attemptID int64) error {
+	g.mu.Lock()
+	g.askStarted = time.Now()
+	g.askDeadline, _ = ctx.Deadline()
+	g.mu.Unlock()
 	if g.askDelay > 0 {
 		select {
 		case <-time.After(g.askDelay):
