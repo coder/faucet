@@ -68,6 +68,7 @@ type webhookState struct {
 	client                *http.Client
 	idKey                 []byte
 	nonceKey              []byte
+	workersPerOrigin      int
 	logger                slog.Logger
 	terminated            struct{ sent, failed atomic.Uint64 }
 	warned                windowWarnings
@@ -88,7 +89,11 @@ func newWebhookState(d WebhookDeps, clock quartz.Clock, logger slog.Logger) (*we
 	if client == nil {
 		client = NewHTTPClient(HTTPClientOptions{AllowInsecureLoopback: d.AllowInsecureLoopback})
 	}
-	return &webhookState{aead: aead, callbacks: d.Callbacks, allowInsecureLoopback: d.AllowInsecureLoopback, verified: newCallbackCache(clock), client: client, idKey: d.Key.messageIDKey(), nonceKey: d.Key.sealNonceKey(), logger: logger}, nil
+	workersPerOrigin := d.MaxWorkersPerOrigin
+	if workersPerOrigin == 0 {
+		workersPerOrigin = defaultMaxWorkersPerOrigin
+	}
+	return &webhookState{aead: aead, callbacks: d.Callbacks, allowInsecureLoopback: d.AllowInsecureLoopback, verified: newCallbackCache(clock), client: client, idKey: d.Key.messageIDKey(), nonceKey: d.Key.sealNonceKey(), workersPerOrigin: workersPerOrigin, logger: logger}, nil
 }
 
 // subscriptionParams holds the params of events/subscribe and

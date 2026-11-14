@@ -49,6 +49,11 @@ type WebhookDeps struct {
 	// request at an address inside your network. Nil uses NewHTTPClient with
 	// AllowInsecureLoopback as set here.
 	Client *http.Client
+	// MaxWorkersPerOrigin is how many of the 8 workers of one DeliverDue call
+	// send to one callback origin at a time. Zero means 2, so that an endpoint
+	// that stalls cannot hold up the others. A negative value removes the cap,
+	// for a host whose subscribers all call back to one origin.
+	MaxWorkersPerOrigin int
 }
 
 // Service turns GitHub webhooks into stored events and serves them to waiters.
