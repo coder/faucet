@@ -90,9 +90,12 @@ type webhookBody struct {
 // A subscription that a purge overtook, one whose unread events were deleted,
 // gets one gap envelope when the call queues its next events. The queueing
 // makes no request: it records the gap on the subscription, and the envelope
-// goes out in the send phase, ahead of the deliveries, on the same workers and
-// under the same deadline, to the subscription as it is then. It is one attempt
-// with no retry, and the result counts it as sent or failed. A gap that no
+// goes out in the send phase, on the same workers and under the same deadline,
+// to the subscription as it is then. It is one attempt with no retry, and the
+// result counts it as sent or failed. Each worker takes gaps before its first
+// delivery, one after another, until none is left that its callback origin
+// limit allows, and then takes deliveries and looks for no more gaps. A gap
+// whose origin is at the limit when a worker looks is passed over. A gap that no
 // worker took before the call ended stays recorded, and the next call sends it.
 //
 // By default at most 2 of the 8 workers of a call send to one callback origin
