@@ -125,12 +125,16 @@ func TestDeliverDueStallingGapEndpointsDoNotStarveAHealthyGap(t *testing.T) {
 	requireEachGapSentOnce(t, healthyRcv, "/ok")
 }
 
-// lapseEveryLease runs once more after every lease has run out, so a gap that a
-// run counted and never finished is claimed and sent again.
+// lapseEveryLease runs once more after every lease has run out. After a correct
+// run, nothing is left to send. A gap that a run counted and never finished is
+// claimed again and sent by this run, and that can be the only request its
+// receiver sees. Only the count of this run shows it.
 func lapseEveryLease(d *deliverHarness) {
 	d.t.Helper()
 	d.advance(faucet.DeliveryLease + time.Second)
-	d.deliverDue()
+	res := d.deliverDue()
+	require.Zero(d.t, res.GapsSent+res.GapsFailed,
+		"after every gap was sent and finished, a run past the lease has nothing left to send: a gap that it sends was counted earlier and never finished")
 }
 
 // requireEachGapSentOnce checks what a receiver saw, not what the runs counted:
