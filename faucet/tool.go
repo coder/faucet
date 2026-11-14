@@ -115,6 +115,9 @@ func (in waitInput) parse() (waitRequest, error) {
 	if in.SHA != "" && !shaPattern.MatchString(in.SHA) {
 		return waitRequest{}, xerrors.New("sha must be 40 hexadecimal characters")
 	}
+	if in.SHA != "" && !slices.ContainsFunc(in.Types, func(name string) bool { t, _ := lookupEventType(name); return !t.noHeadSHA }) {
+		return waitRequest{}, xerrors.New("sha matches none of these types, because they carry no head commit; filter by pr")
+	}
 	if in.PR < 0 {
 		return waitRequest{}, xerrors.New("pr must be a pull request number")
 	}

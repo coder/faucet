@@ -99,7 +99,7 @@ func describeEvents(delivery []string) []eventDescriptor {
 			Name:          t.name,
 			Description:   t.description,
 			Delivery:      delivery,
-			InputSchema:   json.RawMessage(pollArgumentsSchema),
+			InputSchema:   t.inputSchema(),
 			PayloadSchema: t.payloadSchema,
 		}
 	}
@@ -142,7 +142,7 @@ func parsePoll(p *eventsPollParams) (pollRequest, error) {
 	if err != nil {
 		return pollRequest{}, err
 	}
-	args, err := parsePollArguments(p.Arguments)
+	args, err := parsePollArguments(t, p.Arguments)
 	if err != nil {
 		return pollRequest{}, err
 	}
@@ -184,14 +184,14 @@ func eventByName(name string) (eventType, error) {
 	return t, nil
 }
 
-func parsePollArguments(raw json.RawMessage) (pollArguments, error) {
+func parsePollArguments(t eventType, raw json.RawMessage) (pollArguments, error) {
 	var generic any = map[string]any{}
 	if len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
 		if err := json.Unmarshal(raw, &generic); err != nil {
 			return pollArguments{}, invalidParams("arguments are not valid JSON")
 		}
 	}
-	if err := pollArgumentsResolved.Validate(generic); err != nil {
+	if err := t.resolvedInput.Validate(generic); err != nil {
 		return pollArguments{}, invalidParams("arguments do not match the inputSchema: %v", err)
 	}
 	var args pollArguments

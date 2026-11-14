@@ -765,6 +765,18 @@ func TestWaitWithTheRealAuthorizer(t *testing.T) {
 	require.Len(t, h.store.pollQueries(), 1, "only the allowed call read events")
 }
 
+func TestWaitRefusesAShaWhenNoTypeCarriesAHeadCommit(t *testing.T) {
+	t.Parallel()
+	h := newWaitHarness(t)
+
+	failure := h.call(args("repo", testRepo, "types", []string{"pr.comment_created"}, "sha", testShaA)).failure(t)
+	require.Contains(t, failure, "carry no head commit")
+
+	h.insert(repoID, "ci.run_completed", testShaA, 7)
+	res := h.call(args("repo", testRepo, "types", []string{"pr.comment_created", "ci.run_completed"}, "sha", testShaA, "cursor", 0, "timeout_s", 1)).success(t)
+	require.Len(t, res.Events, 1, "a sha with a type that has a head commit is still a filter")
+}
+
 func TestWaitRefusesAWaitBeyondTheLoginsLimitAndAdmitsOneAgainWhenOneEnds(t *testing.T) {
 	t.Parallel()
 	var login atomic.Value

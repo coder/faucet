@@ -269,9 +269,66 @@ func TestEventsListDescribesEveryEventType(t *testing.T) {
 		}
 		require.NoError(t, json.Unmarshal(e.InputSchema, &input))
 		require.Equal(t, []string{"repo"}, input.Required)
-		require.Contains(t, input.Properties, "sha")
 		require.Contains(t, input.Properties, "pr")
+		var payload struct {
+			Properties map[string]any `json:"properties"`
+		}
+		require.NoError(t, json.Unmarshal(e.PayloadSchema, &payload))
+		require.Contains(t, payload.Properties, "prs")
+		if e.Name == "pr.comment_created" {
+			require.NotContains(t, input.Properties, "sha", "GitHub names no head commit in a comment, so a sha filter could never match")
+			require.NotContains(t, payload.Properties, "head_sha")
+			continue
+		}
+		require.Contains(t, input.Properties, "sha", e.Name)
+		require.Contains(t, payload.Properties, "head_sha", e.Name)
 	}
+}
+
+func TestEventsListSaysAClosedPullRequestMayCarryAMergeCommitSHA(t *testing.T) {
+	t.Parallel()
+
+	h := newEventsHarness(t)
+	res, err := h.call(methodList, nil)
+	require.NoError(t, err)
+	var events []struct {
+		Name          string `json:"name"`
+		PayloadSchema struct {
+			Properties map[string]struct {
+				Description string `json:"description"`
+			} `json:"properties"`
+		} `json:"payloadSchema"`
+	}
+	require.NoError(t, json.Unmarshal(res.fields["events"], &events))
+	for _, e := range events {
+		if e.Name == "pr.closed" {
+			require.Contains(t, e.PayloadSchema.Properties["merge_commit_sha"].Description, "does not mean the pull request merged",
+				"GitHub sets merge_commit_sha on pull requests that closed unmerged, and the descriptor must not say it is null then")
+			return
+		}
+	}
+	t.Fatal("events/list has no pr.closed")
+}
+
+func TestShaFilterIsRefusedForEventsThatCarryNoHeadCommit(t *testing.T) {
+	t.Parallel()
+
+	h := newWebhookHarness(t)
+	withSHA := args("repo", testRepo, "pr", 7, "sha", testShaA)
+	withoutSHA := args("repo", testRepo, "pr", 7)
+
+	rpcErr := h.pollError(pollParams("pr.comment_created", withSHA, nil))
+	require.EqualValues(t, codeInvalidParams, rpcErr.Code)
+	h.poll(pollParams("pr.comment_created", withoutSHA, nil))
+	h.poll(pollParams("pr.review_submitted", withSHA, nil))
+
+	secret := newSecret(t, 32)
+	comment := func(arguments map[string]any) *rawParams {
+		return &rawParams{Name: "pr.comment_created", Arguments: raw(arguments), Delivery: deliveryTo(callbackURL, secret)}
+	}
+	require.EqualValues(t, codeInvalidParams, h.subscribeError(comment(withSHA)).Code)
+	require.Empty(t, h.rows(), "a subscription that could never fire is refused, not stored")
+	h.subscribe(comment(withoutSHA))
 }
 
 func TestEventsListRejectsACursorItNeverIssued(t *testing.T) {

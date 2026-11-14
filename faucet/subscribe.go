@@ -471,7 +471,7 @@ func parseSubscriptionName(rawName, arguments json.RawMessage) (eventType, pollA
 	if err != nil {
 		return eventType{}, pollArguments{}, err
 	}
-	args, err := parsePollArguments(arguments)
+	args, err := parsePollArguments(t, arguments)
 	if err != nil {
 		return eventType{}, pollArguments{}, err
 	}
