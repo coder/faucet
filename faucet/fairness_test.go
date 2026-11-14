@@ -120,8 +120,17 @@ func TestDeliverDueStallingGapEndpointsDoNotStarveAHealthyGap(t *testing.T) {
 		sent += d.deliverDue().GapsSent
 	}
 	require.Equal(t, stalling+1, sent, "the runs count every gap")
+	lapseEveryLease(d)
 	requireEachGapSentOnce(t, d.rcv, paths...)
 	requireEachGapSentOnce(t, healthyRcv, "/ok")
+}
+
+// lapseEveryLease runs once more after every lease has run out, so a gap that a
+// run counted and never finished is claimed and sent again.
+func lapseEveryLease(d *deliverHarness) {
+	d.t.Helper()
+	d.advance(faucet.DeliveryLease + time.Second)
+	d.deliverDue()
 }
 
 // requireEachGapSentOnce checks what a receiver saw, not what the runs counted:
@@ -161,6 +170,7 @@ func TestDeliverDueOneCallSendsMoreGapsThanItHasWorkers(t *testing.T) {
 	require.Equal(t, gaps, res.GapsSent, "one call sends every gap, not one for each worker")
 	require.Zero(t, res.GapsFailed)
 	require.Equal(t, gaps, res.Delivered, "the event that survived the purge goes to every subscription too")
+	lapseEveryLease(d)
 	requireEachGapSentOnce(t, d.rcv, paths...)
 }
 
