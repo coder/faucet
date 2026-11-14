@@ -82,6 +82,7 @@ func (s *cronRedeliveryStore) runs() int {
 }
 
 type cronHooks struct {
+	clock quartz.Clock
 	mu    sync.Mutex
 	lists int
 }
@@ -92,7 +93,7 @@ func (h *cronHooks) ListDeliveries(context.Context, string) (faucet.DeliveryPage
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.lists++
-	return faucet.DeliveryPage{}, nil
+	return faucet.DeliveryPage{At: h.clock.Now()}, nil
 }
 
 func (*cronHooks) Redeliver(context.Context, int64) error { return nil }
@@ -199,7 +200,7 @@ func newCronServer(t *testing.T, opts cronOptions) *cronServer {
 		require.NoError(t, err)
 		deps.Webhook = &faucet.WebhookDeps{Key: key, Callbacks: callbacks}
 	}
-	redelivery, hooks := &cronRedeliveryStore{}, &cronHooks{}
+	redelivery, hooks := &cronRedeliveryStore{}, &cronHooks{clock: clock}
 	if opts.redelivery {
 		deps.Redelivery = &faucet.RedeliveryDeps{Store: redelivery, Hooks: hooks}
 	}
