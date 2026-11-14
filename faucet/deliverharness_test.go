@@ -15,7 +15,6 @@ import (
 	"time"
 
 	standardwebhooks "github.com/standard-webhooks/standard-webhooks/libraries/go"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/coder/faucet/faucet"
@@ -261,15 +260,25 @@ func (d *deliverHarness) subscribeEndpoint(e hookEndpoint) subscribed {
 }
 
 // runDeliverDue starts a run in the background and returns what it reports.
+// The run never touches the test, so a test that fails and leaves it behind
+// does not panic.
 func (d *deliverHarness) runDeliverDue() func() faucet.DeliverResult {
 	d.t.Helper()
-	done := make(chan faucet.DeliverResult, 1)
+	type outcome struct {
+		res faucet.DeliverResult
+		err error
+	}
+	done := make(chan outcome, 1)
 	go func() {
 		res, err := d.svc.DeliverDue(d.ctx)
-		assert.NoError(d.t, err)
-		done <- res
+		done <- outcome{res, err}
 	}()
-	return func() faucet.DeliverResult { return <-done }
+	return func() faucet.DeliverResult {
+		d.t.Helper()
+		got := <-done
+		require.NoError(d.t, got.err)
+		return got.res
+	}
 }
 
 func (d *deliverHarness) advance(by time.Duration) { d.clock.Advance(by) }

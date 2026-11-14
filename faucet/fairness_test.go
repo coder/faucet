@@ -10,19 +10,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// stall makes the endpoints at paths of rcv hold every request until the
-// returned function runs, and tracks how many are held at once.
-func stall(t *testing.T, rcv *hookReceiver, paths ...string) (release func(), peak *atomic.Int32) {
+// stalledEndpoints are endpoints that hold every request until release runs.
+type stalledEndpoints struct {
+	release func()
+	held    atomic.Int32
+	peak    atomic.Int32
+}
+
+// stall makes the endpoints at paths of rcv hold every request, for deliveries
+// and gap envelopes alike.
+func stall(t *testing.T, rcv *hookReceiver, paths ...string) *stalledEndpoints {
 	t.Helper()
 	gate := make(chan struct{})
-	release = sync.OnceFunc(func() { close(gate) })
-	t.Cleanup(release)
-	var held atomic.Int32
-	peak = &atomic.Int32{}
+	s := &stalledEndpoints{release: sync.OnceFunc(func() { close(gate) })}
+	t.Cleanup(s.release)
 	hold := func() int {
-		now := held.Add(1)
-		defer held.Add(-1)
-		for seen := peak.Load(); now > seen && !peak.CompareAndSwap(seen, now); seen = peak.Load() {
+		now := s.held.Add(1)
+		defer s.held.Add(-1)
+		for seen := s.peak.Load(); now > seen && !s.peak.CompareAndSwap(seen, now); seen = s.peak.Load() {
 		}
 		<-gate
 		return http.StatusOK
@@ -31,14 +36,16 @@ func stall(t *testing.T, rcv *hookReceiver, paths ...string) (release func(), pe
 		rcv.answer(path, func(int) int { return hold() })
 		rcv.answerEnvelope(path, "gap", hold)
 	}
-	return release, peak
+	return s
 }
 
-// awaitOneRequest waits for the healthy endpoint to get a request while the
-// stalled ones still hold theirs.
-func awaitOneRequest(t *testing.T, rcv *hookReceiver, path string, why string) {
+// requireHeldAtMost waits until the stalled endpoints hold n requests, which a
+// run with work for them reaches, and then checks that none held more.
+func (s *stalledEndpoints) requireHeldAtMost(t *testing.T, n int32) {
 	t.Helper()
-	require.Eventually(t, func() bool { return len(rcv.requests(path)) == 1 }, 5*time.Second, 10*time.Millisecond, why)
+	require.Eventually(t, func() bool { return s.held.Load() >= n }, 5*time.Second, 10*time.Millisecond, "the stalled endpoints hold %d requests", n)
+	time.Sleep(200 * time.Millisecond)
+	require.LessOrEqual(t, s.peak.Load(), n, "a stalled endpoint holds at most %d of the run's workers", n)
 }
 
 func TestDeliverDueOneStallingEndpointDoesNotDelayAnotherSubscriptionsDeliveries(t *testing.T) {
@@ -47,7 +54,7 @@ func TestDeliverDueOneStallingEndpointDoesNotDelayAnotherSubscriptionsDeliveries
 	d := newDeliverHarness(t)
 	slow := d.endpoint("/slow")
 	d.subscribeEndpoint(slow)
-	release, peak := stall(t, d.rcv, slow.path)
+	stalled := stall(t, d.rcv, slow.path)
 	healthyRcv := newHookReceiver(t)
 	d.subscribe(subscribeTo(args("repo", otherRepo), healthyRcv.url("/ok"), newSecret(t, 32)))
 	d.advance(time.Second)
@@ -58,10 +65,11 @@ func TestDeliverDueOneStallingEndpointDoesNotDelayAnotherSubscriptionsDeliveries
 	d.insert(otherRepoID, "ci.run_completed", "")
 
 	wait := d.runDeliverDue()
-	awaitOneRequest(t, healthyRcv, "/ok", "while the slow endpoint holds its requests, another subscription's event is sent")
-	require.LessOrEqual(t, peak.Load(), int32(2), "the slow endpoint holds at most 2 of the run's workers")
+	require.Eventually(t, func() bool { return len(healthyRcv.requests("/ok")) == 1 }, 5*time.Second, 10*time.Millisecond,
+		"while the slow endpoint holds its requests, another subscription's event is sent")
+	stalled.requireHeldAtMost(t, 2)
 
-	release()
+	stalled.release()
 	res := wait()
 	d.record(res)
 	require.Equal(t, queued+1, res.Delivered)
@@ -72,13 +80,13 @@ func TestDeliverDueStallingGapEndpointsDoNotStarveAHealthyGap(t *testing.T) {
 
 	d := newDeliverHarness(t)
 	d.ledgerSkip = true
-	const stalled = 10
-	paths := make([]string, stalled)
-	for i := range stalled {
+	const stalling = 10
+	paths := make([]string, stalling)
+	for i := range stalling {
 		paths[i] = "/slow" + string(rune('a'+i))
 		d.subscribeEndpoint(d.endpoint(paths[i]))
 	}
-	release, peak := stall(t, d.rcv, paths...)
+	held := stall(t, d.rcv, paths...)
 	d.advance(time.Second)
 	d.newRunEvent()
 	d.newRunEvent()
@@ -93,10 +101,11 @@ func TestDeliverDueStallingGapEndpointsDoNotStarveAHealthyGap(t *testing.T) {
 	require.EqualValues(t, 3, res.Deleted)
 
 	wait := d.runDeliverDue()
-	awaitOneRequest(t, healthyRcv, "/ok", "while the slow gap endpoints hold their requests, a healthy gap is sent")
-	require.LessOrEqual(t, peak.Load(), int32(2), "the slow endpoint holds at most 2 of the run's workers")
-	release()
+	require.Eventually(t, func() bool { return len(healthyRcv.envelopesOf("/ok", "gap")) == 1 }, 5*time.Second, 10*time.Millisecond,
+		"while the slow gap endpoints hold their requests, a healthy gap is sent")
+	held.requireHeldAtMost(t, 2)
+	held.release()
 	got := wait()
 	d.record(got)
-	require.Equal(t, stalled+1, got.GapsSent)
+	require.Equal(t, stalling+1, got.GapsSent)
 }
