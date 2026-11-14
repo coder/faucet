@@ -57,7 +57,6 @@ type accessEntry struct {
 
 var _ Authorizer = (*AccessCache)(nil)
 
-// NewAccessCache returns a cache in front of inner.
 func NewAccessCache(inner tokenChecker, clock quartz.Clock) *AccessCache {
 	return &AccessCache{inner: inner, clock: clock, entries: map[accessKey]accessEntry{}}
 }
@@ -77,7 +76,6 @@ func (c *AccessCache) Authenticate(ctx context.Context, token string) (Principal
 	return p, nil
 }
 
-// RepoID implements Authorizer.
 func (c *AccessCache) RepoID(ctx context.Context, p Principal, repo string) (int64, error) {
 	if p.token == "" {
 		return c.inner.RepoID(ctx, p, repo)
@@ -125,7 +123,6 @@ func (c *AccessCache) store(key accessKey, e accessEntry) {
 	c.entries[key] = e
 }
 
-// uncachedAuthorizer is implemented by an Authorizer that remembers answers.
 type uncachedAuthorizer interface {
 	RepoIDUncached(ctx context.Context, p Principal, repo string) (int64, error)
 }
