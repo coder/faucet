@@ -28,11 +28,14 @@ import (
 
 const (
 	envDatabaseURL = "DATABASE_URL"
-	envSecret      = "GITHUB_WEBHOOK_SECRET" //nolint:gosec // The name of an environment variable, not a credential.
-	envPort        = "PORT"
-	defaultPort    = "8080"
-	envAPIURL      = "FAUCET_GITHUB_API_URL"
-	defaultAPIURL  = "https://api.github.com"
+	// envDatabaseURLUnpooled is the direct connection that Neon's Vercel
+	// integration sets next to DATABASE_URL, which is the pooled one.
+	envDatabaseURLUnpooled = "DATABASE_URL_UNPOOLED"
+	envSecret              = "GITHUB_WEBHOOK_SECRET" //nolint:gosec // The name of an environment variable, not a credential.
+	envPort                = "PORT"
+	defaultPort            = "8080"
+	envAPIURL              = "FAUCET_GITHUB_API_URL"
+	defaultAPIURL          = "https://api.github.com"
 
 	envCronSecret    = "CRON_SECRET" //nolint:gosec // The name of an environment variable, not a credential.
 	envRetentionDays = "FAUCET_RETENTION_DAYS"
@@ -45,6 +48,10 @@ const (
 	maxRetentionDays     = 3650
 	minCronSecretBytes   = 16
 
+	// maxOpenConns keeps a burst of requests under the connection limit of a
+	// database that the server reaches directly.
+	maxOpenConns = 10
+
 	dbSetupTimeout  = 30 * time.Second
 	shutdownTimeout = 15 * time.Second
 	githubTimeout   = 10 * time.Second
@@ -55,6 +62,8 @@ const (
 
 type config struct {
 	databaseURL string
+	// databaseVar names the variable that databaseURL came from, for errors.
+	databaseVar string
 	secret      string
 	port        string
 	githubAPI   string
@@ -92,7 +101,14 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if err := (faucet.TokenAuthorizer{BaseURL: githubAPI}).Validate(); err != nil {
 		return config{}, xerrors.Errorf("%s: %w", envAPIURL, err)
 	}
-	cfg := config{databaseURL: getenv(envDatabaseURL), secret: getenv(envSecret), port: port, githubAPI: githubAPI}
+	cfg := config{databaseURL: getenv(envDatabaseURL), databaseVar: envDatabaseURL, secret: getenv(envSecret), port: port, githubAPI: githubAPI}
+	// Under load, Neon's pooled URL fails some of the queries that lib/pq
+	// sends with parameters ("unnamed prepared statement does not exist"),
+	// because lib/pq parses and binds in two batches and the pooler changes
+	// backend between them. The direct URL has no such limit.
+	if direct := getenv(envDatabaseURLUnpooled); direct != "" {
+		cfg.databaseURL, cfg.databaseVar = direct, envDatabaseURLUnpooled
+	}
 	if err := loadCronConfig(getenv, &cfg); err != nil {
 		return config{}, err
 	}
@@ -185,9 +201,10 @@ func run() error {
 
 	db, err := dbconn.Open(cfg.databaseURL)
 	if err != nil {
-		return xerrors.Errorf("%s: %w", envDatabaseURL, err)
+		return xerrors.Errorf("%s: %w", cfg.databaseVar, err)
 	}
 	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(maxOpenConns)
 
 	github := faucet.TokenAuthorizer{BaseURL: cfg.githubAPI, Client: &http.Client{Timeout: githubTimeout}}
 	clock := quartz.NewReal()

@@ -21,7 +21,7 @@ GITHUB_WEBHOOK_SECRET='<a random string of at least 16 bytes>' \
 go run ./cmd/faucet
 ```
 
-`PORT` defaults to 8080. The server applies pending migrations at startup. It exits at once when `DATABASE_URL` or `GITHUB_WEBHOOK_SECRET` is missing.
+`PORT` defaults to 8080. The server applies pending migrations at startup. It exits at once when `DATABASE_URL` or `GITHUB_WEBHOOK_SECRET` is missing. When `DATABASE_URL_UNPOOLED` is set, the server connects with it and ignores `DATABASE_URL`. Use it when `DATABASE_URL` goes through a transaction-mode pooler such as Neon's pooled URL, because the Postgres driver (`lib/pq`) sends a query and its parameters in two batches, and a pooler can fail the second one with `unnamed prepared statement does not exist`. The server opens at most 10 connections.
 
 In the GitHub webhook settings, set the payload URL to `/webhook/github`, the content type to `application/json`, and the secret to the same value. Faucet stores finished workflow runs and check runs, submitted reviews, closed pull requests, and new pull request comments. It acknowledges every other delivery with 202 and stores nothing.
 
