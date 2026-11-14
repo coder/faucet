@@ -47,6 +47,9 @@ jobs:
       # Keep both builds compiling and passing.
       - name: Test the end-to-end build
         run: go test -race -count=1 -tags faucet_e2e ./cmd/faucet
+        env:
+          CI: "true"
+          FAUCET_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
 
   lint:
     runs-on: ubuntu-latest
