@@ -7,3 +7,4 @@ Faucet is a Go library with a thin server (`cmd/faucet`). Read `README.md` first
 - The end-to-end checks live in `verify/` and are described by the `verify-faucet` skill in `.agents/skills/`.
 - Redelivery selection keeps persisted state; no stateless sliding-window sweep (see #10).
 - Redelivery never derives a read position or bound from faucet's clock: the two clocks differ, and a position ahead of GitHub's drops the next failure unseen. It uses times that GitHub gave (attempt times, the `Date` header). A `Date` moves a position only to its time less the lookback, and a run that has no GitHub time records no gap. A run also keeps to its context deadline by construction: the scan has its own time budget, so the asks and the purge always run.
+- No selection shortcut that skips, suppresses or merges an overlap read or an open range (see #22).
