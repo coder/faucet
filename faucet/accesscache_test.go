@@ -246,6 +246,11 @@ func TestAccessCacheForgetsAGrantThatARenewalFindsWithdrawn(t *testing.T) {
 		require.ErrorIs(t, err, faucet.ErrNoAccess, "a poll after a renewal that lost access is refused, not answered from memory")
 		_, err = cache.RepoID(ctx, principal(t), otherRepo)
 		require.NoError(t, err, "another repository of the token keeps its answer")
+		authBefore, _ := checker.calls()
+		_, err = cache.Authenticate(ctx, testToken)
+		require.NoError(t, err)
+		authAfter, _ := checker.calls()
+		require.Equal(t, authBefore, authAfter, "and so does the remembered login, because the token is still good")
 	})
 
 	t.Run("the token is rejected", func(t *testing.T) {
@@ -369,6 +374,14 @@ func TestAccessCacheOrdersAnswersByTheStartOfTheirLookup(t *testing.T) {
 				<-release
 			}
 		}
+		await := func(ch <-chan struct{}) {
+			t.Helper()
+			select {
+			case <-ch:
+			case <-time.After(30 * time.Second):
+				t.Fatal("a lookup never reached the wrapped checker")
+			}
+		}
 		pollDecided, pollRelease, pollDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 		renewalDecided, renewalRelease, renewalDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 
@@ -377,7 +390,7 @@ func TestAccessCacheOrdersAnswersByTheStartOfTheirLookup(t *testing.T) {
 			_, err := cache.RepoID(ctx, p, testRepo)
 			pollDone <- err
 		}()
-		<-pollDecided
+		await(pollDecided)
 		checker.revoke(testRepo)
 		clock.Advance(time.Second)
 		checker.afterAnswer = parkAfterAnswer(renewalDecided, renewalRelease)
@@ -385,7 +398,7 @@ func TestAccessCacheOrdersAnswersByTheStartOfTheirLookup(t *testing.T) {
 			_, err := cache.RepoIDUncached(ctx, p, testRepo)
 			renewalDone <- err
 		}()
-		<-renewalDecided
+		await(renewalDecided)
 
 		clock.Advance(5 * time.Second)
 		close(pollRelease)
@@ -406,6 +419,7 @@ func TestAccessCacheOrdersAnswersByTheStartOfTheirLookup(t *testing.T) {
 			clock.Advance(time.Second)
 			_, err := cache.RepoIDUncached(ctx, principal(t), testRepo)
 			require.ErrorIs(t, err, faucet.ErrInvalidToken)
+			clock.Advance(time.Second)
 		}
 
 		p, err := cache.Authenticate(ctx, testToken)

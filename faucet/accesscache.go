@@ -33,7 +33,8 @@ type tokenChecker interface {
 // once. A grant that GitHub withdraws keeps working for up to a minute, and an
 // entry is never extended by use. The cache holds a SHA-256 of the token as its
 // key and never the token. It keeps at most 10,000 entries and holds them per
-// process. It ignores the case of a repository name, like GitHub does.
+// process. It keys a repository by its lower-case name, because GitHub ignores the
+// case of a name.
 //
 // events/subscribe does not use the remembered answer: a renewal calls
 // RepoIDUncached, because every renewal must check access again. A denial that
@@ -154,15 +155,13 @@ func (c *AccessCache) store(key accessKey, e accessEntry, started time.Time) {
 	c.put(key, e, started)
 }
 
-// deny marks each key as denied, except a key that holds the answer of a lookup
-// that began after this one.
-func (c *AccessCache) deny(started time.Time, keys ...accessKey) {
+// deny marks the key as denied, unless it holds the answer of a lookup that
+// began after this one.
+func (c *AccessCache) deny(started time.Time, key accessKey) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, key := range keys {
-		if old, ok := c.entries[key]; !ok || !old.started.After(started) {
-			c.put(key, accessEntry{denied: true}, started)
-		}
+	if old, ok := c.entries[key]; !ok || !old.started.After(started) {
+		c.put(key, accessEntry{denied: true}, started)
 	}
 }
 
