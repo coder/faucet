@@ -154,7 +154,7 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err != nil {
 		return nil, waitOutput{}, err
 	}
-	repoID, err := s.authorizeRepo(ctx, logger, p, "wait", in.Repo)
+	repoID, err := s.authorizeRepo(ctx, logger, p, "wait", in.Repo, false)
 	if err != nil {
 		return nil, waitOutput{}, err
 	}
@@ -188,7 +188,7 @@ func (s *Service) authorize(ctx context.Context, logger slog.Logger, op, repo st
 	if err != nil {
 		return 0, err
 	}
-	return s.authorizeRepo(ctx, logger, p, op, repo)
+	return s.authorizeRepo(ctx, logger, p, op, repo, false)
 }
 
 func (s *Service) principal(ctx context.Context, logger slog.Logger, op string) (Principal, error) {
@@ -200,9 +200,17 @@ func (s *Service) principal(ctx context.Context, logger slog.Logger, op string) 
 	return p, nil
 }
 
-func (s *Service) authorizeRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo string) (int64, error) {
+// authorizeRepo asks the Authorizer whether p can read repo. With fresh set it
+// bypasses what the Authorizer remembers, when it can.
+func (s *Service) authorizeRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo string, fresh bool) (int64, error) {
 	logger = logger.With(slog.F("login", p.Login))
-	repoID, err := s.authorizer.RepoID(ctx, p, repo)
+	var repoID int64
+	var err error
+	if u, ok := s.authorizer.(uncachedAuthorizer); ok && fresh {
+		repoID, err = u.RepoIDUncached(ctx, p, repo)
+	} else {
+		repoID, err = s.authorizer.RepoID(ctx, p, repo)
+	}
 	switch {
 	case xerrors.Is(err, ErrNoAccess):
 		logger.Info(ctx, op+" denied")

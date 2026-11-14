@@ -617,6 +617,24 @@ func TestPollOfADeniedRepoLooksLikeOneThatDoesNotExist(t *testing.T) {
 	h.requireNoLeak()
 }
 
+func TestPollChecksRepositoryAccessAgainOnEveryPoll(t *testing.T) {
+	t.Parallel()
+
+	h := newEventsHarness(t)
+	h.insert(repoID, "ci.run_completed", testShaA, 7)
+	cursor := h.headCursor(repoArgs())
+	for range 2 {
+		h.poll(pollParams("ci.run_completed", repoArgs(), cursorOf(cursor)))
+	}
+	require.Equal(t, 3, h.authz.callCount(), "every poll asks the authorizer, the service keeps no memory of an answer")
+
+	h.authz.mu.Lock()
+	delete(h.authz.repos, testRepo)
+	h.authz.mu.Unlock()
+	rpcErr := h.pollError(pollParams("ci.run_completed", repoArgs(), cursorOf(cursor)))
+	require.EqualValues(t, codeForbidden, rpcErr.Code, "a poll after the grant is withdrawn is refused")
+}
+
 func TestPollAccessFailures(t *testing.T) {
 	t.Parallel()
 

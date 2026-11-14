@@ -221,8 +221,8 @@ func run() error {
 	db.SetMaxIdleConns(maxIdleConns)
 	db.SetConnMaxIdleTime(maxConnIdleTime)
 
-	github := faucet.TokenAuthorizer{BaseURL: cfg.githubAPI, Client: &http.Client{Timeout: githubTimeout}}
 	clock := quartz.NewReal()
+	github := faucet.NewAccessCache(faucet.TokenAuthorizer{BaseURL: cfg.githubAPI, Client: &http.Client{Timeout: githubTimeout}}, clock)
 	store := pgstore.New(db)
 	deps := faucet.Deps{
 		Store:         store,

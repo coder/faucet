@@ -1130,6 +1130,29 @@ func TestSubscribeChecksRepositoryAccessAgainOnEveryRenewal(t *testing.T) {
 	require.Greater(t, d.rows()[0].ExpiresAt, granted[0].ExpiresAt, "with access back, the subscribe is granted again")
 }
 
+// authenticating gives an Authorizer the step of resolving a token that
+// AccessCache wraps.
+type authenticating struct{ faucet.Authorizer }
+
+func (authenticating) Authenticate(_ context.Context, token string) (faucet.Principal, error) {
+	return faucet.NewPrincipal("octocat", token)
+}
+
+func TestSubscribeRenewalChecksAccessAgainWhateverTheAccessCacheRemembers(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t, func(deps *faucet.Deps) {
+		deps.Authorizer = faucet.NewAccessCache(authenticating{deps.Authorizer}, deps.Clock)
+	})
+	ep := d.endpoint("/hook")
+	d.subscribeEndpoint(ep)
+
+	d.revoke()
+	rpcErr := d.subscribeError(d.renewalParams(ep, newSecret(t, 32)))
+	require.EqualValues(t, codeForbidden, rpcErr.Code, "the cache holds the first grant for a minute, and a renewal asks GitHub anyway")
+	require.Empty(t, d.rows())
+}
+
 func TestSubscribeAndUnsubscribeReadMembersByExactName(t *testing.T) {
 	t.Parallel()
 
