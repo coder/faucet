@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -327,51 +328,66 @@ func TestARateLimitedRequestIsNotAFinalStateAndTheScheduleAsksAgain(t *testing.T
 	require.Equal(t, 1, env.run().Recovered)
 }
 
+// The two tests below give a run a deadline, and the run splits it by time.Now.
+// In a synctest bubble the clock moves only when every goroutine waits, so the
+// run takes the same time on every machine, whatever its load.
 func TestASlowListCostsPagesAndNeverTheAsksOrTheSettle(t *testing.T) {
 	t.Parallel()
-	env := newRedeliveryEnv(t)
-	for i := range 3 {
-		env.gh.record(fmt.Sprintf("failed-%d", i), env.now().Add(-time.Duration(i+1)*time.Second), 503)
-	}
-	for i := range 1800 { // 18 pages, behind the failures
-		env.gh.record(fmt.Sprintf("worked-%04d", i), env.now().Add(-time.Minute-time.Duration(i)*time.Second), http200)
-	}
-	// 18 pages need 2.7 seconds, and the run has 2. It reads for the first one.
-	env.gh.listDelay = 150 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		env := newRedeliveryEnv(t)
+		for i := range 3 {
+			env.gh.record(fmt.Sprintf("failed-%d", i), env.now().Add(-time.Duration(i+1)*time.Second), 503)
+		}
+		for i := range 1800 { // 18 pages, behind the failures
+			env.gh.record(fmt.Sprintf("worked-%04d", i), env.now().Add(-time.Minute-time.Duration(i)*time.Second), http200)
+		}
+		// 18 pages need 2.7 seconds, and the run has 2. It reads for the first one.
+		env.gh.listDelay = 150 * time.Millisecond
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
 
-	res, err := env.svc.Redeliver(ctx)
-	require.NoError(t, err, "the end of the time for the scan is like the page limit: no failure")
-	require.Less(t, res.Pages, 18)
-	require.Equal(t, 3, res.Tracked)
-	require.Equal(t, 3, res.Asked, "a slow list does not cost the asks")
-	require.Equal(t, 3, res.Pending, "a slow list does not cost the settle")
-	require.Equal(t, 1, res.Ranges, "what the scan did not read is an open range")
+		res, err := env.svc.Redeliver(ctx)
+		require.NoError(t, err, "the end of the time for the scan is like the page limit: no failure")
+		require.Less(t, res.Pages, 18)
+		require.Equal(t, 3, res.Tracked)
+		require.Equal(t, 3, res.Asked, "a slow list does not cost the asks")
+		require.Equal(t, 3, res.Pending, "a slow list does not cost the settle")
+		require.Equal(t, 1, res.Ranges, "what the scan did not read is an open range")
 
-	env.gh.listDelay = 0
-	res = env.run()
-	require.Zero(t, res.Ranges, "the next run reads the rest")
-	require.Equal(t, 3, res.Recovered)
+		env.gh.listDelay = 0
+		res = env.run()
+		require.Zero(t, res.Ranges, "the next run reads the rest")
+		require.Equal(t, 3, res.Recovered)
+	})
 }
 
 func TestSlowAsksStopStartingInTimeForARequestInFlightToEndAndForThePurge(t *testing.T) {
 	t.Parallel()
-	env := newRedeliveryEnv(t)
-	for i := range 30 {
-		env.gh.record(fmt.Sprintf("failed-%02d", i), env.now().Add(-time.Duration(i+1)*time.Second), 503)
-	}
-	// 30 asks need 3 seconds, and the run has 2.
-	env.gh.askDelay = 100 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		env := newRedeliveryEnv(t)
+		spy := &purgeSpy{fakeRedeliveryStore: env.store}
+		env.use(spy, env.gh)
+		for i := range 30 {
+			env.gh.record(fmt.Sprintf("failed-%02d", i), env.now().Add(-time.Duration(i+1)*time.Second), 503)
+		}
+		// 30 asks need 3.3 seconds, and the run has 2. No ask ends at a time that
+		// is a share of the run, so that none ends at the instant that the run
+		// cancels one in flight.
+		env.gh.askDelay = 110 * time.Millisecond
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
 
-	res, err := env.svc.Redeliver(ctx)
-	require.NoError(t, err, "no ask is in flight when the time ends, so none is canceled and none is lost")
-	require.Positive(t, res.Asked)
-	require.Less(t, res.Asked, 30)
-	require.Equal(t, 30, res.Pending)
-	require.Len(t, env.gh.askedTimes("failed-29"), 1, "the delivery that waited longest went first")
+		res, err := env.svc.Redeliver(ctx)
+		require.NoError(t, err, "no ask is in flight when the time ends, so none is canceled and none is lost")
+		require.Positive(t, res.Asked)
+		require.Less(t, res.Asked, 30)
+		require.Equal(t, 30, res.Pending)
+		require.Len(t, env.gh.askedTimes("failed-29"), 1, "the delivery that waited longest went first")
+		spy.mu.Lock()
+		defer spy.mu.Unlock()
+		require.Equal(t, 1, spy.calls)
+		require.True(t, spy.alive, "the purge runs inside the run's time")
+	})
 }
 
 func TestAFailedFirstPageStopsTheAsksButStillSettles(t *testing.T) {
