@@ -124,9 +124,9 @@ func TestCheckSchemaAcceptsOnlyTheNewestVersionAndWritesNothing(t *testing.T) {
 	ctx := context.Background()
 	setVersion := func(t *testing.T, db *sql.DB, version int, dirty bool) {
 		t.Helper()
-		_, err := db.ExecContext(ctx, `DELETE FROM `+pq.QuoteIdentifier(pgstore.MigrationsTable))
+		_, err := db.ExecContext(ctx, `DELETE FROM `+pgstore.MigrationsTable) //nolint:gosec // The table name is a package constant.
 		require.NoError(t, err)
-		_, err = db.ExecContext(ctx, `INSERT INTO `+pq.QuoteIdentifier(pgstore.MigrationsTable)+` VALUES ($1, $2)`, version, dirty)
+		_, err = db.ExecContext(ctx, `INSERT INTO `+pgstore.MigrationsTable+` VALUES ($1, $2)`, version, dirty) //nolint:gosec // The table name is a package constant.
 		require.NoError(t, err)
 	}
 	hasTable := func(t *testing.T, db *sql.DB) (exists bool) {

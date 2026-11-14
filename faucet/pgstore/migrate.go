@@ -78,7 +78,7 @@ func CheckSchema(ctx context.Context, db *sql.DB) error {
 	if err := db.QueryRowContext(ctx, `SELECT to_regclass($1::text) IS NOT NULL`, MigrationsTable).Scan(&exists); err != nil {
 		return xerrors.Errorf("look for the migrations table: %w", err)
 	}
-	var have int64
+	var have uint
 	var dirty bool
 	if exists {
 		err := db.QueryRowContext(ctx, `SELECT version, dirty FROM `+MigrationsTable).Scan(&have, &dirty)
@@ -89,7 +89,7 @@ func CheckSchema(ctx context.Context, db *sql.DB) error {
 	switch {
 	case dirty:
 		return xerrors.Errorf("schema version %d is dirty, a migration failed: %w", have, ErrSchemaNotCurrent)
-	case have != int64(want):
+	case have != want:
 		return xerrors.Errorf("schema is at version %d and this build needs %d: %w", have, want, ErrSchemaNotCurrent)
 	}
 	return nil
