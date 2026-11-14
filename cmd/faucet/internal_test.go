@@ -521,3 +521,33 @@ func TestLoadConfigGitHubAPIURL(t *testing.T) {
 		require.NotContains(t, err.Error(), url)
 	}
 }
+
+// Neon's pooled URL breaks lib/pq's parameterised queries, so the server takes
+// the direct URL when the host provides one.
+func TestLoadConfigUsesTheDirectDatabaseURLWhenSet(t *testing.T) {
+	t.Parallel()
+
+	const (
+		pooled = "postgres://pooled.example.com/faucet"
+		direct = "postgres://direct.example.com/faucet"
+	)
+	load := func(unpooled string) (config, error) {
+		return loadConfig(func(name string) string {
+			return map[string]string{
+				envDatabaseURL:         pooled,
+				envDatabaseURLUnpooled: unpooled,
+				envSecret:              testSecret,
+			}[name]
+		})
+	}
+
+	cfg, err := load("")
+	require.NoError(t, err)
+	require.Equal(t, pooled, cfg.databaseURL)
+	require.Equal(t, envDatabaseURL, cfg.databaseVar)
+
+	cfg, err = load(direct)
+	require.NoError(t, err)
+	require.Equal(t, direct, cfg.databaseURL)
+	require.Equal(t, envDatabaseURLUnpooled, cfg.databaseVar)
+}

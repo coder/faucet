@@ -27,6 +27,8 @@ var deliverySubtests = []subtest{
 	{"ClaimDeliveryPassesOverTheOriginsItIsToldTo", claimDeliveryPassesOverTheOriginsItIsToldTo},
 	{"ClaimGapHandsOutARecordedGapToOneCallerUntilItIsFinished", claimGapHandsOutARecordedGapToOneCallerUntilItIsFinished},
 	{"FinishGapIgnoresAnOlderIncarnationAndKeepsANewerGap", finishGapIgnoresAnOlderIncarnationAndKeepsANewerGap},
+	{"EnqueueDeliveriesKeepsAnOwedGapAndItsHigherMark", enqueueDeliveriesKeepsAnOwedGapAndItsHigherMark},
+	{"ClaimGapSkipsExpiredSubscriptions", claimGapSkipsExpiredSubscriptions},
 	{"ClaimDeliveryGivesOneAttemptToOneCaller", claimDeliveryGivesOneAttemptToOneCaller},
 	{"ClaimDeliveryLeaseRunsOutAndTheNextAttemptCounts", claimDeliveryLeaseRunsOutAndTheNextAttemptCounts},
 	{"ClaimDeliverySkipsExpiredSubscriptions", claimDeliverySkipsExpiredSubscriptions},
@@ -891,10 +893,45 @@ func finishGapIgnoresAnOlderIncarnationAndKeepsANewerGap(t *testing.T, s faucet.
 	_, err = s.UpsertSubscription(r.ctx, r.sub, r.now, 10)
 	require.NoError(t, err)
 	r.scanned = 0
-	r.recordGap(12)
+	r.recordGap(second.Ref.Through)
 	require.NoError(t, s.FinishGap(r.ctx, second.Ref))
 	third := claim()
-	require.EqualValues(t, 12, third.Ref.Through, "the end of an older incarnation's gap leaves the new subscription's gap owed")
+	require.EqualValues(t, second.Ref.Through, third.Ref.Through, "the end of an older incarnation's gap leaves the new subscription's gap owed, also at the same mark")
+}
+
+func enqueueDeliveriesKeepsAnOwedGapAndItsHigherMark(t *testing.T, s faucet.Store) {
+	r := newRig(t, s, 2)
+	r.enqueue(r.events[0])
+	r.recordGap(r.scanned)
+	r.enqueue(r.events[1])
+	first, ok, err := s.ClaimGap(r.ctx, r.now, testLease, nil)
+	require.NoError(t, err)
+	require.True(t, ok, "a later enqueue with no gap does not clear the gap that is owed")
+	require.EqualValues(t, r.events[0].ID, first.Ref.Through)
+	require.NoError(t, s.FinishGap(r.ctx, first.Ref))
+
+	r.recordGap(r.scanned)
+	lower := faucet.Enqueue{Key: r.sub.KeyHash, ExpectedScannedThrough: r.scanned, NewScannedThrough: r.scanned, GapThrough: r.events[0].ID}
+	won, err := s.EnqueueDeliveries(r.ctx, r.now, lower)
+	require.NoError(t, err)
+	require.True(t, won)
+	second, ok, err := s.ClaimGap(r.ctx, r.now, testLease, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.EqualValues(t, r.events[1].ID, second.Ref.Through, "a lower mark does not lower the one that is owed")
+}
+
+func claimGapSkipsExpiredSubscriptions(t *testing.T, s faucet.Store) {
+	r := newRig(t, s, 0)
+	r.recordGap(5)
+
+	_, ok, err := s.ClaimGap(r.ctx, r.sub.ExpiresAt, testLease, nil)
+	require.NoError(t, err)
+	require.False(t, ok, "an expired subscription is owed no gap: it is gone, and a purge deletes it")
+	claim, ok, err := s.ClaimGap(r.ctx, r.sub.ExpiresAt.Add(-time.Second), testLease, nil)
+	require.NoError(t, err)
+	require.True(t, ok, "one second before its expiry it is")
+	require.EqualValues(t, 5, claim.Ref.Through, "the refused claim took no lease")
 }
 
 func purgeMovesASubscriptionPastEventsOfAnotherTypeOfItsRepository(t *testing.T, s faucet.Store) {

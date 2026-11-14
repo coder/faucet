@@ -247,7 +247,7 @@ func (s *Store) DeleteLiveSubscription(ctx context.Context, principal string, ke
 	}
 	deleted, err := toSubscription(row)
 	if err != nil {
-		return faucet.Subscription{}, false, xerrors.Errorf("the subscription was deleted and its row does not decode, so no envelope can be sent: %w", err)
+		return faucet.Subscription{}, false, xerrors.Errorf("the subscription was deleted and its row does not decode: %w", err)
 	}
 	return deleted, true, nil
 }

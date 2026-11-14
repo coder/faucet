@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"embed"
 	"errors"
+	"io/fs"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
@@ -57,4 +58,61 @@ func Migrate(ctx context.Context, db *sql.DB) (err error) {
 		return xerrors.Errorf("apply migrations: %w", err)
 	}
 	return nil
+}
+
+// ErrSchemaNotCurrent means that the database is not at the newest migration
+// that this build embeds: it is behind, ahead, or marked dirty by a migration
+// that failed.
+var ErrSchemaNotCurrent = errors.New("database schema is not current")
+
+// CheckSchema returns ErrSchemaNotCurrent unless db is at the newest embedded
+// migration. It only reads: unlike Migrate it creates no table, so a process
+// that must not change the schema can call it.
+func CheckSchema(ctx context.Context, db *sql.DB) error {
+	want, err := newestVersion()
+	if err != nil {
+		return err
+	}
+
+	var exists bool
+	if err := db.QueryRowContext(ctx, `SELECT to_regclass($1::text) IS NOT NULL`, MigrationsTable).Scan(&exists); err != nil {
+		return xerrors.Errorf("look for the migrations table: %w", err)
+	}
+	var have uint
+	var dirty bool
+	if exists {
+		err := db.QueryRowContext(ctx, `SELECT version, dirty FROM `+MigrationsTable).Scan(&have, &dirty)
+		if err != nil && !xerrors.Is(err, sql.ErrNoRows) {
+			return xerrors.Errorf("read the schema version: %w", err)
+		}
+	}
+	switch {
+	case dirty:
+		return xerrors.Errorf("schema version %d is dirty, a migration failed: %w", have, ErrSchemaNotCurrent)
+	case have != want:
+		return xerrors.Errorf("schema is at version %d and this build needs %d: %w", have, want, ErrSchemaNotCurrent)
+	}
+	return nil
+}
+
+func newestVersion() (uint, error) {
+	src, err := iofs.New(migrations, "migrations")
+	if err != nil {
+		return 0, xerrors.Errorf("open migrations: %w", err)
+	}
+	defer func() { _ = src.Close() }()
+	version, err := src.First()
+	if err != nil {
+		return 0, xerrors.Errorf("read the first migration: %w", err)
+	}
+	for {
+		next, err := src.Next(version)
+		if xerrors.Is(err, fs.ErrNotExist) {
+			return version, nil
+		}
+		if err != nil {
+			return 0, xerrors.Errorf("read the migration after %d: %w", version, err)
+		}
+		version = next
+	}
 }

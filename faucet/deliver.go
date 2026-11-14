@@ -120,6 +120,9 @@ func (s *Service) DeliverDue(ctx context.Context) (DeliverResult, error) {
 	}
 	run.sweepPreviousSecrets(ctx)
 	err := run.send(ctx)
+	if err != nil {
+		err = run.unlessEnded(ctx, err)
+	}
 	res := run.result
 	logger := s.logger.Debug
 	if res.Claimed > 0 || res.Enqueued > 0 || res.GaveUpTotal() > 0 {
