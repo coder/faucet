@@ -26,7 +26,8 @@ func TestReadmeStatesTheRedeliveryCapacityThatTheConstantsGive(t *testing.T) {
 	pages := faucet.DefaultMaxPagesPerRun
 	perRun := pages * perPage
 	covered := schedule + faucet.RedeliveryReadOverlap
-	keepsUpWith := int(float64(perRun) * float64(time.Hour) / float64(covered))
+	// The README rounds the sweep's capacity down to a hundred, for a run that starts late.
+	keepsUpWith := steadyCapacity(perRun, covered) / 100 * 100
 	requestsPerHour := faucet.DefaultMaxAsksPerRun * asksPerHour
 
 	offsets := faucet.AskOffsets()
@@ -43,6 +44,8 @@ func TestReadmeStatesTheRedeliveryCapacityThatTheConstantsGive(t *testing.T) {
 	for _, want := range []string{
 		fmt.Sprintf("at most %d pages of %d attempts, which is %s attempts", pages, perPage, thousands(perRun)),
 		fmt.Sprintf("sends at most %d requests", faucet.DefaultMaxAsksPerRun),
+		fmt.Sprintf("a run holds at most %s attempts of its window", thousands(perRun-2)),
+		fmt.Sprintf("That is %s attempts an hour at best", thousands(steadyCapacity(perRun, covered))),
 		fmt.Sprintf("keeps up with %s attempts an hour", thousands(keepsUpWith)),
 		fmt.Sprintf("sends at most %d requests an hour", requestsPerHour),
 		fmt.Sprintf("A delivery is asked for %d times, at %s after", faucet.MaxAsksPerDelivery, askList),

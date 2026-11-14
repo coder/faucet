@@ -46,6 +46,8 @@ type simSpec struct {
 	// happen. A failure needs time for its asks and its give-up.
 	settle time.Duration
 	pages  int
+	// pageSize is the attempts on a page of GitHub's list. Zero means 100.
+	pageSize int
 }
 
 type simOutcome struct {
@@ -65,7 +67,12 @@ func runSim(t *testing.T, spec simSpec) simOutcome {
 	if spec.settle == 0 {
 		spec.settle = 150 * time.Minute
 	}
-	env := newRedeliveryEnv(t, func(o *envOptions) { o.maxPages = spec.pages })
+	env := newRedeliveryEnv(t, func(o *envOptions) {
+		o.maxPages = spec.pages
+		if spec.pageSize != 0 {
+			o.pageSize = spec.pageSize
+		}
+	})
 	t0 := env.now()
 	down := func(at time.Time) bool {
 		return spec.outageLength > 0 && !at.Before(t0.Add(spec.outageFrom)) && at.Before(t0.Add(spec.outageFrom+spec.outageLength))
@@ -273,4 +280,55 @@ func TestSimAFailureThatNeedsASecondAskAtVolumeIsNotDropped(t *testing.T) {
 	require.Equal(t, 1, out.failed)
 	require.Equal(t, 1, out.recovered)
 	require.Zero(t, out.silentLost)
+}
+
+// steadyCapacity is the attempts an hour that a run keeps up with, as the README
+// states it. A run reads the attempts since the one it last saw, less the
+// overlap, and it needs one page past the last of them to learn that it is done.
+// That is two attempts less than the run holds, because it also counts the
+// newest attempt that the run before it read.
+func steadyCapacity(perRun int, covered time.Duration) int {
+	return (perRun - 2) * int(time.Hour/covered)
+}
+
+func TestSimTheStatedCapacityKeepsUpAndAtenthMoreDoesNot(t *testing.T) {
+	t.Parallel()
+	// The same law at a tenth of the scale: pages of 10 attempts, 20 a run.
+	const pages, pageSize = 20, 10
+	capacity := steadyCapacity(pages*pageSize, cronEvery+faucet.RedeliveryReadOverlap)
+
+	for _, tc := range []struct {
+		name    string
+		perHour int
+		grows   bool
+	}{
+		{"at the stated capacity", capacity, false},
+		{"a tenth above it", capacity * 11 / 10, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out := runSim(t, simSpec{
+				phases:   []simPhase{{from: 0, to: 4 * time.Hour, perHour: tc.perHour}},
+				horizon:  4 * time.Hour,
+				pages:    pages,
+				pageSize: pageSize,
+			})
+			t.Logf("RESULT %s (%d an hour): ranges after each run %v", tc.name, tc.perHour, rangesOf(out.runs))
+			if tc.grows {
+				require.Greater(t, out.runs[len(out.runs)-1].Ranges, 5, "more than a run can read is left as ranges that grow")
+				return
+			}
+			for i, res := range out.runs {
+				require.Zero(t, res.Ranges, "run %d leaves a range at the stated capacity", i)
+			}
+		})
+	}
+}
+
+func rangesOf(runs []faucet.RedeliverResult) []int {
+	counts := make([]int, len(runs))
+	for i, res := range runs {
+		counts[i] = res.Ranges
+	}
+	return counts
 }
