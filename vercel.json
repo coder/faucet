@@ -1,0 +1,38 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "faucet": {
+      "root": ".",
+      "framework": "go",
+      "entrypoint": "cmd/faucet/main.go",
+      "buildCommand": "go build -o server ./cmd/faucet",
+      "functions": {
+        "cmd/faucet/main.go": {
+          "maxDuration": 90
+        }
+      }
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": {
+        "service": "faucet"
+      }
+    }
+  ],
+  "crons": [
+    {
+      "path": "/cron/deliver",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/cron/redeliver",
+      "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/cron/purge",
+      "schedule": "0 * * * *"
+    }
+  ]
+}
