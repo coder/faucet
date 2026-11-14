@@ -53,7 +53,7 @@ WITH due AS (
 )
 SELECT
   c.key_hash, c.event_id, c.message_id, c.attempts, c.enqueued_at,
-  s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.repo_id,
+  s.created_at AS incarnation, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.repo_id,
   (SELECT COALESCE(MIN(p.event_id), c.event_id) - 1 FROM faucet_deliveries p WHERE p.key_hash = c.key_hash)::bigint AS watermark,
   e.id AS stored_event_id, e.source, e.delivery_id, e.type, e.repo_id AS event_repo_id, e.prs, e.head_sha, COALESCE(e.data, 'null'::jsonb)::jsonb AS data, e.received_at
 FROM claimed c
@@ -97,4 +97,4 @@ WHERE (key_hash, event_id) IN (
 );
 
 -- name: LockSubscription :one
-SELECT 1::int AS locked FROM faucet_subscriptions WHERE key_hash = sqlc.arg(key_hash) FOR NO KEY UPDATE;
+SELECT created_at FROM faucet_subscriptions WHERE key_hash = sqlc.arg(key_hash) FOR NO KEY UPDATE;

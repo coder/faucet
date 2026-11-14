@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/xerrors"
 
@@ -886,4 +887,73 @@ func TestSubscribeReportsTheDeliveryStatusOfARefreshedSubscription(t *testing.T)
 	require.Nil(t, recovered.LastError, "a 2xx clears the failure")
 	require.Equal(t, deliveredAt.UTC().Format(time.RFC3339), recovered.LastDeliveryAt)
 	require.Empty(t, recovered.FailedSince)
+}
+
+// runDeliverDue starts a run in the background and returns what it reports.
+func (d *deliverHarness) runDeliverDue() func() faucet.DeliverResult {
+	d.t.Helper()
+	done := make(chan faucet.DeliverResult, 1)
+	go func() {
+		res, err := d.svc.DeliverDue(d.ctx)
+		assert.NoError(d.t, err)
+		done <- res
+	}()
+	return func() faucet.DeliverResult { return <-done }
+}
+
+func TestDeliverDueAnAttemptOfAnOlderSubscriptionDoesNotEndTheNewOnesDelivery(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	d.ledgerSkip = true
+	ep := d.endpoint("/hook")
+	d.subscribeEndpoint(ep)
+	d.advance(time.Second)
+	d.newRunEvent()
+
+	olderGate, newerGate := make(chan struct{}), make(chan struct{})
+	releaseOlder, releaseNewer := sync.OnceFunc(func() { close(olderGate) }), sync.OnceFunc(func() { close(newerGate) })
+	t.Cleanup(func() { releaseOlder(); releaseNewer() })
+	arrived := make(chan struct{}, 2)
+	d.rcv.answer("/hook", func(n int) int {
+		switch n {
+		case 1:
+			arrived <- struct{}{}
+			<-olderGate
+			return http.StatusGone
+		case 2:
+			arrived <- struct{}{}
+			<-newerGate
+			return http.StatusInternalServerError
+		}
+		return http.StatusOK
+	})
+	awaitRequest := func() {
+		t.Helper()
+		select {
+		case <-arrived:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the request never arrived")
+		}
+	}
+
+	older := d.runDeliverDue()
+	awaitRequest()
+	d.advance(time.Second)
+	require.Nil(t, d.unsubscribe(ep.args, d.rcv.url(ep.path)))
+	again := subscribeTo(ep.args, d.rcv.url(ep.path), ep.secret)
+	again.Cursor = raw("v1.0")
+	d.subscribe(again)
+	newer := d.runDeliverDue()
+	awaitRequest()
+
+	releaseOlder()
+	olderRes := older()
+	require.Equal(t, 1, olderRes.Superseded, "the older attempt belongs to a subscription that is gone")
+	require.Zero(t, olderRes.GaveUp[faucet.GiveUpEndpointGone], "its 410 ends nothing of the new subscription")
+	releaseNewer()
+	require.Equal(t, 1, newer().Retried, "the new subscription's own attempt records its own 500")
+
+	d.advance(16 * time.Second)
+	require.Equal(t, 1, d.deliverDue().Delivered, "the new subscription's event is still queued and goes out on retry")
 }

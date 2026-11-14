@@ -160,7 +160,7 @@ func (s *fakeStore) ClaimDelivery(ctx context.Context, now time.Time, lease time
 		}
 	}
 	claim := faucet.DeliveryClaim{
-		Ref:                 faucet.DeliveryRef{Key: best.key, EventID: best.eventID, MessageID: bestRow.messageID, Attempt: bestRow.attempts},
+		Ref:                 faucet.DeliveryRef{Key: best.key, EventID: best.eventID, MessageID: bestRow.messageID, Attempt: bestRow.attempts, Incarnation: sub.CreatedAt},
 		MessageID:           bestRow.messageID,
 		EnqueuedAt:          bestRow.enqueuedAt,
 		CallbackURL:         sub.CallbackURL,
@@ -194,7 +194,7 @@ func (s *fakeStore) FinishDelivery(_ context.Context, ref faucet.DeliveryRef, no
 	sub, ok := s.subs[ref.Key]
 	k := fakeDeliveryKey{ref.Key, ref.EventID}
 	d := s.deliveries[k]
-	if !ok || d == nil || d.attempts != ref.Attempt || d.messageID != ref.MessageID {
+	if !ok || d == nil || d.attempts != ref.Attempt || d.messageID != ref.MessageID || !sub.CreatedAt.Equal(ref.Incarnation) {
 		return faucet.FinishResult{}, nil
 	}
 	result := faucet.FinishResult{Accepted: true}

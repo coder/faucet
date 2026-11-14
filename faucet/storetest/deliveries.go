@@ -29,6 +29,7 @@ var deliverySubtests = []subtest{
 	{"ClaimDeliverySkipsExpiredSubscriptions", claimDeliverySkipsExpiredSubscriptions},
 	{"ClaimDeliveryReturnsNoEventAfterAPurge", claimDeliveryReturnsNoEventAfterAPurge},
 	{"FinishDeliveryNeedsTheCurrentAttempt", finishDeliveryNeedsTheCurrentAttempt},
+	{"FinishDeliveryIgnoresAnAttemptOfAnOlderIncarnation", finishDeliveryIgnoresAnAttemptOfAnOlderIncarnation},
 	{"FinishDeliveryRetryReschedulesAndRecordsTheFailure", finishDeliveryRetryReschedulesAndRecordsTheFailure},
 	{"FinishDeliveryDeliveredEndsTheDeliveryAndClearsTheFailure", finishDeliveryDeliveredEndsTheDeliveryAndClearsTheFailure},
 	{"FinishDeliveryGiveUpRecordsOnlyWhatTheEndpointSaid", finishDeliveryGiveUpRecordsOnlyWhatTheEndpointSaid},
@@ -433,15 +434,43 @@ func finishDeliveryNeedsTheCurrentAttempt(t *testing.T, s faucet.Store) {
 	require.Error(t, err, "attempt 0 is no attempt, and a delivery that no one has claimed is at 0")
 	require.Equal(t, faucet.DeliveryStatus{}, r.status(), "a refused finish writes no status")
 	reborn := claim.Ref
-	reborn.MessageID = "msg_from_an_older_subscription"
+	reborn.MessageID = "msg_of_another_delivery"
 	require.False(t, r.finish(reborn, r.now, faucet.Finish{Kind: faucet.FinishDelivered}).Accepted,
-		"a row with another message ID belongs to another incarnation of the subscription")
+		"a row with another message ID is not the delivery that the claim saw")
 	again := r.mustClaim(r.now.Add(testLease))
 	require.EqualValues(t, 2, again.Ref.Attempt, "the delivery is still queued")
 
 	gone := claim.Ref
 	gone.EventID = claim.Ref.EventID + 1000
 	require.False(t, r.finish(gone, r.now, faucet.Finish{Kind: faucet.FinishDelivered}).Accepted, "an unknown delivery")
+}
+
+// finishDeliveryIgnoresAnAttemptOfAnOlderIncarnation plays an attempt that is
+// still in flight when its subscription is deleted and made again from the
+// start of the log: the new subscription queues the same event under the same
+// message ID, and its first claim is attempt 1 as well.
+func finishDeliveryIgnoresAnAttemptOfAnOlderIncarnation(t *testing.T, s faucet.Store) {
+	r := newRig(t, s, 1)
+	r.enqueue(r.events...)
+	older := r.mustClaim(r.now)
+
+	deleted, err := s.DeleteSubscription(r.ctx, r.sub.Principal, r.sub.KeyHash)
+	require.NoError(t, err)
+	require.True(t, deleted)
+	r.now = r.now.Add(time.Second)
+	_, err = s.UpsertSubscription(r.ctx, r.sub, r.now, 10)
+	require.NoError(t, err)
+	r.scanned = 0
+	r.enqueue(r.events...)
+	newer := r.mustClaim(r.now)
+	require.Equal(t, older.Ref.MessageID, newer.Ref.MessageID)
+	require.Equal(t, older.Ref.Attempt, newer.Ref.Attempt)
+
+	res := r.finish(older.Ref, r.now, faucet.Finish{Kind: faucet.FinishGiveUp})
+	require.False(t, res.Accepted, "the result of the older incarnation's attempt ends nothing of the new one")
+	require.Zero(t, res.Removed)
+	require.True(t, r.finish(newer.Ref, r.now, faucet.Finish{Kind: faucet.FinishDelivered}).Accepted,
+		"the delivery was still queued for the new incarnation's own attempt")
 }
 
 func finishDeliveryRetryReschedulesAndRecordsTheFailure(t *testing.T, s faucet.Store) {

@@ -62,7 +62,7 @@ WITH due AS (
 )
 SELECT
   c.key_hash, c.event_id, c.message_id, c.attempts, c.enqueued_at,
-  s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.repo_id,
+  s.created_at AS incarnation, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.repo_id,
   (SELECT COALESCE(MIN(p.event_id), c.event_id) - 1 FROM faucet_deliveries p WHERE p.key_hash = c.key_hash)::bigint AS watermark,
   e.id AS stored_event_id, e.source, e.delivery_id, e.type, e.repo_id AS event_repo_id, e.prs, e.head_sha, COALESCE(e.data, 'null'::jsonb)::jsonb AS data, e.received_at
 FROM claimed c
@@ -81,6 +81,7 @@ type ClaimDeliveryRow struct {
 	MessageID           string
 	Attempts            int32
 	EnqueuedAt          time.Time
+	Incarnation         time.Time
 	CallbackUrl         string
 	SecretEnc           []byte
 	PreviousSecretEnc   []byte
@@ -107,6 +108,7 @@ func (q *Queries) ClaimDelivery(ctx context.Context, arg ClaimDeliveryParams) (C
 		&i.MessageID,
 		&i.Attempts,
 		&i.EnqueuedAt,
+		&i.Incarnation,
 		&i.CallbackUrl,
 		&i.SecretEnc,
 		&i.PreviousSecretEnc,
@@ -224,14 +226,14 @@ func (q *Queries) InsertDeliveries(ctx context.Context, arg InsertDeliveriesPara
 }
 
 const lockSubscription = `-- name: LockSubscription :one
-SELECT 1::int AS locked FROM faucet_subscriptions WHERE key_hash = $1 FOR NO KEY UPDATE
+SELECT created_at FROM faucet_subscriptions WHERE key_hash = $1 FOR NO KEY UPDATE
 `
 
-func (q *Queries) LockSubscription(ctx context.Context, keyHash []byte) (int32, error) {
+func (q *Queries) LockSubscription(ctx context.Context, keyHash []byte) (time.Time, error) {
 	row := q.db.QueryRowContext(ctx, lockSubscription, keyHash)
-	var locked int32
-	err := row.Scan(&locked)
-	return locked, err
+	var created_at time.Time
+	err := row.Scan(&created_at)
+	return created_at, err
 }
 
 const recordDeliveryFailure = `-- name: RecordDeliveryFailure :exec

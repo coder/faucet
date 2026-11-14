@@ -63,8 +63,9 @@ type ScanTarget struct {
 // NewDelivery is one event that a subscription is to receive.
 type NewDelivery struct {
 	EventID int64
-	// MessageID is the webhook-id of the delivery: random, one per (subscription,
-	// event), and the same on every attempt.
+	// MessageID is the webhook-id of the delivery: an HMAC of the subscription
+	// and the event, so it is the same on every attempt and in every incarnation
+	// of the subscription.
 	MessageID string
 }
 
@@ -100,14 +101,20 @@ func (e Enqueue) Validate() error {
 
 // DeliveryRef names one attempt of one delivery. Store.FinishDelivery changes
 // a delivery only for the attempt that the claim returned, and only while the
-// row still has the message ID that the claim saw, so a subscription that was
-// deleted and made again does not take over the result of an older attempt.
+// subscription is still the incarnation that the claim saw. A subscription that
+// was deleted and made again queues the same event under the same message ID
+// and may reach the same attempt number, so the attempt number alone would let
+// the result of an older attempt end the new delivery.
 type DeliveryRef struct {
 	Key       SubscriptionKeyHash
 	EventID   int64
 	MessageID string
 	// Attempt counts from 1 and rises at every claim.
 	Attempt int32
+	// Incarnation is the CreatedAt of the subscription row that the claim read.
+	// A refresh keeps it, and a deleted subscription that is made again has a
+	// new one.
+	Incarnation time.Time
 }
 
 // DeliveryClaim is a delivery that a run now owns for DeliveryLease.

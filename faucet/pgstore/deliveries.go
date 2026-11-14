@@ -104,7 +104,7 @@ func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Dur
 		return faucet.DeliveryClaim{}, false, err
 	}
 	claim := faucet.DeliveryClaim{
-		Ref:                 faucet.DeliveryRef{Key: key, EventID: row.EventID, MessageID: row.MessageID, Attempt: row.Attempts},
+		Ref:                 faucet.DeliveryRef{Key: key, EventID: row.EventID, MessageID: row.MessageID, Attempt: row.Attempts, Incarnation: row.Incarnation},
 		MessageID:           row.MessageID,
 		EnqueuedAt:          row.EnqueuedAt,
 		CallbackURL:         row.CallbackUrl,
@@ -133,7 +133,9 @@ func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Dur
 // FinishDelivery takes the lock of the subscription row before it touches the
 // delivery. DeleteSubscription locks them in the other order (the subscription,
 // then the deliveries that cascade), and two transactions that took the two
-// locks in opposite orders could wait on each other.
+// locks in opposite orders could wait on each other. The lock also makes the
+// incarnation check hold: the row cannot be replaced between the check and the
+// update.
 func (s *Store) FinishDelivery(ctx context.Context, ref faucet.DeliveryRef, now time.Time, f faucet.Finish) (faucet.FinishResult, error) {
 	if ref.Attempt < 1 {
 		return faucet.FinishResult{}, xerrors.Errorf("attempt must be at least 1, got %d", ref.Attempt)
@@ -148,9 +150,11 @@ func (s *Store) FinishDelivery(ctx context.Context, ref faucet.DeliveryRef, now 
 	defer func() { _ = tx.Rollback() }()
 	q := s.q.WithTx(tx)
 
-	if _, err := q.LockSubscription(ctx, ref.Key[:]); xerrors.Is(err, sql.ErrNoRows) {
+	createdAt, err := q.LockSubscription(ctx, ref.Key[:])
+	if xerrors.Is(err, sql.ErrNoRows) || err == nil && !createdAt.Equal(ref.Incarnation) {
 		return faucet.FinishResult{}, nil
-	} else if err != nil {
+	}
+	if err != nil {
 		return faucet.FinishResult{}, xerrors.Errorf("lock subscription: %w", err)
 	}
 	result, err := finishLocked(ctx, q, ref, now, f)

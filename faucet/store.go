@@ -222,7 +222,7 @@ type Store interface {
 	ClaimDelivery(ctx context.Context, now time.Time, lease time.Duration) (claim DeliveryClaim, ok bool, err error)
 	// FinishDelivery records how the attempt in ref ended. It changes nothing
 	// and reports Accepted=false unless ref.Attempt is the delivery's current
-	// attempt. Delivered and Failure update the subscription's DeliveryStatus
+	// attempt and the subscription's CreatedAt is ref.Incarnation. Delivered and Failure update the subscription's DeliveryStatus
 	// at now: a delivered attempt sets LastDeliveryAt and clears the failure,
 	// and a failure sets LastError and keeps the earlier FailedSince.
 	FinishDelivery(ctx context.Context, ref DeliveryRef, now time.Time, f Finish) (FinishResult, error)
