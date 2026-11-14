@@ -33,6 +33,10 @@ func New(db *sql.DB) *Store {
 // error. lib/pq ends such a query with the server's cancel error, which wraps
 // neither context.Canceled nor context.DeadlineExceeded, and the callers tell
 // the end of their own run from a store failure by those two.
+// It wraps any error after the end, because a cancel can also fail a call with
+// driver.ErrBadConn or sql.ErrTxDone, and a narrower test would report those as
+// store failures. A real failure at the same instant then reads as incomplete.
+// The next run reports it only if the failure lasts.
 func endedBy(ctx context.Context, err error) error {
 	if err == nil || ctx.Err() == nil || xerrors.Is(err, ctx.Err()) {
 		return err
