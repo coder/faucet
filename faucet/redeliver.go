@@ -3,6 +3,7 @@ package faucet
 import (
 	"context"
 	"errors"
+	"slices"
 	"time"
 
 	"golang.org/x/xerrors"
@@ -52,6 +53,11 @@ const (
 	// canceled. The purge has the rest.
 	redeliveryAskEndShare = 0.9
 )
+
+// redeliveryOldestRangeShare is the divisor of a run's pages that are kept for
+// the oldest open range. The newer ranges stop before them, so that a range that
+// a hook that fell quiet keeps reading for its overlap cannot starve the rest.
+const redeliveryOldestRangeShare = 3
 
 // errScanBudget says that the time for reading the list ran out.
 var errScanBudget = xerrors.New("the time for reading the delivery list ran out")
@@ -197,8 +203,10 @@ type RedeliverResult struct {
 // (less RedeliveryReadOverlap). When a run cannot read that far inside its
 // page limit, it records the unread part as a range, and the next runs read
 // the ranges, newest first, with what the head read leaves of their page
-// limit. A first page that already reaches that position opens no range, for
-// the runs before it read the overlap. A cursor that GitHub gave is kept with
+// limit. A run always reads the overlap again, except when a range stands at
+// the same position and the first page reaches it: a quiet hook then opens no
+// second range. A third of the pages, at most, is kept for the oldest range, so
+// that the ranges of a quiet hook drain. A cursor that GitHub gave is kept with
 // the range, so a later run continues right after the last attempt read. A
 // range whose old end leaves GitHub's retention before it is read becomes a
 // gap. Where that retention begins is a time of GitHub's: the Date of the run's
@@ -449,12 +457,14 @@ func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, er
 		}
 		step.Gap = gapOf(olderAt, r.floor, covered)
 	}
-	// A page that reaches the position of the run before has read all that is
-	// new. What lies below it, down to the overlap, is what earlier runs read or
-	// the range that they left open for it. A range of it again would only
-	// stand ahead of the older ranges and take the pages of every run.
-	readAllNew := !first && !head.oldest.IsZero() && !head.oldest.After(olderAt)
-	if !head.finished() && !readAllNew {
+	// The overlap is read again by every run, so that an attempt that GitHub
+	// lists late is seen. One case needs no new range for it: no attempt has
+	// arrived since an earlier run opened a range at this same position, and the
+	// first page has read all that is new. The range that stands reads the overlap
+	// on, and a copy of it would take the pages of every run, and the older
+	// ranges would never get one.
+	redundant := !first && !head.oldest.IsZero() && !head.oldest.After(olderAt) && rangeStandsAt(scan.Ranges, olderAt)
+	if !head.finished() && !redundant {
 		step.Open = &RedeliveryRange{NewerAt: head.oldest, OlderAt: olderAt, Cursor: head.next}
 	}
 	res, err := r.apply(ctx, step, cause)
@@ -471,6 +481,12 @@ func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, er
 	return true, r.readRanges(ctx, ranges)
 }
 
+// rangeStandsAt says that an open range was opened for the overlap below the
+// position at.
+func rangeStandsAt(ranges []RedeliveryRange, at time.Time) bool {
+	return slices.ContainsFunc(ranges, func(rg RedeliveryRange) bool { return rg.OlderAt.Equal(at) })
+}
+
 func (r *redeliveryRun) readRanges(ctx context.Context, ranges []RedeliveryRange) error {
 	live := ranges[:0:0]
 	for _, rg := range ranges {
@@ -484,8 +500,13 @@ func (r *redeliveryRun) readRanges(ctx context.Context, ranges []RedeliveryRange
 		}
 		r.res.Ranges--
 	}
-	for _, rg := range live {
-		for r.res.Pages < r.state.maxPages && ctx.Err() == nil && !r.budget.pastScan() {
+	reserve := r.state.maxPages / redeliveryOldestRangeShare
+	for i, rg := range live {
+		limit := r.state.maxPages
+		if i < len(live)-1 {
+			limit -= reserve
+		}
+		for r.res.Pages < limit && ctx.Err() == nil && !r.budget.pastScan() {
 			now := r.svc.clock.Now()
 			p, err := r.read(ctx, rg.Cursor, rg.OlderAt.Add(-RedeliveryReadOverlap))
 			if errors.Is(err, errScanBudget) {

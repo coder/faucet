@@ -13,6 +13,7 @@ import (
 
 	"cdr.dev/slog/v3"
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/quartz"
 )
 
 type gapWindow struct{ from, to time.Time }
@@ -109,8 +110,9 @@ func TestAQuietHookDrainsTheRangesThatABurstLeftOpen(t *testing.T) {
 
 	// A burst of 5 attempts a second for 500 seconds holds 25 pages, and a run
 	// reads 9. The failures are in its oldest part. After the burst the hook
-	// is silent: every run reads the same newest attempts, and the part of the
-	// burst that no run has read must not wait behind them.
+	// is silent: every run reads the overlap below the same newest attempt
+	// again, and that must neither open a range per run nor keep the pages from
+	// the range that holds the burst.
 	env := newRedeliveryEnv(t, func(o *envOptions) { o.maxPages = 9 })
 	env.run()
 	env.advance(time.Minute)
@@ -128,14 +130,14 @@ func TestAQuietHookDrainsTheRangesThatABurstLeftOpen(t *testing.T) {
 	env.advance(cronEvery)
 
 	var ranges []int
-	for range 6 {
+	for range 8 {
 		ranges = append(ranges, env.run().Ranges)
 		env.advance(cronEvery)
 	}
 
-	require.True(t, allStored(env, failed), "every failure of the burst is asked for within a few runs of silence")
-	require.Equal(t, 0, ranges[len(ranges)-1], "a quiet hook reads all that is open")
-	require.LessOrEqual(t, slices.Max(ranges), 1, "a silent run opens no range of what an earlier run read: %v", ranges)
+	require.True(t, allStored(env, failed), "every failure of the burst is asked for within a few runs of silence: %v", ranges)
+	require.Equal(t, 0, ranges[len(ranges)-1], "a quiet hook reads all that is open: %v", ranges)
+	require.LessOrEqual(t, slices.Max(ranges), 2, "a silent run opens no range for an overlap that a range already reads: %v", ranges)
 }
 
 // dateAdmin gives the pages of its HookAdmin another Date header: none, or one
@@ -311,4 +313,48 @@ func TestAPageWithoutADateTakesTheEndOfTheFirstGapFromItsNewestAttempt(t *testin
 	env.run()
 
 	requireNoSilentLoss(t, env, failures)
+}
+
+func TestALateAttemptInsideTheOverlapIsReadWhateverNumberOfAttemptsAreNew(t *testing.T) {
+	t.Parallel()
+
+	// k attempts lie in the delta before T, and the run before reads them, so
+	// its position is T. Then a failed attempt L is listed, dated T less delta,
+	// below the position, and newAttempts attempts arrive before the next run. The
+	// first page holds the new ones and the newest of the old ones, and L is
+	// below it, so the run reads it only through the overlap.
+	for _, delta := range []time.Duration{15 * time.Second, 2 * time.Minute, 4 * time.Minute} {
+		for _, k := range []int{1, 5, 30} {
+			t.Run(fmt.Sprintf("delta=%s,k=%d", delta, k), func(t *testing.T) {
+				t.Parallel()
+				var lost []int
+				for newAttempts := range 201 {
+					env := newRedeliveryEnv(t)
+					env.clock.WithLogger(quartz.NoOpLogger)
+					env.run()
+					env.advance(cronEvery)
+					top := env.gh.now().Add(-time.Second)
+					for i := range k {
+						env.gh.record(fmt.Sprintf("k-%03d", i), top.Add(-time.Duration(i)*delta/time.Duration(k+1)), http200)
+					}
+					env.run()
+
+					env.gh.record("L", top.Add(-delta), 503)
+					listed := env.gh.now()
+					for i := range newAttempts {
+						env.gh.record(fmt.Sprintf("n-%04d", i), listed.Add(time.Duration(i+1)*(cronEvery-time.Second)/time.Duration(newAttempts+1)), http200)
+					}
+					env.advance(cronEvery)
+					env.run()
+					env.advance(cronEvery)
+					env.run()
+
+					if !env.stored("L") {
+						lost = append(lost, newAttempts)
+					}
+				}
+				require.Empty(t, lost, "L failed inside the overlap, so a run must read it, and it was not read when this many attempts were new")
+			})
+		}
+	}
 }
