@@ -330,9 +330,8 @@ func (s *fakeStore) hasSomethingToReadLocked(key faucet.SubscriptionKeyHash, sub
 	})
 }
 
-// repeatCurrentSecretAsPrevious gives the row a previous secret that opens to
-// the same secret as its current one, as a row sealed before windows existed
-// has after its first refresh with the same secret.
+// A row sealed before rotation windows existed looks like this after its first
+// refresh with the same secret.
 func (s *fakeStore) repeatCurrentSecretAsPrevious(key faucet.SubscriptionKeyHash, until time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -341,8 +340,7 @@ func (s *fakeStore) repeatCurrentSecretAsPrevious(key faucet.SubscriptionKeyHash
 	s.subs[key] = sub
 }
 
-// corruptArguments makes the row's stored arguments valid JSON that the run
-// cannot read, as a row written by a different version of faucet could be.
+// A row written by another version of faucet can hold such arguments.
 func (s *fakeStore) corruptArguments(key faucet.SubscriptionKeyHash) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

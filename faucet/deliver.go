@@ -21,10 +21,8 @@ import (
 
 const (
 	deliverWorkers = 8
-	// maxWorkersPerEndpoint is the most workers of one run that send to one
-	// callback origin at a time. An endpoint that stalls costs a request timeout
-	// per attempt, so it must not hold every worker while other subscriptions
-	// wait.
+	// A stalled endpoint costs a request timeout per attempt, so it must not
+	// hold every worker while other subscriptions wait.
 	maxWorkersPerEndpoint = 2
 	// maxClaimsPerRun bounds the work of one DeliverDue, so a run fits the
 	// deadline of the cron request that starts it.
@@ -147,13 +145,11 @@ type deliveryRun struct {
 	gate    endpointGate
 }
 
-// endpointGate counts the workers of a run that send to each callback origin.
 type endpointGate struct {
 	mu      sync.Mutex
 	workers map[string]int
 }
 
-// full lists the origins that have no place left for a worker.
 func (g *endpointGate) full() []string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -300,9 +296,7 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 	return nil
 }
 
-// endUndecodable ends a subscription whose stored arguments do not decode, so
-// that no run reads it again. Its queued deliveries end with it and the run
-// counts them, as at the scan, under GiveUpArgumentsUndecodable.
+// endUndecodable ends the subscription so that no later run reads it again.
 func (r *deliveryRun) endUndecodable(ctx context.Context, now time.Time, target ScanTarget, logger slog.Logger) error {
 	_, found, err := r.svc.store.DeleteLiveSubscription(ctx, target.Principal, target.KeyHash, now)
 	if err != nil {
@@ -315,8 +309,6 @@ func (r *deliveryRun) endUndecodable(ctx context.Context, now time.Time, target 
 	return nil
 }
 
-// sendGaps takes gap envelopes until none is left that this run may take or the
-// run is out of time.
 func (r *deliveryRun) sendGaps(ctx context.Context) error {
 	for ctx.Err() == nil && !r.outOfTime(ctx) {
 		claim, ok, err := r.claimGap(ctx)
@@ -380,9 +372,8 @@ func (r *deliveryRun) sweepExpired(ctx context.Context) error {
 	return nil
 }
 
-// sweepPreviousSecrets removes the previous secrets of ended rotations. A
-// failure ends nothing else: signing ignores a window that ended, so the sends
-// that follow stay correct.
+// A sweep failure ends nothing else: signing ignores a window that ended, so
+// the sends that follow stay correct.
 func (r *deliveryRun) sweepPreviousSecrets(ctx context.Context) {
 	cleared, err := r.svc.store.ClearExpiredPreviousSecrets(ctx, r.svc.clock.Now())
 	switch {

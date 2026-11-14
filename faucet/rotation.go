@@ -33,17 +33,12 @@ func (c DeliveryClaim) sealedSecrets() sealedSecrets {
 	return sealedSecrets{current: c.SecretEnc, previous: c.PreviousSecretEnc, previousUntil: c.PreviousSecretUntil}
 }
 
-// windowWarnings remembers the rotation windows that a warning went out for, so
-// that a window whose previous secret does not open logs once, not once per
-// send. It forgets a window when it ends.
 type windowWarnings struct {
 	mu    sync.Mutex
 	until map[SubscriptionKeyHash]time.Time
 }
 
-// first says whether the window of key that ends at until has no warning yet,
-// and records it.
-func (w *windowWarnings) first(key SubscriptionKeyHash, until, now time.Time) bool {
+func (w *windowWarnings) shouldWarn(key SubscriptionKeyHash, until, now time.Time) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	for k, end := range w.until {
@@ -82,7 +77,7 @@ func (wh *webhookState) signingSecrets(ctx context.Context, now time.Time, key S
 	}
 	previous, err := openSecret(wh.aead, sealed.previous, key[:])
 	if err != nil {
-		if wh.warned.first(key, sealed.previousUntil, now) {
+		if wh.warned.shouldWarn(key, sealed.previousUntil, now) {
 			wh.logger.Warn(ctx, "the previous secret of a rotation does not open, signing with the current secret only",
 				slog.F("subscription", key.ID()))
 		}

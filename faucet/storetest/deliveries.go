@@ -91,8 +91,6 @@ func (r *rig) enqueue(events ...faucet.Event) {
 	r.scanned = e.NewScannedThrough
 }
 
-// recordGap moves the read position to through, which is the purge mark, and
-// records the gap that the move owes the subscription.
 func (r *rig) recordGap(through int64) {
 	r.t.Helper()
 	e := faucet.Enqueue{Key: r.sub.KeyHash, ExpectedScannedThrough: r.scanned, NewScannedThrough: through, GapThrough: through}
@@ -458,10 +456,6 @@ func finishDeliveryNeedsTheCurrentAttempt(t *testing.T, s faucet.Store) {
 	require.False(t, r.finish(gone, r.now, faucet.Finish{Kind: faucet.FinishDelivered}).Accepted, "an unknown delivery")
 }
 
-// finishDeliveryIgnoresAnAttemptOfAnOlderIncarnation plays an attempt that is
-// still in flight when its subscription is deleted and made again from the
-// start of the log: the new subscription queues the same event under the same
-// message ID, and its first claim is attempt 1 as well.
 func finishDeliveryIgnoresAnAttemptOfAnOlderIncarnation(t *testing.T, s faucet.Store) {
 	r := newRig(t, s, 1)
 	r.enqueue(r.events...)

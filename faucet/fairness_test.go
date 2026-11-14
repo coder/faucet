@@ -10,15 +10,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// stalledEndpoints are endpoints that hold every request until release runs.
 type stalledEndpoints struct {
 	release func()
 	held    atomic.Int32
 	peak    atomic.Int32
 }
 
-// stall makes the endpoints at paths of rcv hold every request, for deliveries
-// and gap envelopes alike.
 func stall(t *testing.T, rcv *hookReceiver, paths ...string) *stalledEndpoints {
 	t.Helper()
 	gate := make(chan struct{})
@@ -42,8 +39,6 @@ func stall(t *testing.T, rcv *hookReceiver, paths ...string) *stalledEndpoints {
 	return s
 }
 
-// requireHeldAtMost waits until the stalled endpoints hold n requests, which a
-// run with work for them reaches, and then checks that none held more.
 func (s *stalledEndpoints) requireHeldAtMost(t *testing.T, n int32) {
 	t.Helper()
 	require.Eventually(t, func() bool { return s.held.Load() >= n }, 5*time.Second, 10*time.Millisecond, "the stalled endpoints hold %d requests", n)

@@ -259,9 +259,8 @@ func (d *deliverHarness) subscribeEndpoint(e hookEndpoint) subscribed {
 	return d.subscribe(subscribeTo(e.args, d.rcv.url(e.path), e.secret))
 }
 
-// runDeliverDue starts a run in the background and returns what it reports.
-// The run never touches the test, so a test that fails and leaves it behind
-// does not panic.
+// The goroutine never touches d.t: testing panics on a t call after the test
+// ends, and a failing test can leave the run behind.
 func (d *deliverHarness) runDeliverDue() func() faucet.DeliverResult {
 	d.t.Helper()
 	type outcome struct {
