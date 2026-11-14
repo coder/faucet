@@ -1,6 +1,5 @@
-import { readFileSync } from 'node:fs';
 import { closedPullRequest, samples } from './payloads';
-import { describe, expect, newDeliveryId, newRepoId, test, type Faucet } from './support';
+import { appLog, describe, expect, newDeliveryId, newRepoId, test, type Faucet } from './support';
 
 const run = samples['workflow_run.completed'];
 const allTypes = ['ci.run_completed', 'ci.check_completed', 'pr.review_submitted', 'pr.closed', 'pr.comment_created'];
@@ -139,7 +138,7 @@ describe('wait tool', () => {
   });
 
   test('the app log never holds the GitHub token or the webhook secret', async ({ faucet }) => {
-    const log = readFileSync('.e2e/logs/app.log', 'utf8');
+    const log = appLog();
 
     expect(log).toContain('wait denied');
     expect(faucet.leaksSecret(log)).toBe(false);

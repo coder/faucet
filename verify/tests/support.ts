@@ -590,8 +590,15 @@ export function openSealedSecret(key: Buffer, secretEncHex: string, keyHashHex: 
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
 }
 
+// The runner appends to app.log across runs, so the log of this run starts at the last line that app.mjs writes once Postgres is up.
+// Without that cut, a line left by an earlier run satisfies a test of this one.
+const RUN_START = 'faucet-verify: postgres listening on ';
+
 export function appLog(): string {
-  return readFileSync('.e2e/logs/app.log', 'utf8');
+  const log = readFileSync('.e2e/logs/app.log', 'utf8');
+  const start = log.lastIndexOf(RUN_START);
+  if (start < 0) throw new Error('app.log has no line that marks the start of this run');
+  return log.slice(start);
 }
 
 async function isHealthy(baseUrl: string): Promise<boolean> {

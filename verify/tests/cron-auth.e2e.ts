@@ -1,7 +1,6 @@
-import { readFileSync } from 'node:fs';
 import { counts, endpoint, eventRequests, paramsFor, parseReply, storeRun, withDeliveryFaucet } from './delivery';
 import { samples } from './payloads';
-import { describe, expect, newDeliveryId, newRepoId, test, type CronOptions, type Faucet } from './support';
+import { appLog, describe, expect, newDeliveryId, newRepoId, test, type CronOptions, type Faucet } from './support';
 import { subscribed } from './subscriptions';
 
 const run = samples['workflow_run.completed'];
@@ -183,7 +182,7 @@ describe('cron routes', () => {
   });
 
   test('the app log records the purge and never holds the cron secret', async ({ cron }) => {
-    const log = readFileSync('.e2e/logs/app.log', 'utf8');
+    const log = appLog();
 
     expect(log).toContain('events purged');
     expect(cron.leaksSecret(log)).toBe(false);
