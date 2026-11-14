@@ -233,6 +233,25 @@ describe('webhook delivery, failures and retries', () => {
     });
   });
 
+  test('a purge ends the deliveries of an expired subscription with it and counts them', async ({ faucet, receiver }) => {
+    await withDeliveryFaucet(faucet, async (started) => {
+      const repoId = newRepoId();
+      const queued = await endpoint(receiver, 'fail500');
+      await subscribed(started, paramsFor(repoId, queued));
+      await storeRun(started, repoId, 9701);
+      await storeRun(started, repoId, 9702);
+      expect(await deliverDue(started)).toEqual(counts({ enqueued: 2, claimed: 2, sent: 2, retried: 2 }));
+      expect(await started.deliveries()).toHaveLength(2);
+
+      expect(await started.expireSubscriptions(queued.id)).toBe(1);
+      const purge = await started.cronJob('purge');
+
+      expect(purge.status).toBe(200);
+      expect(JSON.parse(purge.body)).toMatchObject({ expired_subscriptions: 1, ended_deliveries: 2 });
+      expect(await started.deliveries()).toEqual([]);
+    });
+  });
+
   test('a delivery that a crashed run claimed waits for its lease, then goes out with the webhook-id it was queued with', async ({ faucet, receiver }) => {
     await withDeliveryFaucet(faucet, async (started) => {
       const repoId = newRepoId();

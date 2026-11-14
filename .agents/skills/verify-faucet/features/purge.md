@@ -5,10 +5,10 @@
 ## Sub-features
 
 - The retention is `FAUCET_RETENTION_DAYS`, a whole number of days from 1 to 3650, default 30. An event received exactly that many days ago or later stays.
-- The reply is 200 JSON `{"deleted": <rows deleted>, "purged_through": <the mark after the purge>}`. The mark never moves down: a second purge with nothing to delete returns `deleted` 0 and the same mark.
+- The reply is 200 JSON `{"deleted": <rows deleted>, "purged_through": <the mark after the purge>, "expired_subscriptions": <rows deleted>, "ended_deliveries": <deliveries that ended with them>}`. The mark never moves down: a second purge with nothing to delete returns `deleted` 0 and the same mark.
 - `events/poll` and `wait_for_github_events` with a cursor below the mark return `truncated: true`, and the events that remain above the cursor. A cursor at or above the mark is not flagged. The wait tool's `truncated` is new in the structured output.
 - A cursor that a call returns is never below the mark, also when the purge emptied the table. A waiter that passes it back is not flagged again.
-- A subscription whose `expires_at` has passed is deleted by the purge, and one that has not stays. The reply counts events only, and the log line `events purged` adds `expired_subscriptions_deleted`.
+- A subscription whose `expires_at` has passed is deleted by the purge, and one that has not stays. The deliveries that such a subscription still held end with it: the reply counts them in `ended_deliveries`, and the log line `events purged` adds `expired_subscriptions_deleted` and `deliveries_ended`.
 - `CursorAt`, which the poll's `maxAgeMs` and the wait's default start use, is never below the mark either.
 
 ## How to get to it (user POV)
