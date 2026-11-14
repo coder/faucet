@@ -4,6 +4,7 @@ package pgstore
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"golang.org/x/xerrors"
@@ -28,10 +29,22 @@ func New(db *sql.DB) *Store {
 	return &Store{db: db, q: database.New(db)}
 }
 
+// endedBy makes the error of a call that its context cut short wrap the context
+// error. lib/pq ends such a query with the server's cancel error, which wraps
+// neither context.Canceled nor context.DeadlineExceeded, and the callers tell
+// the end of their own run from a store failure by those two.
+func endedBy(ctx context.Context, err error) error {
+	if err == nil || ctx.Err() == nil || xerrors.Is(err, ctx.Err()) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ctx.Err(), err)
+}
+
 // InsertEvent stores ev in one transaction that holds eventsLockKey until it
 // commits. Sequence values are therefore handed out and committed in the same
 // order, so a reader that sees ID n has seen every lower ID that will commit.
-func (s *Store) InsertEvent(ctx context.Context, ev faucet.Event) (faucet.Event, bool, error) {
+func (s *Store) InsertEvent(ctx context.Context, ev faucet.Event) (_ faucet.Event, _ bool, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	if err := ev.Validate(); err != nil {
 		return faucet.Event{}, false, xerrors.Errorf("validate event: %w", err)
 	}
@@ -74,7 +87,8 @@ func (s *Store) InsertEvent(ctx context.Context, ev faucet.Event) (faucet.Event,
 	return toEvent(row), inserted, nil
 }
 
-func (s *Store) EventsAfter(ctx context.Context, afterID int64, limit int32) ([]faucet.Event, error) {
+func (s *Store) EventsAfter(ctx context.Context, afterID int64, limit int32) (_ []faucet.Event, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	if limit <= 0 {
 		return nil, xerrors.Errorf("limit must be positive, got %d", limit)
 	}
@@ -93,7 +107,8 @@ func (s *Store) EventsAfter(ctx context.Context, afterID int64, limit int32) ([]
 // snapshot. The head ID is read in the same statement as the page because
 // IDs become visible in commit order: every ID at or below it that will ever
 // exist is already visible, so a cursor set to it cannot skip an event.
-func (s *Store) PollEvents(ctx context.Context, q faucet.PollQuery) (faucet.PollPage, error) {
+func (s *Store) PollEvents(ctx context.Context, q faucet.PollQuery) (_ faucet.PollPage, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	if err := q.Validate(); err != nil {
 		return faucet.PollPage{}, xerrors.Errorf("validate poll query: %w", err)
 	}
@@ -129,7 +144,8 @@ func (s *Store) PollEvents(ctx context.Context, q faucet.PollQuery) (faucet.Poll
 	return page, nil
 }
 
-func (s *Store) CursorAt(ctx context.Context, t time.Time) (int64, error) {
+func (s *Store) CursorAt(ctx context.Context, t time.Time) (_ int64, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	id, err := s.q.CursorAt(ctx, t)
 	if err != nil {
 		return 0, xerrors.Errorf("select cursor: %w", err)
@@ -147,7 +163,8 @@ func (s *Store) CursorAt(ctx context.Context, t time.Time) (int64, error) {
 // behind it wait too. Only a redelivery of an event older than the retention
 // does that. Purge locks the mark row first, so concurrent purges queue up
 // instead of deadlocking.
-func (s *Store) Purge(ctx context.Context, before time.Time) (faucet.PurgeResult, error) {
+func (s *Store) Purge(ctx context.Context, before time.Time) (_ faucet.PurgeResult, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return faucet.PurgeResult{}, xerrors.Errorf("begin transaction: %w", err)
@@ -179,7 +196,8 @@ func (s *Store) Purge(ctx context.Context, before time.Time) (faucet.PurgeResult
 // principal cannot both pass the limit. It deletes the principal's expired
 // rows first, so a lapsed subscription is replaced whole and does not count
 // against the limit.
-func (s *Store) UpsertSubscription(ctx context.Context, sub faucet.Subscription, now time.Time, maxLive int) (faucet.Subscription, error) {
+func (s *Store) UpsertSubscription(ctx context.Context, sub faucet.Subscription, now time.Time, maxLive int) (_ faucet.Subscription, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	if maxLive <= 0 {
 		return faucet.Subscription{}, xerrors.Errorf("max live subscriptions must be positive, got %d", maxLive)
 	}
@@ -229,7 +247,8 @@ func (s *Store) UpsertSubscription(ctx context.Context, sub faucet.Subscription,
 	return toSubscription(row)
 }
 
-func (s *Store) DeleteSubscription(ctx context.Context, principal string, key faucet.SubscriptionKeyHash) (bool, error) {
+func (s *Store) DeleteSubscription(ctx context.Context, principal string, key faucet.SubscriptionKeyHash) (_ bool, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	deleted, err := s.q.DeleteSubscription(ctx, database.DeleteSubscriptionParams{KeyHash: key[:], Principal: principal})
 	if err != nil {
 		return false, xerrors.Errorf("delete subscription: %w", err)
@@ -237,7 +256,8 @@ func (s *Store) DeleteSubscription(ctx context.Context, principal string, key fa
 	return deleted > 0, nil
 }
 
-func (s *Store) DeleteLiveSubscription(ctx context.Context, principal string, key faucet.SubscriptionKeyHash, now time.Time) (faucet.Subscription, bool, error) {
+func (s *Store) DeleteLiveSubscription(ctx context.Context, principal string, key faucet.SubscriptionKeyHash, now time.Time) (_ faucet.Subscription, _ bool, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	row, err := s.q.DeleteLiveSubscription(ctx, database.DeleteLiveSubscriptionParams{KeyHash: key[:], Principal: principal, Now: now})
 	if xerrors.Is(err, sql.ErrNoRows) {
 		return faucet.Subscription{}, false, nil
@@ -252,7 +272,8 @@ func (s *Store) DeleteLiveSubscription(ctx context.Context, principal string, ke
 	return deleted, true, nil
 }
 
-func (s *Store) DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (int64, error) {
+func (s *Store) DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (_ int64, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	deleted, err := s.q.DeleteExpiredSubscriptions(ctx, now)
 	if err != nil {
 		return 0, xerrors.Errorf("delete expired subscriptions: %w", err)
@@ -260,7 +281,8 @@ func (s *Store) DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (
 	return deleted, nil
 }
 
-func (s *Store) ClearExpiredPreviousSecrets(ctx context.Context, now time.Time) (int64, error) {
+func (s *Store) ClearExpiredPreviousSecrets(ctx context.Context, now time.Time) (_ int64, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	cleared, err := s.q.ClearExpiredPreviousSecrets(ctx, now)
 	if err != nil {
 		return 0, xerrors.Errorf("clear expired previous secrets: %w", err)
