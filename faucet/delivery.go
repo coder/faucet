@@ -41,6 +41,9 @@ type DeliveryStatus struct {
 // the end of the log.
 type ScanTarget struct {
 	KeyHash SubscriptionKeyHash
+	// Principal owns the subscription. It lets the run end a subscription that
+	// it cannot read events for.
+	Principal string
 	// EventType and Arguments are the subscription's own.
 	EventType string
 	Arguments json.RawMessage
@@ -209,6 +212,7 @@ const (
 	GiveUpRepoMismatch            GiveUpReason = "repo_mismatch"
 	GiveUpSecretUnreadable        GiveUpReason = "secret_unreadable"
 	GiveUpSubscriptionExpired     GiveUpReason = "subscription_expired"
+	GiveUpArgumentsUndecodable    GiveUpReason = "arguments_undecodable"
 )
 
 // DeliverResult counts what one DeliverDue run did. Every delivery that ended

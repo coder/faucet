@@ -157,6 +157,7 @@ func scanTargetsListsLiveSubscriptionsBehindTheHead(t *testing.T, s faucet.Store
 	require.Len(t, targets, 2, "the caught up subscription and the lapsed one are not targets")
 	require.Equal(t, r.sub.KeyHash, targets[0].KeyHash, "the subscription furthest behind comes first")
 	require.Equal(t, ahead.KeyHash, targets[1].KeyHash)
+	require.Equal(t, r.sub.Principal, targets[0].Principal, "a target names the principal that owns it")
 	first := targets[0]
 	require.Equal(t, "ci.run_completed", first.EventType)
 	require.JSONEq(t, `{"repo":"octo/repo"}`, string(first.Arguments))

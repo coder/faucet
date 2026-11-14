@@ -198,8 +198,7 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 	logger := s.logger.With(slog.F("subscription", target.KeyHash.ID()))
 	var args pollArguments
 	if err := json.Unmarshal(target.Arguments, &args); err != nil {
-		logger.Error(ctx, "stored subscription has arguments that do not decode")
-		return nil
+		return r.endUndecodable(ctx, now, target, logger)
 	}
 	page, err := s.store.PollEvents(ctx, PollQuery{
 		RepoID:  target.RepoID,
@@ -234,6 +233,21 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 			r.gaps = append(r.gaps, queuedGap{target: target, purgedThrough: page.PurgedThrough})
 		}
 	})
+	return nil
+}
+
+// endUndecodable ends a subscription whose stored arguments do not decode, so
+// that no run reads it again. Its queued deliveries end with it and the run
+// counts them, as at the scan, under GiveUpArgumentsUndecodable.
+func (r *deliveryRun) endUndecodable(ctx context.Context, now time.Time, target ScanTarget, logger slog.Logger) error {
+	_, found, err := r.svc.store.DeleteLiveSubscription(ctx, target.Principal, target.KeyHash, now)
+	if err != nil {
+		return xerrors.Errorf("end a subscription whose arguments do not decode: %w", err)
+	}
+	if found {
+		logger.Error(ctx, "ended a subscription whose stored arguments do not decode", slog.F("deliveries_ended", target.Pending))
+		r.add(func(res *DeliverResult) { res.GaveUp[GiveUpArgumentsUndecodable] += int(target.Pending) })
+	}
 	return nil
 }
 

@@ -980,3 +980,27 @@ func TestPurgeCountsTheDeliveriesThatEndWithAnExpiredSubscription(t *testing.T) 
 	require.Equal(t, 1, strings.Count(d.logs.String(), "events purged"), "one log line")
 	require.Contains(t, d.logs.String(), "deliveries_ended=2")
 }
+
+func TestDeliverDueEndsASubscriptionWhoseArgumentsDoNotDecodeAndNeverRescansIt(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	ep := d.endpoint("/hook")
+	d.rcv.answer("/hook", always(http.StatusInternalServerError))
+	d.subscribeEndpoint(ep)
+	d.advance(time.Second)
+	d.newRunEvent()
+	require.Equal(t, 1, d.deliverDue().Retried)
+	d.store.corruptArguments(d.rows()[0].KeyHash)
+	d.newRunEvent()
+
+	res := d.deliverDue()
+	require.Equal(t, 1, res.GaveUp[faucet.GiveUpArgumentsUndecodable], "the delivery that was queued ends with the subscription and is counted")
+	require.Empty(t, d.rows(), "the subscription ended")
+	require.Empty(t, d.store.deliveryRows())
+
+	d.newRunEvent()
+	d.deliverDue()
+	d.deliverDue()
+	require.Equal(t, 1, strings.Count(d.logs.String(), "stored arguments do not decode"), "later runs do not read it again")
+}

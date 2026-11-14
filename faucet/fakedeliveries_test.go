@@ -3,6 +3,7 @@ package faucet_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"slices"
 	"time"
 
@@ -80,7 +81,7 @@ func (s *fakeStore) ScanTargets(ctx context.Context, now time.Time, maxPending, 
 			continue
 		}
 		targets = append(targets, faucet.ScanTarget{
-			KeyHash: key, EventType: sub.EventType, Arguments: slices.Clone(sub.Arguments), RepoID: sub.RepoID,
+			KeyHash: key, Principal: sub.Principal, EventType: sub.EventType, Arguments: slices.Clone(sub.Arguments), RepoID: sub.RepoID,
 			CallbackURL: sub.CallbackURL, SecretEnc: slices.Clone(sub.SecretEnc), PreviousSecretEnc: slices.Clone(sub.PreviousSecretEnc), PreviousSecretUntil: sub.PreviousSecretUntil,
 			ScannedThrough: s.scanned[key], Pending: pending,
 		})
@@ -278,5 +279,15 @@ func (s *fakeStore) repeatCurrentSecretAsPrevious(key faucet.SubscriptionKeyHash
 	defer s.mu.Unlock()
 	sub := s.subs[key]
 	sub.PreviousSecretEnc, sub.PreviousSecretUntil = slices.Clone(sub.SecretEnc), until
+	s.subs[key] = sub
+}
+
+// corruptArguments makes the row's stored arguments valid JSON that the run
+// cannot read, as a row written by a different version of faucet could be.
+func (s *fakeStore) corruptArguments(key faucet.SubscriptionKeyHash) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sub := s.subs[key]
+	sub.Arguments = json.RawMessage(`{"repo":"octo/repo","pr":"not a number"}`)
 	s.subs[key] = sub
 }

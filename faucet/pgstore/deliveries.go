@@ -27,6 +27,7 @@ func (s *Store) ScanTargets(ctx context.Context, now time.Time, maxPending, limi
 		}
 		targets[i] = faucet.ScanTarget{
 			KeyHash:             key,
+			Principal:           row.Principal,
 			EventType:           row.EventType,
 			Arguments:           row.Arguments,
 			RepoID:              row.RepoID,
