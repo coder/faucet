@@ -116,7 +116,10 @@ func TestDeliverDueSendsToOneOriginWithAsManyWorkersAsMaxWorkersPerOriginAllows(
 	t.Parallel()
 
 	const workers = 8
-	for name, c := range map[string]struct{ setting, want int }{
+	for name, c := range map[string]struct {
+		setting int
+		want    int32
+	}{
 		"Default": {0, 2},
 		"Five":    {5, 5},
 		"NoCap":   {-1, workers},
@@ -135,7 +138,7 @@ func TestDeliverDueSendsToOneOriginWithAsManyWorkersAsMaxWorkersPerOriginAllows(
 			}
 
 			wait := d.runDeliverDue()
-			stalled.requireHeldAtMost(t, int32(c.want))
+			stalled.requireHeldAtMost(t, c.want)
 			stalled.release()
 			res := wait()
 			d.record(res)
