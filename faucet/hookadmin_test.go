@@ -371,10 +371,6 @@ func TestGitHubHookAdminSendsTheTokenOnlyToBaseURL(t *testing.T) {
 	}
 }
 
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
 // A redirect that keeps the host and changes the scheme would send the token
 // over plain http, or to a listener that nobody vouched for. A transport that
 // counts the requests stands in for the network, because one listener cannot
