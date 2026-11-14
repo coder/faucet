@@ -25,6 +25,9 @@ type fakeChecker struct {
 	repoCalls int
 	// during runs inside each call, like the time a GitHub answer takes.
 	during func()
+	// afterAnswer runs once, after the next RepoID has decided and before it
+	// returns, like the answer's way back while GitHub's state moves on.
+	afterAnswer func()
 }
 
 func newFakeChecker() *fakeChecker {
@@ -52,17 +55,27 @@ func (c *fakeChecker) RepoID(_ context.Context, _ faucet.Principal, repo string)
 	if c.during != nil {
 		c.during()
 	}
+	id, err, afterAnswer := c.decide(repo)
+	if afterAnswer != nil {
+		afterAnswer()
+	}
+	return id, err
+}
+
+func (c *fakeChecker) decide(repo string) (int64, error, func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.repoCalls++
+	afterAnswer := c.afterAnswer
+	c.afterAnswer = nil
 	if c.err != nil {
-		return 0, c.err
+		return 0, c.err, afterAnswer
 	}
 	id, ok := c.repos[repo]
 	if !ok {
-		return 0, faucet.ErrNoAccess
+		return 0, faucet.ErrNoAccess, afterAnswer
 	}
-	return id, nil
+	return id, nil, afterAnswer
 }
 
 func (c *fakeChecker) calls() (auth, repo int) {
@@ -75,6 +88,12 @@ func (c *fakeChecker) revoke(repo string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.repos, repo)
+}
+
+func (c *fakeChecker) grant(repo string, id int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.repos[repo] = id
 }
 
 func authenticateAndAuthorize(t *testing.T, cache *faucet.AccessCache, token, repo string) (int64, error) {
@@ -268,13 +287,88 @@ func TestAccessCacheCountsTheMinuteFromTheStartOfTheLookup(t *testing.T) {
 
 func TestAccessCacheRefusesAnEmptyRepositoryInsteadOfAnsweringFromTheLogin(t *testing.T) {
 	t.Parallel()
-	cache := faucet.NewAccessCache(newFakeChecker(), quartz.NewMock(t))
-	p, err := cache.Authenticate(context.Background(), testToken)
+	checker := newFakeChecker()
+	checker.grant("", 5)
+	cache := faucet.NewAccessCache(checker, quartz.NewMock(t))
+	ctx := context.Background()
+	p, err := cache.Authenticate(ctx, testToken)
 	require.NoError(t, err)
 
-	id, err := cache.RepoID(context.Background(), p, "")
+	id, err := cache.RepoID(ctx, p, "")
 	require.Error(t, err)
 	require.Zero(t, id)
-	_, err = cache.RepoIDUncached(context.Background(), p, "")
-	require.Error(t, err)
+	_, err = cache.RepoIDUncached(ctx, p, "")
+	require.Error(t, err, "a wrapped authorizer that would accept an empty repo is not asked")
+	again, err := cache.Authenticate(ctx, testToken)
+	require.NoError(t, err, "and nothing was stored where the remembered login lives")
+	require.Equal(t, "octocat", again.Login)
+}
+
+func TestAccessCacheOrdersAnswersByTheStartOfTheirLookup(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	for name, delay := range map[string]time.Duration{"after": time.Second, "at the same instant as": 0} {
+		t.Run("a grant that was in flight when a renewal started "+name+" its lookup, and found access withdrawn, is not stored", func(t *testing.T) {
+			t.Parallel()
+			checker := newFakeChecker()
+			clock := quartz.NewMock(t)
+			cache := faucet.NewAccessCache(checker, clock)
+			checker.afterAnswer = func() {
+				checker.revoke(testRepo)
+				clock.Advance(delay)
+				_, err := cache.RepoIDUncached(ctx, principal(t), testRepo)
+				require.ErrorIs(t, err, faucet.ErrNoAccess)
+			}
+
+			id, err := cache.RepoID(ctx, principal(t), testRepo)
+			require.NoError(t, err, "that poll gets what GitHub said when it asked")
+			require.EqualValues(t, repoID, id)
+			clock.Advance(time.Second)
+			_, err = cache.RepoID(ctx, principal(t), testRepo)
+			require.ErrorIs(t, err, faucet.ErrNoAccess, "the next poll is refused, not served the older grant for a minute")
+		})
+	}
+
+	t.Run("a denial that was in flight does not remove a grant whose lookup started after it", func(t *testing.T) {
+		t.Parallel()
+		checker := newFakeChecker()
+		clock := quartz.NewMock(t)
+		cache := faucet.NewAccessCache(checker, clock)
+		checker.revoke(testRepo)
+		checker.afterAnswer = func() {
+			checker.grant(testRepo, repoID)
+			clock.Advance(time.Second)
+			_, err := cache.RepoID(ctx, principal(t), testRepo)
+			require.NoError(t, err)
+		}
+
+		_, err := cache.RepoIDUncached(ctx, principal(t), testRepo)
+		require.ErrorIs(t, err, faucet.ErrNoAccess)
+		_, callsBefore := checker.calls()
+		_, err = cache.RepoID(ctx, principal(t), testRepo)
+		require.NoError(t, err)
+		_, calls := checker.calls()
+		require.Equal(t, callsBefore, calls, "the fresher grant is still remembered")
+	})
+
+	t.Run("a grant whose lookup started after a denial is stored", func(t *testing.T) {
+		t.Parallel()
+		checker := newFakeChecker()
+		clock := quartz.NewMock(t)
+		cache := faucet.NewAccessCache(checker, clock)
+		checker.revoke(testRepo)
+		_, err := cache.RepoIDUncached(ctx, principal(t), testRepo)
+		require.ErrorIs(t, err, faucet.ErrNoAccess)
+
+		checker.grant(testRepo, repoID)
+		clock.Advance(time.Millisecond)
+		_, err = cache.RepoID(ctx, principal(t), testRepo)
+		require.NoError(t, err)
+		_, callsBefore := checker.calls()
+		_, err = cache.RepoID(ctx, principal(t), testRepo)
+		require.NoError(t, err)
+		_, calls := checker.calls()
+		require.Equal(t, callsBefore, calls, "a denial does not block the answers that come after it")
+	})
 }

@@ -35,7 +35,11 @@ type tokenChecker interface {
 // process.
 //
 // events/subscribe does not use the remembered answer: a renewal calls
-// RepoIDUncached, because every renewal must check access again.
+// RepoIDUncached, because every renewal must check access again. A denial that
+// a renewal finds leaves a marker for a minute. Answers are ordered by the start
+// of their lookup, not by when GitHub looked: a marker keeps a grant from an
+// older lookup, still in flight, from being stored, and it replaces a grant only
+// when that grant's lookup started before the denial's.
 type AccessCache struct {
 	inner tokenChecker
 	clock quartz.Clock
@@ -51,10 +55,14 @@ type accessKey struct {
 	repo string
 }
 
+// accessEntry is a remembered answer. started is when its lookup began, and
+// denied marks a denial that only keeps an older lookup from being stored.
 type accessEntry struct {
 	login   string
 	repoID  int64
+	started time.Time
 	expires time.Time
+	denied  bool
 }
 
 var _ Authorizer = (*AccessCache)(nil)
@@ -66,7 +74,7 @@ func NewAccessCache(inner tokenChecker, clock quartz.Clock) *AccessCache {
 // Authenticate implements the authenticator of the server. A cached login is
 // returned with the token of this call.
 func (c *AccessCache) Authenticate(ctx context.Context, token string) (Principal, error) {
-	key := accessKey{token: sha256.Sum256([]byte(token))}
+	key := keyOf(token, "")
 	if e, ok := c.lookup(key); ok {
 		return NewPrincipal(e.login, token)
 	}
@@ -80,61 +88,83 @@ func (c *AccessCache) Authenticate(ctx context.Context, token string) (Principal
 }
 
 func (c *AccessCache) RepoID(ctx context.Context, p Principal, repo string) (int64, error) {
-	if p.token == "" || repo == "" {
-		return c.RepoIDUncached(ctx, p, repo)
+	if p.token != "" && repo != "" {
+		if e, ok := c.lookup(keyOf(p.token, repo)); ok {
+			return e.repoID, nil
+		}
 	}
-	if e, ok := c.lookup(accessKey{token: sha256.Sum256([]byte(p.token)), repo: repo}); ok {
-		return e.repoID, nil
-	}
-	return c.RepoIDUncached(ctx, p, repo)
+	id, _, err := c.ask(ctx, p, repo)
+	return id, err
 }
 
-// RepoIDUncached asks the wrapped authorizer. It remembers a success, and a
-// denial removes what was remembered, so a poll right after a renewal that
-// lost access is refused.
+// RepoIDUncached asks the wrapped authorizer and remembers a success. A denial
+// leaves a marker in place of what was remembered, so a poll right after a
+// renewal that lost access is refused.
 func (c *AccessCache) RepoIDUncached(ctx context.Context, p Principal, repo string) (int64, error) {
+	id, started, err := c.ask(ctx, p, repo)
+	switch {
+	case p.token == "" || repo == "":
+	case xerrors.Is(err, ErrNoAccess):
+		c.deny(started, keyOf(p.token, repo))
+	case xerrors.Is(err, ErrInvalidToken):
+		c.deny(started, keyOf(p.token, repo), keyOf(p.token, ""))
+	}
+	return id, err
+}
+
+// ask puts the question to the wrapped authorizer and remembers a success. It
+// never asks about an empty repo, whose key is the key of the remembered login.
+func (c *AccessCache) ask(ctx context.Context, p Principal, repo string) (int64, time.Time, error) {
 	if repo == "" {
-		return 0, xerrors.New("repo must be written owner/name")
+		return 0, time.Time{}, xerrors.New("repo must be written owner/name")
 	}
 	started := c.clock.Now()
 	id, err := c.inner.RepoID(ctx, p, repo)
-	if p.token == "" {
-		return id, err
+	if err == nil && p.token != "" {
+		c.store(keyOf(p.token, repo), accessEntry{repoID: id}, started)
 	}
-	key := accessKey{token: sha256.Sum256([]byte(p.token)), repo: repo}
-	switch {
-	case err == nil:
-		c.store(key, accessEntry{repoID: id}, started)
-	case xerrors.Is(err, ErrNoAccess):
-		c.forget(key)
-	case xerrors.Is(err, ErrInvalidToken):
-		c.forget(key, accessKey{token: key.token})
-	}
-	return id, err
+	return id, started, err
+}
+
+func keyOf(token, repo string) accessKey {
+	return accessKey{token: sha256.Sum256([]byte(token)), repo: repo}
 }
 
 func (c *AccessCache) lookup(key accessKey) (accessEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[key]
-	return e, ok && e.expires.After(c.clock.Now())
+	return e, ok && !e.denied && e.expires.After(c.clock.Now())
 }
 
-func (c *AccessCache) forget(keys ...accessKey) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, key := range keys {
-		delete(c.entries, key)
-	}
-}
-
-// store counts the minute from started, the start of the lookup, so a slow
-// GitHub answer does not stretch what it says. It drops the expired entries
-// once a minute and whenever the cache is full, and when it is still full it
-// keeps the answer to itself.
+// store keeps the answer of a lookup that began at started, unless the key holds
+// a denial from a lookup that began at the same time or later.
 func (c *AccessCache) store(key accessKey, e accessEntry, started time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if old, ok := c.entries[key]; ok && old.denied && !started.After(old.started) {
+		return
+	}
+	c.put(key, e, started)
+}
+
+// deny marks each key as denied, except a key that holds the answer of a lookup
+// that began after this one.
+func (c *AccessCache) deny(started time.Time, keys ...accessKey) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, key := range keys {
+		if old, ok := c.entries[key]; !ok || !old.started.After(started) {
+			c.put(key, accessEntry{denied: true}, started)
+		}
+	}
+}
+
+// put counts the minute from started, the start of the lookup, so a slow GitHub
+// answer does not stretch what it says. It drops the expired entries once a
+// minute and whenever the cache is full, and when it is still full it keeps the
+// answer to itself. The caller holds the lock.
+func (c *AccessCache) put(key accessKey, e accessEntry, started time.Time) {
 	now := c.clock.Now()
 	if !now.Before(c.nextSweep) || len(c.entries) >= maxAccessCacheEntries {
 		for k, old := range c.entries {
@@ -147,7 +177,7 @@ func (c *AccessCache) store(key accessKey, e accessEntry, started time.Time) {
 	if _, known := c.entries[key]; !known && len(c.entries) >= maxAccessCacheEntries {
 		return
 	}
-	e.expires = started.Add(accessCacheTTL)
+	e.started, e.expires = started, started.Add(accessCacheTTL)
 	c.entries[key] = e
 }
 
