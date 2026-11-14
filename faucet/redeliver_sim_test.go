@@ -133,11 +133,7 @@ func runSim(t *testing.T, spec simSpec) simOutcome {
 	for _, line := range env.logged("redelivery gave up") {
 		gaveUp[line["delivery_id"]] = true
 	}
-	type window struct{ from, to time.Time }
-	var gaps []window
-	for _, line := range env.logged("redelivery gap") {
-		gaps = append(gaps, window{logTime(t, line["from"]), logTime(t, line["to"])})
-	}
+	gaps := env.loggedGaps()
 	out.failed = len(failedFirst)
 	for _, d := range failedFirst {
 		switch {
@@ -145,7 +141,7 @@ func runSim(t *testing.T, spec simSpec) simOutcome {
 			out.recovered++
 		case gaveUp[d.guid]:
 			out.loggedGaveUp++
-		case slices.ContainsFunc(gaps, func(w window) bool { return !d.at.Before(w.from) && !d.at.After(w.to) }):
+		case slices.ContainsFunc(gaps, func(w gapWindow) bool { return w.holds(d.at) }):
 			out.inGap++
 		default:
 			out.silentLost++
