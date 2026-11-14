@@ -49,12 +49,14 @@ describe('events list', () => {
       expect(event.description, `${event.name} description`).not.toBe('');
       expect(event.delivery, `${event.name} delivery`).toEqual(['poll', 'webhook']);
       expect(event.inputSchema.type, `${event.name} inputSchema`).toBe('object');
-      expect(Object.keys(event.inputSchema.properties).sort(), `${event.name} inputSchema properties`).toEqual(['pr', 'repo', 'sha']);
+      const hasHeadCommit = event.name !== 'pr.comment_created';
+      expect(Object.keys(event.inputSchema.properties).sort(), `${event.name} inputSchema properties`).toEqual(
+        hasHeadCommit ? ['pr', 'repo', 'sha'] : ['pr', 'repo'],
+      );
       expect(event.inputSchema.required, `${event.name} inputSchema required`).toEqual(['repo']);
       expect(event.payloadSchema.type, `${event.name} payloadSchema`).toBe('object');
-      expect(Object.keys(event.payloadSchema.properties), `${event.name} payloadSchema properties`).toEqual(
-        expect.arrayContaining(['prs', 'head_sha']),
-      );
+      expect(Object.keys(event.payloadSchema.properties).includes('head_sha'), `${event.name} payloadSchema head_sha`).toBe(hasHeadCommit);
+      expect(Object.keys(event.payloadSchema.properties), `${event.name} payloadSchema properties`).toContain('prs');
       expect(event.payloadSchema.required, `${event.name} payloadSchema required`).toContain('prs');
     }
   });

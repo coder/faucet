@@ -9,39 +9,64 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
+// eventType describes one event type. noHeadSHA is set for a type whose GitHub
+// payload names no head commit, so no event of it has a head_sha and a sha
+// filter could never match one.
 type eventType struct {
 	name          string
 	description   string
 	payloadSchema json.RawMessage
+	noHeadSHA     bool
+	resolvedInput *jsonschema.Resolved
 }
 
-const pollArgumentsSchema = `{
+const pollArgumentsTemplate = `{
   "type": "object",
   "properties": {
-    "repo": {"type": "string", "description": "The repository, written owner/name."},
-    "sha": {"type": "string", "pattern": "^[0-9A-Fa-f]{40}$", "description": "Only events for this 40 character head commit SHA."},
+    "repo": {"type": "string", "description": "The repository, written owner/name."},%s
     "pr": {"type": "integer", "minimum": 1, "maximum": 2147483647, "description": "Only events that mention this pull request number."}
   },
   "required": ["repo"],
   "additionalProperties": false
 }`
 
+const shaArgumentProperty = `
+    "sha": {"type": "string", "pattern": "^[0-9A-Fa-f]{40}$", "description": "Only events for this 40 character head commit SHA."},`
+
 const payloadTemplate = `{
   "type": "object",
   "properties": {
-    "prs": {"type": "array", "items": {"type": "integer"}, "description": "Pull request numbers the event mentions."},
-    "head_sha": {"type": "string", "description": "The head commit SHA. Absent when the event has none."},
+    "prs": {"type": "array", "items": {"type": "integer"}, "description": "Pull request numbers the event mentions."},%s
     %s
   },
   "required": ["prs", %s]
 }`
 
+const headSHAProperty = `
+    "head_sha": {"type": "string", "description": "The head commit SHA. Absent when the event has none."},`
+
 func payloadSchema(properties string, required ...string) json.RawMessage {
+	return payloadSchemaOf(headSHAProperty, properties, required...)
+}
+
+func payloadSchemaOf(headSHA, properties string, required ...string) json.RawMessage {
 	quoted := make([]string, len(required))
 	for i, name := range required {
 		quoted[i] = fmt.Sprintf("%q", name)
 	}
-	return json.RawMessage(fmt.Sprintf(payloadTemplate, properties, strings.Join(quoted, ", ")))
+	return json.RawMessage(fmt.Sprintf(payloadTemplate, headSHA, properties, strings.Join(quoted, ", ")))
+}
+
+// shaInputResolved is the arguments schema of an event type that has a sha. A
+// version before pr.comment_created lost its sha stored subscriptions with one,
+// and events/unsubscribe still reads that shape so they can be ended.
+var shaInputResolved = mustResolve(fmt.Sprintf(pollArgumentsTemplate, shaArgumentProperty))
+
+func (t eventType) inputSchema() json.RawMessage {
+	if t.noHeadSHA {
+		return json.RawMessage(fmt.Sprintf(pollArgumentsTemplate, ""))
+	}
+	return json.RawMessage(fmt.Sprintf(pollArgumentsTemplate, shaArgumentProperty))
 }
 
 var eventCatalog = []eventType{
@@ -79,12 +104,13 @@ var eventCatalog = []eventType{
 	},
 	{
 		name:        "pr.comment_created",
-		description: "A comment was posted in the conversation of a pull request.",
-		payloadSchema: payloadSchema(`
+		description: "A comment was posted in the conversation of a pull request. GitHub names no head commit in this event, so filter by pr and not by sha.",
+		payloadSchema: payloadSchemaOf("", `
     "comment_id": {"type": "integer"},
     "user_login": {"type": "string"},
     "html_url": {"type": "string"}`,
 			"comment_id", "user_login", "html_url"),
+		noHeadSHA: true,
 	},
 	{
 		name:        "pr.review_submitted",
@@ -104,13 +130,12 @@ type pollArguments struct {
 	PR   int32  `json:"pr"`
 }
 
-var pollArgumentsResolved = mustResolve(pollArgumentsSchema)
-
 func init() {
 	names := make([]string, len(eventCatalog))
 	for i, t := range eventCatalog {
 		names[i] = t.name
 		mustResolve(string(t.payloadSchema))
+		eventCatalog[i].resolvedInput = mustResolve(string(t.inputSchema()))
 	}
 	if !slices.Equal(names, eventTypes()) {
 		panic(fmt.Sprintf("event catalog %v does not match the normalized event types %v", names, eventTypes()))

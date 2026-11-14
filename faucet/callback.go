@@ -2,6 +2,7 @@ package faucet
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/netip"
@@ -63,9 +64,11 @@ var ErrCallbackRateLimited = xerrors.New("callback verification rate limit reach
 // CallbackRequest is what a CallbackVerifier gets for one callback URL. It holds
 // no credential: not the subscriber's GitHub token, and the secret only inside
 // a function that fmt prints as an address. It does hold the URL, which can
-// carry a receiver token: printing the request shows the login only, but a
-// struct that holds a request is printed field by field, URL included, so do
-// not log such a struct.
+// carry a receiver token, so every way to print or encode a request shows the
+// login only: fmt, a logger (String), and encoding/json (MarshalJSON), whether
+// the request or a struct that holds it. fmt prints a struct field of another
+// package by reflection and skips Format for an unexported one, so keep a
+// request in an exported field if you log the struct.
 type CallbackRequest struct {
 	// Login is the GitHub login of the subscriber.
 	Login string
@@ -90,7 +93,21 @@ func (r CallbackRequest) Sign(id string, timestamp time.Time, body []byte) (http
 // Format implements fmt.Formatter so that printing a request directly shows the
 // login only, because the URL can hold a token.
 func (r CallbackRequest) Format(f fmt.State, _ rune) {
-	_, _ = fmt.Fprintf(f, "CallbackRequest{Login:%q}", r.Login)
+	_, _ = fmt.Fprint(f, r.String())
+}
+
+// String is what a logger prints for a request: sloghuman prints the exported
+// fields of a struct unless it has a String method.
+func (r CallbackRequest) String() string {
+	return fmt.Sprintf("CallbackRequest{Login:%q}", r.Login)
+}
+
+// MarshalJSON encodes the login only, for sloghuman and any other encoder that
+// marshals a struct field by field.
+func (r CallbackRequest) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Login string `json:"login"`
+	}{r.Login})
 }
 
 // CallbackVerifier proves that the endpoint behind a callback URL agrees to

@@ -69,15 +69,17 @@ type waitOutput struct {
 // The tool returns the events of one repository that match its filters, as
 // soon as there are any, or none when timeout_s runs out. Either way it
 // returns a cursor, and passing that cursor to the next call resumes exactly
-// where this one stopped. Without a cursor it starts at the present, or ten
-// minutes back when sha is set.
+// where this one stopped, as long as repo and the filters stay the same: the
+// cursor is the newest event of any repository, so an event at or below it that
+// matches only a new filter is never returned. Without a cursor it starts at
+// the present, or ten minutes back when sha is set.
 func (s *Service) Register(srv *mcp.Server) {
 	types := eventTypes()
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: toolName,
 		Description: "Wait for GitHub events on a repository, such as a CI run finishing or a pull request review, " +
 			"and return them as soon as they arrive. Returns no events and a cursor when timeout_s runs out; " +
-			"call again with that cursor to keep waiting. When truncated is true, a retention purge deleted events after " +
+			"call again with that cursor and the same repo and filters to keep waiting. When truncated is true, a retention purge deleted events after " +
 			"the cursor you passed, so some may be missing. Event types: " + strings.Join(types, ", ") + ".",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, Title: "Wait for GitHub events"},
 	}, s.waitForEvents)
@@ -115,6 +117,9 @@ func (in waitInput) parse() (waitRequest, error) {
 	if in.SHA != "" && !shaPattern.MatchString(in.SHA) {
 		return waitRequest{}, xerrors.New("sha must be 40 hexadecimal characters")
 	}
+	if in.SHA != "" && !slices.ContainsFunc(in.Types, func(name string) bool { t, _ := lookupEventType(name); return !t.noHeadSHA }) {
+		return waitRequest{}, xerrors.New("sha matches none of these types, because they carry no head commit; filter by pr")
+	}
 	if in.PR < 0 {
 		return waitRequest{}, xerrors.New("pr must be a pull request number")
 	}
@@ -150,11 +155,22 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	}
 	logger := s.logger.With(slog.F("repo", in.Repo))
 
-	repoID, err := s.authorize(ctx, logger, "wait", in.Repo)
+	p, err := s.principal(ctx, logger, "wait")
+	if err != nil {
+		return nil, waitOutput{}, err
+	}
+	repoID, err := s.authorizeRepo(ctx, logger, p, "wait", in.Repo)
 	if err != nil {
 		return nil, waitOutput{}, err
 	}
 	req.query.RepoID = repoID
+
+	release, ok := s.waits.acquire(p.Login)
+	if !ok {
+		logger.Info(ctx, "wait refused, too many open", slog.F("login", p.Login))
+		return nil, waitOutput{}, errTooManyWaits
+	}
+	defer release()
 
 	req.query.After, err = s.startCursor(ctx, req)
 	if err != nil {
@@ -190,8 +206,22 @@ func (s *Service) principal(ctx context.Context, logger slog.Logger, op string) 
 }
 
 func (s *Service) authorizeRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo string) (int64, error) {
+	return checkRepo(ctx, logger, p, op, repo, s.authorizer.RepoID)
+}
+
+// authorizeFreshRepo is authorizeRepo that ignores what the Authorizer
+// remembers, when it can.
+func (s *Service) authorizeFreshRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo string) (int64, error) {
+	lookup := s.authorizer.RepoID
+	if u, ok := s.authorizer.(uncachedAuthorizer); ok {
+		lookup = u.RepoIDUncached
+	}
+	return checkRepo(ctx, logger, p, op, repo, lookup)
+}
+
+func checkRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo string, lookup func(context.Context, Principal, string) (int64, error)) (int64, error) {
 	logger = logger.With(slog.F("login", p.Login))
-	repoID, err := s.authorizer.RepoID(ctx, p, repo)
+	repoID, err := lookup(ctx, p, repo)
 	switch {
 	case xerrors.Is(err, ErrNoAccess):
 		logger.Info(ctx, op+" denied")
@@ -211,9 +241,10 @@ func (s *Service) authorizeRepo(ctx context.Context, logger slog.Logger, p Princ
 
 // startCursor picks where a wait begins. A given cursor wins. With a sha the
 // wait begins shaLookback ago. Otherwise it begins at the present, which is
-// the highest ID received before now. If the store's clock is behind ours that
-// can return an event from just before the call. It cannot skip one that
-// arrives later, because later events get higher IDs than any that exist now.
+// the highest ID received before now. If the store's clock is ahead of ours,
+// an event from just before the call can still carry a time after now, and the
+// wait returns it. It cannot skip one that arrives later, because later events
+// get higher IDs than any that exist now.
 func (s *Service) startCursor(ctx context.Context, req waitRequest) (int64, error) {
 	switch {
 	case req.cursor != nil:

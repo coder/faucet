@@ -157,9 +157,31 @@ func newTestServer(t *testing.T, configure ...func(*httptest.Server)) *testServe
 		c(srv)
 	}
 	srv.Start()
-	t.Cleanup(srv.Close)
-	t.Cleanup(func() { clock.Advance(time.Hour) })
+	t.Cleanup(func() { closeServer(srv, clock) })
 	return &testServer{Server: srv, github: github, store: store, clock: clock, logs: logs}
+}
+
+// closeServer closes srv and fires the pending timers of clock one at a time
+// while it waits, so a handler that waits on one ends. A single Advance of an
+// hour fails the test when a timer is due sooner and leaves Close to wait for
+// that handler until the package timeout, with no report of what failed.
+func closeServer(srv *httptest.Server, clock *quartz.Mock) {
+	closed := make(chan struct{})
+	go func() {
+		srv.Close()
+		close(closed)
+	}()
+	for {
+		select {
+		case <-closed:
+			return
+		case <-time.After(10 * time.Millisecond):
+			if _, ok := clock.Peek(); ok {
+				_, advanced := clock.AdvanceNext()
+				<-advanced.Done()
+			}
+		}
+	}
 }
 
 func (s *testServer) requireNoToken(t *testing.T, what string, texts ...string) {
@@ -195,7 +217,6 @@ func (s *testServer) connect(ctx context.Context, t *testing.T, token string) *m
 	}, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = session.Close() })
-	t.Cleanup(func() { s.clock.Advance(time.Hour) })
 	return session
 }
 
