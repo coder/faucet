@@ -217,9 +217,10 @@ func (r *deliveryRun) add(update func(*DeliverResult)) {
 
 // unlessEnded drops an error that the end of the run's context caused, and
 // says the run is incomplete instead. A store call that the deadline cut short
-// is no store failure, and the run's result is still what it did.
+// is no store failure, and the run's result is still what it did. Any other
+// error stays the run's error, also when the context ended meanwhile.
 func (r *deliveryRun) unlessEnded(ctx context.Context, err error) error {
-	if ctx.Err() == nil {
+	if ctx.Err() == nil || !xerrors.Is(err, context.Canceled) && !xerrors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
 	r.add(func(res *DeliverResult) { res.Incomplete = true })
