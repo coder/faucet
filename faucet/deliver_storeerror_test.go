@@ -151,32 +151,49 @@ func TestDeliverDueReturnsTheTimeoutOfARecordedResultAfterTheRunEnded(t *testing
 	require.ErrorIs(t, err, context.DeadlineExceeded, "the store timed out on its own, and the run's end is no reason to hide it")
 }
 
-// sweepEndsStore ends the run during the sweep of previous secrets and fails it
-// with errStoreDown.
+// sweepEndsStore ends the run during the sweep of previous secrets. The sweep
+// fails with the cut query's context error when cut is set, and with
+// errStoreDown otherwise.
 type sweepEndsStore struct {
 	faucet.Store
 	endRun func()
+	cut    bool
 }
 
-func (s *sweepEndsStore) ClearExpiredPreviousSecrets(context.Context, time.Time) (int64, error) {
+func (s *sweepEndsStore) ClearExpiredPreviousSecrets(ctx context.Context, _ time.Time) (int64, error) {
 	s.endRun()
+	if s.cut {
+		return 0, ctx.Err()
+	}
 	return 0, errStoreDown
 }
 
-func TestDeliverDueLogsAFailedSweepOfPreviousSecretsThatTheRunEndedDuring(t *testing.T) {
+func TestDeliverDueLogsAFailedSweepOfPreviousSecretsUnlessTheEndOfTheRunCausedIt(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	d := newDeliverHarness(t, func(deps *faucet.Deps) {
-		deps.Store = &sweepEndsStore{Store: deps.Store, endRun: cancel}
-	})
-	d.ledgerSkip = true
+	for _, tc := range []struct {
+		name   string
+		cut    bool
+		logged bool
+	}{
+		{"the store failed for its own reason", false, true},
+		{"the end of the run cut the sweep short", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			d := newDeliverHarness(t, func(deps *faucet.Deps) {
+				deps.Store = &sweepEndsStore{Store: deps.Store, endRun: cancel, cut: tc.cut}
+			})
+			d.ledgerSkip = true
 
-	res, err := d.svc.DeliverDue(ctx)
-	require.NoError(t, err, "a failed sweep ends nothing")
-	require.True(t, res.Incomplete)
-	require.True(t, d.logsContain("clear expired previous secrets"), "the store failed for its own reason, and the log has it")
+			res, err := d.svc.DeliverDue(ctx)
+			require.NoError(t, err, "a failed sweep ends nothing")
+			require.True(t, res.Incomplete)
+			require.Equal(t, tc.logged, d.logsContain("clear expired previous secrets"))
+		})
+	}
 }
 
 // claimEndsStore ends the run inside one kind of claim, as the cancel cuts a
