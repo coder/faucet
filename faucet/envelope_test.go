@@ -479,6 +479,31 @@ func TestDeliverDueKeepsAGapThatItDidNotSendForTheNextRun(t *testing.T) {
 	})
 }
 
+func TestDeliverDueLeavesAGapOwedWhenTheRunEndsDuringItsRequest(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	ep := d.endpoint("/hook")
+	d.purgedBeforeRead(ep)
+	ctx, cancel := context.WithCancel(d.ctx)
+	defer cancel()
+	d.rcv.answerEnvelope("/hook", "gap", func() int {
+		cancel()
+		time.Sleep(50 * time.Millisecond)
+		return http.StatusOK
+	})
+
+	res := d.deliverDueWith(ctx)
+	require.Equal(t, 1, res.Gaps)
+	require.Zero(t, res.GapsSent+res.GapsFailed, "the run does not know whether the endpoint got the envelope, so it counts neither")
+	require.True(t, res.Incomplete)
+
+	d.advance(faucet.DeliveryLease)
+	next := d.deliverDueWith(context.Background())
+	require.Equal(t, 1, next.GapsSent, "the next run sends the gap again after the lease")
+	require.Len(t, d.rcv.envelopesOf("/hook", "gap"), 2)
+}
+
 func TestDeliverDueSendsAGapToTheSubscriptionAsItIsWhenTheEnvelopeGoesOut(t *testing.T) {
 	t.Parallel()
 
