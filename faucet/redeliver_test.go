@@ -341,14 +341,17 @@ func TestASlowListCostsPagesAndNeverTheAsksOrTheSettle(t *testing.T) {
 		for i := range 1800 { // 18 pages, behind the failures
 			env.gh.record(fmt.Sprintf("worked-%04d", i), env.now().Add(-time.Minute-time.Duration(i)*time.Second), http200)
 		}
-		// 18 pages need 2.7 seconds, and the run has 2. It reads for the first one.
+		// 18 pages need 2.7 seconds, and the run has 2. The scan gets the first
+		// half of it, 1 second. Pages 1 to 6 end at 150 ms to 900 ms. Page 7
+		// starts at 900 ms and is in flight when the scan time ends, so the run
+		// cancels it and does not count it.
 		env.gh.listDelay = 150 * time.Millisecond
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
 		res, err := env.svc.Redeliver(ctx)
 		require.NoError(t, err, "the end of the time for the scan is like the page limit: no failure")
-		require.Less(t, res.Pages, 18)
+		require.Equal(t, 6, res.Pages, "the page in flight at the end of the scan time is canceled and not counted")
 		require.Equal(t, 3, res.Tracked)
 		require.Equal(t, 3, res.Asked, "a slow list does not cost the asks")
 		require.Equal(t, 3, res.Pending, "a slow list does not cost the settle")
@@ -372,15 +375,17 @@ func TestSlowAsksStopStartingInTimeForARequestInFlightToEndAndForThePurge(t *tes
 		}
 		// 30 asks need 3.3 seconds, and the run has 2. No ask ends at a time that
 		// is a share of the run, so that none ends at the instant that the run
-		// cancels one in flight.
+		// cancels one in flight. No ask starts after 80 percent, which is 1.6
+		// seconds. Asks start every 110 ms, from 0 to 1.54 seconds, and that
+		// is 15 of them. The last ends at 1.65 seconds, before the 90 percent
+		// at which the run cancels an ask in flight.
 		env.gh.askDelay = 110 * time.Millisecond
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
 		res, err := env.svc.Redeliver(ctx)
 		require.NoError(t, err, "no ask is in flight when the time ends, so none is canceled and none is lost")
-		require.Positive(t, res.Asked)
-		require.Less(t, res.Asked, 30)
+		require.Equal(t, 15, res.Asked, "asks start until 80 percent of the time, and every one that started ended")
 		require.Equal(t, 30, res.Pending)
 		require.Len(t, env.gh.askedTimes("failed-29"), 1, "the delivery that waited longest went first")
 		spy.mu.Lock()
