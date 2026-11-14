@@ -199,10 +199,11 @@ type RedeliverResult struct {
 // the ranges, newest first, with what the head read leaves of their page
 // limit. A first page that already reaches that position opens no range, for
 // the runs before it read the overlap. A cursor that GitHub gave is kept with
-// the range, so a later run continues right after the last attempt read. A range whose old end leaves
-// GitHub's retention before it is read becomes a gap. Where that retention
-// begins is a time of GitHub's: the Date of the run's first page, never earlier
-// than the newest attempt on it. A run that has neither records no gap.
+// the range, so a later run continues right after the last attempt read. A
+// range whose old end leaves GitHub's retention before it is read becomes a
+// gap. Where that retention begins is a time of GitHub's: the Date of the run's
+// first page, never earlier than the newest attempt on it. A run that has
+// neither records no gap.
 //
 // A delivery is asked for at most MaxAsksPerDelivery times, on the schedule
 // that AskOffsets gives, and at most MaxAsksPerRun times in a run, the delivery
@@ -301,7 +302,7 @@ type pageRead struct {
 
 // githubNow is GitHub's own time at this page: the Date header, but never
 // earlier than the newest attempt that the page lists. It is zero when the page
-// has neither. Faucet's clock does not belong here.
+// has neither.
 func (p pageRead) githubNow() time.Time {
 	if p.newest.After(p.at) {
 		return p.newest

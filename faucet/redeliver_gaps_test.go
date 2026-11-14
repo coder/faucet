@@ -53,19 +53,21 @@ func requireNoSilentLoss(t *testing.T, env *redeliveryEnv, failures []ghAttempt)
 	}
 }
 
+// failEvery gives GitHub a failed attempt every interval of the last span, at
+// GitHub's times.
+func failEvery(env *redeliveryEnv, every, span time.Duration) []ghAttempt {
+	var failures []ghAttempt
+	for at := env.gh.now().Add(-span + every); !at.After(env.gh.now()); at = at.Add(every) {
+		failures = append(failures, env.gh.record(fmt.Sprintf("f-%05d", len(failures)), at, 503))
+	}
+	return failures
+}
+
 func TestAGapReachesGitHubsRetentionWhateverFaucetsClockSays(t *testing.T) {
 	t.Parallel()
 
 	// skew is GitHub's clock minus faucet's. The failures sit 50 minutes apart,
 	// so that a skew of 3 hours spans several of them.
-	failEvery := func(env *redeliveryEnv, every, span time.Duration) []ghAttempt {
-		var failures []ghAttempt
-		for at := env.gh.now().Add(-span + every); !at.After(env.gh.now()); at = at.Add(every) {
-			failures = append(failures, env.gh.record(fmt.Sprintf("f-%05d", len(failures)), at, 503))
-		}
-		return failures
-	}
-
 	t.Run("the first run, with faucet's clock ahead", func(t *testing.T) {
 		t.Parallel()
 		env := newRedeliveryEnv(t)
@@ -297,4 +299,16 @@ func TestAnAttemptThatGotNoAnswerOrARedirectIsAFailureAndOnlyA2xxIsNot(t *testin
 			require.Equal(t, failure, env.stored("g1"), "a failure is asked for until faucet stores it")
 		})
 	}
+}
+
+func TestAPageWithoutADateTakesTheEndOfTheFirstGapFromItsNewestAttempt(t *testing.T) {
+	t.Parallel()
+
+	env := newRedeliveryEnv(t)
+	env.use(env.store, dateAdmin{HookAdmin: env.gh, missing: true})
+	failures := failEvery(env, 50*time.Minute, faucet.GitHubDeliveryRetention)
+
+	env.run()
+
+	requireNoSilentLoss(t, env, failures)
 }
