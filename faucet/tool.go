@@ -206,7 +206,7 @@ func (s *Service) principal(ctx context.Context, logger slog.Logger, op string) 
 }
 
 func (s *Service) authorizeRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo string) (int64, error) {
-	return s.checkRepo(ctx, logger, p, op, repo, s.authorizer.RepoID)
+	return checkRepo(ctx, logger, p, op, repo, s.authorizer.RepoID)
 }
 
 // authorizeFreshRepo is authorizeRepo that ignores what the Authorizer
@@ -216,10 +216,10 @@ func (s *Service) authorizeFreshRepo(ctx context.Context, logger slog.Logger, p 
 	if u, ok := s.authorizer.(uncachedAuthorizer); ok {
 		lookup = u.RepoIDUncached
 	}
-	return s.checkRepo(ctx, logger, p, op, repo, lookup)
+	return checkRepo(ctx, logger, p, op, repo, lookup)
 }
 
-func (s *Service) checkRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo string, lookup func(context.Context, Principal, string) (int64, error)) (int64, error) {
+func checkRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo string, lookup func(context.Context, Principal, string) (int64, error)) (int64, error) {
 	logger = logger.With(slog.F("login", p.Login))
 	repoID, err := lookup(ctx, p, repo)
 	switch {
