@@ -98,6 +98,47 @@ describe('cron routes', () => {
     }
   });
 
+  for (const [title, send] of refused) {
+    test(`GET /cron/redeliver with ${title} is 401 and asks GitHub for nothing`, async ({ cron, hooks }) => {
+      await cron.withFaucet(cron.hookEnv(), async (started) => {
+        await hooks.arm(started, []);
+
+        const reply = await started.cronJob('redeliver', { send });
+
+        expect(reply.status).toBe(401);
+        expect(reply.body).toBe('unauthorized\n');
+        expect(reply.headers.get('www-authenticate')).toBe('Bearer');
+        expect(started.leaksSecret(reply.body + JSON.stringify([...reply.headers]))).toBe(false);
+        expect(await hooks.requests(), 'a refused call must not reach GitHub').toEqual([]);
+      });
+    });
+  }
+
+  for (const method of ['POST', 'PUT', 'DELETE']) {
+    test(`${method} /cron/redeliver with the right secret is 405 and asks GitHub for nothing`, async ({ cron, hooks }) => {
+      await cron.withFaucet(cron.hookEnv(), async (started) => {
+        await hooks.arm(started, []);
+
+        const reply = await started.cronJob('redeliver', { method });
+
+        expect(reply.status).toBe(405);
+        expect(await hooks.requests()).toEqual([]);
+      });
+    });
+  }
+
+  test('a faucet with a cron secret and no hook settings answers /cron/redeliver 503 after it checks the secret', async ({ cron }) => {
+    const wrong = await cron.cronJob('redeliver', { send: () => ({ authorization: `Bearer ${'0'.repeat(64)}` }) });
+    const right = await cron.cronJob('redeliver');
+    const purge = await cron.cronJob('purge');
+
+    expect(wrong.status, 'a caller without the secret learns nothing about the config').toBe(401);
+    expect(right.status).toBe(503);
+    expect(right.body).toBe('redelivery is not configured\n');
+    expect(purge.status, 'purge does not need the hook settings').toBe(200);
+    expect(cron.leaksSecret(right.body)).toBe(false);
+  });
+
   test('GET /cron/deliver with the right secret on a faucet without webhook mode is 503 and sends nothing', async ({ cron }) => {
     const reply = await cron.cronJob('deliver');
 

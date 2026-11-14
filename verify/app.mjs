@@ -63,25 +63,174 @@ function freePort() {
   });
 }
 
-// The stub knows two tokens and answers GET /user with the login of the token
-// (verify-user and verify-other) and GET /repos/verify/r<id> with repository id
-// <id> for both. Every other repository is 404, like one the token cannot see,
-// and so is one that the receiver's control channel has revoked.
-async function startGitHubStub(token, otherToken, revoked) {
-  const reply = (res, status, body) => {
-    res.writeHead(status, { 'Content-Type': 'application/json' });
+const HOOK_PATH = '/orgs/verify/hooks/7';
+const RETENTION_MS = 72 * 60 * 60 * 1000;
+
+async function readJson(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+// The stub plays GitHub. It knows two tokens and answers GET /user with the login of the token (verify-user and
+// verify-other) and GET /repos/verify/r<id> with repository id <id> for both. Every other repository is 404, like one the
+// token cannot see, and so is one that the receiver's control channel has revoked.
+//
+// It also serves the deliveries API of the org webhook verify/7 to `hookToken` alone, as GitHub does: attempts newest first,
+// 100 at most per page, a Link header with a keyset cursor (v1_<attempt id>), nothing older than 72 hours. A redelivery
+// request makes the stub post the stored payload, signed, to the faucet that the test named, and add the answer as a new
+// attempt. A test sets the attempts and reads the requests through /__stub/, which needs `control`. The request log names
+// the kind of credential each request carried and never the credential.
+async function startGitHubStub({ token, otherToken, hookToken, control, revoked }) {
+  const reply = (res, status, body, headers = {}) => {
+    res.writeHead(status, { 'Content-Type': 'application/json', ...headers });
     res.end(JSON.stringify(body));
   };
-  const stub = createHttpServer((req, res) => {
-    const login = { [`Bearer ${token}`]: 'verify-user', [`Bearer ${otherToken}`]: 'verify-other' }[req.headers.authorization ?? ''];
-    if (login === undefined) return reply(res, 401, { message: 'Bad credentials' });
-    if (req.url === '/user') return reply(res, 200, { login });
-    const repo = /^\/repos\/verify\/r(\d+)$/.exec(req.url ?? '');
-    if (repo && !revoked.has(Number(repo[1]))) return reply(res, 200, { id: Number(repo[1]) });
+  const kindOf = (auth) => {
+    if (auth === `Bearer ${hookToken}`) return 'hook';
+    if (auth === `Bearer ${token}` || auth === `Bearer ${otherToken}`) return 'user';
+    return auth ? 'other' : 'none';
+  };
+  let attempts = [];
+  let nextId = 1000;
+  let pageSize = 100;
+  let listDelayMs = 0;
+  let redeliveryStatus = 202;
+  let target = null;
+  let requests = [];
+  let address;
+
+  const add = (items) => {
+    const now = Date.now();
+    for (const d of items) {
+      attempts.push({
+        id: d.id ?? nextId++,
+        guid: d.guid,
+        at: now - d.ageMs,
+        status: d.status,
+        event: d.event ?? 'workflow_run',
+        action: d.action === undefined ? 'completed' : d.action,
+        redelivery: false,
+        payload: d.payload,
+      });
+    }
+  };
+
+  const handleControl = async (req, res, url) => {
+    if (req.headers['x-stub-control'] !== control) return reply(res, 403, { message: 'Forbidden' });
+    if (req.method === 'PUT' && url.pathname === '/__stub/deliveries') {
+      const body = await readJson(req);
+      attempts = [];
+      add(body.deliveries);
+      target = body.target ?? null;
+      pageSize = body.pageSize ?? 100;
+      listDelayMs = body.listDelayMs ?? 0;
+      redeliveryStatus = body.redeliveryStatus ?? 202;
+      requests = [];
+      return reply(res, 200, {});
+    }
+    if (req.method === 'POST' && url.pathname === '/__stub/deliveries') {
+      add((await readJson(req)).deliveries);
+      return reply(res, 200, {});
+    }
+    if (req.method === 'GET' && url.pathname === '/__stub/requests') return reply(res, 200, requests);
+    if (req.method === 'GET' && url.pathname === '/__stub/attempts') {
+      return reply(res, 200, attempts.map(({ id, guid, status, redelivery }) => ({ id, guid, status, redelivery })));
+    }
     return reply(res, 404, { message: 'Not Found' });
+  };
+
+  const newestFirst = (a, b) => b.at - a.at || b.id - a.id;
+
+  const list = async (res, url) => {
+    if (listDelayMs > 0) await new Promise((done) => setTimeout(done, listDelayMs));
+    const visible = attempts.filter((a) => a.at <= Date.now() && a.at > Date.now() - RETENTION_MS).sort(newestFirst);
+    const perPage = Math.min(Number(url.searchParams.get('per_page')) || 30, pageSize);
+    const cursor = /^v1_(\d+)$/.exec(url.searchParams.get('cursor') ?? '')?.[1];
+    let start = 0;
+    if (cursor !== undefined) {
+      const from = attempts.find((a) => a.id === Number(cursor));
+      if (!from) return reply(res, 422, { message: 'invalid cursor' });
+      start = visible.filter((a) => newestFirst(a, from) <= 0).length;
+    }
+    const page = visible.slice(start, start + perPage);
+    const headers = {};
+    if (start + perPage < visible.length) {
+      headers.Link = `<http://127.0.0.1:${address.port}${url.pathname}?per_page=${perPage}&cursor=v1_${page.at(-1).id}>; rel="next"`;
+    }
+    return reply(
+      res,
+      200,
+      page.map((d) => ({
+        id: d.id,
+        guid: d.guid,
+        delivered_at: new Date(d.at).toISOString().replace(/\.\d+Z$/, 'Z'),
+        redelivery: d.redelivery,
+        duration: 0.1,
+        status: String(d.status),
+        status_code: d.status,
+        event: d.event,
+        action: d.action,
+        installation_id: null,
+        repository_id: null,
+        throttled_at: null,
+      })),
+      headers,
+    );
+  };
+
+  const redeliver = async (res, id) => {
+    const original = attempts.find((a) => a.id === id);
+    if (!original) return reply(res, 404, { message: 'Not Found' });
+    if (redeliveryStatus !== 202) return reply(res, redeliveryStatus, { message: 'refused' });
+    let status = 500;
+    if (original.payload && target) {
+      const body = JSON.stringify(original.payload);
+      const signature = `sha256=${createHmac('sha256', target.secret).update(body).digest('hex')}`;
+      const delivered = await fetch(`${target.url}/webhook/github`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-GitHub-Event': original.event,
+          'X-GitHub-Delivery': original.guid,
+          'X-Hub-Signature-256': signature,
+        },
+        body,
+      });
+      status = delivered.status;
+    }
+    attempts.push({ ...original, id: nextId++, at: Date.now(), status, redelivery: true });
+    return reply(res, 202, {});
+  };
+
+  const hooks = async (req, res, url) => {
+    if (req.headers.authorization !== `Bearer ${hookToken}`) return reply(res, 401, { message: 'Bad credentials' });
+    if (req.method === 'GET' && url.pathname === `${HOOK_PATH}/deliveries`) return list(res, url);
+    const attempt = req.method === 'POST' && new RegExp(`^${HOOK_PATH}/deliveries/(\\d+)/attempts$`).exec(url.pathname);
+    if (attempt) return redeliver(res, Number(attempt[1]));
+    return reply(res, 404, { message: 'Not Found' });
+  };
+
+  const stub = createHttpServer(async (req, res) => {
+    try {
+      const url = new URL(req.url ?? '/', 'http://stub');
+      if (url.pathname.startsWith('/__stub/')) return await handleControl(req, res, url);
+      requests.push({ method: req.method, path: url.pathname, query: url.search, auth: kindOf(req.headers.authorization) });
+      if (url.pathname.startsWith('/orgs/')) return await hooks(req, res, url);
+      const login = { [`Bearer ${token}`]: 'verify-user', [`Bearer ${otherToken}`]: 'verify-other' }[req.headers.authorization ?? ''];
+      if (login === undefined) return reply(res, 401, { message: 'Bad credentials' });
+      if (url.pathname === '/user') return reply(res, 200, { login });
+      const repo = /^\/repos\/verify\/r(\d+)$/.exec(url.pathname);
+      if (repo && !revoked.has(Number(repo[1]))) return reply(res, 200, { id: Number(repo[1]) });
+      return reply(res, 404, { message: 'Not Found' });
+    } catch (err) {
+      log(`stub: ${err.message}`);
+      return reply(res, 500, { message: 'stub error' });
+    }
   });
   stub.listen(0, '127.0.0.1');
   await once(stub, 'listening');
+  address = stub.address();
   return stub;
 }
 
@@ -369,9 +518,11 @@ async function main(abort) {
       db: CRON_DB,
       webhookSecret: randomBytes(32).toString('hex'),
       cronSecret: randomBytes(32).toString('hex'),
+      hookToken: `ghp_${randomBytes(20).toString('hex')}`,
+      stubControl: randomBytes(16).toString('hex'),
     };
     const revoked = new Set();
-    githubStub = await startGitHubStub(githubToken, otherToken, revoked);
+    githubStub = await startGitHubStub({ token: githubToken, otherToken, hookToken: cron.hookToken, control: cron.stubControl, revoked });
     const stubUrl = `http://127.0.0.1:${githubStub.address().port}`;
     await createDatabase(psql, dir, CRON_DB);
     const receiverControl = randomBytes(16).toString('hex');

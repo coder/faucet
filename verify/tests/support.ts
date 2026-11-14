@@ -17,6 +17,8 @@ interface CronState {
   db: string;
   webhookSecret: string;
   cronSecret: string;
+  hookToken: string;
+  stubControl: string;
   stubUrl: string;
 }
 
@@ -46,6 +48,31 @@ interface Target {
   database: string;
   // The FAUCET_WEBHOOK_KEY this process runs with, or null when it has none.
   webhookKey: string | null;
+}
+
+// StubDelivery is one attempt of GitHub to deliver a webhook, as the stub in app.mjs lists it. ageMs is how long ago it
+// happened. payload is what a redelivery posts to faucet.
+export interface StubDelivery {
+  guid: string;
+  ageMs: number;
+  status: number;
+  event?: string;
+  action?: string | null;
+  payload?: object;
+}
+
+export interface StubRequest {
+  method: string;
+  path: string;
+  query: string;
+  auth: 'hook' | 'user' | 'other' | 'none';
+}
+
+export interface StubAttempt {
+  id: number;
+  guid: string;
+  status: number;
+  redelivery: boolean;
 }
 
 export interface CronCredentials {
@@ -156,17 +183,19 @@ function isSecret(value: unknown): value is string {
 }
 
 function readCronState(value: unknown): CronState {
-  const { port, db, webhookSecret, cronSecret, stubUrl } = (value ?? {}) as Partial<CronState>;
+  const { port, db, webhookSecret, cronSecret, hookToken, stubControl, stubUrl } = (value ?? {}) as Partial<CronState>;
   if (
     typeof port !== 'number' ||
     typeof db !== 'string' ||
     !isSecret(webhookSecret) ||
     !isSecret(cronSecret) ||
+    !isSecret(hookToken) ||
+    !isSecret(stubControl) ||
     typeof stubUrl !== 'string'
   ) {
     throw new Error('the run state written by app.mjs is malformed');
   }
-  return { port, db, webhookSecret, cronSecret, stubUrl };
+  return { port, db, webhookSecret, cronSecret, hookToken, stubControl, stubUrl };
 }
 
 function readReceiverState(value: unknown): ReceiverState {
@@ -242,6 +271,17 @@ export class Faucet {
     return this.#state.binary;
   }
 
+  // hookEnv is the environment that turns on redelivery for the webhook that the stub serves. A test passes it to
+  // withFaucet, and never names the token.
+  hookEnv(): Record<string, string> {
+    return { FAUCET_HOOK_TOKEN: this.#state.cron.hookToken, FAUCET_HOOK_ORG: 'verify', FAUCET_HOOK_ID: '7' };
+  }
+
+  // webhookTarget is where the stub posts a redelivery, and the secret that it signs the post with.
+  webhookTarget(): { url: string; secret: string } {
+    return { url: this.baseUrl, secret: this.#target.webhookSecret };
+  }
+
   // withFaucet starts one more faucet on its own database, runs fn against it and stops it. The new faucet has a random
   // CRON_SECRET and webhook mode off. env adds the rest. fn gets the faucet and a function that returns its
   // output so far. opts.e2eBuild runs the binary that was built with -tags faucet_e2e, whose callback client reaches loopback
@@ -310,7 +350,7 @@ export class Faucet {
 
   // cronJob calls GET /cron/<job> the way Vercel Cron does, with the run's cron secret as a bearer token. opts.send says
   // what the request carries instead, as a function of the secret, so that no test names the secret.
-  async cronJob(job: 'purge' | 'deliver', opts: CronOptions = {}): Promise<Reply> {
+  async cronJob(job: 'purge' | 'deliver' | 'redeliver', opts: CronOptions = {}): Promise<Reply> {
     const send = opts.send ?? ((secret: string): CronCredentials => ({ authorization: `Bearer ${secret}` }));
     const { authorization, query, body } = send(this.#cronSecret);
     const headers = new Headers();
@@ -527,7 +567,7 @@ export class Faucet {
 
   leaksSecret(text: string): boolean {
     const { secret, githubToken, otherToken, webhookKey, cron, receiver } = this.#state;
-    const secrets = [secret, githubToken, otherToken, webhookKey, cron.webhookSecret, cron.cronSecret, receiver.control];
+    const secrets = [secret, githubToken, otherToken, webhookKey, cron.webhookSecret, cron.cronSecret, cron.hookToken, cron.stubControl, receiver.control];
     const own = [this.#target.webhookSecret, this.#cronSecret, ...(this.#target.webhookKey === null ? [] : [this.#target.webhookKey])];
     return [...secrets, ...own].some((value) => text.includes(value));
   }
@@ -620,7 +660,53 @@ export class Receiver {
   }
 }
 
-export const test = base.extend<{ faucet: Faucet; cron: Faucet; receiver: Receiver }>({
+// HookStub sets and reads what the GitHub stub in app.mjs serves for the webhook that redelivery manages. It plays GitHub's
+// redelivery too: it posts the stored payload, signed, to the faucet that the test armed it with.
+export class HookStub {
+  readonly #url: string;
+  readonly #control: string;
+
+  constructor(appUrl: string) {
+    const { cron } = readState(appUrl);
+    this.#url = cron.stubUrl;
+    this.#control = cron.stubControl;
+  }
+
+  // arm replaces the attempts that the stub lists and clears its request log. pageSize caps a page, redeliveryStatus is the
+  // status of a redelivery request (GitHub answers 202) and listDelayMs holds every list answer back.
+  async arm(
+    faucet: Faucet,
+    deliveries: StubDelivery[],
+    opts: { pageSize?: number; redeliveryStatus?: number; listDelayMs?: number } = {},
+  ): Promise<void> {
+    await this.#call('PUT', '/__stub/deliveries', { deliveries, target: faucet.webhookTarget(), ...opts });
+  }
+
+  // add lists more attempts, as if GitHub delivered them after the last run.
+  async add(deliveries: StubDelivery[]): Promise<void> {
+    await this.#call('POST', '/__stub/deliveries', { deliveries });
+  }
+
+  async requests(): Promise<StubRequest[]> {
+    return (await this.#call('GET', '/__stub/requests')) as StubRequest[];
+  }
+
+  async attempts(): Promise<StubAttempt[]> {
+    return (await this.#call('GET', '/__stub/attempts')) as StubAttempt[];
+  }
+
+  async #call(method: string, path: string, body?: object): Promise<unknown> {
+    const response = await fetch(`${this.#url}${path}`, {
+      method,
+      headers: { 'X-Stub-Control': this.#control, 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (response.status !== 200) throw new Error(`the stub answered ${method} ${path} with ${response.status}`);
+    return response.json();
+  }
+}
+
+export const test = base.extend<{ faucet: Faucet; cron: Faucet; receiver: Receiver; hooks: HookStub }>({
   faucet: async ({ app }, use) => {
     await use(Faucet.main(app.baseUrl));
   },
@@ -629,6 +715,9 @@ export const test = base.extend<{ faucet: Faucet; cron: Faucet; receiver: Receiv
   },
   receiver: async ({ app }, use) => {
     await use(new Receiver(app.baseUrl));
+  },
+  hooks: async ({ app }, use) => {
+    await use(new HookStub(app.baseUrl));
   },
 });
 

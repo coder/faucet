@@ -137,32 +137,9 @@ func (a TokenAuthorizer) get(ctx context.Context, token, path string, out any) (
 	if err != nil {
 		return 0, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String()+path, nil)
+	resp, err := callGitHub(ctx, a.Client, base, token, http.MethodGet, path, "")
 	if err != nil {
-		return 0, xerrors.Errorf("build GitHub request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("User-Agent", "coder-faucet")
-
-	client := http.DefaultClient
-	if a.Client != nil {
-		client = a.Client
-	}
-	pinned := *client
-	pinned.CheckRedirect = func(next *http.Request, via []*http.Request) error {
-		if next.URL.Scheme != base.Scheme || next.URL.Host != base.Host {
-			return xerrors.New("GitHub redirected to another host")
-		}
-		if len(via) > maxRedirects {
-			return xerrors.New("GitHub redirected too many times")
-		}
-		return nil
-	}
-	resp, err := pinned.Do(req)
-	if err != nil {
-		return 0, xerrors.Errorf("call GitHub: %w", err)
+		return 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -176,6 +153,45 @@ func (a TokenAuthorizer) get(ctx context.Context, token, path string, out any) (
 		return 0, xerrors.Errorf("decode GitHub response: %w", err)
 	}
 	return resp.StatusCode, nil
+}
+
+// callGitHub sends the token to base and nowhere else. A redirect is followed
+// only when it keeps the scheme and host of base, so no redirect can carry the
+// token to another host. The caller closes the response body.
+func callGitHub(ctx context.Context, client *http.Client, base *url.URL, token, method, path, rawQuery string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, base.String()+path, nil)
+	if err != nil {
+		return nil, xerrors.Errorf("build GitHub request: %w", err)
+	}
+	req.URL.RawQuery = rawQuery
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", "coder-faucet")
+
+	if client == nil {
+		client = http.DefaultClient
+	}
+	pinned := *client
+	pinned.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		if next.URL.Scheme != base.Scheme || next.URL.Host != base.Host {
+			return xerrors.New("GitHub redirected to another host")
+		}
+		if len(via) > maxRedirects {
+			return xerrors.New("GitHub redirected too many times")
+		}
+		return nil
+	}
+	resp, err := pinned.Do(req)
+	if err != nil {
+		// A *url.Error quotes the request URL, which can carry a cursor.
+		var urlErr *url.Error
+		if xerrors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		return nil, xerrors.Errorf("call GitHub: %w", err)
+	}
+	return resp, nil
 }
 
 // rateLimited tells GitHub's rate limiter from a denial. GitHub answers a rate

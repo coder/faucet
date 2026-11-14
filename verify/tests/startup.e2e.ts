@@ -10,6 +10,7 @@ const FAKE_DB_PASSWORD = 'fake-db-password-7c1f4e';
 const FAKE_SECRET = 'fake-webhook-secret-0123456789abcdef';
 const SHORT_SECRET = 'tiny-7c1f4e';
 const FAKE_CRON_SECRET = 'fake-cron-secret-0123456789abcdef';
+const FAKE_HOOK_TOKEN = 'ghp_fakehook0123456789abcdefghijklmnop';
 const ORIGIN_TOKEN = 'h7c1f4e';
 const USERINFO_TOKEN = 'ppass7c1f4e';
 const KEY_NOT_BASE64 = 'not-base64-key-7c1f4e!!';
@@ -132,6 +133,27 @@ describe('startup configuration', () => {
       env: { ...valid, CRON_SECRET: SHORT_SECRET },
       message: 'CRON_SECRET must be at least 16 bytes\n',
     },
+    ...(
+      [
+        ['FAUCET_HOOK_TOKEN alone', { FAUCET_HOOK_TOKEN: FAKE_HOOK_TOKEN }, 'redelivery needs FAUCET_HOOK_ID, FAUCET_HOOK_ORG or FAUCET_HOOK_REPO\n'],
+        ['FAUCET_HOOK_ID alone', { FAUCET_HOOK_ID: '7' }, 'redelivery needs FAUCET_HOOK_TOKEN, FAUCET_HOOK_ORG or FAUCET_HOOK_REPO\n'],
+        [
+          'both FAUCET_HOOK_ORG and FAUCET_HOOK_REPO',
+          { FAUCET_HOOK_TOKEN: FAKE_HOOK_TOKEN, FAUCET_HOOK_ID: '7', FAUCET_HOOK_ORG: 'acme', FAUCET_HOOK_REPO: 'acme/app' },
+          'set only one of FAUCET_HOOK_ORG and FAUCET_HOOK_REPO\n',
+        ],
+        [
+          'a FAUCET_HOOK_ID that is not a number',
+          { FAUCET_HOOK_TOKEN: FAKE_HOOK_TOKEN, FAUCET_HOOK_ID: 'seven', FAUCET_HOOK_ORG: 'acme' },
+          'FAUCET_HOOK_ID must be a positive integer\n',
+        ],
+        [
+          'a FAUCET_HOOK_TOKEN with a space',
+          { FAUCET_HOOK_TOKEN: 'ghp_fake hook', FAUCET_HOOK_ID: '7', FAUCET_HOOK_ORG: 'acme' },
+          'FAUCET_HOOK_*: hook token must be 1 to 1024 printable ASCII characters without spaces\n',
+        ],
+      ] as [string, Record<string, string>, string][]
+    ).map(([name, settings, message]) => ({ name, env: { ...valid, ...settings }, message })),
     ...['abc', '0', '-1', '3651', '1.5', '30 days'].map((days) => ({
       name: `FAUCET_RETENTION_DAYS=${days}`,
       env: { ...valid, FAUCET_RETENTION_DAYS: days },
@@ -140,7 +162,7 @@ describe('startup configuration', () => {
     ...webhookCases.map(([name, settings, message]) => ({ name, env: { ...valid, ...settings }, message })),
   ];
   const printedNever = [
-    FAKE_DB_PASSWORD, FAKE_SECRET, SHORT_SECRET, FAKE_CRON_SECRET,
+    FAKE_DB_PASSWORD, FAKE_SECRET, SHORT_SECRET, FAKE_CRON_SECRET, FAKE_HOOK_TOKEN,
     KEY_32, KEY_NOT_BASE64, KEY_URL_SAFE, KEY_31_BYTES, KEY_33_BYTES, KEY_ZERO, ORIGIN_TOKEN, USERINFO_TOKEN, VERIFY_UNKNOWN,
   ];
   for (const { name, env, message } of cases) {

@@ -21,10 +21,11 @@ One file per user-facing behavior of the faucet server at PR 8b, from the point 
 | [Events subscribe](events-subscribe.md) | `POST /mcp`, `events/subscribe` | `tests/events-subscribe.e2e.ts`, `tests/events-subscribe-types.e2e.ts` | tested |
 | [Events unsubscribe](events-unsubscribe.md) | `POST /mcp`, `events/unsubscribe` | `tests/events-unsubscribe.e2e.ts` | tested |
 | [Webhook handshake](webhook-handshake.md) | `POST /mcp`, `events/subscribe` in `handshake` mode, and the request that faucet sends to the callback URL | `tests/handshake.e2e.ts` | tested |
-| [Cron routes](cron-auth.md) | `GET /cron/purge`, `GET /cron/deliver`, the secret check | `tests/cron-auth.e2e.ts` | tested |
+| [Cron routes](cron-auth.md) | `GET /cron/purge`, `GET /cron/deliver`, `GET /cron/redeliver`, the secret check | `tests/cron-auth.e2e.ts` | tested |
 | [Purge](purge.md) | `GET /cron/purge`, then `events/poll`, the wait tool and the subscriptions table | `tests/purge.e2e.ts` | tested |
 | [Control envelopes](envelopes.md) | `GET /cron/deliver` after a purge, and `events/subscribe` after a revoked renewal, then the signed `POST` of a `gap` or `terminated` body to the callback URL | `tests/envelopes.e2e.ts` | tested |
 | [Secret rotation](rotation.md) | `POST /mcp`, `events/subscribe` with a new secret, then `GET /cron/deliver` and the signed `POST` to the callback URL | `tests/rotation.e2e.ts` | tested |
 | [Webhook delivery](delivery.md) | `GET /cron/deliver`, then the signed `POST` to the callback URL | `tests/delivery.e2e.ts`, `tests/delivery-retry.e2e.ts`, `tests/cron-auth.e2e.ts` | tested |
+| [Redelivery](redeliver.md) | `GET /cron/redeliver`, the deliveries stub, the redelivery tables and the app log | `tests/redeliver.e2e.ts`, `tests/cron-auth.e2e.ts`, `tests/startup.e2e.ts` | tested |
 
 The webhook handler checks in this order: method, signature header shape, body size, the HMAC, the event and delivery headers, `ping`, then the payload. A rejection earlier in that order wins. A test pins only the first ordering, the signature before the headers. Two more were checked once by hand at PR 2 and are not pinned: an oversize body is 413 before any HMAC, and `ping` needs both headers.
