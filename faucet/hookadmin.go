@@ -47,14 +47,11 @@ type DeliveryPage struct {
 	// Next is the cursor of the next, older page. It is empty on the last page.
 	Next string
 	// At is GitHub's own clock when it answered, which GitHub's Date header
-	// carries. It is zero when GitHub sent none. Redeliver takes the start of
-	// GitHub's retention from At, and never from faucet's clock: the clocks
-	// differ, and a gap that ends at the wrong time leaves attempts uncounted.
-	// When the whole list is empty, Redeliver moves its position to At less
-	// RedeliveryStartLookback, so that a Date that runs ahead cannot make the
-	// next failed attempt look as if an earlier run had read it. A HookAdmin
-	// that leaves At zero leaves the position where it was, and a run that has
-	// no time from GitHub records no gap, because it cannot tell what expired.
+	// carries. It is zero when GitHub sent none. When the whole list is empty,
+	// Redeliver moves its position to At and never to the time of faucet's
+	// clock: the clocks differ, and a position ahead of GitHub's would make
+	// the next failed attempt look as if an earlier run had read it. A
+	// HookAdmin that leaves At zero leaves the position where it was.
 	At time.Time
 }
 

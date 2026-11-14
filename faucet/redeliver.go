@@ -29,8 +29,6 @@ const (
 	// RedeliveryStartLookback is how far back the first run of a webhook reads.
 	// The part of GitHub's retention before it is recorded as one gap, so the
 	// first run does not spend its pages on a history that nobody waits for.
-	// A run that reads an empty list puts its position this far behind
-	// GitHub's clock, so that a wrong Date cannot hide the next failure.
 	RedeliveryStartLookback = 24 * time.Hour
 
 	redeliveryLeaseTTL  = 2 * time.Minute
@@ -199,9 +197,7 @@ type RedeliverResult struct {
 // the ranges, newest first, with what the head read leaves of their page
 // limit. A cursor that GitHub gave is kept with the range, so a later run
 // continues right after the last attempt read. A range whose old end leaves
-// GitHub's retention before it is read becomes a gap. Where that retention
-// begins is a time of GitHub's: the Date of the run's first page, never earlier
-// than the newest attempt on it. A run that has neither records no gap.
+// GitHub's retention before it is read becomes a gap.
 //
 // A delivery is asked for at most MaxAsksPerDelivery times, on the schedule
 // that AskOffsets gives, and at most MaxAsksPerRun times in a run, the delivery
@@ -251,10 +247,6 @@ type redeliveryRun struct {
 	epoch  int64
 	budget runBudget
 	res    RedeliverResult
-	// floor is where GitHub's retention begins, on GitHub's own clock. It is
-	// zero when GitHub gave this run no time to take it from, and then the run
-	// records no gap, because it cannot tell what expired.
-	floor time.Time
 }
 
 func (r *redeliveryRun) execute(ctx context.Context, scan RedeliveryScan) (RedeliverResult, error) {
@@ -296,16 +288,6 @@ type pageRead struct {
 	at           time.Time
 	reachedBound bool
 	next         string
-}
-
-// githubNow is GitHub's own time at this page: the Date header, but never
-// earlier than the newest attempt that the page lists. It is zero when the page
-// has neither.
-func (p pageRead) githubNow() time.Time {
-	if p.newest.After(p.at) {
-		return p.newest
-	}
-	return p.at
 }
 
 // finished says that a read of the range this page belongs to has seen all of
@@ -354,17 +336,13 @@ func (p pageRead) step(epoch int64, now time.Time) ScanStep {
 }
 
 // gapOf says which part of a range expired before a run read it. olderAt is
-// the range's old end. coveredFrom is how far down a read has got, or zero when
-// it got nowhere. Only the part below the retention floor is gone. A part above
-// it that holds no attempt was quiet. A zero floor means that nothing says what
-// is gone.
+// the range's old end. coveredFrom is how far down a read has got, or the
+// range's new end when it got nowhere. Only the part below the retention floor
+// is gone. A part above it that holds no attempt was quiet.
 func gapOf(olderAt, floor, coveredFrom time.Time) *RedeliveryGap {
-	if floor.IsZero() {
-		return nil
-	}
-	to := floor
-	if !coveredFrom.IsZero() && coveredFrom.Before(floor) {
-		to = coveredFrom
+	to := coveredFrom
+	if floor.Before(to) {
+		to = floor
 	}
 	if !olderAt.Before(to) {
 		return nil
@@ -409,43 +387,40 @@ func (r *redeliveryRun) countGap(ctx context.Context, gap RedeliveryGap, cause s
 // returns whether the head read worked.
 func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, error) {
 	now := r.svc.clock.Now()
-	first := scan.Top.IsZero()
+	floor := now.Add(-GitHubDeliveryRetention)
 	olderAt, bound := scan.Top, scan.Top.Add(-RedeliveryReadOverlap)
-	if first {
+	var gap *RedeliveryGap
+	cause := gapExpiredUnread
+	if scan.Top.IsZero() {
 		olderAt = now.Add(-RedeliveryStartLookback)
 		bound = olderAt
+		gap, cause = &RedeliveryGap{From: floor, To: olderAt}, gapBeforeTracking
 	}
 
 	head, err := r.read(ctx, "", bound)
 	if err != nil {
 		return false, err
 	}
-	githubNow := head.githubNow()
-	if !githubNow.IsZero() {
-		r.floor = githubNow.Add(-GitHubDeliveryRetention)
-	}
 	step := head.step(r.epoch, now)
-	// The position is a time of GitHub's: the newest attempt, or, when the list
-	// is empty, GitHub's clock less the lookback. A Date that runs ahead of the
-	// list by less than that cannot put the next failure below the position.
-	// Faucet's clock does not belong here (see DeliveryPage.At).
+	// The position is a time of GitHub's: the newest attempt, or GitHub's clock
+	// when the list is empty. Faucet's clock does not belong here (see
+	// DeliveryPage.At).
 	step.Top = head.newest
-	if step.Top.IsZero() && !head.at.IsZero() {
-		step.Top = head.at.Add(-RedeliveryStartLookback)
+	if step.Top.IsZero() {
+		step.Top = head.at
 	}
-	cause := gapExpiredUnread
-	switch {
-	case first:
-		cause = gapBeforeTracking
-		if !r.floor.IsZero() && r.floor.Before(olderAt) {
-			step.Gap = &RedeliveryGap{From: r.floor, To: olderAt}
+	if head.finished() {
+		covered := now
+		if !head.oldest.IsZero() {
+			covered = head.oldest
 		}
-	case head.finished():
-		step.Gap = gapOf(olderAt, r.floor, head.oldest)
-	}
-	if !head.finished() {
+		if gap == nil {
+			gap = gapOf(olderAt, floor, covered)
+		}
+	} else {
 		step.Open = &RedeliveryRange{NewerAt: head.oldest, OlderAt: olderAt, Cursor: head.next}
 	}
+	step.Gap = gap
 	res, err := r.apply(ctx, step, cause)
 	if err != nil {
 		return false, err
@@ -461,9 +436,10 @@ func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, er
 }
 
 func (r *redeliveryRun) readRanges(ctx context.Context, ranges []RedeliveryRange) error {
+	floor := r.svc.clock.Now().Add(-GitHubDeliveryRetention)
 	live := ranges[:0:0]
 	for _, rg := range ranges {
-		if !rg.NewerAt.Before(r.floor) {
+		if !rg.NewerAt.Before(floor) {
 			live = append(live, rg)
 			continue
 		}
@@ -492,8 +468,12 @@ func (r *redeliveryRun) readRanges(ctx context.Context, ranges []RedeliveryRange
 				rg.Cursor = p.next
 				continue
 			}
+			covered := rg.NewerAt
+			if !p.oldest.IsZero() {
+				covered = p.oldest
+			}
 			step.CloseID = rg.ID
-			step.Gap = gapOf(rg.OlderAt, r.floor, p.oldest)
+			step.Gap = gapOf(rg.OlderAt, now.Add(-GitHubDeliveryRetention), covered)
 			if _, err := r.apply(ctx, step, gapExpiredUnread); err != nil {
 				return err
 			}

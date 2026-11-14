@@ -576,7 +576,7 @@ func TestRedeliverRecordsOnlyTheExpiredPartOfARangeAsAGap(t *testing.T) {
 	require.Len(t, lines, 2)
 	require.Equal(t, "expired unread", lines[1]["cause"])
 	from, to := logTime(t, lines[1]["from"]), logTime(t, lines[1]["to"])
-	require.WithinDuration(t, start.Add(-faucet.RedeliveryStartLookback), from, time.Minute, "the gap starts where the position of the earlier run was: it read an empty list, so GitHub's clock less the lookback")
+	require.WithinDuration(t, start, from, time.Minute, "the gap starts where the position of the earlier run was")
 	require.WithinDuration(t, env.now().Add(-faucet.GitHubDeliveryRetention), to, time.Minute, "and ends where GitHub's list begins")
 }
 

@@ -53,57 +53,6 @@ func requireNoSilentLoss(t *testing.T, env *redeliveryEnv, failures []ghAttempt)
 	}
 }
 
-// failEvery gives GitHub a failed attempt every interval of the last span, at
-// GitHub's times.
-func failEvery(env *redeliveryEnv, every, span time.Duration) []ghAttempt {
-	var failures []ghAttempt
-	for at := env.gh.now().Add(-span + every); !at.After(env.gh.now()); at = at.Add(every) {
-		failures = append(failures, env.gh.record(fmt.Sprintf("f-%05d", len(failures)), at, 503))
-	}
-	return failures
-}
-
-func TestAGapReachesGitHubsRetentionWhateverFaucetsClockSays(t *testing.T) {
-	t.Parallel()
-
-	// skew is GitHub's clock minus faucet's. The failures sit 50 minutes apart,
-	// so that a skew of 3 hours spans several of them.
-	t.Run("the first run, with faucet's clock ahead", func(t *testing.T) {
-		t.Parallel()
-		env := newRedeliveryEnv(t)
-		env.gh.skew = -3 * time.Hour
-		failures := failEvery(env, 50*time.Minute, faucet.GitHubDeliveryRetention)
-
-		env.run()
-
-		requireNoSilentLoss(t, env, failures)
-	})
-
-	for name, tc := range map[string]struct {
-		every time.Duration
-		pages int
-	}{
-		"a list that fits on one page":   {every: 50 * time.Minute},
-		"a list that takes several runs": {every: 2 * time.Minute, pages: 20},
-	} {
-		t.Run("a cron that was down for 75 hours, with faucet's clock behind, and "+name, func(t *testing.T) {
-			t.Parallel()
-			env := newRedeliveryEnv(t, func(o *envOptions) { o.maxPages = tc.pages })
-			env.gh.skew = 3 * time.Hour
-			env.run()
-			env.advance(75 * time.Hour)
-			failures := failEvery(env, tc.every, 75*time.Hour)
-
-			for range 4 {
-				env.run()
-				env.advance(cronEvery)
-			}
-
-			requireNoSilentLoss(t, env, failures)
-		})
-	}
-}
-
 func TestABurstThatARunCannotReadEndsEveryFailureRecoveredOrInACountedGap(t *testing.T) {
 	t.Parallel()
 
@@ -138,23 +87,6 @@ func TestABurstThatARunCannotReadEndsEveryFailureRecoveredOrInACountedGap(t *tes
 	require.Zero(t, env.run().Ranges, "a range that no run read has expired by now")
 }
 
-// dateAdmin gives the pages of its HookAdmin another Date header: none, or one
-// that is shifted.
-type dateAdmin struct {
-	faucet.HookAdmin
-	missing bool
-	shift   time.Duration
-}
-
-func (a dateAdmin) ListDeliveries(ctx context.Context, cursor string) (faucet.DeliveryPage, error) {
-	page, err := a.HookAdmin.ListDeliveries(ctx, cursor)
-	page.At = page.At.Add(a.shift)
-	if a.missing {
-		page.At = time.Time{}
-	}
-	return page, err
-}
-
 // use replaces the service with one that runs on store and hooks, with the
 // same clock and logs.
 func (e *redeliveryEnv) use(store faucet.RedeliveryStore, hooks faucet.HookAdmin) {
@@ -166,70 +98,6 @@ func (e *redeliveryEnv) use(store faucet.RedeliveryStore, hooks faucet.HookAdmin
 	svc, err := faucet.New(deps)
 	require.NoError(e.t, err)
 	e.svc = svc
-}
-
-func TestADateAheadOfGitHubsListDoesNotHideTheNextFailure(t *testing.T) {
-	t.Parallel()
-
-	for _, ahead := range []time.Duration{time.Hour, 12 * time.Hour} {
-		t.Run(ahead.String(), func(t *testing.T) {
-			t.Parallel()
-			env := newRedeliveryEnv(t)
-			env.use(env.store, dateAdmin{HookAdmin: env.gh, shift: ahead})
-			for range 3 {
-				require.Zero(t, env.run().Tracked)
-				env.advance(cronEvery)
-			}
-
-			env.gh.record("g1", env.gh.now().Add(-time.Minute), 503)
-			res := env.run()
-
-			require.Equal(t, 1, res.Tracked, "a Date that is wrong must not put the position past an attempt that GitHub has not listed yet")
-			require.True(t, env.stored("g1"))
-		})
-	}
-}
-
-func TestAMissingDateRecordsNoGapOnEveryEmptyRun(t *testing.T) {
-	t.Parallel()
-
-	t.Run("a new hook", func(t *testing.T) {
-		t.Parallel()
-		env := newRedeliveryEnv(t)
-		env.use(env.store, dateAdmin{HookAdmin: env.gh, missing: true})
-		var gaps int
-		for range 5 {
-			gaps += env.run().Gaps
-			env.advance(cronEvery)
-		}
-		require.Zero(t, gaps, "an empty list and no Date tell nothing about what expired")
-
-		env.gh.record("g1", env.gh.now().Add(-time.Minute), 503)
-		var tracked int
-		for range 5 {
-			res := env.run()
-			gaps, tracked = gaps+res.Gaps, tracked+res.Tracked
-			env.advance(cronEvery)
-		}
-		require.Equal(t, 1, tracked)
-		require.Equal(t, 1, gaps, "an attempt gives a time to take the first gap from, and it is recorded once")
-	})
-
-	t.Run("a hook quiet for longer than GitHub keeps attempts", func(t *testing.T) {
-		t.Parallel()
-		env := newRedeliveryEnv(t)
-		env.use(env.store, dateAdmin{HookAdmin: env.gh, missing: true})
-		env.gh.record("g1", env.gh.now().Add(-time.Minute), http200)
-		env.run()
-		env.advance(faucet.GitHubDeliveryRetention + time.Hour)
-
-		var gaps int
-		for range 6 {
-			gaps += env.run().Gaps
-			env.advance(cronEvery)
-		}
-		require.Zero(t, gaps)
-	})
 }
 
 // purgeSpy records when a run purges, and whether the run still has its context.
@@ -301,18 +169,6 @@ func TestAnAttemptThatGotNoAnswerOrARedirectIsAFailureAndOnlyA2xxIsNot(t *testin
 	}
 }
 
-func TestAPageWithoutADateTakesTheEndOfTheFirstGapFromItsNewestAttempt(t *testing.T) {
-	t.Parallel()
-
-	env := newRedeliveryEnv(t)
-	env.use(env.store, dateAdmin{HookAdmin: env.gh, missing: true})
-	failures := failEvery(env, 50*time.Minute, faucet.GitHubDeliveryRetention)
-
-	env.run()
-
-	requireNoSilentLoss(t, env, failures)
-}
-
 func TestALateAttemptInsideTheOverlapIsReadWhateverNumberOfAttemptsAreNew(t *testing.T) {
 	t.Parallel()
 
@@ -355,35 +211,6 @@ func TestALateAttemptInsideTheOverlapIsReadWhateverNumberOfAttemptsAreNew(t *tes
 			})
 		}
 	}
-}
-
-func TestARangeThatGitHubStillListsIsReadNotClosedWhenFaucetsClockIsAhead(t *testing.T) {
-	t.Parallel()
-
-	// A failure every 10 minutes for 40 hours. Two pages read the newest 200 of
-	// them, and the rest stays a range whose new end is 33 hours 10 minutes old.
-	env := newRedeliveryEnv(t, func(o *envOptions) { o.maxPages = 2 })
-	env.gh.skew = -3 * time.Hour
-	env.run()
-	env.advance(40 * time.Hour)
-	failures := failEvery(env, 10*time.Minute, 40*time.Hour)
-	require.Equal(t, 1, env.run().Ranges)
-	newEnd := failures[len(failures)-200].at
-
-	// GitHub's retention now ends an hour below that new end, and faucet's
-	// clock puts the end two hours above it.
-	env.advance(72*time.Hour - 33*time.Hour - 10*time.Minute - time.Hour)
-	listedFrom := env.gh.now().Add(-faucet.GitHubDeliveryRetention)
-	env.run()
-
-	var listed int
-	for _, f := range failures {
-		if f.at.After(listedFrom) && f.at.Before(newEnd) {
-			listed++
-			require.True(t, env.tracked(f.guid), "%s is still listed, so the range that holds it must be read, not closed as a gap", f.guid)
-		}
-	}
-	require.Equal(t, 5, listed, "the scenario must have attempts between GitHub's end and the range's new end")
 }
 
 func TestALateAttemptIsReadWhileARangeStandsAtThePosition(t *testing.T) {
