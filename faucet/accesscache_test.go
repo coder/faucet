@@ -23,6 +23,8 @@ type fakeChecker struct {
 	err       error
 	authCalls int
 	repoCalls int
+	// during runs inside each call, like the time a GitHub answer takes.
+	during func()
 }
 
 func newFakeChecker() *fakeChecker {
@@ -30,6 +32,9 @@ func newFakeChecker() *fakeChecker {
 }
 
 func (c *fakeChecker) Authenticate(_ context.Context, token string) (faucet.Principal, error) {
+	if c.during != nil {
+		c.during()
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.authCalls++
@@ -44,6 +49,9 @@ func (c *fakeChecker) Authenticate(_ context.Context, token string) (faucet.Prin
 }
 
 func (c *fakeChecker) RepoID(_ context.Context, _ faucet.Principal, repo string) (int64, error) {
+	if c.during != nil {
+		c.during()
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.repoCalls++
@@ -178,4 +186,95 @@ func TestAccessCacheStopsAddingAtTenThousandEntriesAndKeepsWhatItHas(t *testing.
 	}
 	auth, _ := checker.calls()
 	require.Equal(t, 10002, auth, "a full cache answers the extra token from GitHub each time and still serves the entries it holds")
+}
+
+func TestAccessCacheForgetsAGrantThatARenewalFindsWithdrawn(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("the repository is no longer readable", func(t *testing.T) {
+		t.Parallel()
+		checker := newFakeChecker()
+		cache := faucet.NewAccessCache(checker, quartz.NewMock(t))
+		_, err := authenticateAndAuthorize(t, cache, testToken, testRepo)
+		require.NoError(t, err)
+
+		checker.revoke(testRepo)
+		_, err = cache.RepoIDUncached(ctx, principal(t), testRepo)
+		require.ErrorIs(t, err, faucet.ErrNoAccess)
+		_, err = cache.RepoID(ctx, principal(t), testRepo)
+		require.ErrorIs(t, err, faucet.ErrNoAccess, "a poll after a renewal that lost access is refused, not answered from memory")
+		_, err = cache.RepoID(ctx, principal(t), otherRepo)
+		require.NoError(t, err, "another repository of the token keeps its answer")
+	})
+
+	t.Run("the token is rejected", func(t *testing.T) {
+		t.Parallel()
+		checker := newFakeChecker()
+		cache := faucet.NewAccessCache(checker, quartz.NewMock(t))
+		_, err := authenticateAndAuthorize(t, cache, testToken, testRepo)
+		require.NoError(t, err)
+
+		checker.err = faucet.ErrInvalidToken
+		_, err = cache.RepoIDUncached(ctx, principal(t), testRepo)
+		require.ErrorIs(t, err, faucet.ErrInvalidToken)
+		_, err = cache.Authenticate(ctx, testToken)
+		require.ErrorIs(t, err, faucet.ErrInvalidToken, "the remembered login of a rejected token is gone too")
+	})
+
+	t.Run("GitHub cannot be reached", func(t *testing.T) {
+		t.Parallel()
+		checker := newFakeChecker()
+		cache := faucet.NewAccessCache(checker, quartz.NewMock(t))
+		_, err := authenticateAndAuthorize(t, cache, testToken, testRepo)
+		require.NoError(t, err)
+
+		checker.err = errors.New("GitHub rate limit reached")
+		_, err = cache.RepoIDUncached(ctx, principal(t), testRepo)
+		require.Error(t, err)
+		checker.err = nil
+		_, repoCallsBefore := checker.calls()
+		_, err = cache.RepoID(ctx, principal(t), testRepo)
+		require.NoError(t, err)
+		_, repoCalls := checker.calls()
+		require.Equal(t, repoCallsBefore, repoCalls, "a failed check says nothing about access, so the answer stays")
+	})
+}
+
+func TestAccessCacheCountsTheMinuteFromTheStartOfTheLookup(t *testing.T) {
+	t.Parallel()
+	checker := newFakeChecker()
+	clock := quartz.NewMock(t)
+	cache := faucet.NewAccessCache(checker, clock)
+	checker.during = func() { clock.Advance(10 * time.Second) }
+	ctx := context.Background()
+
+	_, err := cache.RepoID(ctx, principal(t), testRepo)
+	require.NoError(t, err)
+	checker.during = nil
+
+	clock.Advance(49 * time.Second)
+	_, err = cache.RepoID(ctx, principal(t), testRepo)
+	require.NoError(t, err)
+	_, repoCalls := checker.calls()
+	require.Equal(t, 1, repoCalls, "59 seconds after the lookup started the answer is still used")
+
+	clock.Advance(time.Second)
+	_, err = cache.RepoID(ctx, principal(t), testRepo)
+	require.NoError(t, err)
+	_, repoCalls = checker.calls()
+	require.Equal(t, 2, repoCalls, "the 10 seconds that GitHub took do not add to the minute")
+}
+
+func TestAccessCacheRefusesAnEmptyRepositoryInsteadOfAnsweringFromTheLogin(t *testing.T) {
+	t.Parallel()
+	cache := faucet.NewAccessCache(newFakeChecker(), quartz.NewMock(t))
+	p, err := cache.Authenticate(context.Background(), testToken)
+	require.NoError(t, err)
+
+	id, err := cache.RepoID(context.Background(), p, "")
+	require.Error(t, err)
+	require.Zero(t, id)
+	_, err = cache.RepoIDUncached(context.Background(), p, "")
+	require.Error(t, err)
 }

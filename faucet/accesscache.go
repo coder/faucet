@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/xerrors"
+
 	"github.com/coder/quartz"
 )
 
@@ -68,17 +70,18 @@ func (c *AccessCache) Authenticate(ctx context.Context, token string) (Principal
 	if e, ok := c.lookup(key); ok {
 		return NewPrincipal(e.login, token)
 	}
+	started := c.clock.Now()
 	p, err := c.inner.Authenticate(ctx, token)
 	if err != nil {
 		return Principal{}, err
 	}
-	c.store(key, accessEntry{login: p.Login})
+	c.store(key, accessEntry{login: p.Login}, started)
 	return p, nil
 }
 
 func (c *AccessCache) RepoID(ctx context.Context, p Principal, repo string) (int64, error) {
-	if p.token == "" {
-		return c.inner.RepoID(ctx, p, repo)
+	if p.token == "" || repo == "" {
+		return c.RepoIDUncached(ctx, p, repo)
 	}
 	if e, ok := c.lookup(accessKey{token: sha256.Sum256([]byte(p.token)), repo: repo}); ok {
 		return e.repoID, nil
@@ -86,11 +89,26 @@ func (c *AccessCache) RepoID(ctx context.Context, p Principal, repo string) (int
 	return c.RepoIDUncached(ctx, p, repo)
 }
 
-// RepoIDUncached asks the wrapped authorizer and remembers a success.
+// RepoIDUncached asks the wrapped authorizer. It remembers a success, and a
+// denial removes what was remembered, so a poll right after a renewal that
+// lost access is refused.
 func (c *AccessCache) RepoIDUncached(ctx context.Context, p Principal, repo string) (int64, error) {
+	if repo == "" {
+		return 0, xerrors.New("repo must be written owner/name")
+	}
+	started := c.clock.Now()
 	id, err := c.inner.RepoID(ctx, p, repo)
-	if err == nil && p.token != "" {
-		c.store(accessKey{token: sha256.Sum256([]byte(p.token)), repo: repo}, accessEntry{repoID: id})
+	if p.token == "" {
+		return id, err
+	}
+	key := accessKey{token: sha256.Sum256([]byte(p.token)), repo: repo}
+	switch {
+	case err == nil:
+		c.store(key, accessEntry{repoID: id}, started)
+	case xerrors.Is(err, ErrNoAccess):
+		c.forget(key)
+	case xerrors.Is(err, ErrInvalidToken):
+		c.forget(key, accessKey{token: key.token})
 	}
 	return id, err
 }
@@ -102,9 +120,19 @@ func (c *AccessCache) lookup(key accessKey) (accessEntry, bool) {
 	return e, ok && e.expires.After(c.clock.Now())
 }
 
-// store drops the expired entries once a minute and whenever the cache is full,
-// and when it is still full it keeps the answer to itself.
-func (c *AccessCache) store(key accessKey, e accessEntry) {
+func (c *AccessCache) forget(keys ...accessKey) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, key := range keys {
+		delete(c.entries, key)
+	}
+}
+
+// store counts the minute from started, the start of the lookup, so a slow
+// GitHub answer does not stretch what it says. It drops the expired entries
+// once a minute and whenever the cache is full, and when it is still full it
+// keeps the answer to itself.
+func (c *AccessCache) store(key accessKey, e accessEntry, started time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.clock.Now()
@@ -119,7 +147,7 @@ func (c *AccessCache) store(key accessKey, e accessEntry) {
 	if _, known := c.entries[key]; !known && len(c.entries) >= maxAccessCacheEntries {
 		return
 	}
-	e.expires = now.Add(accessCacheTTL)
+	e.expires = started.Add(accessCacheTTL)
 	c.entries[key] = e
 }
 
