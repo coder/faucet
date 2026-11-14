@@ -305,11 +305,11 @@ func (s *Service) unsubscribeMethod(ctx context.Context, _ *mcp.ServerSession, p
 		return nil, err
 	}
 	key := NewSubscriptionKeyHash(principal.Login, callbackURL, t.name, canonicalArguments(args))
-	deleted, err := s.store.DeleteSubscription(ctx, principal.Login, key)
+	_, found, err := s.store.DeleteLiveSubscription(ctx, principal.Login, key, s.clock.Now())
 	if err != nil {
 		return nil, subscriptionStoreError(ctx, logger, err)
 	}
-	if !deleted {
+	if !found {
 		return nil, rpcError(codeNotFound, "no such subscription", map[string]string{"kind": "subscription"})
 	}
 	logger.Info(ctx, "unsubscribed", slog.F("login", principal.Login), slog.F("subscription", key.ID()))
@@ -445,18 +445,28 @@ func isAbsent(raw json.RawMessage) bool {
 	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
 }
 
-// parseInteger reads a JSON integer. One beyond the int64 range reads as the
-// nearest end of it.
+// parseInteger reads a JSON number whose value is an integer, so 600000,
+// 6e5 and 600000.0 all read as 600000. One beyond the int64 range reads as the
+// nearest end of it. A fraction and anything that is not a number is an error.
 func parseInteger(raw json.RawMessage) (int64, error) {
-	trimmed := bytes.TrimSpace(raw)
-	n, err := strconv.ParseInt(string(trimmed), 10, 64)
-	if xerrors.Is(err, strconv.ErrRange) {
-		if trimmed[0] == '-' {
-			return math.MinInt64, nil
-		}
-		return math.MaxInt64, nil
+	trimmed := string(bytes.TrimSpace(raw))
+	n, err := strconv.ParseInt(trimmed, 10, 64)
+	if err == nil {
+		return n, nil
 	}
-	return n, err
+	if !strings.ContainsAny(trimmed, ".eE") && !xerrors.Is(err, strconv.ErrRange) {
+		return 0, err
+	}
+	f, err := strconv.ParseFloat(trimmed, 64)
+	switch {
+	case err != nil && !xerrors.Is(err, strconv.ErrRange), math.IsNaN(f), f != math.Trunc(f):
+		return 0, xerrors.New("not an integer")
+	case f >= math.MaxInt64:
+		return math.MaxInt64, nil
+	case f <= math.MinInt64:
+		return math.MinInt64, nil
+	}
+	return int64(f), nil
 }
 
 func parseSubscriptionName(rawName, arguments json.RawMessage) (eventType, pollArguments, error) {

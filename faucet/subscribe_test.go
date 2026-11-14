@@ -869,6 +869,19 @@ func TestUnsubscribeRemovesOnlyTheCallersSubscription(t *testing.T) {
 	require.Len(t, h.rows(), 1)
 }
 
+func TestUnsubscribeOfASubscriptionThatExpiredIsNotFound(t *testing.T) {
+	t.Parallel()
+
+	h := newWebhookHarness(t)
+	h.subscribe(subscribeTo(repoArgs(), callbackURL, newSecret(t, 32)))
+	h.clock.Advance(11 * time.Minute)
+	require.Len(t, h.rows(), 1, "the lapsed row stays until a purge, and counts as absent")
+
+	gone := h.unsubscribe(repoArgs(), callbackURL)
+	require.NotNil(t, gone, "unsubscribe of a lapsed subscription answers like one that never existed")
+	require.EqualValues(t, codeNotFound, gone.Code)
+}
+
 func TestUnsubscribeDoesNotNeedRepositoryAccess(t *testing.T) {
 	t.Parallel()
 
@@ -1108,6 +1121,39 @@ func TestSubscribeGrantStaysFromTheFloorToTheCapForAnyInteger(t *testing.T) {
 	}
 }
 
+func TestSubscribeReadsAnyJSONNumberWhoseValueIsAnInteger(t *testing.T) {
+	t.Parallel()
+
+	h := newWebhookHarness(t)
+	secret := newSecret(t, 32)
+	grantOf := func(ttl string) time.Duration {
+		params := subscribeTo(repoArgs(), callbackURL, secret)
+		params.TTLMs = json.RawMessage(ttl)
+		grant, err := time.Parse(time.RFC3339, h.subscribe(params).RefreshBefore)
+		require.NoError(t, err)
+		return grant.Sub(h.clock.Now())
+	}
+	for ttl, want := range map[string]time.Duration{
+		"60000": time.Minute, "6e4": time.Minute, "6E4": time.Minute, "60000.0": time.Minute, "60.0e3": time.Minute,
+		"1e3": 30 * time.Second, "-1e3": 30 * time.Second, "-1e999": 30 * time.Second,
+		"1e999": 10 * time.Minute, "99999999999999999999": 10 * time.Minute,
+	} {
+		require.Equal(t, want, grantOf(ttl), "ttlMs %s", ttl)
+	}
+
+	for _, ttl := range []string{"60000.5", "1e-1", `"60000"`, "true", "[60000]", "{}"} {
+		params := subscribeTo(repoArgs(), callbackURL, secret)
+		params.TTLMs = json.RawMessage(ttl)
+		require.EqualValues(t, codeInvalidParams, h.subscribeError(params).Code, "ttlMs %s is not an integer", ttl)
+	}
+
+	params := subscribeTo(repoArgs(), callbackURL, secret)
+	params.Cursor, params.MaxAgeMs = cursorOf("v1.0"), json.RawMessage("1e3")
+	h.subscribe(params)
+	params.MaxAgeMs = json.RawMessage("1.5")
+	require.EqualValues(t, codeInvalidParams, h.subscribeError(params).Code)
+}
+
 func TestSubscribeChecksRepositoryAccessAgainOnEveryRenewal(t *testing.T) {
 	t.Parallel()
 
@@ -1201,6 +1247,23 @@ func TestSubscribeAndUnsubscribeReadMembersByExactName(t *testing.T) {
 			require.EqualValues(t, codeInvalidParams, h.callError(method, &rawParams{Whole: whole}).Code, method)
 		}
 		requireNothingStored(t, h, "a repeated name")
+	})
+
+	t.Run("a repeated member inside delivery is refused", func(t *testing.T) {
+		t.Parallel()
+
+		h := newWebhookHarness(t)
+		for _, repeated := range []string{
+			`"url":"` + url("a") + `","url":"` + url("b") + `","secret":"` + secret + `"`,
+			`"url":"` + url("a") + `","secret":"` + secret + `","secret":"` + secret + `"`,
+			`"mode":"webhook","mode":"webhook","url":"` + url("a") + `","secret":"` + secret + `"`,
+		} {
+			whole := json.RawMessage(`{"name":"ci.run_completed","arguments":` + repo + `,"delivery":{` + repeated + `}}`)
+			require.EqualValues(t, codeInvalidParams, h.subscribeError(&rawParams{Whole: whole}).Code, repeated)
+		}
+		whole := json.RawMessage(`{"name":"ci.run_completed","arguments":` + repo + `,"delivery":{"url":"` + url("a") + `","url":"` + url("b") + `"}}`)
+		require.EqualValues(t, codeInvalidParams, h.callError(methodUnsubscribe, &rawParams{Whole: whole}).Code)
+		requireNothingStored(t, h, "a repeated member of delivery")
 	})
 
 	t.Run("the other members are read by exact name too", func(t *testing.T) {
