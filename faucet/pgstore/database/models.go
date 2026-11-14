@@ -85,4 +85,6 @@ type FaucetSubscription struct {
 	FailedSince         sql.NullTime
 	PreviousSecretEnc   []byte
 	PreviousSecretUntil sql.NullTime
+	GapThrough          int64
+	GapLeaseUntil       sql.NullTime
 }

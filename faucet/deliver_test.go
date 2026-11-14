@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/xerrors"
 
@@ -451,7 +450,7 @@ func TestDeliverDueTakesBackADeliveryWhenALeaseRunsOut(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, won)
 		d.ledger.Enqueued++
-		claim, ok, err := d.store.ClaimDelivery(d.ctx, d.clock.Now(), faucet.DeliveryLease)
+		claim, ok, err := d.store.ClaimDelivery(d.ctx, d.clock.Now(), faucet.DeliveryLease, nil)
 		require.NoError(t, err)
 		require.True(t, ok, "the run that is about to crash holds the delivery")
 		return claim, targets[0]
@@ -480,7 +479,7 @@ func TestDeliverDueTakesBackADeliveryWhenALeaseRunsOut(t *testing.T) {
 		queue(d)
 		for attempt := 2; attempt <= faucet.MaxDeliveryAttempts; attempt++ {
 			d.advance(faucet.DeliveryLease)
-			_, ok, err := d.store.ClaimDelivery(d.ctx, d.clock.Now(), faucet.DeliveryLease)
+			_, ok, err := d.store.ClaimDelivery(d.ctx, d.clock.Now(), faucet.DeliveryLease, nil)
 			require.NoError(t, err)
 			require.True(t, ok, "attempt %d is claimed once the lease runs out", attempt)
 		}
@@ -887,18 +886,6 @@ func TestSubscribeReportsTheDeliveryStatusOfARefreshedSubscription(t *testing.T)
 	require.Nil(t, recovered.LastError, "a 2xx clears the failure")
 	require.Equal(t, deliveredAt.UTC().Format(time.RFC3339), recovered.LastDeliveryAt)
 	require.Empty(t, recovered.FailedSince)
-}
-
-// runDeliverDue starts a run in the background and returns what it reports.
-func (d *deliverHarness) runDeliverDue() func() faucet.DeliverResult {
-	d.t.Helper()
-	done := make(chan faucet.DeliverResult, 1)
-	go func() {
-		res, err := d.svc.DeliverDue(d.ctx)
-		assert.NoError(d.t, err)
-		done <- res
-	}()
-	return func() faucet.DeliverResult { return <-done }
 }
 
 func TestDeliverDueAnAttemptOfAnOlderSubscriptionDoesNotEndTheNewOnesDelivery(t *testing.T) {

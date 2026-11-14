@@ -125,7 +125,13 @@ func (s *cronStore) ClearExpiredPreviousSecrets(context.Context, time.Time) (int
 	return s.cleared, s.failing
 }
 
-func (s *cronStore) ClaimDelivery(context.Context, time.Time, time.Duration) (faucet.DeliveryClaim, bool, error) {
+func (s *cronStore) ClaimGap(context.Context, time.Time, time.Duration, []string) (faucet.GapClaim, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return faucet.GapClaim{}, false, s.failing
+}
+
+func (s *cronStore) ClaimDelivery(context.Context, time.Time, time.Duration, []string) (faucet.DeliveryClaim, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.failing != nil || len(s.claims) == 0 {

@@ -25,8 +25,8 @@ func (s Subscription) sealedSecrets() sealedSecrets {
 	return sealedSecrets{current: s.SecretEnc, previous: s.PreviousSecretEnc, previousUntil: s.PreviousSecretUntil}
 }
 
-func (t ScanTarget) sealedSecrets() sealedSecrets {
-	return sealedSecrets{current: t.SecretEnc, previous: t.PreviousSecretEnc, previousUntil: t.PreviousSecretUntil}
+func (c GapClaim) sealedSecrets() sealedSecrets {
+	return sealedSecrets{current: c.SecretEnc, previous: c.PreviousSecretEnc, previousUntil: c.PreviousSecretUntil}
 }
 
 func (c DeliveryClaim) sealedSecrets() sealedSecrets {

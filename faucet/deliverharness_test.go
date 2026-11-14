@@ -15,6 +15,7 @@ import (
 	"time"
 
 	standardwebhooks "github.com/standard-webhooks/standard-webhooks/libraries/go"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/coder/faucet/faucet"
@@ -257,6 +258,18 @@ func (d *deliverHarness) endpoint(path string, arguments ...any) hookEndpoint {
 func (d *deliverHarness) subscribeEndpoint(e hookEndpoint) subscribed {
 	d.t.Helper()
 	return d.subscribe(subscribeTo(e.args, d.rcv.url(e.path), e.secret))
+}
+
+// runDeliverDue starts a run in the background and returns what it reports.
+func (d *deliverHarness) runDeliverDue() func() faucet.DeliverResult {
+	d.t.Helper()
+	done := make(chan faucet.DeliverResult, 1)
+	go func() {
+		res, err := d.svc.DeliverDue(d.ctx)
+		assert.NoError(d.t, err)
+		done <- res
+	}()
+	return func() faucet.DeliverResult { return <-done }
 }
 
 func (d *deliverHarness) advance(by time.Duration) { d.clock.Advance(by) }

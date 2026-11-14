@@ -43,6 +43,7 @@ type fakeStore struct {
 	subs          map[faucet.SubscriptionKeyHash]faucet.Subscription
 	scanned       map[faucet.SubscriptionKeyHash]int64
 	deliveries    map[fakeDeliveryKey]*fakeDelivery
+	gaps          map[faucet.SubscriptionKeyHash]*fakeGap
 }
 
 func (s *fakeStore) InsertEvent(_ context.Context, ev faucet.Event) (faucet.Event, bool, error) {

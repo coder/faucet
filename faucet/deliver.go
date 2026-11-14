@@ -21,6 +21,11 @@ import (
 
 const (
 	deliverWorkers = 8
+	// maxWorkersPerEndpoint is the most workers of one run that send to one
+	// callback origin at a time. An endpoint that stalls costs a request timeout
+	// per attempt, so it must not hold every worker while other subscriptions
+	// wait.
+	maxWorkersPerEndpoint = 2
 	// maxClaimsPerRun bounds the work of one DeliverDue, so a run fits the
 	// deadline of the cron request that starts it.
 	maxClaimsPerRun = 200
@@ -86,10 +91,15 @@ type webhookBody struct {
 //
 // A subscription that a purge overtook, one whose unread events were deleted,
 // gets one gap envelope when the call queues its next events. The queueing
-// makes no request: the envelope goes out in the send phase, ahead of the
-// deliveries, on the same workers and under the same deadline. It is one
-// attempt with no retry, and the result counts it as sent or failed. A call
-// that ends before it sends the envelope counts it as failed.
+// makes no request: it records the gap on the subscription, and the envelope
+// goes out in the send phase, ahead of the deliveries, on the same workers and
+// under the same deadline, to the subscription as it is then. It is one attempt
+// with no retry, and the result counts it as sent or failed. A gap that no
+// worker took before the call ended stays recorded, and the next call sends it.
+//
+// At most 2 of the 8 workers of a call send to one callback origin at a time,
+// for deliveries and gaps alike, so one endpoint that stalls cannot hold up the
+// others.
 //
 // Calls may overlap, in one process or in several. A claim gives an attempt to
 // one caller for 30 seconds, and a caller whose claim lapsed records nothing.
@@ -105,16 +115,12 @@ func (s *Service) DeliverDue(ctx context.Context) (DeliverResult, error) {
 	}
 	run := &deliveryRun{svc: s, wh: s.webhook, result: DeliverResult{GaveUp: map[GiveUpReason]int{}}}
 	if err := run.enqueue(ctx); err != nil {
-		run.abandonUnsentGaps(ctx, gapRunFailed)
 		return run.result, run.unlessEnded(ctx, err)
 	}
 	if err := run.sweepExpired(ctx); err != nil {
-		run.abandonUnsentGaps(ctx, gapRunFailed)
 		return run.result, run.unlessEnded(ctx, err)
 	}
-	if err := run.sweepPreviousSecrets(ctx); err != nil {
-		return run.result, run.unlessEnded(ctx, err)
-	}
+	run.sweepPreviousSecrets(ctx)
 	err := run.send(ctx)
 	res := run.result
 	logger := s.logger.Debug
@@ -134,18 +140,73 @@ type deliveryRun struct {
 
 	mu     sync.Mutex
 	result DeliverResult
-	// gaps are the gap envelopes to send, in the order the enqueue found them.
-	// The enqueue appends and the send phase takes them, so nothing reads the
-	// slice while the other writes it. nextGap is the first one not yet taken.
-	gaps    []queuedGap
-	nextGap atomic.Int64
+
+	// claimMu makes a worker's claim and its entry into the endpoint gate one
+	// step, so no two workers can both take the last place of an endpoint.
+	claimMu sync.Mutex
+	gate    endpointGate
 }
 
-// queuedGap is a subscription whose enqueue was won and whose read position
-// was below the purge mark. Its envelope is the one that the send phase owes.
-type queuedGap struct {
-	target        ScanTarget
-	purgedThrough int64
+// endpointGate counts the workers of a run that send to each callback origin.
+type endpointGate struct {
+	mu      sync.Mutex
+	workers map[string]int
+}
+
+// full lists the origins that have no place left for a worker.
+func (g *endpointGate) full() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	full := []string{}
+	for origin, n := range g.workers {
+		if n >= maxWorkersPerEndpoint {
+			full = append(full, origin)
+		}
+	}
+	return full
+}
+
+func (g *endpointGate) enter(origin string) {
+	if origin == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.workers == nil {
+		g.workers = map[string]int{}
+	}
+	g.workers[origin]++
+}
+
+func (g *endpointGate) leave(origin string) {
+	if origin == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.workers[origin]--; g.workers[origin] <= 0 {
+		delete(g.workers, origin)
+	}
+}
+
+func (r *deliveryRun) claimDelivery(ctx context.Context) (DeliveryClaim, bool, error) {
+	r.claimMu.Lock()
+	defer r.claimMu.Unlock()
+	claim, ok, err := r.svc.store.ClaimDelivery(ctx, r.svc.clock.Now(), DeliveryLease, r.gate.full())
+	if ok {
+		r.gate.enter(CallbackOrigin(claim.CallbackURL))
+	}
+	return claim, ok, err
+}
+
+func (r *deliveryRun) claimGap(ctx context.Context) (GapClaim, bool, error) {
+	r.claimMu.Lock()
+	defer r.claimMu.Unlock()
+	claim, ok, err := r.svc.store.ClaimGap(ctx, r.svc.clock.Now(), DeliveryLease, r.gate.full())
+	if ok {
+		r.gate.enter(CallbackOrigin(claim.CallbackURL))
+	}
+	return claim, ok, err
 }
 
 func (r *deliveryRun) add(update func(*DeliverResult)) {
@@ -215,6 +276,10 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 		return nil
 	}
 	e := Enqueue{Key: target.KeyHash, ExpectedScannedThrough: target.ScannedThrough, NewScannedThrough: page.Next}
+	gap := target.ScannedThrough < page.PurgedThrough
+	if gap {
+		e.GapThrough = page.PurgedThrough
+	}
 	for _, ev := range page.Events {
 		e.Deliveries = append(e.Deliveries, NewDelivery{EventID: ev.ID, MessageID: r.wh.messageID(target.KeyHash, ev.ID)})
 	}
@@ -225,12 +290,10 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 	if !won {
 		return nil
 	}
-	gap := target.ScannedThrough < page.PurgedThrough
 	r.add(func(res *DeliverResult) {
 		res.Enqueued += len(e.Deliveries)
 		if gap {
 			res.Gaps++
-			r.gaps = append(r.gaps, queuedGap{target: target, purgedThrough: page.PurgedThrough})
 		}
 	})
 	return nil
@@ -251,36 +314,44 @@ func (r *deliveryRun) endUndecodable(ctx context.Context, now time.Time, target 
 	return nil
 }
 
-const (
-	gapRunEnded  = "run_ended"
-	gapRunFailed = "run_failed"
-)
-
-func (r *deliveryRun) gapLogger(g queuedGap) slog.Logger {
-	return r.svc.logger.With(slog.F("subscription", g.target.KeyHash.ID()),
-		slog.F("scanned_through", g.target.ScannedThrough), slog.F("purged_through", g.purgedThrough))
-}
-
-// sendGaps takes queued gaps until none is left or the run is out of time.
-func (r *deliveryRun) sendGaps(ctx context.Context) {
+// sendGaps takes gap envelopes until none is left that this run may take or the
+// run is out of time.
+func (r *deliveryRun) sendGaps(ctx context.Context) error {
 	for ctx.Err() == nil && !r.outOfTime(ctx) {
-		i := int(r.nextGap.Add(1)) - 1
-		if i >= len(r.gaps) {
-			return
+		claim, ok, err := r.claimGap(ctx)
+		if err != nil {
+			return xerrors.Errorf("claim a gap: %w", err)
 		}
-		r.sendGap(ctx, r.gaps[i])
+		if !ok {
+			return nil
+		}
+		if err := r.sendGap(ctx, claim); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // sendGap tells a subscription that a purge deleted events before the run read
 // them: one request, no retry, counted and logged once. The cursor is the
 // purge mark. Every event that still exists lies above it, so a client that
 // resumes from it loses none of them, and every watermark that a later event
-// carries is at or above it.
-func (r *deliveryRun) sendGap(ctx context.Context, g queuedGap) {
-	failure := r.wh.sendEnvelope(ctx, r.svc.clock.Now(), envelopeGap, g.target.KeyHash, g.target.CallbackURL, g.target.sealedSecrets(),
-		gapEnvelope{Type: envelopeGap, Cursor: encodeCursor(g.purgedThrough)})
-	logger := r.gapLogger(g)
+// carries is at or above it. A request that the end of the run cut short has no
+// result: the claim keeps its lease, and a later run sends the gap again.
+func (r *deliveryRun) sendGap(ctx context.Context, claim GapClaim) error {
+	defer r.gate.leave(CallbackOrigin(claim.CallbackURL))
+	logger := r.svc.logger.With(slog.F("subscription", claim.Ref.Key.ID()), slog.F("purged_through", claim.Ref.Through))
+	failure := r.wh.sendEnvelope(ctx, r.svc.clock.Now(), envelopeGap, claim.Ref.Key, claim.CallbackURL, claim.sealedSecrets(),
+		gapEnvelope{Type: envelopeGap, Cursor: encodeCursor(claim.Ref.Through)})
+	if failure != "" && ctx.Err() != nil {
+		logger.Info(ctx, "the run ended during the request, the gap envelope waits for its lease")
+		return nil
+	}
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
+	defer cancel()
+	if err := r.svc.store.FinishGap(finishCtx, claim.Ref); err != nil {
+		return xerrors.Errorf("record the end of a gap: %w", err)
+	}
 	if failure == "" {
 		logger.Warn(ctx, "a purge deleted events before the subscription read them, the gap envelope was sent")
 	} else {
@@ -293,22 +364,7 @@ func (r *deliveryRun) sendGap(ctx context.Context, g queuedGap) {
 			res.GapsFailed++
 		}
 	})
-}
-
-// abandonUnsentGaps counts the gaps that no worker took as failed, one log line
-// each. Their enqueue is won and moved the read position past the purge mark,
-// so no later run finds them: they are never dropped silently.
-func (r *deliveryRun) abandonUnsentGaps(ctx context.Context, reason string) {
-	first := min(int(r.nextGap.Swap(int64(len(r.gaps)))), len(r.gaps))
-	for _, g := range r.gaps[first:] {
-		r.gapLogger(g).Warn(ctx, "a purge deleted events before the subscription read them, the gap envelope was not sent", slog.F("reason", reason))
-	}
-	if first < len(r.gaps) {
-		r.add(func(res *DeliverResult) {
-			res.GapsFailed += len(r.gaps) - first
-			res.Incomplete = true
-		})
-	}
+	return nil
 }
 
 func (r *deliveryRun) sweepExpired(ctx context.Context) error {
@@ -323,16 +379,20 @@ func (r *deliveryRun) sweepExpired(ctx context.Context) error {
 	return nil
 }
 
-func (r *deliveryRun) sweepPreviousSecrets(ctx context.Context) error {
+// sweepPreviousSecrets removes the previous secrets of ended rotations. A
+// failure ends nothing else: signing ignores a window that ended, so the sends
+// that follow stay correct.
+func (r *deliveryRun) sweepPreviousSecrets(ctx context.Context) {
 	cleared, err := r.svc.store.ClearExpiredPreviousSecrets(ctx, r.svc.clock.Now())
-	if err != nil {
-		return xerrors.Errorf("clear expired previous secrets: %w", err)
-	}
-	if cleared > 0 {
+	switch {
+	case err != nil && ctx.Err() != nil:
+		r.add(func(res *DeliverResult) { res.Incomplete = true })
+	case err != nil:
+		r.svc.logger.Error(ctx, "clear expired previous secrets", slog.Error(err))
+	case cleared > 0:
 		r.svc.logger.Info(ctx, "previous secrets of ended rotations removed", slog.F("count", cleared))
 		r.add(func(res *DeliverResult) { res.PreviousSecretsCleared += int(cleared) })
 	}
-	return nil
 }
 
 func (r *deliveryRun) send(ctx context.Context) error {
@@ -353,7 +413,10 @@ func (r *deliveryRun) send(ctx context.Context) error {
 	}
 	for range deliverWorkers {
 		wg.Go(func() {
-			r.sendGaps(ctx)
+			if err := r.sendGaps(ctx); err != nil {
+				fail(err)
+				return
+			}
 			for !stopped.Load() {
 				if ctx.Err() != nil || r.outOfTime(ctx) {
 					r.add(func(res *DeliverResult) { res.Incomplete = true })
@@ -363,7 +426,7 @@ func (r *deliveryRun) send(ctx context.Context) error {
 					r.add(func(res *DeliverResult) { res.Incomplete = true })
 					return
 				}
-				claim, ok, err := r.svc.store.ClaimDelivery(ctx, r.svc.clock.Now(), DeliveryLease)
+				claim, ok, err := r.claimDelivery(ctx)
 				if err != nil {
 					fail(xerrors.Errorf("claim a delivery: %w", err))
 					return
@@ -381,7 +444,6 @@ func (r *deliveryRun) send(ctx context.Context) error {
 		})
 	}
 	wg.Wait()
-	r.abandonUnsentGaps(ctx, gapRunEnded)
 	return firstErr
 }
 
@@ -414,6 +476,7 @@ func giveUp(reason GiveUpReason) attemptOutcome {
 }
 
 func (r *deliveryRun) attempt(ctx context.Context, claim DeliveryClaim) error {
+	defer r.gate.leave(CallbackOrigin(claim.CallbackURL))
 	s := r.svc
 	logger := s.logger.With(
 		slog.F("subscription", claim.Ref.Key.ID()), slog.F("event_id", claim.Ref.EventID),

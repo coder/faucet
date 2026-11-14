@@ -17,6 +17,11 @@ type fakeDeliveryKey struct {
 	eventID int64
 }
 
+type fakeGap struct {
+	through    int64
+	leaseUntil time.Time
+}
+
 type fakeDelivery struct {
 	messageID   string
 	enqueuedAt  time.Time
@@ -30,12 +35,14 @@ func (s *fakeStore) initSubscriptionsLocked() {
 		s.subs = map[faucet.SubscriptionKeyHash]faucet.Subscription{}
 		s.scanned = map[faucet.SubscriptionKeyHash]int64{}
 		s.deliveries = map[fakeDeliveryKey]*fakeDelivery{}
+		s.gaps = map[faucet.SubscriptionKeyHash]*fakeGap{}
 	}
 }
 
 func (s *fakeStore) dropSubscriptionLocked(key faucet.SubscriptionKeyHash) {
 	delete(s.subs, key)
 	delete(s.scanned, key)
+	delete(s.gaps, key)
 	for k := range s.deliveries {
 		if k.key == key {
 			delete(s.deliveries, k)
@@ -82,7 +89,6 @@ func (s *fakeStore) ScanTargets(ctx context.Context, now time.Time, maxPending, 
 		}
 		targets = append(targets, faucet.ScanTarget{
 			KeyHash: key, Principal: sub.Principal, EventType: sub.EventType, Arguments: slices.Clone(sub.Arguments), RepoID: sub.RepoID,
-			CallbackURL: sub.CallbackURL, SecretEnc: slices.Clone(sub.SecretEnc), PreviousSecretEnc: slices.Clone(sub.PreviousSecretEnc), PreviousSecretUntil: sub.PreviousSecretUntil,
 			ScannedThrough: s.scanned[key], Pending: pending,
 		})
 	}
@@ -112,6 +118,12 @@ func (s *fakeStore) EnqueueDeliveries(ctx context.Context, now time.Time, e fauc
 		return false, nil
 	}
 	s.scanned[e.Key] = e.NewScannedThrough
+	if e.GapThrough > 0 {
+		if s.gaps[e.Key] == nil {
+			s.gaps[e.Key] = &fakeGap{}
+		}
+		s.gaps[e.Key].through = max(s.gaps[e.Key].through, e.GapThrough)
+	}
 	for _, d := range e.Deliveries {
 		k := fakeDeliveryKey{e.Key, d.EventID}
 		if _, dup := s.deliveries[k]; dup {
@@ -122,7 +134,7 @@ func (s *fakeStore) EnqueueDeliveries(ctx context.Context, now time.Time, e fauc
 	return true, nil
 }
 
-func (s *fakeStore) ClaimDelivery(ctx context.Context, now time.Time, lease time.Duration) (faucet.DeliveryClaim, bool, error) {
+func (s *fakeStore) ClaimDelivery(ctx context.Context, now time.Time, lease time.Duration, skip []string) (faucet.DeliveryClaim, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -140,7 +152,8 @@ func (s *fakeStore) ClaimDelivery(ctx context.Context, now time.Time, lease time
 	)
 	for k, d := range s.deliveries {
 		sub, ok := s.subs[k.key]
-		due := ok && sub.ExpiresAt.After(now) && !d.nextAttempt.After(now) && (d.leaseUntil.IsZero() || !d.leaseUntil.After(now))
+		due := ok && sub.ExpiresAt.After(now) && !d.nextAttempt.After(now) && (d.leaseUntil.IsZero() || !d.leaseUntil.After(now)) &&
+			!slices.Contains(skip, faucet.CallbackOrigin(sub.CallbackURL))
 		if !due {
 			continue
 		}
@@ -178,6 +191,52 @@ func (s *fakeStore) ClaimDelivery(ctx context.Context, now time.Time, lease time
 		}
 	}
 	return claim, true, nil
+}
+
+func (s *fakeStore) ClaimGap(ctx context.Context, now time.Time, lease time.Duration, skip []string) (faucet.GapClaim, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return faucet.GapClaim{}, false, err
+	}
+	if s.err != nil {
+		return faucet.GapClaim{}, false, s.err
+	}
+	var best faucet.SubscriptionKeyHash
+	for key, gap := range s.gaps {
+		sub := s.subs[key]
+		due := gap.through > 0 && sub.ExpiresAt.After(now) && !gap.leaseUntil.After(now) && !slices.Contains(skip, faucet.CallbackOrigin(sub.CallbackURL))
+		if due && (best == faucet.SubscriptionKeyHash{} || bytes.Compare(key[:], best[:]) < 0) {
+			best = key
+		}
+	}
+	if best == (faucet.SubscriptionKeyHash{}) {
+		return faucet.GapClaim{}, false, nil
+	}
+	sub, gap := s.subs[best], s.gaps[best]
+	gap.leaseUntil = now.Add(lease)
+	return faucet.GapClaim{
+		Ref:         faucet.GapRef{Key: best, Incarnation: sub.CreatedAt, Through: gap.through},
+		CallbackURL: sub.CallbackURL, SecretEnc: slices.Clone(sub.SecretEnc),
+		PreviousSecretEnc: slices.Clone(sub.PreviousSecretEnc), PreviousSecretUntil: sub.PreviousSecretUntil,
+	}, true, nil
+}
+
+func (s *fakeStore) FinishGap(_ context.Context, ref faucet.GapRef) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return s.err
+	}
+	sub, gap := s.subs[ref.Key], s.gaps[ref.Key]
+	if gap == nil || !sub.CreatedAt.Equal(ref.Incarnation) {
+		return nil
+	}
+	if gap.through <= ref.Through {
+		gap.through = 0
+	}
+	gap.leaseUntil = time.Time{}
+	return nil
 }
 
 func (s *fakeStore) FinishDelivery(_ context.Context, ref faucet.DeliveryRef, now time.Time, f faucet.Finish) (faucet.FinishResult, error) {

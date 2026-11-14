@@ -135,7 +135,7 @@ type rivalStore struct {
 
 func (s rivalStore) EnqueueDeliveries(ctx context.Context, now time.Time, e faucet.Enqueue) (bool, error) {
 	s.t.Helper()
-	won, err := s.Store.EnqueueDeliveries(ctx, now, faucet.Enqueue{Key: e.Key, ExpectedScannedThrough: e.ExpectedScannedThrough, NewScannedThrough: e.NewScannedThrough})
+	won, err := s.Store.EnqueueDeliveries(ctx, now, faucet.Enqueue{Key: e.Key, ExpectedScannedThrough: e.ExpectedScannedThrough, NewScannedThrough: e.NewScannedThrough, GapThrough: e.GapThrough})
 	require.NoError(s.t, err)
 	require.True(s.t, won, "the rival run takes the subscription first")
 	return s.Store.EnqueueDeliveries(ctx, now, e)
@@ -151,9 +151,10 @@ func TestDeliverDueSendsNoGapEnvelopeWhenAnotherRunTookTheSubscription(t *testin
 	d.purgedBeforeRead(d.endpoint("/hook"))
 
 	res := d.deliverDue()
-	require.Zero(t, res.Gaps, "the run that lost the enqueue reports no gap: the winner does")
-	require.Zero(t, res.GapsSent)
-	require.Zero(t, d.rcv.total(), "the run that lost the enqueue sends nothing")
+	require.Zero(t, res.Gaps, "the run that lost the enqueue queues no gap: the winner did")
+	require.Equal(t, 1, res.GapsSent, "the gap that the winner recorded goes out")
+	d.deliverDue()
+	require.Len(t, d.rcv.envelopesOf("/hook", "gap"), 1, "one gap sends one envelope, whichever run takes it")
 }
 
 const revokedEnvelope = `{"type":"terminated","error":{"code":-32024,"message":"Forbidden","data":{"reason":"Access revoked"}}}`
@@ -340,6 +341,7 @@ type scriptedStore struct {
 	faucet.Store
 	onExpire func()
 	pollErr  func(call int) error
+	clearErr error
 
 	mu    sync.Mutex
 	polls int
@@ -350,6 +352,13 @@ func (s *scriptedStore) ExpireDeliveries(ctx context.Context, now time.Time) (in
 		s.onExpire()
 	}
 	return s.Store.ExpireDeliveries(ctx, now)
+}
+
+func (s *scriptedStore) ClearExpiredPreviousSecrets(ctx context.Context, now time.Time) (int64, error) {
+	if s.clearErr != nil {
+		return 0, s.clearErr
+	}
+	return s.Store.ClearExpiredPreviousSecrets(ctx, now)
 }
 
 func (s *scriptedStore) PollEvents(ctx context.Context, q faucet.PollQuery) (faucet.PollPage, error) {
@@ -419,8 +428,16 @@ func TestDeliverDueGapEndpointThatStallsDoesNotDelayQueueingOrSendingOtherSubscr
 	require.Equal(t, 2, got.res.Delivered, "the survivor of the gapped subscription and the new event of the other")
 }
 
-func TestDeliverDueCountsGapsThatItDidNotSend(t *testing.T) {
+func TestDeliverDueKeepsAGapThatItDidNotSendForTheNextRun(t *testing.T) {
 	t.Parallel()
+
+	requireSentOnce := func(t *testing.T, d *deliverHarness) {
+		t.Helper()
+		next := d.deliverDueWith(context.Background())
+		require.Equal(t, 1, next.GapsSent, "the next run sends the gap that the first one queued")
+		require.Zero(t, d.deliverDueWith(context.Background()).GapsSent)
+		require.Len(t, d.rcv.envelopesOf("/hook", "gap"), 1, "and it sends it once")
+	}
 
 	t.Run("the run ended before the send phase", func(t *testing.T) {
 		t.Parallel()
@@ -435,11 +452,10 @@ func TestDeliverDueCountsGapsThatItDidNotSend(t *testing.T) {
 		defer cancel()
 		res := d.deliverDueWith(short)
 		require.Equal(t, 1, res.Gaps)
-		require.Equal(t, 1, res.GapsFailed, "a gap that the run had no time to send is counted, not dropped")
-		require.Zero(t, res.GapsSent)
+		require.Zero(t, res.GapsSent+res.GapsFailed, "the run had no time to send it")
 		require.True(t, res.Incomplete)
 		require.Zero(t, d.rcv.total())
-		require.True(t, d.logsContain("the gap envelope was not sent"))
+		requireSentOnce(t, d)
 	})
 
 	t.Run("the run failed after queueing it", func(t *testing.T) {
@@ -453,14 +469,76 @@ func TestDeliverDueCountsGapsThatItDidNotSend(t *testing.T) {
 			}}
 		})
 		d.ledgerSkip = true
-		d.gappedThenBusy(d.endpoint("/slow"))
+		d.gappedThenBusy(d.endpoint("/hook"))
 
 		res, err := d.svc.DeliverDue(d.ctx)
 		require.Error(t, err)
 		require.Equal(t, 1, res.Gaps)
-		require.Equal(t, 1, res.GapsFailed, "a gap queued before the failure is counted as not sent")
 		require.Zero(t, d.rcv.total())
+		requireSentOnce(t, d)
 	})
+}
+
+func TestDeliverDueSendsAGapToTheSubscriptionAsItIsWhenTheEnvelopeGoesOut(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a subscription that ended after the gap was queued gets nothing", func(t *testing.T) {
+		t.Parallel()
+		var (
+			d    *deliverHarness
+			ep   hookEndpoint
+			once sync.Once
+		)
+		d = newDeliverHarness(t, func(deps *faucet.Deps) {
+			deps.Store = &scriptedStore{Store: deps.Store, onExpire: func() {
+				once.Do(func() { require.Nil(t, d.unsubscribe(ep.args, d.rcv.url(ep.path))) })
+			}}
+		})
+		d.ledgerSkip = true
+		ep = d.endpoint("/hook")
+		d.purgedBeforeRead(ep)
+
+		res := d.deliverDue()
+		require.Equal(t, 1, res.Gaps, "the run queued the gap")
+		require.Zero(t, res.GapsSent+res.GapsFailed)
+		require.Zero(t, d.rcv.total(), "the subscription is gone, so nothing goes to its endpoint")
+	})
+
+	t.Run("a secret that rotated after the gap was queued signs it", func(t *testing.T) {
+		t.Parallel()
+		var (
+			d       *deliverHarness
+			ep      hookEndpoint
+			rotated string
+			once    sync.Once
+		)
+		d = newDeliverHarness(t, func(deps *faucet.Deps) {
+			deps.Store = &scriptedStore{Store: deps.Store, onExpire: func() {
+				once.Do(func() { rotated = d.rotate(ep, newSecret(t, 32)).secret })
+			}}
+		})
+		ep = d.endpoint("/hook")
+		sub, _, _ := d.purgedBeforeRead(ep)
+
+		require.Equal(t, 1, d.deliverDue().GapsSent)
+		gaps := d.rcv.envelopesOf("/hook", "gap")
+		require.Len(t, gaps, 1)
+		d.requireEnvelope(gaps[0], "gap", rotated, sub.ID)
+	})
+}
+
+func TestDeliverDueSendsGapsAndDeliveriesWhenTheSweepOfPreviousSecretsFails(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t, func(deps *faucet.Deps) {
+		deps.Store = &scriptedStore{Store: deps.Store, clearErr: xerrors.New("database is busy")}
+	})
+	d.purgedBeforeRead(d.endpoint("/hook"))
+
+	res := d.deliverDue()
+	require.Equal(t, 1, res.GapsSent, "a failed sweep does not keep the gap envelope from going out")
+	require.Equal(t, 1, res.Delivered, "or the delivery")
+	require.True(t, d.logsContain("clear expired previous secrets"))
 }
 
 func TestDeliverDueSendsNoGapToASubscriptionWhoseRepositoryLostNoEvents(t *testing.T) {

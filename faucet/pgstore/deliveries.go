@@ -26,17 +26,13 @@ func (s *Store) ScanTargets(ctx context.Context, now time.Time, maxPending, limi
 			return nil, err
 		}
 		targets[i] = faucet.ScanTarget{
-			KeyHash:             key,
-			Principal:           row.Principal,
-			EventType:           row.EventType,
-			Arguments:           row.Arguments,
-			RepoID:              row.RepoID,
-			CallbackURL:         row.CallbackUrl,
-			SecretEnc:           row.SecretEnc,
-			PreviousSecretEnc:   row.PreviousSecretEnc,
-			PreviousSecretUntil: row.PreviousSecretUntil.Time,
-			ScannedThrough:      row.ScannedThrough,
-			Pending:             row.Pending,
+			KeyHash:        key,
+			Principal:      row.Principal,
+			EventType:      row.EventType,
+			Arguments:      row.Arguments,
+			RepoID:         row.RepoID,
+			ScannedThrough: row.ScannedThrough,
+			Pending:        row.Pending,
 		}
 	}
 	return targets, nil
@@ -59,6 +55,7 @@ func (s *Store) EnqueueDeliveries(ctx context.Context, now time.Time, e faucet.E
 
 	moved, err := q.AdvanceScan(ctx, database.AdvanceScanParams{
 		NewScannedThrough:      e.NewScannedThrough,
+		GapThrough:             e.GapThrough,
 		KeyHash:                e.Key[:],
 		ExpectedScannedThrough: e.ExpectedScannedThrough,
 		Now:                    now,
@@ -89,11 +86,11 @@ func (s *Store) EnqueueDeliveries(ctx context.Context, now time.Time, e faucet.E
 // caller, and the update in the same statement sets the lease and raises the
 // attempt, so a caller that arrives after the commit finds a held row and
 // skips it.
-func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Duration) (faucet.DeliveryClaim, bool, error) {
+func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Duration, skip []string) (faucet.DeliveryClaim, bool, error) {
 	if lease <= 0 {
 		return faucet.DeliveryClaim{}, false, xerrors.Errorf("lease must be positive, got %s", lease)
 	}
-	row, err := s.q.ClaimDelivery(ctx, database.ClaimDeliveryParams{Now: now, LeaseUntil: sql.NullTime{Time: now.Add(lease), Valid: true}})
+	row, err := s.q.ClaimDelivery(ctx, database.ClaimDeliveryParams{Now: now, LeaseUntil: sql.NullTime{Time: now.Add(lease), Valid: true}, SkipOrigins: nonNil(skip)})
 	if xerrors.Is(err, sql.ErrNoRows) {
 		return faucet.DeliveryClaim{}, false, nil
 	}
@@ -129,6 +126,50 @@ func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Dur
 		}
 	}
 	return claim, true, nil
+}
+
+// ClaimGap is one statement, like ClaimDelivery: the lease is set by the same
+// statement that selects the row, so a caller that arrives after the commit
+// finds a held gap and skips it.
+func (s *Store) ClaimGap(ctx context.Context, now time.Time, lease time.Duration, skip []string) (faucet.GapClaim, bool, error) {
+	if lease <= 0 {
+		return faucet.GapClaim{}, false, xerrors.Errorf("lease must be positive, got %s", lease)
+	}
+	row, err := s.q.ClaimGap(ctx, database.ClaimGapParams{Now: now, LeaseUntil: sql.NullTime{Time: now.Add(lease), Valid: true}, SkipOrigins: nonNil(skip)})
+	if xerrors.Is(err, sql.ErrNoRows) {
+		return faucet.GapClaim{}, false, nil
+	}
+	if err != nil {
+		return faucet.GapClaim{}, false, xerrors.Errorf("claim gap: %w", err)
+	}
+	key, err := toKeyHash(row.KeyHash)
+	if err != nil {
+		return faucet.GapClaim{}, false, err
+	}
+	return faucet.GapClaim{
+		Ref:                 faucet.GapRef{Key: key, Incarnation: row.Incarnation, Through: row.GapThrough},
+		CallbackURL:         row.CallbackUrl,
+		SecretEnc:           row.SecretEnc,
+		PreviousSecretEnc:   row.PreviousSecretEnc,
+		PreviousSecretUntil: row.PreviousSecretUntil.Time,
+	}, true, nil
+}
+
+func (s *Store) FinishGap(ctx context.Context, ref faucet.GapRef) error {
+	err := s.q.FinishGap(ctx, database.FinishGapParams{Through: ref.Through, KeyHash: ref.Key[:], Incarnation: ref.Incarnation})
+	if err != nil {
+		return xerrors.Errorf("finish gap: %w", err)
+	}
+	return nil
+}
+
+// nonNil turns a nil list into an empty one: lib/pq sends a nil slice as NULL,
+// and a comparison with NULL would match no row.
+func nonNil(list []string) []string {
+	if list == nil {
+		return []string{}
+	}
+	return list
 }
 
 // FinishDelivery takes the lock of the subscription row before it touches the

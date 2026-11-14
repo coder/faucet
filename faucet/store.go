@@ -217,15 +217,29 @@ type Store interface {
 	// EnqueueDeliveries queues e.Deliveries and moves the subscription's read
 	// position to e.NewScannedThrough in one transaction, and only if the
 	// subscription is live at now and still at e.ExpectedScannedThrough. It
-	// reports whether it did. The queued deliveries are due at now.
+	// reports whether it did. The queued deliveries are due at now. A non-zero
+	// e.GapThrough is recorded as a gap that ClaimGap hands out.
 	EnqueueDeliveries(ctx context.Context, now time.Time, e Enqueue) (bool, error)
 	// ClaimDelivery takes the due delivery with the earliest due time, of a
 	// subscription that is live at now, and no other caller holds. A delivery
 	// is due when its next attempt time is at or before now, and held while
 	// its lease runs. The call sets the lease to now+lease and raises the
 	// attempt count by one in one step, so no two callers hold one attempt.
-	// ok is false when nothing is due.
-	ClaimDelivery(ctx context.Context, now time.Time, lease time.Duration) (claim DeliveryClaim, ok bool, err error)
+	// It passes over the deliveries whose subscription's CallbackOrigin is in
+	// skip, so a caller can keep one endpoint from taking all its workers. ok
+	// is false when nothing else is due.
+	ClaimDelivery(ctx context.Context, now time.Time, lease time.Duration, skip []string) (claim DeliveryClaim, ok bool, err error)
+	// ClaimGap takes a gap envelope that no other caller holds, of a
+	// subscription that is live at now and whose CallbackOrigin is not in skip,
+	// and sets its lease to now+lease. The gap is the one that
+	// EnqueueDeliveries recorded: it stays owed until FinishGap, so a gap that no
+	// run took, or whose run died, goes to the next run. The claim carries the
+	// subscription's secrets as of now. ok is false when no gap can be taken.
+	ClaimGap(ctx context.Context, now time.Time, lease time.Duration, skip []string) (claim GapClaim, ok bool, err error)
+	// FinishGap ends the gap in ref and releases its lease. It changes nothing
+	// for a subscription that is gone or is another incarnation. A gap with a
+	// mark above ref.Through, recorded since the claim, stays owed.
+	FinishGap(ctx context.Context, ref GapRef) error
 	// FinishDelivery records how the attempt in ref ended. It changes nothing
 	// and reports Accepted=false unless ref.Attempt is the delivery's current
 	// attempt and the subscription's CreatedAt is ref.Incarnation. Delivered and Failure update the subscription's DeliveryStatus
