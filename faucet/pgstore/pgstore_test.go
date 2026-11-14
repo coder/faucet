@@ -230,3 +230,50 @@ func TestStoreCallThatItsContextCutShortWrapsTheContextError(t *testing.T) {
 		})
 	}
 }
+
+func TestRedeliveryStoreCallThatItsContextCutShortWrapsTheContextError(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	tx, err := db.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	for _, table := range []string{"faucet_redeliveries", "faucet_redelivery_scan", "faucet_redelivery_ranges"} {
+		_, err = tx.Exec("LOCK TABLE " + table + " IN ACCESS EXCLUSIVE MODE") //nolint:gosec // The names are constants.
+		require.NoError(t, err)
+	}
+
+	now := time.Now()
+	for name, call := range map[string]func(context.Context) error{
+		"AcquireRedeliveryLease": func(ctx context.Context) error {
+			_, _, err := store.AcquireRedeliveryLease(ctx, "hook", now, time.Minute)
+			return err
+		},
+		"ReleaseRedeliveryLease": func(ctx context.Context) error {
+			return store.ReleaseRedeliveryLease(ctx, 1)
+		},
+		"ApplyRedeliveryScan": func(ctx context.Context) error {
+			_, err := store.ApplyRedeliveryScan(ctx, faucet.ScanStep{Epoch: 1, Now: now})
+			return err
+		},
+		"SettleRedeliveries": func(ctx context.Context) error {
+			_, err := store.SettleRedeliveries(ctx, faucet.SettleRequest{Now: now, Retention: time.Hour, MaxAsks: 3})
+			return err
+		},
+		"ClaimRedelivery": func(ctx context.Context) error {
+			_, _, err := store.ClaimRedelivery(ctx, faucet.ClaimRequest{Now: now, Retention: time.Hour, MaxAsks: 1, Schedule: []time.Duration{time.Minute}})
+			return err
+		},
+		"PurgeRedeliveries": func(ctx context.Context) error {
+			_, err := store.PurgeRedeliveries(ctx, now)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			require.ErrorIs(t, call(ctx), context.DeadlineExceeded, "the statement waits on the lock until the context ends it")
+		})
+	}
+}
