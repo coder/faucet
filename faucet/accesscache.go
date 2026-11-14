@@ -3,6 +3,7 @@ package faucet
 import (
 	"context"
 	"crypto/sha256"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,14 +33,15 @@ type tokenChecker interface {
 // once. A grant that GitHub withdraws keeps working for up to a minute, and an
 // entry is never extended by use. The cache holds a SHA-256 of the token as its
 // key and never the token. It keeps at most 10,000 entries and holds them per
-// process.
+// process. It ignores the case of a repository name, like GitHub does.
 //
 // events/subscribe does not use the remembered answer: a renewal calls
 // RepoIDUncached, because every renewal must check access again. A denial that
-// a renewal finds leaves a marker for a minute. Answers are ordered by the start
-// of their lookup, not by when GitHub looked: a marker keeps a grant from an
-// older lookup, still in flight, from being stored, and it replaces a grant only
-// when that grant's lookup started before the denial's.
+// a renewal finds leaves a marker for a minute, and a lookup of any path that
+// finds the token rejected leaves one in place of the remembered login. Answers
+// are ordered by the start of their lookup, not by when GitHub looked: a marker
+// keeps a grant from an older lookup, still in flight, from being stored, and it
+// replaces a grant only when that grant's lookup started before the denial's.
 type AccessCache struct {
 	inner tokenChecker
 	clock quartz.Clock
@@ -51,7 +53,8 @@ type AccessCache struct {
 
 type accessKey struct {
 	token [sha256.Size]byte
-	// repo is empty for the answer of Authenticate.
+	// repo is empty for the answer of Authenticate. It is in lower case,
+	// because GitHub ignores the case of a repository name.
 	repo string
 }
 
@@ -102,32 +105,34 @@ func (c *AccessCache) RepoID(ctx context.Context, p Principal, repo string) (int
 // renewal that lost access is refused.
 func (c *AccessCache) RepoIDUncached(ctx context.Context, p Principal, repo string) (int64, error) {
 	id, started, err := c.ask(ctx, p, repo)
-	switch {
-	case p.token == "" || repo == "":
-	case xerrors.Is(err, ErrNoAccess):
+	if p.token != "" && (xerrors.Is(err, ErrNoAccess) || xerrors.Is(err, ErrInvalidToken)) {
 		c.deny(started, keyOf(p.token, repo))
-	case xerrors.Is(err, ErrInvalidToken):
-		c.deny(started, keyOf(p.token, repo), keyOf(p.token, ""))
 	}
 	return id, err
 }
 
-// ask puts the question to the wrapped authorizer and remembers a success. It
-// never asks about an empty repo, whose key is the key of the remembered login.
+// ask puts the question to the wrapped authorizer and remembers a success. A
+// rejected token leaves a marker in place of its remembered login, on every
+// path. It never asks about an empty repo, whose key is the key of the
+// remembered login.
 func (c *AccessCache) ask(ctx context.Context, p Principal, repo string) (int64, time.Time, error) {
 	if repo == "" {
 		return 0, time.Time{}, xerrors.New("repo must be written owner/name")
 	}
 	started := c.clock.Now()
 	id, err := c.inner.RepoID(ctx, p, repo)
-	if err == nil && p.token != "" {
+	switch {
+	case p.token == "":
+	case err == nil:
 		c.store(keyOf(p.token, repo), accessEntry{repoID: id}, started)
+	case xerrors.Is(err, ErrInvalidToken):
+		c.deny(started, keyOf(p.token, ""))
 	}
 	return id, started, err
 }
 
 func keyOf(token, repo string) accessKey {
-	return accessKey{token: sha256.Sum256([]byte(token)), repo: repo}
+	return accessKey{token: sha256.Sum256([]byte(token)), repo: strings.ToLower(repo)}
 }
 
 func (c *AccessCache) lookup(key accessKey) (accessEntry, bool) {
