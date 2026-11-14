@@ -522,9 +522,10 @@ func TestLoadConfigGitHubAPIURL(t *testing.T) {
 	}
 }
 
-// Neon's pooled URL breaks lib/pq's parameterised queries, so the server takes
-// the direct URL when the host provides one.
-func TestLoadConfigUsesTheDirectDatabaseURLWhenSet(t *testing.T) {
+// Neon's pooled URL serves the requests, with the option that keeps lib/pq
+// working behind its pooler. The direct URL applies the migrations, because
+// the migration lock does not survive a transaction-mode pooler.
+func TestLoadConfigServesOverTheDatabaseURLAndMigratesOverTheDirectOne(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -544,10 +545,12 @@ func TestLoadConfigUsesTheDirectDatabaseURLWhenSet(t *testing.T) {
 	cfg, err := load("")
 	require.NoError(t, err)
 	require.Equal(t, pooled, cfg.databaseURL)
-	require.Equal(t, envDatabaseURL, cfg.databaseVar)
+	require.Equal(t, pooled, cfg.migrateURL)
+	require.Equal(t, envDatabaseURL, cfg.migrateVar)
 
 	cfg, err = load(direct)
 	require.NoError(t, err)
-	require.Equal(t, direct, cfg.databaseURL)
-	require.Equal(t, envDatabaseURLUnpooled, cfg.databaseVar)
+	require.Equal(t, pooled, cfg.databaseURL)
+	require.Equal(t, direct, cfg.migrateURL)
+	require.Equal(t, envDatabaseURLUnpooled, cfg.migrateVar)
 }

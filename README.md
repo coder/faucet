@@ -21,7 +21,7 @@ GITHUB_WEBHOOK_SECRET='<a random string of at least 16 bytes>' \
 go run ./cmd/faucet
 ```
 
-`PORT` defaults to 8080. The server applies pending migrations at startup. It exits at once when `DATABASE_URL` or `GITHUB_WEBHOOK_SECRET` is missing. When `DATABASE_URL_UNPOOLED` is set, the server connects with it and ignores `DATABASE_URL`. Use it when `DATABASE_URL` goes through a transaction-mode pooler such as Neon's pooled URL, because the Postgres driver (`lib/pq`) sends a query and its parameters in two batches, and a pooler can fail the second one with `unnamed prepared statement does not exist`. The server opens at most 10 connections, and closes an idle one after 10 seconds. It migrates only when `VERCEL_ENV` is unset or `production` (see **Deploy on Vercel**).
+`PORT` defaults to 8080. The server applies pending migrations at startup. It exits at once when `DATABASE_URL` or `GITHUB_WEBHOOK_SECRET` is missing. `DATABASE_URL` serves the requests and can be a transaction-mode pooler such as Neon's pooled URL. The server adds `binary_parameters=yes` to it, so the Postgres driver (`lib/pq`) sends each query in one batch. By default it sends a query and its parameters in two, and a pooler can fail the second with `unnamed prepared statement does not exist`. When `DATABASE_URL_UNPOOLED` is set, the migrations run over it and not over `DATABASE_URL`, because they hold a session-level advisory lock that a pooler does not keep. The server opens at most 10 connections, and closes an idle one after 10 seconds. It migrates only when `VERCEL_ENV` is unset or `production` (see **Deploy on Vercel**).
 
 In the GitHub webhook settings, set the payload URL to `/webhook/github`, the content type to `application/json`, and the secret to the same value. Faucet stores finished workflow runs and check runs, submitted reviews, closed pull requests, and new pull request comments. It acknowledges every other delivery with 202 and stores nothing.
 
@@ -166,7 +166,7 @@ To embed faucet, set `Deps.Redelivery` to a `RedeliveryDeps`: a `RedeliveryStore
 - The server migrates only when `VERCEL_ENV` is unset or `production`. In any other environment it checks the schema, and exits at start unless the database is already at the newest migration.
 - Keep the database variables and every secret below set for Production only. A preview must not read them.
 
-1. Create a Vercel project from this repository and attach a Neon Postgres database to it with the Vercel integration. The integration sets `DATABASE_URL` (pooled) and `DATABASE_URL_UNPOOLED` (direct), and the `POSTGRES_*` and `PG*` variables. Remove the Preview target from all of them. The server uses the direct URL, for the reason that **Run the server** gives.
+1. Create a Vercel project from this repository and attach a Neon Postgres database to it with the Vercel integration. The integration sets `DATABASE_URL` (pooled) and `DATABASE_URL_UNPOOLED` (direct), and the `POSTGRES_*` and `PG*` variables. Remove the Preview target from all of them. The server serves requests over the pooled `DATABASE_URL` and migrates over the direct `DATABASE_URL_UNPOOLED`, for the reasons that **Run the server** gives.
 2. Set these variables for Production only, as sensitive:
 
    | Variable | Value |
@@ -180,7 +180,7 @@ To embed faucet, set `Deps.Redelivery` to a `RedeliveryDeps`: a `RedeliveryStore
 3. Deploy by pushing to `main`. Do not run `vercel deploy` by hand. On a project with no production deployment, a plain `vercel deploy` created a production deployment.
 4. Set the GitHub webhook's payload URL to `https://<production domain>/webhook/github`. Do not put Vercel Deployment Protection on that domain, because GitHub and MCP clients cannot pass it.
 
-The server applies pending migrations when a production instance starts, over `DATABASE_URL_UNPOOLED`, before it serves a request.
+The server applies pending migrations when a production instance starts, over `DATABASE_URL_UNPOOLED` (or over `DATABASE_URL` when that is unset), before it serves a request.
 
 **Do not roll back past the newest migration.** After production has migrated to `000007_gap_pending`, a build that does not embed it, which is what Vercel Instant Rollback to an older deployment gives, cannot start: the migration library fails with `no migration found for version 7` and every new instance exits, so the rollback serves nothing. Recover in one of two ways. Redeploy a build that embeds the migration. Or roll the database back with the down migration `faucet/pgstore/migrations/000007_gap_pending.down.sql`, applied through golang-migrate against the `faucet_schema_migrations` table so that the recorded version drops to 6. The down migration drops the `gap_through` and `gap_lease_until` columns, and with them every gap that is owed and not yet sent. The same holds for each later migration.
 
