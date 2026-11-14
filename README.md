@@ -21,7 +21,7 @@ GITHUB_WEBHOOK_SECRET='<a random string of at least 16 bytes>' \
 go run ./cmd/faucet
 ```
 
-`PORT` defaults to 8080. The server applies pending migrations at startup. It exits at once when `DATABASE_URL` or `GITHUB_WEBHOOK_SECRET` is missing.
+`PORT` defaults to 8080. The server applies pending migrations at startup. It exits at once when `DATABASE_URL` or `GITHUB_WEBHOOK_SECRET` is missing. When `DATABASE_URL_UNPOOLED` is set, the server connects with it and ignores `DATABASE_URL`. Use it when `DATABASE_URL` goes through a transaction-mode pooler such as Neon's pooled URL, because the Postgres driver (`lib/pq`) sends a query and its parameters in two batches, and a pooler can fail the second one with `unnamed prepared statement does not exist`. The server opens at most 10 connections, and closes an idle one after 10 seconds. It migrates only when `VERCEL_ENV` is unset or `production` (see **Deploy on Vercel**).
 
 In the GitHub webhook settings, set the payload URL to `/webhook/github`, the content type to `application/json`, and the secret to the same value. Faucet stores finished workflow runs and check runs, submitted reviews, closed pull requests, and new pull request comments. It acknowledges every other delivery with 202 and stores nothing.
 
@@ -86,7 +86,7 @@ To embed faucet, set `Deps.Webhook` to a `WebhookDeps`: a `WebhookKey` from `New
 
 `GET /cron/deliver` (or `Service.DeliverDue` in a host that embeds faucet) sends the webhooks that are due. A run does four things in this order: it queues the events that live subscriptions have not read yet, ends the unsent deliveries of subscriptions that expired, claims due deliveries, and sends each through the guarded client. A run starts no attempt with less than 10 seconds left on its deadline, claims at most 200 attempts and sends 8 at a time.
 
-**When a webhook arrives.** Faucet sends nothing by itself between runs. On Vercel the cron schedule of the project sets the pace, and a Pro cron runs at most once a minute, so **a webhook can wait up to one minute** (and a retry a minute past its backoff). This repository adds no `vercel.json`. A host that needs seconds calls `DeliverDue` in its own loop, or calls the route more often: extra calls run the same due work earlier and never send a delivery before its time. Delivery is at least once: a request that went out and whose result faucet could not record (a crash, a run that ran out of time) is sent again after the 30 second lease, with the same `webhook-id`, so deduplicate on it.
+**When a webhook arrives.** Faucet sends nothing by itself between runs. On Vercel the cron schedule of the project sets the pace, and a Pro cron runs at most once a minute, so **a webhook can wait up to one minute** (and a retry a minute past its backoff). The `vercel.json` of this repository sets that schedule (see **Deploy on Vercel**). A host that needs seconds calls `DeliverDue` in its own loop, or calls the route more often: extra calls run the same due work earlier and never send a delivery before its time. Delivery is at least once: a request that went out and whose result faucet could not record (a crash, a run that ran out of time) is sent again after the 30 second lease, with the same `webhook-id`, so deduplicate on it.
 
 **What a subscription gets.** Only events of the repository that the subscriber could read at its last renewal, of the subscribed event name, that match its `sha` (in any letter case) and `pr` arguments, from the cursor on, and only while it is live. A subscription that holds 100 unsent deliveries reads no more events until some end, and the events wait in the log.
 
@@ -150,6 +150,31 @@ The reply is JSON: `busy`, `pages`, `attempts`, `tracked`, `asked`, `recovered`,
 **Time.** The cron route stops a run after 25 seconds. A run that has such a deadline spends it so that the asks and the purge always get their turn: it reads the list for half of the time, drops a page that is not back by then and leaves the rest as an open range (as at the page limit), settles, asks until 80 percent of the time has passed, and purges. A slow GitHub costs pages and never the asks. A first page that is not back in half of the time ends the run with an error, and it asks for nothing.
 
 To embed faucet, set `Deps.Redelivery` to a `RedeliveryDeps`: a `RedeliveryStore` (`pgstore.Store` is one, and `storetest.RunRedelivery` checks yours), and a `HookAdmin`. `NewGitHubHookAdmin` is the one for GitHub's REST API. Call `Service.Redeliver(ctx)` on your own schedule. It has no auth. The host decides who may call it.
+
+## Deploy on Vercel
+
+`vercel.json` deploys `cmd/faucet` as a Vercel Go service (Go runtime, Beta) behind one catch-all rewrite, lets a request run for 90 seconds at most (an `/mcp` wait lasts 50 seconds at most, and the server's write deadline for it is 75), and schedules the cron routes: `/cron/deliver` every minute, `/cron/redeliver` every 10 minutes and `/cron/purge` every hour. A cron every minute needs the Pro plan. Vercel runs crons on production deployments only, and sends `Authorization: Bearer $CRON_SECRET`.
+
+**Previews are off, on purpose.** A preview runs the code of any branch. The Neon integration gives a preview the same database as production, and the server migrates at start. A preview of an unmerged migration would therefore change the production schema before anyone reviewed it, and every production instance that started afterwards would exit. `vercel.json` sets `git.deploymentEnabled` to `false` for every branch except `main`, and it holds for Git deployments only (a `vercel deploy` from a terminal skips it). Two more guards back it up:
+
+- The server migrates only when `VERCEL_ENV` is unset or `production`. In any other environment it checks the schema, and exits at start unless the database is already at the newest migration.
+- Keep the database variables and every secret below set for Production only. A preview must not read them.
+
+1. Create a Vercel project from this repository and attach a Neon Postgres database to it with the Vercel integration. The integration sets `DATABASE_URL` (pooled) and `DATABASE_URL_UNPOOLED` (direct), and the `POSTGRES_*` and `PG*` variables. Remove the Preview target from all of them. The server uses the direct URL, for the reason that **Run the server** gives.
+2. Set these variables for Production only, as sensitive:
+
+   | Variable | Value |
+   | --- | --- |
+   | `GITHUB_WEBHOOK_SECRET` | The secret of the GitHub webhook. |
+   | `CRON_SECRET` | A random string, for example `openssl rand -hex 32`. |
+   | `FAUCET_WEBHOOK_KEY` | `openssl rand -base64 32`. |
+   | `FAUCET_WEBHOOK_CALLBACK_VERIFICATION` | `handshake`. To use an allowlist instead, delete this variable and set `FAUCET_WEBHOOK_ALLOWED_ORIGINS`. |
+
+   Redelivery stays off, and `/cron/redeliver` answers 503, until the GitHub webhook exists and you set `FAUCET_HOOK_TOKEN`, `FAUCET_HOOK_ORG` or `FAUCET_HOOK_REPO`, and `FAUCET_HOOK_ID` (see **Redeliver failed webhooks**).
+3. Deploy by pushing to `main`. Do not run `vercel deploy` by hand. On a project with no production deployment, a plain `vercel deploy` created a production deployment.
+4. Set the GitHub webhook's payload URL to `https://<production domain>/webhook/github`. Do not put Vercel Deployment Protection on that domain, because GitHub and MCP clients cannot pass it.
+
+The server applies pending migrations when a production instance starts, over `DATABASE_URL_UNPOOLED`, before it serves a request.
 
 ## Tests
 
