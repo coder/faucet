@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,7 +16,8 @@ import (
 )
 
 // fakeChecker answers like GitHub for the tokens in logins and the repos in
-// repos, and counts the questions.
+// repos, and counts the questions. Like GitHub it ignores the case of a repo
+// name, so write the keys of repos in lower case.
 type fakeChecker struct {
 	mu        sync.Mutex
 	logins    map[string]string
@@ -25,8 +27,9 @@ type fakeChecker struct {
 	repoCalls int
 	// during runs inside each call, like the time a GitHub answer takes.
 	during func()
-	// afterAnswer runs once, after the next RepoID has decided and before it
-	// returns, like the answer's way back while GitHub's state moves on.
+	// afterAnswer runs once, after the next Authenticate or RepoID has decided
+	// and before it returns, like the answer's way back while GitHub's state
+	// moves on.
 	afterAnswer func()
 }
 
@@ -38,17 +41,30 @@ func (c *fakeChecker) Authenticate(_ context.Context, token string) (faucet.Prin
 	if c.during != nil {
 		c.during()
 	}
+	login, afterAnswer, err := c.decideLogin(token)
+	if afterAnswer != nil {
+		afterAnswer()
+	}
+	if err != nil {
+		return faucet.Principal{}, err
+	}
+	return faucet.NewPrincipal(login, token)
+}
+
+func (c *fakeChecker) decideLogin(token string) (string, func(), error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.authCalls++
+	afterAnswer := c.afterAnswer
+	c.afterAnswer = nil
 	if c.err != nil {
-		return faucet.Principal{}, c.err
+		return "", afterAnswer, c.err
 	}
 	login, ok := c.logins[token]
 	if !ok {
-		return faucet.Principal{}, faucet.ErrInvalidToken
+		return "", afterAnswer, faucet.ErrInvalidToken
 	}
-	return faucet.NewPrincipal(login, token)
+	return login, afterAnswer, nil
 }
 
 func (c *fakeChecker) RepoID(_ context.Context, _ faucet.Principal, repo string) (int64, error) {
@@ -71,7 +87,7 @@ func (c *fakeChecker) decide(repo string) (int64, func(), error) {
 	if c.err != nil {
 		return 0, afterAnswer, c.err
 	}
-	id, ok := c.repos[repo]
+	id, ok := c.repos[strings.ToLower(repo)]
 	if !ok {
 		return 0, afterAnswer, faucet.ErrNoAccess
 	}
@@ -87,13 +103,13 @@ func (c *fakeChecker) calls() (auth, repo int) {
 func (c *fakeChecker) revoke(repo string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.repos, repo)
+	delete(c.repos, strings.ToLower(repo))
 }
 
 func (c *fakeChecker) grant(repo string, id int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.repos[repo] = id
+	c.repos[strings.ToLower(repo)] = id
 }
 
 func authenticateAndAuthorize(t *testing.T, cache *faucet.AccessCache, token, repo string) (int64, error) {
@@ -153,6 +169,11 @@ func TestAccessCacheRemembersASuccessAndNothingElse(t *testing.T) {
 	id, err := cache.RepoID(ctx, p, "octo/private")
 	require.NoError(t, err, "a repository that was denied is allowed at once when GitHub allows it")
 	require.EqualValues(t, 77, id)
+	_, repoCallsBefore := checker.calls()
+	_, err = cache.RepoID(ctx, p, "octo/private")
+	require.NoError(t, err)
+	_, repoCalls := checker.calls()
+	require.Equal(t, repoCallsBefore, repoCalls, "the new grant is remembered, which a marker left by the denied polls would prevent")
 
 	checker.err = errors.New("GitHub rate limit reached")
 	_, err = cache.RepoID(ctx, p, otherRepo)
@@ -225,6 +246,11 @@ func TestAccessCacheForgetsAGrantThatARenewalFindsWithdrawn(t *testing.T) {
 		require.ErrorIs(t, err, faucet.ErrNoAccess, "a poll after a renewal that lost access is refused, not answered from memory")
 		_, err = cache.RepoID(ctx, principal(t), otherRepo)
 		require.NoError(t, err, "another repository of the token keeps its answer")
+		authBefore, _ := checker.calls()
+		_, err = cache.Authenticate(ctx, testToken)
+		require.NoError(t, err)
+		authAfter, _ := checker.calls()
+		require.Equal(t, authBefore, authAfter, "and so does the remembered login, because the token is still good")
 	})
 
 	t.Run("the token is rejected", func(t *testing.T) {
@@ -239,6 +265,12 @@ func TestAccessCacheForgetsAGrantThatARenewalFindsWithdrawn(t *testing.T) {
 		require.ErrorIs(t, err, faucet.ErrInvalidToken)
 		_, err = cache.Authenticate(ctx, testToken)
 		require.ErrorIs(t, err, faucet.ErrInvalidToken, "the remembered login of a rejected token is gone too")
+		checker.err = nil
+		_, repoCallsBefore := checker.calls()
+		_, err = cache.RepoID(ctx, principal(t), testRepo)
+		require.NoError(t, err)
+		_, repoCalls := checker.calls()
+		require.Equal(t, repoCallsBefore+1, repoCalls, "and so is the remembered grant of the repository, for a host that has its own Authenticate")
 	})
 
 	t.Run("GitHub cannot be reached", func(t *testing.T) {
@@ -330,6 +362,74 @@ func TestAccessCacheOrdersAnswersByTheStartOfTheirLookup(t *testing.T) {
 		})
 	}
 
+	t.Run("a denial whose lookup started while a grant's lookup was in flight replaces the grant that landed first", func(t *testing.T) {
+		t.Parallel()
+		checker := newFakeChecker()
+		clock := quartz.NewMock(t)
+		cache := faucet.NewAccessCache(checker, clock)
+		p := principal(t)
+		parkAfterAnswer := func(decided chan<- struct{}, release <-chan struct{}) func() {
+			return func() {
+				close(decided)
+				<-release
+			}
+		}
+		await := func(ch <-chan struct{}) {
+			t.Helper()
+			select {
+			case <-ch:
+			case <-time.After(30 * time.Second):
+				t.Fatal("a lookup never reached the wrapped checker")
+			}
+		}
+		pollDecided, pollRelease, pollDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+		renewalDecided, renewalRelease, renewalDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+
+		checker.afterAnswer = parkAfterAnswer(pollDecided, pollRelease)
+		go func() {
+			_, err := cache.RepoID(ctx, p, testRepo)
+			pollDone <- err
+		}()
+		await(pollDecided)
+		checker.revoke(testRepo)
+		clock.Advance(time.Second)
+		checker.afterAnswer = parkAfterAnswer(renewalDecided, renewalRelease)
+		go func() {
+			_, err := cache.RepoIDUncached(ctx, p, testRepo)
+			renewalDone <- err
+		}()
+		await(renewalDecided)
+
+		clock.Advance(5 * time.Second)
+		close(pollRelease)
+		require.NoError(t, <-pollDone, "that poll gets what GitHub said when it asked")
+		close(renewalRelease)
+		require.ErrorIs(t, <-renewalDone, faucet.ErrNoAccess)
+		_, err := cache.RepoID(ctx, p, testRepo)
+		require.ErrorIs(t, err, faucet.ErrNoAccess, "the grant is ordered by the start of its lookup, which was before the renewal's, not by when it was stored")
+	})
+
+	t.Run("a login that was in flight when a renewal found the token rejected is not stored", func(t *testing.T) {
+		t.Parallel()
+		checker := newFakeChecker()
+		clock := quartz.NewMock(t)
+		cache := faucet.NewAccessCache(checker, clock)
+		checker.afterAnswer = func() {
+			checker.err = faucet.ErrInvalidToken
+			clock.Advance(time.Second)
+			_, err := cache.RepoIDUncached(ctx, principal(t), testRepo)
+			require.ErrorIs(t, err, faucet.ErrInvalidToken)
+			clock.Advance(time.Second)
+		}
+
+		p, err := cache.Authenticate(ctx, testToken)
+		require.NoError(t, err, "that request gets what GitHub said when it asked")
+		require.Equal(t, "octocat", p.Login)
+		clock.Advance(time.Second)
+		_, err = cache.Authenticate(ctx, testToken)
+		require.ErrorIs(t, err, faucet.ErrInvalidToken, "the next request is refused, not served the older login for a minute")
+	})
+
 	t.Run("a denial that was in flight does not remove a grant whose lookup started after it", func(t *testing.T) {
 		t.Parallel()
 		checker := newFakeChecker()
@@ -371,4 +471,73 @@ func TestAccessCacheOrdersAnswersByTheStartOfTheirLookup(t *testing.T) {
 		_, calls := checker.calls()
 		require.Equal(t, callsBefore, calls, "a denial does not block the answers that come after it")
 	})
+}
+
+func TestAccessCacheKeepsOneAnswerPerRepositoryWhateverTheCaseOfItsName(t *testing.T) {
+	t.Parallel()
+	checker := newFakeChecker()
+	cache := faucet.NewAccessCache(checker, quartz.NewMock(t))
+	ctx := context.Background()
+
+	id, err := cache.RepoID(ctx, principal(t), "Octo/Repo")
+	require.NoError(t, err)
+	require.EqualValues(t, repoID, id)
+	_, err = cache.RepoID(ctx, principal(t), testRepo)
+	require.NoError(t, err)
+	_, repoCalls := checker.calls()
+	require.Equal(t, 1, repoCalls, "GitHub is asked once about a repository, however its name is capitalized")
+
+	checker.revoke(testRepo)
+	_, err = cache.RepoIDUncached(ctx, principal(t), testRepo)
+	require.ErrorIs(t, err, faucet.ErrNoAccess)
+	_, err = cache.RepoID(ctx, principal(t), "Octo/Repo")
+	require.ErrorIs(t, err, faucet.ErrNoAccess, "a renewal that lost access blocks the grant that was remembered under another spelling")
+}
+
+func TestAccessCacheForgetsTheLoginOfATokenThatAPollFindsRejected(t *testing.T) {
+	t.Parallel()
+	checker := newFakeChecker()
+	cache := faucet.NewAccessCache(checker, quartz.NewMock(t))
+	ctx := context.Background()
+	p, err := cache.Authenticate(ctx, testToken)
+	require.NoError(t, err)
+
+	checker.err = faucet.ErrInvalidToken
+	_, err = cache.RepoID(ctx, p, testRepo)
+	require.ErrorIs(t, err, faucet.ErrInvalidToken)
+	_, err = cache.Authenticate(ctx, testToken)
+	require.ErrorIs(t, err, faucet.ErrInvalidToken, "the next request checks the token again instead of using the remembered login")
+}
+
+func TestAccessCacheHoldsMarkersToTheSameTenThousandEntriesAndDropsThemAfterAMinute(t *testing.T) {
+	t.Parallel()
+	checker := newFakeChecker()
+	clock := quartz.NewMock(t)
+	cache := faucet.NewAccessCache(checker, clock)
+	ctx := context.Background()
+	p := principal(t)
+	deny := func(i int) {
+		_, err := cache.RepoIDUncached(ctx, p, fmt.Sprintf("octo/gone%05d", i))
+		require.ErrorIs(t, err, faucet.ErrNoAccess)
+	}
+
+	for i := range 10000 {
+		deny(i)
+	}
+	clock.Advance(30 * time.Second)
+	deny(10000)
+	clock.Advance(30 * time.Second)
+
+	var last string
+	for i := range 10000 {
+		last = fmt.Sprintf("ghp_token%05d", i)
+		checker.logins[last] = "octocat"
+		_, err := cache.Authenticate(ctx, last)
+		require.NoError(t, err)
+	}
+	authBefore, _ := checker.calls()
+	_, err := cache.Authenticate(ctx, last)
+	require.NoError(t, err)
+	authAfter, _ := checker.calls()
+	require.Equal(t, authBefore, authAfter, "after the minute the markers are gone, and the one that met a full cache was never kept, so 10,000 answers fit")
 }
