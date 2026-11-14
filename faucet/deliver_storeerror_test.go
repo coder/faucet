@@ -178,3 +178,52 @@ func TestDeliverDueLogsAFailedSweepOfPreviousSecretsThatTheRunEndedDuring(t *tes
 	require.True(t, res.Incomplete)
 	require.True(t, d.logsContain("clear expired previous secrets"), "the store failed for its own reason, and the log has it")
 }
+
+// claimEndsStore ends the run inside one kind of claim, as the cancel cuts a
+// Postgres query short.
+type claimEndsStore struct {
+	faucet.Store
+	endRun func()
+	gap    bool
+}
+
+func (s *claimEndsStore) ClaimGap(ctx context.Context, now time.Time, lease time.Duration, skip []string) (faucet.GapClaim, bool, error) {
+	if !s.gap {
+		return s.Store.ClaimGap(ctx, now, lease, skip)
+	}
+	s.endRun()
+	return faucet.GapClaim{}, false, ctx.Err()
+}
+
+func (s *claimEndsStore) ClaimDelivery(ctx context.Context, now time.Time, lease time.Duration, skip []string) (faucet.DeliveryClaim, bool, error) {
+	if s.gap {
+		return s.Store.ClaimDelivery(ctx, now, lease, skip)
+	}
+	s.endRun()
+	return faucet.DeliveryClaim{}, false, ctx.Err()
+}
+
+func TestDeliverDueIsIncompleteNotFailedWhenTheEndOfTheRunCutsAClaimShort(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		gap  bool
+	}{
+		{"a gap claim", true},
+		{"a delivery claim", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			d := newDeliverHarness(t, func(deps *faucet.Deps) {
+				deps.Store = &claimEndsStore{Store: deps.Store, endRun: cancel, gap: tc.gap}
+			})
+
+			res, err := d.svc.DeliverDue(ctx)
+			require.NoError(t, err, "a claim that the run's own end cut short is no store failure")
+			require.True(t, res.Incomplete)
+		})
+	}
+}
