@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/xerrors"
@@ -286,7 +287,7 @@ func (s *Service) unsubscribeMethod(ctx context.Context, _ *mcp.ServerSession, p
 	if p == nil || p.malformed {
 		return nil, invalidParams("params must be an object")
 	}
-	t, args, err := parseSubscriptionName(p.fields.Name, p.fields.Arguments)
+	t, args, err := parseSubscriptionName(p.fields.Name, p.fields.Arguments, func(eventType) *jsonschema.Resolved { return shaInputResolved })
 	if err != nil {
 		return nil, err
 	}
@@ -396,7 +397,7 @@ func parseSubscribe(p *subscriptionParams, allowInsecureLoopback bool) (subscrib
 	if p == nil || p.malformed {
 		return subscribeRequest{}, invalidParams("params must be an object")
 	}
-	t, args, err := parseSubscriptionName(p.fields.Name, p.fields.Arguments)
+	t, args, err := parseSubscriptionName(p.fields.Name, p.fields.Arguments, func(t eventType) *jsonschema.Resolved { return t.resolvedInput })
 	if err != nil {
 		return subscribeRequest{}, err
 	}
@@ -469,7 +470,7 @@ func parseInteger(raw json.RawMessage) (int64, error) {
 	return int64(f), nil
 }
 
-func parseSubscriptionName(rawName, arguments json.RawMessage) (eventType, pollArguments, error) {
+func parseSubscriptionName(rawName, arguments json.RawMessage, input func(eventType) *jsonschema.Resolved) (eventType, pollArguments, error) {
 	var name string
 	if !isAbsent(rawName) && json.Unmarshal(rawName, &name) != nil {
 		return eventType{}, pollArguments{}, invalidParams("name must be a string")
@@ -481,7 +482,7 @@ func parseSubscriptionName(rawName, arguments json.RawMessage) (eventType, pollA
 	if err != nil {
 		return eventType{}, pollArguments{}, err
 	}
-	args, err := parsePollArguments(t, arguments)
+	args, err := parsePollArguments(input(t), arguments)
 	if err != nil {
 		return eventType{}, pollArguments{}, err
 	}

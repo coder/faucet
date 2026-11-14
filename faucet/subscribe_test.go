@@ -882,6 +882,31 @@ func TestUnsubscribeOfASubscriptionThatExpiredIsNotFound(t *testing.T) {
 	require.EqualValues(t, codeNotFound, gone.Code)
 }
 
+func TestUnsubscribeEndsAShaSubscriptionToCommentEventsThatAnOlderVersionStored(t *testing.T) {
+	t.Parallel()
+
+	h := newWebhookHarness(t)
+	arguments := json.RawMessage(`{"repo":"` + testRepo + `","sha":"` + testShaA + `"}`)
+	_, err := h.store.UpsertSubscription(h.ctx, faucet.Subscription{
+		KeyHash:     faucet.NewSubscriptionKeyHash("octocat", callbackURL, "pr.comment_created", arguments),
+		Principal:   "octocat",
+		CallbackURL: callbackURL,
+		EventType:   "pr.comment_created",
+		Arguments:   arguments,
+		RepoID:      repoID,
+		SecretEnc:   []byte("sealed"),
+		ExpiresAt:   h.clock.Now().Add(5 * time.Minute),
+	}, h.clock.Now(), 100)
+	require.NoError(t, err)
+	require.Len(t, h.rows(), 1)
+
+	_, err = h.call(methodUnsubscribe, &rawParams{
+		Name: "pr.comment_created", Arguments: raw(args("repo", testRepo, "sha", testShaA)), Delivery: raw(map[string]any{"url": callbackURL}),
+	})
+	require.NoError(t, err, "a sha that subscribe now refuses still names the subscription that it once stored")
+	require.Empty(t, h.rows())
+}
+
 func TestUnsubscribeDoesNotNeedRepositoryAccess(t *testing.T) {
 	t.Parallel()
 

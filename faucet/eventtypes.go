@@ -57,6 +57,11 @@ func payloadSchemaOf(headSHA, properties string, required ...string) json.RawMes
 	return json.RawMessage(fmt.Sprintf(payloadTemplate, headSHA, properties, strings.Join(quoted, ", ")))
 }
 
+// shaInputResolved is the arguments schema of an event type that has a sha. A
+// version before pr.comment_created lost its sha stored subscriptions with one,
+// and events/unsubscribe still reads that shape so they can be ended.
+var shaInputResolved = mustResolve(fmt.Sprintf(pollArgumentsTemplate, shaArgumentProperty))
+
 func (t eventType) inputSchema() json.RawMessage {
 	if t.noHeadSHA {
 		return json.RawMessage(fmt.Sprintf(pollArgumentsTemplate, ""))
