@@ -16,14 +16,24 @@ import (
 var errStoreDown = xerrors.New("store down: connection reset by peer")
 
 // settle is how long the first worker has to record its error before the other
-// call returns. The store has no signal for it. A worker that is late makes the
-// test pass for the other order and never fail.
+// call returns. The store has no signal for it. A worker that is late only makes
+// the test run the other order, and never makes it fail.
 const settle = 100 * time.Millisecond
 
-func awaitSignal(t *testing.T, signal <-chan struct{}, what string) {
+// signal is a one-shot event that a test waits for.
+type signal struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func newSignal() *signal { return &signal{done: make(chan struct{})} }
+
+func (s *signal) fire() { s.once.Do(func() { close(s.done) }) }
+
+func (s *signal) await(t *testing.T, what string) {
 	t.Helper()
 	select {
-	case <-signal:
+	case <-s.done:
 	case <-time.After(10 * time.Second):
 		t.Fatalf("%s never happened", what)
 	}
@@ -39,35 +49,32 @@ type endedClaimStore struct {
 	// claimFirst makes the cut claim return before the result fails.
 	claimFirst bool
 
-	claimInside, claimCut, finishInside func()
-	inside, cut, finishing              chan struct{}
+	// inside is the second worker in its claim, cut when the claim returned,
+	// and finishing the first worker in the recording of its result.
+	inside, cut, finishing *signal
 }
 
 func newEndedClaimStore(claimFirst bool) *endedClaimStore {
-	s := &endedClaimStore{claimFirst: claimFirst, inside: make(chan struct{}), cut: make(chan struct{}), finishing: make(chan struct{})}
-	s.claimInside = sync.OnceFunc(func() { close(s.inside) })
-	s.claimCut = sync.OnceFunc(func() { close(s.cut) })
-	s.finishInside = sync.OnceFunc(func() { close(s.finishing) })
-	return s
+	return &endedClaimStore{claimFirst: claimFirst, inside: newSignal(), cut: newSignal(), finishing: newSignal()}
 }
 
 func (s *endedClaimStore) ClaimDelivery(ctx context.Context, now time.Time, lease time.Duration, skip []string) (faucet.DeliveryClaim, bool, error) {
 	if s.claims.Add(1) == 1 {
 		return s.Store.ClaimDelivery(ctx, now, lease, skip)
 	}
-	s.claimInside()
+	s.inside.fire()
 	<-ctx.Done()
-	s.claimCut()
+	s.cut.fire()
 	return faucet.DeliveryClaim{}, false, ctx.Err()
 }
 
 func (s *endedClaimStore) FinishDelivery(context.Context, faucet.DeliveryRef, time.Time, faucet.Finish) (faucet.FinishResult, error) {
-	s.finishInside()
+	s.finishing.fire()
 	if s.claimFirst {
-		<-s.cut
+		<-s.cut.done
 		time.Sleep(settle)
 	} else {
-		<-s.inside
+		<-s.inside.done
 	}
 	return faucet.FinishResult{}, errStoreDown
 }
@@ -102,8 +109,8 @@ func TestDeliverDueKeepsAStoreErrorWhenTheEndOfTheRunCutsAClaimShort(t *testing.
 				done <- err
 			}()
 
-			awaitSignal(t, store.inside, "the second worker's claim")
-			awaitSignal(t, store.finishing, "the first worker's result")
+			store.inside.await(t, "the second worker's claim")
+			store.finishing.await(t, "the first worker's result")
 			if !tc.claimFirst {
 				time.Sleep(settle)
 			}
@@ -118,17 +125,16 @@ func TestDeliverDueKeepsAStoreErrorWhenTheEndOfTheRunCutsAClaimShort(t *testing.
 	}
 }
 
-// finishEndsStore ends the run during the recording of a result and fails it
-// with err.
-type finishEndsStore struct {
+// finishTimesOutStore ends the run during the recording of a result, and the
+// recording then times out, as a stalled query does under its own timeout.
+type finishTimesOutStore struct {
 	faucet.Store
 	endRun func()
-	err    error
 }
 
-func (s *finishEndsStore) FinishDelivery(context.Context, faucet.DeliveryRef, time.Time, faucet.Finish) (faucet.FinishResult, error) {
+func (s *finishTimesOutStore) FinishDelivery(context.Context, faucet.DeliveryRef, time.Time, faucet.Finish) (faucet.FinishResult, error) {
 	s.endRun()
-	return faucet.FinishResult{}, s.err
+	return faucet.FinishResult{}, xerrors.Errorf("update the delivery: %w", context.DeadlineExceeded)
 }
 
 // The result is recorded under a context that the run's end does not cancel,
@@ -140,7 +146,7 @@ func TestDeliverDueReturnsTheTimeoutOfARecordedResultAfterTheRunEnded(t *testing
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	d := newDeliverHarness(t, func(deps *faucet.Deps) {
-		deps.Store = &finishEndsStore{Store: deps.Store, endRun: cancel, err: xerrors.Errorf("update the delivery: %w", context.DeadlineExceeded)}
+		deps.Store = &finishTimesOutStore{Store: deps.Store, endRun: cancel}
 	})
 	d.ledgerSkip = true
 	d.subscribeEndpoint(d.endpoint("/hook"))

@@ -194,7 +194,7 @@ func (g *endpointGate) leave(origin string) {
 	}
 }
 
-// The claims are the only calls of the send phase that the run's context
+// The claims are the only store calls of the send phase that the run's context
 // bounds, so they tell the end of the run from a store failure here. A worker
 // whose claim the end cut short claims nothing and stops, and the run is
 // incomplete. The error of the send phase then holds only store failures, and
