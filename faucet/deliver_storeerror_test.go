@@ -2,9 +2,11 @@ package faucet_test
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -16,10 +18,8 @@ import (
 var errStoreDown = xerrors.New("store down: connection reset by peer")
 
 // settle is how long the first worker has to record its error before the other
-// call returns. The store has no signal for it. In the test of the claim race, a
-// worker that is late only makes the test run the other order. In the test of
-// the first failure it makes the test fail, so settle is long against the few
-// microseconds that the record takes.
+// call returns. The store has no signal for it. A worker that is late only makes
+// the test run the other order, and never makes it fail.
 const settle = 100 * time.Millisecond
 
 // signal is a one-shot event that a test waits for.
@@ -308,12 +308,15 @@ var (
 )
 
 // twoFailuresStore plays two workers of one run whose results the store fails
-// to record. The first worker to arrive fails once the other has arrived, and
-// the other fails settle after that.
+// to record. Both workers are inside the recording before either fails, so that
+// the first failure cannot stop the run before the other worker starts. The
+// first worker to arrive then fails at once. The other fails once every other
+// goroutine of the bubble waits, and the first worker has recorded its error
+// and returned by then.
 type twoFailuresStore struct {
 	faucet.Store
-	arrivals            atomic.Int32
-	bothIn, firstFailed *signal
+	arrivals atomic.Int32
+	bothIn   *signal
 }
 
 func (s *twoFailuresStore) FinishDelivery(context.Context, faucet.DeliveryRef, time.Time, faucet.Finish) (faucet.FinishResult, error) {
@@ -321,34 +324,44 @@ func (s *twoFailuresStore) FinishDelivery(context.Context, faucet.DeliveryRef, t
 		if !s.bothIn.wait() {
 			return faucet.FinishResult{}, xerrors.New("the second worker never arrived")
 		}
-		s.firstFailed.fire()
 		return faucet.FinishResult{}, errFirstFailure
 	}
 	s.bothIn.fire()
-	if !s.firstFailed.wait() {
-		return faucet.FinishResult{}, xerrors.New("the first worker never failed")
-	}
-	time.Sleep(settle)
+	synctest.Wait()
 	return faucet.FinishResult{}, errLaterFailure
+}
+
+// answersOK plays a callback endpoint that accepts every event.
+func answersOK(req *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody, Request: req}, nil
 }
 
 // The first failure is the cause that the operator needs. Later ones can be its
 // echoes.
+//
+// A synctest bubble orders the two failures, with no margin of real time that a
+// loaded machine can eat. The bubble has no socket, as a goroutine that waits
+// on one does not count as waiting.
 func TestDeliverDueReturnsTheFirstStoreFailureWhenWorkersFailInTurn(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		store := &twoFailuresStore{bothIn: newSignal()}
+		d := newDeliverHarness(t, func(deps *faucet.Deps) {
+			store.Store = deps.Store
+			deps.Store = store
+			deps.Webhook.Client = &http.Client{Transport: roundTripFunc(answersOK)}
+		})
+		d.rcv.server.Close()
+		d.ledgerSkip = true
+		d.subscribeEndpoint(d.endpoint("/hook"))
+		d.advance(time.Second)
+		d.newRunEvent()
+		d.newRunEvent()
 
-	store := &twoFailuresStore{bothIn: newSignal(), firstFailed: newSignal()}
-	d := newDeliverHarness(t, func(deps *faucet.Deps) {
-		store.Store = deps.Store
-		deps.Store = store
+		// The bubble's clock starts in the year 2000, behind the harness's mock
+		// clock, so the harness's deadline would end the run before it starts.
+		_, err := d.svc.DeliverDue(context.WithoutCancel(d.ctx))
+		require.ErrorIs(t, err, errFirstFailure, "the failure that came first is the run's error")
+		require.NotErrorIs(t, err, errLaterFailure, "a later failure does not replace it")
 	})
-	d.ledgerSkip = true
-	d.subscribeEndpoint(d.endpoint("/hook"))
-	d.advance(time.Second)
-	d.newRunEvent()
-	d.newRunEvent()
-
-	_, err := d.svc.DeliverDue(d.ctx)
-	require.ErrorIs(t, err, errFirstFailure, "the failure that came first is the run's error")
-	require.NotErrorIs(t, err, errLaterFailure, "a later failure does not replace it")
 }
