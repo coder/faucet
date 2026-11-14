@@ -2,6 +2,7 @@ package faucet_test
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -95,4 +96,38 @@ func TestAGapReachesGitHubsRetentionWhateverFaucetsClockSays(t *testing.T) {
 			requireNoSilentLoss(t, env, failures)
 		})
 	}
+}
+
+func TestAQuietHookDrainsTheRangesThatABurstLeftOpen(t *testing.T) {
+	t.Parallel()
+
+	// A burst of 5 attempts a second for 500 seconds holds 25 pages, and a run
+	// reads 9. The failures are in its oldest part. After the burst the hook
+	// is silent: every run reads the same newest attempts, and the part of the
+	// burst that no run has read must not wait behind them.
+	env := newRedeliveryEnv(t, func(o *envOptions) { o.maxPages = 9 })
+	env.run()
+	env.advance(time.Minute)
+	start := env.gh.now()
+	var failed []string
+	for i := range 2500 {
+		guid := fmt.Sprintf("a-%04d", i)
+		status := http200
+		if i < 1000 && i%50 == 7 {
+			status = 503
+			failed = append(failed, guid)
+		}
+		env.gh.record(guid, start.Add(time.Duration(i)*200*time.Millisecond), status)
+	}
+	env.advance(cronEvery)
+
+	var ranges []int
+	for range 6 {
+		ranges = append(ranges, env.run().Ranges)
+		env.advance(cronEvery)
+	}
+
+	require.True(t, allStored(env, failed), "every failure of the burst is asked for within a few runs of silence")
+	require.Equal(t, 0, ranges[len(ranges)-1], "a quiet hook reads all that is open")
+	require.LessOrEqual(t, slices.Max(ranges), 1, "a silent run opens no range of what an earlier run read: %v", ranges)
 }

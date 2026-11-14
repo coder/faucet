@@ -442,7 +442,12 @@ func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, er
 		}
 		step.Gap = gapOf(olderAt, r.floor, covered)
 	}
-	if !head.finished() {
+	// A page that reaches the position of the run before has read all that is
+	// new. What lies below it, down to the overlap, is what earlier runs read or
+	// the range that they left open for it. A range of it again would only
+	// stand ahead of the older ranges and take the pages of every run.
+	readAllNew := !first && !head.oldest.IsZero() && !head.oldest.After(olderAt)
+	if !head.finished() && !readAllNew {
 		step.Open = &RedeliveryRange{NewerAt: head.oldest, OlderAt: olderAt, Cursor: head.next}
 	}
 	res, err := r.apply(ctx, step, cause)
