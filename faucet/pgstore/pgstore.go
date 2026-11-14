@@ -71,7 +71,7 @@ func (s *Store) InsertEvent(ctx context.Context, ev faucet.Event) (_ faucet.Even
 		RepoID:     ev.RepoID,
 		Prs:        prs,
 		HeadSha:    ev.HeadSHA,
-		Data:       ev.Data,
+		Data:       string(ev.Data),
 	})
 	inserted := true
 	if xerrors.Is(err, sql.ErrNoRows) {
@@ -230,7 +230,7 @@ func (s *Store) UpsertSubscription(ctx context.Context, sub faucet.Subscription,
 		Principal:           sub.Principal,
 		CallbackUrl:         sub.CallbackURL,
 		EventType:           sub.EventType,
-		Arguments:           sub.Arguments,
+		Arguments:           string(sub.Arguments),
 		RepoID:              sub.RepoID,
 		SecretEnc:           sub.SecretEnc,
 		Cursor:              sub.Cursor,

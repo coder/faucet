@@ -41,6 +41,28 @@ func TestRedeliveryStore(t *testing.T) {
 	})
 }
 
+// A transaction-mode pooler such as Neon's pooled URL breaks lib/pq's default
+// parse-then-bind pair of batches, and binary_parameters=yes avoids it by
+// sending each query in one batch. That mode sends every []byte parameter in
+// binary, which a jsonb parameter cannot take, so the whole suite runs in it.
+func TestStoreOverBinaryParameters(t *testing.T) {
+	t.Parallel()
+	adminURL := withBinaryParameters(t, testDatabaseURL(t))
+
+	storetest.Run(t, func(t *testing.T) faucet.Store {
+		return pgstore.New(newDatabase(t, adminURL))
+	})
+}
+
+func TestRedeliveryStoreOverBinaryParameters(t *testing.T) {
+	t.Parallel()
+	adminURL := withBinaryParameters(t, testDatabaseURL(t))
+
+	storetest.RunRedelivery(t, func(t *testing.T) storetest.RedeliveryStore {
+		return pgstore.New(newDatabase(t, adminURL))
+	})
+}
+
 func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {
 	t.Parallel()
 	adminURL := testDatabaseURL(t)
@@ -72,6 +94,16 @@ func testDatabaseURL(t *testing.T) string {
 		t.Skipf("set %s to a Postgres URL, for example postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable", databaseURLEnv)
 	}
 	return adminURL
+}
+
+func withBinaryParameters(t *testing.T, rawURL string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	require.NoError(t, err)
+	q := u.Query()
+	q.Set("binary_parameters", "yes")
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func newDatabase(t *testing.T, adminURL string) *sql.DB {

@@ -256,7 +256,7 @@ VALUES (
   $4,
   $5::int[],
   NULLIF($6::text, ''),
-  $7
+  $7::text::jsonb
 )
 ON CONFLICT (delivery_id) DO NOTHING
 RETURNING id, source, delivery_id, type, repo_id, prs, head_sha, data, received_at
@@ -269,7 +269,7 @@ type InsertEventParams struct {
 	RepoID     int64
 	Prs        []int32
 	HeadSha    string
-	Data       json.RawMessage
+	Data       string
 }
 
 func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (FaucetEvent, error) {
@@ -435,7 +435,7 @@ VALUES (
   $2,
   $3,
   $4,
-  $5,
+  $5::text::jsonb,
   $6,
   $7,
   $8,
@@ -466,7 +466,7 @@ type UpsertSubscriptionParams struct {
 	Principal           string
 	CallbackUrl         string
 	EventType           string
-	Arguments           json.RawMessage
+	Arguments           string
 	RepoID              int64
 	SecretEnc           []byte
 	Cursor              int64
