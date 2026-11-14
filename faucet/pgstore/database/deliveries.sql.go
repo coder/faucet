@@ -53,7 +53,7 @@ WITH due AS (
   WHERE s.expires_at > $1
     AND d.next_attempt_at <= $1
     AND (d.lease_until IS NULL OR d.lease_until <= $1)
-    AND COALESCE(substring(s.callback_url from '^[a-z][a-z0-9+.-]*://[^/?#]*'), '') <> ALL($2::text[])
+    AND lower(COALESCE(regexp_replace(substring(s.callback_url from '^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*'), '^([^/]*//).*@', '\1'), '')) <> ALL($2::text[])
   ORDER BY d.next_attempt_at, d.event_id
   LIMIT 1
   FOR UPDATE OF d SKIP LOCKED
@@ -104,6 +104,8 @@ type ClaimDeliveryRow struct {
 	ReceivedAt          sql.NullTime
 }
 
+// The origin expression below is faucet.CallbackOrigin written in SQL: the scheme
+// and host with the user info dropped, in lower case. ClaimGap has the same one.
 func (q *Queries) ClaimDelivery(ctx context.Context, arg ClaimDeliveryParams) (ClaimDeliveryRow, error) {
 	row := q.db.QueryRowContext(ctx, claimDelivery, arg.Now, pq.Array(arg.SkipOrigins), arg.LeaseUntil)
 	var i ClaimDeliveryRow
@@ -140,7 +142,7 @@ WITH due AS (
   WHERE s.gap_through > 0
     AND s.expires_at > $2
     AND (s.gap_lease_until IS NULL OR s.gap_lease_until <= $2)
-    AND COALESCE(substring(s.callback_url from '^[a-z][a-z0-9+.-]*://[^/?#]*'), '') <> ALL($3::text[])
+    AND lower(COALESCE(regexp_replace(substring(s.callback_url from '^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*'), '^([^/]*//).*@', '\1'), '')) <> ALL($3::text[])
   ORDER BY s.gap_through, s.key_hash
   LIMIT 1
   FOR UPDATE SKIP LOCKED
