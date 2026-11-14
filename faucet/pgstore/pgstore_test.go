@@ -198,6 +198,64 @@ func TestCheckSchemaAcceptsOnlyTheNewestVersionAndWritesNothing(t *testing.T) {
 	})
 }
 
+// A purge that has to wait for another purge must hold nothing yet. The test
+// stands in for the running purge by holding the purge-mark row, and probes
+// with a second transaction that wants an event the waiting purge would
+// delete. A purge that deleted before it waited would hold that row, and the
+// inserts and claims that need it would wait behind two purges, with a
+// deadlock possible between purges that take their rows in another order.
+func TestPurgeThatWaitsForAnotherPurgeHoldsNoEventRow(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	ctx := context.Background()
+
+	stored, inserted, err := store.InsertEvent(ctx, faucet.Event{
+		Source: "github", DeliveryID: "purge-wait-1", Type: "ci.run_completed", RepoID: 42, Data: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	require.True(t, inserted)
+
+	running, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = running.Rollback() })
+	_, err = running.ExecContext(ctx, `SELECT purged_through FROM faucet_purge_mark FOR UPDATE`)
+	require.NoError(t, err)
+
+	type outcome struct {
+		res faucet.PurgeResult
+		err error
+	}
+	waiting := make(chan outcome, 1)
+	go func() {
+		res, err := store.Purge(ctx, time.Now().Add(time.Hour))
+		waiting <- outcome{res, err}
+	}()
+	require.Eventually(t, func() bool {
+		var blocked int
+		err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&blocked)
+		return err == nil && blocked == 1
+	}, 10*time.Second, 20*time.Millisecond, "the purge never waited for the held purge mark")
+
+	probe, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	var id int64
+	err = probe.QueryRowContext(ctx, `SELECT id FROM faucet_events FOR UPDATE NOWAIT`).Scan(&id)
+	require.NoError(t, probe.Rollback())
+	require.NoError(t, err, "the waiting purge already holds an event row")
+	require.Equal(t, stored.ID, id)
+
+	select {
+	case got := <-waiting:
+		t.Fatalf("the purge finished while the purge mark was held: %+v", got)
+	default:
+	}
+	require.NoError(t, running.Commit())
+	got := <-waiting
+	require.NoError(t, got.err)
+	require.Equal(t, faucet.PurgeResult{Deleted: 1, PurgedThrough: stored.ID}, got.res)
+}
+
 func TestStoreCallThatItsContextCutShortWrapsTheContextError(t *testing.T) {
 	t.Parallel()
 	db := newDatabase(t, testDatabaseURL(t))
