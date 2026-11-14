@@ -197,8 +197,9 @@ type RedeliverResult struct {
 // (less RedeliveryReadOverlap). When a run cannot read that far inside its
 // page limit, it records the unread part as a range, and the next runs read
 // the ranges, newest first, with what the head read leaves of their page
-// limit. A cursor that GitHub gave is kept with the range, so a later run
-// continues right after the last attempt read. A range whose old end leaves
+// limit. A first page that already reaches that position opens no range, for
+// the runs before it read the overlap. A cursor that GitHub gave is kept with
+// the range, so a later run continues right after the last attempt read. A range whose old end leaves
 // GitHub's retention before it is read becomes a gap. Where that retention
 // begins is a time of GitHub's: the Date of the run's first page, never earlier
 // than the newest attempt on it. A run that has neither records no gap.
