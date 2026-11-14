@@ -52,11 +52,10 @@ func (b *syncBuffer) String() string {
 
 type githubStub struct {
 	*httptest.Server
-	mu       sync.Mutex
-	requests []string
-	auth     []string
-	userErr  int
-	// userHeader is set on the answer that userErr gives.
+	mu         sync.Mutex
+	requests   []string
+	auth       []string
+	userErr    int
 	userHeader http.Header
 }
 
@@ -172,9 +171,9 @@ func (s *testServer) requireNoToken(t *testing.T, what string, texts ...string) 
 	}
 }
 
-// bearerTransport sends through the transport of one test server. The
-// default transport is shared by the parallel tests, and a server that closes
-// breaks the idle connections of every test that uses it.
+// bearerTransport takes the test server's own transport: httptest.Server.Close
+// closes the idle connections of http.DefaultTransport, which breaks parallel
+// tests that share it.
 type bearerTransport struct {
 	token string
 	next  http.RoundTripper

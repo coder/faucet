@@ -19,7 +19,6 @@ import (
 	"github.com/coder/faucet/faucet/pgstore"
 )
 
-// postgresStore returns a store on a database of its own, which the test drops.
 func postgresStore(t *testing.T) faucet.Store {
 	t.Helper()
 	adminURL := os.Getenv("FAUCET_TEST_DATABASE_URL")
@@ -54,8 +53,6 @@ func postgresStore(t *testing.T) faucet.Store {
 	return pgstore.New(db)
 }
 
-// onPostgres is a delivery harness whose service keeps its subscriptions in a
-// real database.
 func onPostgres(t *testing.T) (d *deliverHarness, store faucet.Store) {
 	t.Helper()
 	store = postgresStore(t)
@@ -64,8 +61,6 @@ func onPostgres(t *testing.T) (d *deliverHarness, store faucet.Store) {
 	return d, store
 }
 
-// restartedUnderNewKey is a second service on the same database with another
-// FAUCET_WEBHOOK_KEY, as after an operator changed the key.
 func (d *deliverHarness) restartedUnderNewKey(store faucet.Store) *deliverHarness {
 	d.t.Helper()
 	key, err := faucet.NewWebhookKey(bytes.Repeat([]byte{0x5c}, 32))
