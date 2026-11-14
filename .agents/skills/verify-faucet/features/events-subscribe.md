@@ -1,6 +1,6 @@
 # Events subscribe
 
-An agent asks faucet to send the events of one repository to a webhook it runs, through `events/subscribe` on `POST /mcp`. This is the webhook delivery mode of the MCP Events extension (SEP-3415). At PR 6 faucet only stores the subscription. It sends nothing, and it makes no request to the callback URL. The agent ends a subscription with [events/unsubscribe](events-unsubscribe.md). [events/list](events-list.md) says whether the mode is offered, and [startup](startup.md) says what turns it on.
+An agent asks faucet to send the events of one repository to a webhook it runs, through `events/subscribe` on `POST /mcp`. This is the webhook delivery mode of the MCP Events extension (SEP-3415). Faucet stores the subscription and makes no request to the callback URL when it does. A later call to `GET /cron/deliver` sends the events, see [delivery](delivery.md). The agent ends a subscription with [events/unsubscribe](events-unsubscribe.md). [events/list](events-list.md) says whether the mode is offered, and [startup](startup.md) says what turns it on.
 
 ## Sub-features
 
