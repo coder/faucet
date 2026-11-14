@@ -1,6 +1,7 @@
 package faucet_test
 
 import (
+	"fmt"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -131,6 +132,36 @@ func requireEachGapSentOnce(t *testing.T, rcv *hookReceiver, paths ...string) {
 	for _, path := range paths {
 		require.Len(t, rcv.envelopesOf(path, "gap"), 1, "the subscription at %s gets its gap envelope once: no run loses it or sends it again", path)
 	}
+}
+
+// A worker sends gaps one after another until none is left, so one call sends
+// more of them than it has workers. The origin has no limit, so that no worker
+// finds it full and passes a gap over: every gap goes out, whatever the timing.
+func TestDeliverDueOneCallSendsMoreGapsThanItHasWorkers(t *testing.T) {
+	t.Parallel()
+
+	const workers = 8
+	const gaps = 4 * workers
+	d := newDeliverHarness(t, func(deps *faucet.Deps) { deps.Webhook.MaxWorkersPerOrigin = -1 })
+	paths := make([]string, gaps)
+	for i := range gaps {
+		paths[i] = fmt.Sprintf("/gap%02d", i)
+		d.subscribeEndpoint(d.endpoint(paths[i]))
+	}
+	d.advance(time.Second)
+	d.newRunEvent()
+	d.advance(5 * time.Minute)
+	d.newRunEvent()
+	purged, err := d.store.Purge(d.ctx, d.clock.Now().Add(-time.Minute))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, purged.Deleted)
+
+	res := d.deliverDue()
+	require.Equal(t, gaps, res.Gaps)
+	require.Equal(t, gaps, res.GapsSent, "one call sends every gap, not one for each worker")
+	require.Zero(t, res.GapsFailed)
+	require.Equal(t, gaps, res.Delivered, "the event that survived the purge goes to every subscription too")
+	requireEachGapSentOnce(t, d.rcv, paths...)
 }
 
 // A host whose subscribers all call back to one origin sends with 2 of the 8
