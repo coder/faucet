@@ -228,7 +228,7 @@ func (s *cronServer) get(t *testing.T, method, path string, authHeader *string) 
 	if authHeader != nil {
 		req.Header["Authorization"] = []string{*authHeader}
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.Client().Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
