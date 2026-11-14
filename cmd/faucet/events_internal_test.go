@@ -72,7 +72,6 @@ func (s *testServer) connectEvents(ctx context.Context, t *testing.T, token stri
 	}, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = session.Close() })
-	t.Cleanup(func() { s.clock.Advance(1) })
 	return session
 }
 
