@@ -35,6 +35,57 @@ const (
 	redeliveryAskSettle = 5 * time.Minute
 )
 
+// A run whose context has a deadline spends the time left at its start in
+// four parts, so that the settle, the asks and the purge get their turn
+// whatever the delivery list costs. A slow list leaves a range open, as the
+// page limit does, and the next run reads on.
+const (
+	// redeliveryScanShare is the share for reading the list. A page in flight
+	// when it ends is cancelled and not counted.
+	redeliveryScanShare = 0.5
+	// redeliveryAskStartShare is the share after which no ask starts, so that
+	// an ask that started before it has time to finish.
+	redeliveryAskStartShare = 0.8
+	// redeliveryAskEndShare is the share at which an ask in flight is
+	// cancelled. The purge has the rest.
+	redeliveryAskEndShare = 0.9
+)
+
+// errScanBudget says that the time for reading the list ran out.
+var errScanBudget = xerrors.New("the time for reading the delivery list ran out")
+
+// runBudget holds the instants that split a run's deadline. The zero value
+// means no deadline, and nothing ends early. A context deadline is wall time,
+// so the split does not use the service's clock.
+type runBudget struct {
+	scanEnd, askStart, askEnd time.Time
+}
+
+func newRunBudget(ctx context.Context) runBudget {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return runBudget{}
+	}
+	start := time.Now()
+	left := deadline.Sub(start)
+	at := func(share float64) time.Time { return start.Add(time.Duration(float64(left) * share)) }
+	return runBudget{scanEnd: at(redeliveryScanShare), askStart: at(redeliveryAskStartShare), askEnd: at(redeliveryAskEndShare)}
+}
+
+// pastScan says that the run must start no more pages.
+func (b runBudget) pastScan() bool { return !b.scanEnd.IsZero() && !time.Now().Before(b.scanEnd) }
+
+// pastAskStart says that the run must start no more asks.
+func (b runBudget) pastAskStart() bool { return !b.askStart.IsZero() && !time.Now().Before(b.askStart) }
+
+// until returns ctx cut at end, or ctx itself when end is zero.
+func until(ctx context.Context, end time.Time) (context.Context, context.CancelFunc) {
+	if end.IsZero() {
+		return ctx, func() {}
+	}
+	return context.WithDeadline(ctx, end)
+}
+
 // askWaits is how long a delivery waits after ask n before ask n+1. The wait
 // doubles, so a few asks cover an outage of hours, and a delivery that faucet
 // always rejects costs MaxAsksPerDelivery requests.
@@ -155,6 +206,12 @@ type RedeliverResult struct {
 // fails stops the asks of the run, and a failed first page stops them as well,
 // because both mean that the token, the hook or GitHub is not working.
 //
+// When ctx has a deadline, the run keeps to it by construction. It reads the
+// list for half of the time that is left at its start, and a page that is not
+// back by then is dropped. What it did not read stays an open range, as it
+// does at the page limit. Then the run settles, asks until 80 percent of the
+// time has passed, and purges. A slow list so costs pages and never the asks.
+//
 // One run holds the lease at a time. A second run that starts meanwhile
 // returns at once with Busy set.
 //
@@ -180,15 +237,16 @@ func (s *Service) Redeliver(ctx context.Context) (RedeliverResult, error) {
 		}
 	}()
 
-	run := &redeliveryRun{svc: s, state: rd, epoch: scan.Epoch}
+	run := &redeliveryRun{svc: s, state: rd, epoch: scan.Epoch, budget: newRunBudget(ctx)}
 	return run.execute(ctx, scan)
 }
 
 type redeliveryRun struct {
-	svc   *Service
-	state *redeliveryState
-	epoch int64
-	res   RedeliverResult
+	svc    *Service
+	state  *redeliveryState
+	epoch  int64
+	budget runBudget
+	res    RedeliverResult
 }
 
 func (r *redeliveryRun) execute(ctx context.Context, scan RedeliveryScan) (RedeliverResult, error) {
@@ -237,8 +295,13 @@ type pageRead struct {
 func (p pageRead) finished() bool { return p.reachedBound || p.next == "" }
 
 func (r *redeliveryRun) read(ctx context.Context, cursor string, bound time.Time) (pageRead, error) {
-	page, err := r.state.hooks.ListDeliveries(ctx, cursor)
+	readCtx, cancel := until(ctx, r.budget.scanEnd)
+	defer cancel()
+	page, err := r.state.hooks.ListDeliveries(readCtx, cursor)
 	if err != nil {
+		if ctx.Err() == nil && readCtx.Err() != nil {
+			return pageRead{}, errScanBudget
+		}
 		return pageRead{}, xerrors.Errorf("list deliveries: %w", err)
 	}
 	r.res.Pages++
@@ -387,9 +450,12 @@ func (r *redeliveryRun) readRanges(ctx context.Context, ranges []RedeliveryRange
 		r.res.Ranges--
 	}
 	for _, rg := range live {
-		for r.res.Pages < r.state.maxPages && ctx.Err() == nil {
+		for r.res.Pages < r.state.maxPages && ctx.Err() == nil && !r.budget.pastScan() {
 			now := r.svc.clock.Now()
 			p, err := r.read(ctx, rg.Cursor, rg.OlderAt.Add(-RedeliveryReadOverlap))
+			if errors.Is(err, errScanBudget) {
+				return nil // the range stays open where the last page left it
+			}
 			if err != nil {
 				return err
 			}
@@ -456,7 +522,9 @@ func (r *redeliveryRun) settle(ctx context.Context) error {
 
 func (r *redeliveryRun) ask(ctx context.Context) error {
 	schedule := askSchedule()
-	for r.res.Asked < r.state.maxAsks && ctx.Err() == nil {
+	askCtx, cancel := until(ctx, r.budget.askEnd)
+	defer cancel()
+	for r.res.Asked < r.state.maxAsks && askCtx.Err() == nil && !r.budget.pastAskStart() {
 		claim, ok, err := r.state.store.ClaimRedelivery(ctx, ClaimRequest{
 			Now: r.svc.clock.Now(), Retention: GitHubDeliveryRetention, MaxAsks: MaxAsksPerDelivery, Schedule: schedule,
 		})
@@ -466,7 +534,7 @@ func (r *redeliveryRun) ask(ctx context.Context) error {
 		if !ok {
 			return nil
 		}
-		if err := r.state.hooks.Redeliver(ctx, claim.AttemptID); err != nil {
+		if err := r.state.hooks.Redeliver(askCtx, claim.AttemptID); err != nil {
 			r.svc.logger.Warn(ctx, "redelivery request failed",
 				slog.F("delivery_id", claim.GUID), slog.F("attempt_id", claim.AttemptID), slog.F("ask", claim.Ask), slog.Error(err))
 			return xerrors.Errorf("request redelivery: %w", err)

@@ -63,6 +63,9 @@ type fakeGitHub struct {
 	askFault  func(guid string) error
 	// listGate, when set, runs inside every list call, before the answer.
 	listGate func()
+	// listDelay and askDelay make every list call and every redelivery request
+	// take that long, or until its context ends.
+	listDelay, askDelay time.Duration
 }
 
 var _ faucet.HookAdmin = (*fakeGitHub)(nil)
@@ -139,9 +142,16 @@ func (g *fakeGitHub) visibleLocked() []ghAttempt {
 	return g.attempts[lo:hi]
 }
 
-func (g *fakeGitHub) ListDeliveries(_ context.Context, cursor string) (faucet.DeliveryPage, error) {
+func (g *fakeGitHub) ListDeliveries(ctx context.Context, cursor string) (faucet.DeliveryPage, error) {
 	if gate := g.listGate; gate != nil {
 		gate()
+	}
+	if g.listDelay > 0 {
+		select {
+		case <-time.After(g.listDelay):
+		case <-ctx.Done():
+			return faucet.DeliveryPage{}, ctx.Err()
+		}
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -204,7 +214,14 @@ func olderThan(a, b ghAttempt) bool {
 	return a.at.Before(b.at) || (a.at.Equal(b.at) && a.id < b.id)
 }
 
-func (g *fakeGitHub) Redeliver(_ context.Context, attemptID int64) error {
+func (g *fakeGitHub) Redeliver(ctx context.Context, attemptID int64) error {
+	if g.askDelay > 0 {
+		select {
+		case <-time.After(g.askDelay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for _, a := range g.attempts {

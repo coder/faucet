@@ -327,6 +327,53 @@ func TestARateLimitedRequestIsNotAFinalStateAndTheScheduleAsksAgain(t *testing.T
 	require.Equal(t, 1, env.run().Recovered)
 }
 
+func TestASlowListCostsPagesAndNeverTheAsksOrTheSettle(t *testing.T) {
+	t.Parallel()
+	env := newRedeliveryEnv(t)
+	for i := range 3 {
+		env.gh.record(fmt.Sprintf("failed-%d", i), env.now().Add(-time.Duration(i+1)*time.Second), 503)
+	}
+	for i := range 1800 { // 18 pages, behind the failures
+		env.gh.record(fmt.Sprintf("worked-%04d", i), env.now().Add(-time.Minute-time.Duration(i)*time.Second), http200)
+	}
+	// 18 pages need 2.7 seconds, and the run has 2. It reads for the first one.
+	env.gh.listDelay = 150 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	res, err := env.svc.Redeliver(ctx)
+	require.NoError(t, err, "the end of the time for the scan is like the page limit: no failure")
+	require.Less(t, res.Pages, 18)
+	require.Equal(t, 3, res.Tracked)
+	require.Equal(t, 3, res.Asked, "a slow list does not cost the asks")
+	require.Equal(t, 3, res.Pending, "a slow list does not cost the settle")
+	require.Equal(t, 1, res.Ranges, "what the scan did not read is an open range")
+
+	env.gh.listDelay = 0
+	res = env.run()
+	require.Zero(t, res.Ranges, "the next run reads the rest")
+	require.Equal(t, 3, res.Recovered)
+}
+
+func TestSlowAsksStopStartingInTimeForARequestInFlightToEndAndForThePurge(t *testing.T) {
+	t.Parallel()
+	env := newRedeliveryEnv(t)
+	for i := range 30 {
+		env.gh.record(fmt.Sprintf("failed-%02d", i), env.now().Add(-time.Duration(i+1)*time.Second), 503)
+	}
+	// 30 asks need 3 seconds, and the run has 2.
+	env.gh.askDelay = 100 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	res, err := env.svc.Redeliver(ctx)
+	require.NoError(t, err, "no ask is in flight when the time ends, so none is cancelled and none is lost")
+	require.Positive(t, res.Asked)
+	require.Less(t, res.Asked, 30)
+	require.Equal(t, 30, res.Pending)
+	require.Len(t, env.gh.askedTimes("failed-29"), 1, "the delivery that waited longest went first")
+}
+
 func TestAFailedFirstPageStopsTheAsksButStillSettles(t *testing.T) {
 	t.Parallel()
 	env := newRedeliveryEnv(t)
