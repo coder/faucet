@@ -573,6 +573,62 @@ func TestHandshakeManyLoginsStillCannotFloodOneHost(t *testing.T) {
 	requireNothingStored(t, h, "a refused handshake")
 }
 
+func TestHandshakeALoginOverItsLimitSpendsNothingOfTheHost(t *testing.T) {
+	t.Parallel()
+
+	secret := newSecret(t, 32)
+	gateway := sharedGateway(t, secret)
+	h := newHandshakeHarness(t, gateway.target, resolveToLoopback())
+	failing := func(login string, i int) *jsonrpc.Error {
+		h.as(login)
+		return h.subscribeError(subscribeTo(repoArgs(), fmt.Sprintf("%s/x-%s-%d", gateway.url, login, i), secret))
+	}
+
+	for i := range 5 {
+		require.EqualValues(t, codeCallbackEndpoint, failing("octocat", i).Code)
+	}
+	for i := 5; i < 205; i++ {
+		require.EqualValues(t, codeResourceExhausted, failing("octocat", i).Code, "attempt %d is over the login's limit", i)
+	}
+	for login := range 11 {
+		for i := range 5 {
+			require.EqualValues(t, codeCallbackEndpoint, failing(fmt.Sprintf("user-%d", login), i).Code,
+				"the 200 refused attempts took no token of the host, so the other logins still get the other 55")
+		}
+	}
+	require.EqualValues(t, 60, gateway.hits.Load())
+	require.EqualValues(t, codeResourceExhausted, failing("user-99", 0).Code, "and the host is then empty")
+}
+
+func TestHandshakeHostRefillsOnePerSecondAndKeepsTheTokensOfLoginsItRefused(t *testing.T) {
+	t.Parallel()
+
+	secret := newSecret(t, 32)
+	gateway := sharedGateway(t, secret)
+	h := newHandshakeHarness(t, gateway.target, resolveToLoopback())
+	failing := func(login string, i int) *jsonrpc.Error {
+		h.as(login)
+		return h.subscribeError(subscribeTo(repoArgs(), fmt.Sprintf("%s/x-%s-%d", gateway.url, login, i), secret))
+	}
+
+	for login := range 12 {
+		for i := range 5 {
+			require.EqualValues(t, codeCallbackEndpoint, failing(fmt.Sprintf("user-%d", login), i).Code)
+		}
+	}
+	for i := range 6 {
+		require.EqualValues(t, codeResourceExhausted, failing("octocat", i).Code, "the empty host refuses octocat")
+	}
+
+	h.clock.Advance(5 * time.Second)
+	for i := 10; i < 15; i++ {
+		require.EqualValues(t, codeCallbackEndpoint, failing("octocat", i).Code,
+			"the host refused octocat and gave back its tokens, and 5 seconds gave the host 5")
+	}
+	require.EqualValues(t, 65, gateway.hits.Load())
+	require.EqualValues(t, codeResourceExhausted, failing("user-99", 0).Code, "5 seconds gave the host 5 tokens and no more")
+}
+
 func TestHandshakeAnsweredHandshakesDoNotUseUpTheHostLimit(t *testing.T) {
 	t.Parallel()
 
