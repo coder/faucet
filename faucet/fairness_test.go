@@ -27,7 +27,10 @@ func stall(t *testing.T, rcv *hookReceiver, paths ...string) *stalledEndpoints {
 	hold := func() int {
 		now := s.held.Add(1)
 		defer s.held.Add(-1)
-		for seen := s.peak.Load(); now > seen && !s.peak.CompareAndSwap(seen, now); seen = s.peak.Load() {
+		for seen := s.peak.Load(); now > seen; seen = s.peak.Load() {
+			if s.peak.CompareAndSwap(seen, now) {
+				break
+			}
 		}
 		<-gate
 		return http.StatusOK

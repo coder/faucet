@@ -67,9 +67,10 @@ func (w *windowWarnings) first(key SubscriptionKeyHash, until, now time.Time) bo
 // is that of openSecret for the current secret, which holds no secret.
 //
 // A previous secret that does not open is skipped, with one log line per
-// subscription and window, and the current secret signs alone. The store cannot open it, so a renewal under
-// another FAUCET_WEBHOOK_KEY moves a ciphertext of the old key there. It must
-// never end a delivery or the subscription, which the current secret serves.
+// subscription and window, and the current secret signs alone. The store
+// cannot open it, so a renewal under another FAUCET_WEBHOOK_KEY moves a
+// ciphertext of the old key there. It must never end a delivery or the
+// subscription, which the current secret serves.
 func (wh *webhookState) signingSecrets(ctx context.Context, now time.Time, key SubscriptionKeyHash, sealed sealedSecrets) ([]subscriberSecret, error) {
 	current, err := openSecret(wh.aead, sealed.current, key[:])
 	if err != nil {

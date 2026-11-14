@@ -184,7 +184,8 @@ func (g *endpointGate) leave(origin string) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.workers[origin]--; g.workers[origin] <= 0 {
+	g.workers[origin]--
+	if g.workers[origin] <= 0 {
 		delete(g.workers, origin)
 	}
 }
