@@ -224,9 +224,27 @@ func concurrentInsertsCommitInIDOrder(t *testing.T, s faucet.Store) {
 		close(writersDone)
 	}()
 
-	seen := make([][]int64, readers)
+	// A reader follows the log by the last ID it saw, or by the Next of a poll.
+	// Next is the head ID of the same snapshot as the page, and a store that
+	// reads the head in a statement of its own skips an event that commits
+	// between the two.
+	followers := []func(ctx context.Context, after int64) (events []faucet.Event, next int64, err error){
+		func(ctx context.Context, after int64) ([]faucet.Event, int64, error) {
+			events, err := s.EventsAfter(ctx, after, pageSize)
+			if len(events) > 0 {
+				after = events[len(events)-1].ID
+			}
+			return events, after, err
+		},
+		func(ctx context.Context, after int64) ([]faucet.Event, int64, error) {
+			page, err := s.PollEvents(ctx, faucet.PollQuery{RepoID: newEvent("").RepoID, After: after, Limit: pageSize})
+			return page.Events, page.Next, err
+		},
+	}
+	seen := make([][]int64, readers*len(followers))
 	var readerWG sync.WaitGroup
-	for r := range readers {
+	for r := range seen {
+		follow := followers[r%len(followers)]
 		readerWG.Go(func() {
 			var cursor int64
 			finished := false
@@ -236,15 +254,15 @@ func concurrentInsertsCommitInIDOrder(t *testing.T, s faucet.Store) {
 					finished = true
 				default:
 				}
-				events, err := s.EventsAfter(ctx, cursor, pageSize)
+				events, next, err := follow(ctx, cursor)
 				if err != nil {
 					t.Errorf("reader %d: %v", r, err)
 					return
 				}
 				for _, ev := range events {
 					seen[r] = append(seen[r], ev.ID)
-					cursor = ev.ID
 				}
+				cursor = next
 				// A page read after the writers finished that comes back empty
 				// means the reader has drained everything.
 				if finished && len(events) == 0 {

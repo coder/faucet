@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +17,10 @@ import (
 )
 
 const testToken = "ghp_test0123456789abcdefghijklmnopqrstuv"
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 type githubStub struct {
 	*httptest.Server
@@ -177,6 +182,24 @@ func TestTokenAuthorizerSendsTheTokenOnlyToBaseURL(t *testing.T) {
 		require.Zero(t, id)
 		requireNoToken(t, "error", err.Error())
 		require.Zero(t, elsewhere.requests.Load(), "the redirect target must not be called")
+	})
+
+	t.Run("SchemeDowngradeOnTheSameHostIsRefused", func(t *testing.T) {
+		t.Parallel()
+
+		var schemes []string
+		client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			schemes = append(schemes, r.URL.Scheme)
+			if len(schemes) == 1 {
+				return &http.Response{StatusCode: http.StatusMovedPermanently, Header: http.Header{"Location": {"http://api.github.test/repos/o/r"}}, Body: http.NoBody, Request: r}, nil
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"id": 1}`)), Request: r}, nil
+		})}
+		authz := faucet.TokenAuthorizer{BaseURL: "https://api.github.test", Client: client}
+
+		_, err := authz.RepoID(context.Background(), principal(t), "o/r")
+		require.Error(t, err)
+		require.Equal(t, []string{"https"}, schemes, "the token is never sent over http, whatever the host says")
 	})
 
 	t.Run("SameHostRedirectIsFollowed", func(t *testing.T) {
