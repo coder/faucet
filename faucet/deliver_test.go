@@ -492,6 +492,63 @@ func TestDeliverDueTakesBackADeliveryWhenALeaseRunsOut(t *testing.T) {
 	})
 }
 
+// A run counts a gap or a delivery when its request is done, and must also
+// finish it. A send that is counted but not finished keeps its lease, and the
+// first run after the lease sends it again. The counts of the first run and the
+// receivers after it cannot show that, so this test runs once more past the
+// lease, and nothing may go out. There are more gaps than workers, so that a
+// worker which finishes only its first gap leaves some unfinished. One gap
+// endpoint answers slowly, so that a request that takes long is finished too.
+// The origin has no limit, so that no worker passes a gap over and one call
+// sends everything.
+func TestDeliverDueARunPastTheLeaseSendsNothingAgain(t *testing.T) {
+	t.Parallel()
+
+	const workers = 8
+	const subscriptions = 4 * workers
+	d := newDeliverHarness(t, func(deps *faucet.Deps) { deps.Webhook.MaxWorkersPerOrigin = -1 })
+	paths := make([]string, subscriptions)
+	for i := range subscriptions {
+		paths[i] = fmt.Sprintf("/sub%02d", i)
+		d.subscribeEndpoint(d.endpoint(paths[i]))
+	}
+	d.rcv.answerEnvelope(paths[0], "gap", func() int {
+		time.Sleep(200 * time.Millisecond)
+		return http.StatusOK
+	})
+	d.advance(time.Second)
+	d.newRunEvent()
+	d.advance(5 * time.Minute)
+	d.newRunEvent()
+	purged, err := d.store.Purge(d.ctx, d.clock.Now().Add(-time.Minute))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, purged.Deleted)
+
+	requireGapAndEventSentOnce := func() {
+		t.Helper()
+		requireEachGapSentOnce(t, d.rcv, paths...)
+		for _, path := range paths {
+			require.Len(t, d.rcv.requests(path), 2, "the subscription at %s got its gap envelope and its event once each", path)
+		}
+	}
+
+	first := d.deliverDue()
+	require.False(t, first.Incomplete, "the first run did all the due work")
+	require.Equal(t, subscriptions, first.GapsSent)
+	require.Zero(t, first.GapsFailed)
+	require.Equal(t, subscriptions, first.Delivered)
+	requireGapAndEventSentOnce()
+	d.requireEveryDeliveryAccountedFor()
+
+	d.advance(faucet.DeliveryLease + time.Second)
+	again := d.deliverDue()
+	require.Zero(t, again.Claimed, "a run past the lease claims nothing: the first run finished every delivery")
+	require.Zero(t, again.Sent, "and sends no event again")
+	require.Zero(t, again.GapsSent+again.GapsFailed, "and sends no gap again: the first run finished every gap")
+	require.Zero(t, again.Delivered+again.Retried+again.GaveUpTotal()+again.Superseded)
+	requireGapAndEventSentOnce()
+}
+
 func TestDeliverDueEndsEveryDeliveryItCannotSendWithAReason(t *testing.T) {
 	t.Parallel()
 
