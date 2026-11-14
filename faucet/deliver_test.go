@@ -542,10 +542,10 @@ func TestDeliverDueARunPastTheLeaseSendsNothingAgain(t *testing.T) {
 
 	d.advance(faucet.DeliveryLease + time.Second)
 	again := d.deliverDue()
-	require.Zero(t, again.Claimed, "a run past the lease claims nothing: the first run finished every delivery")
+	require.Zero(t, again.Claimed, "a run past the lease claims nothing, because the first run finished every delivery")
 	require.Zero(t, again.Sent, "and sends no event again")
-	require.Zero(t, again.GapsSent+again.GapsFailed, "and sends no gap again: the first run finished every gap")
-	require.Zero(t, again.Delivered+again.Retried+again.GaveUpTotal()+again.Superseded)
+	require.Zero(t, again.GapsSent+again.GapsFailed, "and sends no gap again, because the first run finished every gap")
+	require.Zero(t, again.Delivered+again.Retried+again.GaveUpTotal()+again.Superseded, "and ends no delivery")
 	requireGapAndEventSentOnce()
 }
 
