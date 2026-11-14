@@ -214,7 +214,7 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 	if err != nil {
 		return nil, err
 	}
-	repoID, err := s.authorizeRepo(ctx, logger, principal, "subscribe", req.arguments.Repo, true)
+	repoID, err := s.authorizeFreshRepo(ctx, logger, principal, "subscribe", req.arguments.Repo)
 	if err != nil {
 		if xerrors.Is(err, ErrNoAccess) {
 			s.endRevokedSubscription(ctx, logger, wh, principal, req)

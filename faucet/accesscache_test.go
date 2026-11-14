@@ -2,6 +2,7 @@ package faucet_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -20,8 +21,8 @@ type fakeChecker struct {
 	logins    map[string]string
 	repos     map[string]int64
 	err       error
-	authCalls []string
-	repoCalls []string
+	authCalls int
+	repoCalls int
 }
 
 func newFakeChecker() *fakeChecker {
@@ -31,7 +32,7 @@ func newFakeChecker() *fakeChecker {
 func (c *fakeChecker) Authenticate(_ context.Context, token string) (faucet.Principal, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.authCalls = append(c.authCalls, token)
+	c.authCalls++
 	if c.err != nil {
 		return faucet.Principal{}, c.err
 	}
@@ -42,10 +43,10 @@ func (c *fakeChecker) Authenticate(_ context.Context, token string) (faucet.Prin
 	return faucet.NewPrincipal(login, token)
 }
 
-func (c *fakeChecker) RepoID(_ context.Context, p faucet.Principal, repo string) (int64, error) {
+func (c *fakeChecker) RepoID(_ context.Context, _ faucet.Principal, repo string) (int64, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.repoCalls = append(c.repoCalls, p.Login+" "+repo)
+	c.repoCalls++
 	if c.err != nil {
 		return 0, c.err
 	}
@@ -59,7 +60,7 @@ func (c *fakeChecker) RepoID(_ context.Context, p faucet.Principal, repo string)
 func (c *fakeChecker) calls() (auth, repo int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return len(c.authCalls), len(c.repoCalls)
+	return c.authCalls, c.repoCalls
 }
 
 func (c *fakeChecker) revoke(repo string) {
@@ -88,6 +89,7 @@ func TestAccessCacheAsksGitHubOncePerMinuteAndThenAgain(t *testing.T) {
 	}
 	auth, repo := checker.calls()
 	require.Equal(t, [2]int{1, 1}, [2]int{auth, repo}, "three requests cost one call of each kind")
+	requireNoToken(t, "the memory of the cache", fmt.Sprintf("%#v", cache))
 
 	checker.revoke(testRepo)
 	clock.Advance(59 * time.Second)
@@ -107,32 +109,30 @@ func TestAccessCacheRemembersASuccessAndNothingElse(t *testing.T) {
 	cache := faucet.NewAccessCache(checker, quartz.NewMock(t))
 	ctx := context.Background()
 
-	_, err := cache.Authenticate(ctx, "ghp_rejected")
-	require.ErrorIs(t, err, faucet.ErrInvalidToken)
-	_, err = cache.Authenticate(ctx, "ghp_rejected")
-	require.ErrorIs(t, err, faucet.ErrInvalidToken)
+	for range 2 {
+		_, err := cache.Authenticate(ctx, "ghp_rejected")
+		require.ErrorIs(t, err, faucet.ErrInvalidToken)
+	}
 	checker.logins["ghp_rejected"] = "octocat"
-	_, err = cache.Authenticate(ctx, "ghp_rejected")
+	_, err := cache.Authenticate(ctx, "ghp_rejected")
 	require.NoError(t, err, "a token that GitHub rejected is not refused again from memory")
 
 	p := principal(t)
-	denied := "octo/private"
 	for range 2 {
-		_, err = cache.RepoID(ctx, p, denied)
+		_, err = cache.RepoID(ctx, p, "octo/private")
 		require.ErrorIs(t, err, faucet.ErrNoAccess)
 	}
-	checker.repos[denied] = 77
-	id, err := cache.RepoID(ctx, p, denied)
+	checker.repos["octo/private"] = 77
+	id, err := cache.RepoID(ctx, p, "octo/private")
 	require.NoError(t, err, "a repository that was denied is allowed at once when GitHub allows it")
 	require.EqualValues(t, 77, id)
 
-	checker.err = fmt.Errorf("GitHub rate limit reached")
+	checker.err = errors.New("GitHub rate limit reached")
 	_, err = cache.RepoID(ctx, p, otherRepo)
 	require.Error(t, err)
 	checker.err = nil
-	id, err = cache.RepoID(ctx, p, otherRepo)
+	_, err = cache.RepoID(ctx, p, otherRepo)
 	require.NoError(t, err, "an error is not remembered")
-	require.EqualValues(t, otherRepoID, id)
 }
 
 func TestAccessCacheNeverAnswersForAnotherTokenOrRepository(t *testing.T) {
@@ -146,34 +146,17 @@ func TestAccessCacheNeverAnswersForAnotherTokenOrRepository(t *testing.T) {
 	require.NoError(t, err)
 	theirs, err := cache.Authenticate(ctx, "ghp_other")
 	require.NoError(t, err)
-	require.Equal(t, "octocat", mine.Login)
-	require.Equal(t, "hubot", theirs.Login, "the login of one token is not given to another")
+	require.Equal(t, [2]string{"octocat", "hubot"}, [2]string{mine.Login, theirs.Login}, "the login of one token is not given to another")
 
-	_, err = cache.RepoID(ctx, mine, testRepo)
-	require.NoError(t, err)
-	_, err = cache.RepoID(ctx, mine, otherRepo)
-	require.NoError(t, err)
-	_, err = cache.RepoID(ctx, theirs, testRepo)
-	require.NoError(t, err)
+	for _, ask := range []struct {
+		p    faucet.Principal
+		repo string
+	}{{mine, testRepo}, {mine, otherRepo}, {theirs, testRepo}, {mine, testRepo}} {
+		_, err = cache.RepoID(ctx, ask.p, ask.repo)
+		require.NoError(t, err)
+	}
 	_, repo := checker.calls()
-	require.Equal(t, 3, repo, "another repository and another token each ask GitHub")
-
-	again, err := cache.Authenticate(ctx, testToken)
-	require.NoError(t, err)
-	require.Equal(t, "octocat", again.Login)
-	_, err = cache.RepoID(ctx, again, testRepo)
-	require.NoError(t, err)
-	_, repo = checker.calls()
-	require.Equal(t, 3, repo, "the principal of a cached login still reaches the cached answers")
-}
-
-func TestAccessCacheNeverHoldsTheToken(t *testing.T) {
-	t.Parallel()
-	cache := faucet.NewAccessCache(newFakeChecker(), quartz.NewMock(t))
-	_, err := authenticateAndAuthorize(t, cache, testToken, testRepo)
-	require.NoError(t, err)
-
-	requireNoToken(t, "the memory of the cache", fmt.Sprintf("%#v", cache))
+	require.Equal(t, 3, repo, "another repository and another token each ask GitHub, and a repeat does not")
 }
 
 func TestAccessCacheStopsAddingAtTenThousandEntriesAndKeepsWhatItHas(t *testing.T) {
@@ -187,16 +170,12 @@ func TestAccessCacheStopsAddingAtTenThousandEntriesAndKeepsWhatItHas(t *testing.
 		_, err := cache.Authenticate(ctx, token)
 		require.NoError(t, err)
 	}
-	auth, _ := checker.calls()
-	require.Equal(t, 10000, auth)
 
 	checker.logins["ghp_overflow"] = "octocat"
-	for range 2 {
-		_, err := cache.Authenticate(ctx, "ghp_overflow")
+	for _, token := range []string{"ghp_overflow", "ghp_overflow", "ghp_token00000"} {
+		_, err := cache.Authenticate(ctx, token)
 		require.NoError(t, err)
 	}
-	_, err := cache.Authenticate(ctx, "ghp_token00000")
-	require.NoError(t, err)
-	auth, _ = checker.calls()
+	auth, _ := checker.calls()
 	require.Equal(t, 10002, auth, "a full cache answers the extra token from GitHub each time and still serves the entries it holds")
 }

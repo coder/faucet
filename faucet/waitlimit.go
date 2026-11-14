@@ -14,34 +14,35 @@ var errTooManyWaits = xerrors.New("too many waits are open for this account, try
 // only while a wait holds it, so the map is never larger than the number of
 // open waits.
 type waitLimiter struct {
-	max  int
-	mu   sync.Mutex
-	open map[string]int
+	limit int
+	mu    sync.Mutex
+	open  map[string]int
 }
 
-func newWaitLimiter(max int) *waitLimiter {
-	if max == 0 {
-		max = defaultMaxWaitsPerLogin
+func newWaitLimiter(limit int) *waitLimiter {
+	if limit == 0 {
+		limit = defaultMaxWaitsPerLogin
 	}
-	return &waitLimiter{max: max, open: map[string]int{}}
+	return &waitLimiter{limit: limit, open: map[string]int{}}
 }
 
 // acquire takes one slot of login and returns the function that gives it back.
-// It returns false when the login holds max slots already.
+// It returns false when the login holds the limit already.
 func (l *waitLimiter) acquire(login string) (release func(), ok bool) {
-	if l.max < 0 {
+	if l.limit < 0 {
 		return func() {}, true
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.open[login] >= l.max {
+	if l.open[login] >= l.limit {
 		return nil, false
 	}
 	l.open[login]++
 	return func() {
 		l.mu.Lock()
 		defer l.mu.Unlock()
-		if l.open[login]--; l.open[login] == 0 {
+		l.open[login]--
+		if l.open[login] == 0 {
 			delete(l.open, login)
 		}
 	}, true
