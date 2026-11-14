@@ -55,27 +55,27 @@ func (c *fakeChecker) RepoID(_ context.Context, _ faucet.Principal, repo string)
 	if c.during != nil {
 		c.during()
 	}
-	id, err, afterAnswer := c.decide(repo)
+	id, afterAnswer, err := c.decide(repo)
 	if afterAnswer != nil {
 		afterAnswer()
 	}
 	return id, err
 }
 
-func (c *fakeChecker) decide(repo string) (int64, error, func()) {
+func (c *fakeChecker) decide(repo string) (int64, func(), error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.repoCalls++
 	afterAnswer := c.afterAnswer
 	c.afterAnswer = nil
 	if c.err != nil {
-		return 0, c.err, afterAnswer
+		return 0, afterAnswer, c.err
 	}
 	id, ok := c.repos[repo]
 	if !ok {
-		return 0, faucet.ErrNoAccess, afterAnswer
+		return 0, afterAnswer, faucet.ErrNoAccess
 	}
-	return id, nil, afterAnswer
+	return id, afterAnswer, nil
 }
 
 func (c *fakeChecker) calls() (auth, repo int) {
