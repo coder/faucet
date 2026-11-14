@@ -37,11 +37,12 @@ type tokenChecker interface {
 //
 // events/subscribe does not use the remembered answer: a renewal calls
 // RepoIDUncached, because every renewal must check access again. A denial that
-// a renewal finds leaves a marker for a minute, and a lookup of any path that
-// finds the token rejected leaves one in place of the remembered login. Answers
-// are ordered by the start of their lookup, not by when GitHub looked: a marker
-// keeps a grant from an older lookup, still in flight, from being stored, and it
-// replaces a grant only when that grant's lookup started before the denial's.
+// a renewal finds leaves a marker for a minute, and a repository lookup of any
+// path that finds the token rejected leaves one in place of the remembered
+// login. Answers are ordered by the start of their lookup, not by when GitHub
+// looked: a marker keeps a grant from an older lookup, still in flight, from
+// being stored, and it replaces a grant only when that grant's lookup started
+// before the denial's.
 type AccessCache struct {
 	inner tokenChecker
 	clock quartz.Clock
