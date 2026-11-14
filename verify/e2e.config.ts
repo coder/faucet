@@ -1,5 +1,6 @@
 import type { E2EConfig } from 'e2e';
 import { web } from '@e2e-dev/web';
+import { GO_ENV } from './env.mjs';
 
 export default {
   tests: 'tests/**/*.e2e.ts',
@@ -16,7 +17,8 @@ export default {
         command: {
           executable: 'node',
           args: ['app.mjs', '--port', '{port}'],
-          inheritEnv: ['FAUCET_ROOT', 'PG_BIN', 'GO*'],
+          env: { FAUCET_VERIFY_PARENT: String(process.pid) },
+          inheritEnv: ['FAUCET_ROOT', 'PG_BIN', ...GO_ENV],
           startupTimeout: 240_000,
           shutdownTimeout: 60_000,
           log: '.e2e/logs/app.log',

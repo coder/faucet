@@ -11,7 +11,7 @@ Vercel Cron calls `GET /cron/purge`, `GET /cron/deliver` and `GET /cron/redelive
 - Only `GET` is routed. `POST`, `PUT` and `DELETE` with the right secret are 405 and run nothing.
 - The right secret runs the job and answers 200 with a JSON body. The secret is in no response and no log line.
 - The comparison hashes both sides with SHA-256 and compares the digests in constant time, so it does not leak the length or a prefix of the secret. A test cannot see timing, so this is pinned by the Go unit tests, not here.
-- A `CRON_SECRET` shorter than 16 bytes stops the start. See [startup](startup.md).
+- A `CRON_SECRET` that is shorter than 16 bytes, longer than 1024 bytes, or holds a space or a non-printable byte stops the start, because no request could carry it. See [startup](startup.md).
 
 ## How to get to it (user POV)
 

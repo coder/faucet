@@ -888,10 +888,30 @@ func TestSubscribeReportsTheDeliveryStatusOfARefreshedSubscription(t *testing.T)
 	require.Empty(t, recovered.FailedSince)
 }
 
+// finishRecordingStore reports what the store answered to each result of an
+// attempt, in the order the answers came.
+type finishRecordingStore struct {
+	faucet.Store
+	answers chan faucet.FinishResult
+}
+
+func (s *finishRecordingStore) FinishDelivery(ctx context.Context, ref faucet.DeliveryRef, now time.Time, finish faucet.Finish) (faucet.FinishResult, error) {
+	res, err := s.Store.FinishDelivery(ctx, ref, now, finish)
+	s.answers <- res
+	return res, err
+}
+
+// Which of the two runs sends the new subscription's delivery depends on which
+// of the workers claims first, because a worker of the older run that has not
+// claimed yet can take it. The test therefore reads the answers of the store
+// and the sums of both runs, and never the result of one run.
 func TestDeliverDueAnAttemptOfAnOlderSubscriptionDoesNotEndTheNewOnesDelivery(t *testing.T) {
 	t.Parallel()
 
-	d := newDeliverHarness(t)
+	answers := make(chan faucet.FinishResult, 4)
+	d := newDeliverHarness(t, func(deps *faucet.Deps) {
+		deps.Store = &finishRecordingStore{Store: deps.Store, answers: answers}
+	})
 	d.ledgerSkip = true
 	ep := d.endpoint("/hook")
 	d.subscribeEndpoint(ep)
@@ -924,6 +944,17 @@ func TestDeliverDueAnAttemptOfAnOlderSubscriptionDoesNotEndTheNewOnesDelivery(t 
 		}
 	}
 
+	awaitAnswer := func() faucet.FinishResult {
+		t.Helper()
+		select {
+		case res := <-answers:
+			return res
+		case <-time.After(5 * time.Second):
+			t.Fatal("the store was never asked to record a result")
+			return faucet.FinishResult{}
+		}
+	}
+
 	older := d.runDeliverDue()
 	awaitRequest()
 	d.advance(time.Second)
@@ -935,11 +966,14 @@ func TestDeliverDueAnAttemptOfAnOlderSubscriptionDoesNotEndTheNewOnesDelivery(t 
 	awaitRequest()
 
 	releaseOlder()
-	olderRes := older()
-	require.Equal(t, 1, olderRes.Superseded, "the older attempt belongs to a subscription that is gone")
-	require.Zero(t, olderRes.GaveUp[faucet.GiveUpEndpointGone], "its 410 ends nothing of the new subscription")
+	require.False(t, awaitAnswer().Accepted, "the 410 belongs to a subscription that is gone, so the store drops it while the new delivery is in flight")
 	releaseNewer()
-	require.Equal(t, 1, newer().Retried, "the new subscription's own attempt records its own 500")
+	require.True(t, awaitAnswer().Accepted, "the new subscription's own attempt records its own 500")
+
+	olderRes, newerRes := older(), newer()
+	require.Equal(t, 1, olderRes.Superseded+newerRes.Superseded, "the older attempt is counted as superseded")
+	require.Zero(t, olderRes.GaveUp[faucet.GiveUpEndpointGone]+newerRes.GaveUp[faucet.GiveUpEndpointGone], "its 410 ends nothing of the new subscription")
+	require.Equal(t, 1, olderRes.Retried+newerRes.Retried, "the new subscription's own 500 is a retry")
 
 	d.advance(16 * time.Second)
 	require.Equal(t, 1, d.deliverDue().Delivered, "the new subscription's event is still queued and goes out on retry")

@@ -2,18 +2,23 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { delimiter, dirname, join, resolve } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { parseArgs, promisify } from 'node:util';
+import { childEnv } from './env.mjs';
+import { endGroup } from './group.mjs';
 import { CALLBACK_ORIGIN, ENDPOINT_SAYS, runDir, stateFile } from './runstate.mjs';
 
 const execFileAsync = promisify(execFile);
-const FAUCET_STOP_MS = 20_000;
+const STOP_MS = 20_000;
+const POSTGRES_START_MS = 60_000;
 const DB_PORT = 5432;
 const SOCKET_PATH_MAX = 100;
 const PARENT_POLL_MS = 1000;
+const PARENT_ENV = 'FAUCET_VERIFY_PARENT';
 const HEALTHY_MS = 120_000;
 // An aborted initdb or go build can still be writing into the directory when it is removed.
 const RM_OPTIONS = { recursive: true, force: true, maxRetries: 20, retryDelay: 100 };
@@ -23,13 +28,13 @@ function log(message) {
 }
 
 function hasServerBinaries(dir) {
-  return ['initdb', 'pg_ctl', 'postgres'].every((name) => existsSync(join(dir, name)));
+  return ['initdb', 'postgres'].every((name) => existsSync(join(dir, name)));
 }
 
 function findPostgresBin() {
   if (process.env.PG_BIN) {
     if (!hasServerBinaries(process.env.PG_BIN)) {
-      throw new Error('PG_BIN must name a directory holding initdb, pg_ctl and postgres');
+      throw new Error('PG_BIN must name a directory holding initdb and postgres');
     }
     return process.env.PG_BIN;
   }
@@ -374,54 +379,89 @@ async function startReceiver({ control, revoked }) {
   return server;
 }
 
-async function startPostgres(bin, dir, signal) {
-  await execFileAsync(
-    join(bin, 'pg_ctl'),
-    [
-      'start', '-D', join(dir, 'pgdata'), '-w', '-t', '60', '-l', join(dir, 'postgres.log'),
-      '-o', `-p ${DB_PORT} -k '${dir}' -c listen_addresses='' -c unix_socket_permissions=0700 -c fsync=off`,
-    ],
-    { signal },
-  );
-}
-
-function postmasterRuns(dir) {
+function startPostgres(bin, dir) {
+  const logFd = openSync(join(dir, 'postgres.log'), 'a');
   try {
-    const pid = Number(readFileSync(join(dir, 'pgdata', 'postmaster.pid'), 'utf8').split('\n', 1)[0]);
-    if (!(pid > 0)) return false;
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return err.code === 'EPERM';
+    return spawn(
+      join(bin, 'postgres'),
+      ['-D', join(dir, 'pgdata'), '-p', String(DB_PORT), '-k', dir, '-c', 'listen_addresses=', '-c', 'unix_socket_permissions=0700', '-c', 'fsync=off'],
+      { env: childEnv(), stdio: ['ignore', logFd, logFd] },
+    );
+  } finally {
+    closeSync(logFd);
   }
 }
 
-async function stopPostgres(bin, dir) {
-  try {
-    await execFileAsync(join(bin, 'pg_ctl'), ['stop', '-D', join(dir, 'pgdata'), '-m', 'fast', '-w', '-t', '30']);
-    return true;
-  } catch (err) {
-    log(`postgres did not stop: ${err.message}`);
-    return false;
+async function waitUntilAcceptingConnections(psql, dir, postgres, signal) {
+  const deadline = Date.now() + POSTGRES_START_MS;
+  while (postgres.exitCode === null && postgres.signalCode === null) {
+    signal.throwIfAborted();
+    try {
+      await execFileAsync(psql, ['-X', '-q', '-h', dir, '-p', String(DB_PORT), '-U', 'postgres', '-d', 'postgres', '-c', 'select 1'], { env: childEnv(), signal });
+      return;
+    } catch (err) {
+      if (signal.aborted) throw err;
+    }
+    if (Date.now() > deadline) throw new Error(`postgres did not accept connections within ${POSTGRES_START_MS} ms`);
+    await sleep(100);
   }
+  throw new Error('postgres exited before it accepted connections');
 }
 
-async function stopFaucet(child) {
+async function stopChild(child, signal) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const exited = once(child, 'exit');
-  child.kill('SIGTERM');
-  const timer = setTimeout(() => child.kill('SIGKILL'), FAUCET_STOP_MS);
+  child.kill(signal);
+  const timer = setTimeout(() => child.kill('SIGKILL'), STOP_MS);
   await exited;
   clearTimeout(timer);
 }
 
-function stopWhenParentExits(abort) {
-  const parent = process.ppid;
-  setInterval(() => {
-    if (process.ppid === parent) return;
-    log('parent process exited, shutting down');
+function parseOptions() {
+  const { values } = parseArgs({ options: { port: { type: 'string' }, detach: { type: 'boolean' }, stack: { type: 'boolean' } } });
+  const port = Number(values.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('--port must be an integer from 1 to 65535');
+  }
+  return { port, detach: values.detach === true, stack: values.stack === true };
+}
+
+function stopWhenLifelineEnds(abort) {
+  process.stdin.once('close', () => {
+    log('the watchdog exited, shutting down');
     abort.abort();
-  }, PARENT_POLL_MS).unref();
+  });
+  process.stdin.resume();
+}
+
+// The runner starts this watchdog, which runs the stack in a process group of its own. Each of the three ends the next when
+// it dies: the watchdog ends the stack's group, the stack process ends itself when the pipe from the watchdog closes, and the
+// watchdog ends the stack when the runner is gone.
+async function supervise({ port, detach }) {
+  const expected = process.env[PARENT_ENV] === undefined ? process.ppid : Number(process.env[PARENT_ENV]);
+  if (!Number.isInteger(expected) || expected < 2) throw new Error(`${PARENT_ENV} must be a process ID`);
+  if (!detach && process.ppid !== expected) {
+    throw new Error(`process ${expected} is not the parent of app.mjs, so it exited before app.mjs started: no stack started`);
+  }
+  const stack = spawn(process.execPath, [import.meta.filename, ...process.argv.slice(2), '--stack'], {
+    detached: true,
+    stdio: ['pipe', 'inherit', 'inherit'],
+  });
+  for (const name of ['SIGINT', 'SIGTERM']) process.on(name, () => stack.kill(name));
+  if (!detach) {
+    setInterval(() => {
+      if (process.ppid === expected) return;
+      log('parent process exited, shutting down');
+      stack.kill('SIGTERM');
+    }, PARENT_POLL_MS).unref();
+  }
+  const [code, killedBy] = await once(stack, 'exit');
+  try {
+    await endGroup(stack.pid);
+  } finally {
+    if (killedBy !== null) rmSync(runDir(port), RM_OPTIONS);
+  }
+  return code ?? 1;
 }
 
 function waitForFaucetOrAbort(children, signal) {
@@ -454,22 +494,18 @@ async function createDatabase(psql, dir, name) {
   await execFileAsync(psql, [
     '-X', '-q', '-h', dir, '-p', String(DB_PORT), '-U', 'postgres', '-d', 'postgres',
     '-v', 'ON_ERROR_STOP=1', '-c', `CREATE DATABASE ${name}`,
-  ]);
+  ], { env: childEnv() });
 }
 
-async function main(abort) {
+async function runStack({ port }, abort) {
   const { signal } = abort;
-  const { values } = parseArgs({ options: { port: { type: 'string' }, detach: { type: 'boolean' } } });
-  const port = Number(values.port);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error('--port must be an integer from 1 to 65535');
-  }
-  if (!values.detach) stopWhenParentExits(abort);
+  stopWhenLifelineEnds(abort);
   const root = resolve(process.env.FAUCET_ROOT ?? join(import.meta.dirname, '..'));
   if (!existsSync(join(root, 'cmd', 'faucet', 'main.go'))) {
     throw new Error(`${root} is not a faucet checkout: cmd/faucet/main.go is missing`);
   }
   const bin = findPostgresBin();
+  const psql = existsSync(join(bin, 'psql')) ? join(bin, 'psql') : 'psql';
   const dir = runDir(port);
   const socketPath = join(dir, `.s.PGSQL.${DB_PORT}`);
   if (Buffer.byteLength(socketPath) >= SOCKET_PATH_MAX) {
@@ -487,6 +523,7 @@ async function main(abort) {
     throw err;
   }
 
+  let postgres;
   let faucet;
   let cronFaucet;
   let githubStub;
@@ -496,23 +533,25 @@ async function main(abort) {
     await execFileAsync(
       join(bin, 'initdb'),
       ['-U', 'postgres', '--auth-local=trust', '--auth-host=reject', '--no-sync', '-D', join(dir, 'pgdata')],
-      { signal },
+      { env: childEnv(), signal },
     );
-    await startPostgres(bin, dir, signal);
+    postgres = startPostgres(bin, dir);
+    await waitUntilAcceptingConnections(psql, dir, postgres, signal);
     log(`postgres listening on ${socketPath}`);
 
     const binary = join(dir, 'faucet');
-    await execFileAsync('go', ['build', '-o', binary, './cmd/faucet'], { cwd: root, signal });
+    const goEnv = { ...childEnv(), GOTMPDIR: join(dir, 'gotmp') };
+    mkdirSync(goEnv.GOTMPDIR);
+    await execFileAsync('go', ['build', '-o', binary, './cmd/faucet'], { cwd: root, env: goEnv, signal });
     // The e2e build lets the callback client reach loopback over http, so the handshake can reach the receiver. Only tests that
     // start a faucet with it get that. The main faucet and the production binary above do not.
     const e2eBinary = join(dir, 'faucet-e2e');
-    await execFileAsync('go', ['build', '-tags', 'faucet_e2e', '-o', e2eBinary, './cmd/faucet'], { cwd: root, signal });
+    await execFileAsync('go', ['build', '-tags', 'faucet_e2e', '-o', e2eBinary, './cmd/faucet'], { cwd: root, env: goEnv, signal });
 
     const secret = randomBytes(32).toString('hex');
     const githubToken = `ghp_${randomBytes(20).toString('hex')}`;
     const otherToken = `ghp_${randomBytes(20).toString('hex')}`;
     const webhookKey = randomBytes(32).toString('base64');
-    const psql = existsSync(join(bin, 'psql')) ? join(bin, 'psql') : 'psql';
     const cron = {
       port: await freePort(),
       db: CRON_DB,
@@ -568,23 +607,23 @@ async function main(abort) {
   } catch (err) {
     if (!signal.aborted) failure = err.message;
   } finally {
-    if (faucet) await stopFaucet(faucet);
-    if (cronFaucet) await stopFaucet(cronFaucet);
+    if (faucet) await stopChild(faucet, 'SIGTERM');
+    if (cronFaucet) await stopChild(cronFaucet, 'SIGTERM');
     githubStub?.close();
     receiver?.closeAllConnections();
     receiver?.close();
-    const postgresStopped = !postmasterRuns(dir) || (await stopPostgres(bin, dir));
-    if (postgresStopped) rmSync(dir, RM_OPTIONS);
-    else failure ??= `left ${dir} in place because Postgres is still running`;
+    if (postgres) await stopChild(postgres, 'SIGINT');
+    rmSync(dir, RM_OPTIONS);
   }
   if (failure) throw new Error(failure);
 }
 
 const abort = new AbortController();
-for (const name of ['SIGINT', 'SIGTERM']) process.on(name, () => abort.abort());
+const options = parseOptions();
+if (options.stack) for (const name of ['SIGINT', 'SIGTERM']) process.on(name, () => abort.abort());
 
-main(abort).then(
-  () => process.exit(0),
+(options.stack ? runStack(options, abort).then(() => 0) : supervise(options)).then(
+  (code) => process.exit(code),
   (err) => {
     log(err.message);
     process.exit(1);

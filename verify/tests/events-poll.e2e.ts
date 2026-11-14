@@ -1,7 +1,6 @@
-import { readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { samples, type Sample } from './payloads';
-import { describe, expect, newDeliveryId, newRepoId, test, type Faucet, type McpOptions, type McpReply } from './support';
+import { appLog, describe, expect, newDeliveryId, newRepoId, test, type Faucet, type McpOptions, type McpReply } from './support';
 
 const run = samples['workflow_run.completed'];
 const check = samples['check_run.completed'];
@@ -359,7 +358,7 @@ describe('events poll', () => {
       await poll(faucet, RUN, { repo: repoOf(repoId) }, {}, { name: null }),
       await poll(faucet, RUN, { repo: repoOf(repoId) }, {}, { token: null }),
     ];
-    const readLog = (): string => readFileSync('.e2e/logs/app.log', 'utf8');
+    const readLog = appLog;
 
     await expect.poll(() => new RegExp(`poll denied\\s+repo=${denied}\\s`).test(readLog())).toBe(true);
     for (const reply of replies) {

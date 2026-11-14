@@ -148,6 +148,15 @@ describe('startup configuration', () => {
       env: { ...valid, CRON_SECRET: SHORT_SECRET },
       message: 'CRON_SECRET must be at least 16 bytes\n',
     },
+    ...Object.entries({
+      'a space inside': `${FAKE_CRON_SECRET} ${FAKE_CRON_SECRET}`,
+      'a trailing newline': `${FAKE_CRON_SECRET}\n`,
+      'more than 1024 bytes': `${FAKE_CRON_SECRET}${'a'.repeat(1024)}`,
+    }).map(([what, secret]) => ({
+      name: `a CRON_SECRET with ${what}`,
+      env: { ...valid, CRON_SECRET: secret },
+      message: 'CRON_SECRET must be at most 1024 printable ASCII characters with no space',
+    })),
     ...(
       [
         ['FAUCET_HOOK_TOKEN alone', { FAUCET_HOOK_TOKEN: FAKE_HOOK_TOKEN }, 'redelivery needs FAUCET_HOOK_ID, FAUCET_HOOK_ORG or FAUCET_HOOK_REPO\n'],

@@ -103,16 +103,17 @@ func (e *redeliveryEnv) use(store faucet.RedeliveryStore, hooks faucet.HookAdmin
 // purgeSpy records when a run purges, and whether the run still has its context.
 type purgeSpy struct {
 	*fakeRedeliveryStore
-	mu    sync.Mutex
-	at    time.Time
-	alive bool
-	calls int
+	mu       sync.Mutex
+	at       time.Time
+	deadline time.Time
+	calls    int
 }
 
 func (s *purgeSpy) PurgeRedeliveries(ctx context.Context, before time.Time) (int64, error) {
 	s.mu.Lock()
 	s.calls++
-	s.at, s.alive = time.Now(), ctx.Err() == nil
+	s.at = time.Now()
+	s.deadline, _ = ctx.Deadline()
 	s.mu.Unlock()
 	return s.fakeRedeliveryStore.PurgeRedeliveries(ctx, before)
 }
@@ -128,8 +129,9 @@ func TestARequestInFlightIsCanceledAtNinetyPercentOfTheTimeSoThePurgeRuns(t *tes
 	env.gh.askDelay = time.Hour // the one request never answers
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
+	runDeadline, _ := ctx.Deadline()
 
-	start := time.Now()
+	startedBefore := time.Now()
 	res, err := env.svc.Redeliver(ctx)
 
 	require.ErrorContains(t, err, "request redelivery", "the request that did not answer is canceled and counted as a failed one")
@@ -137,10 +139,17 @@ func TestARequestInFlightIsCanceledAtNinetyPercentOfTheTimeSoThePurgeRuns(t *tes
 	spy.mu.Lock()
 	defer spy.mu.Unlock()
 	require.Equal(t, 1, spy.calls)
-	require.True(t, spy.alive, "the purge runs inside the run's time")
-	purgedAfter := spy.at.Sub(start)
-	require.Greater(t, purgedAfter, limit*85/100, "a request in flight is not canceled before 90 percent of the time has passed")
-	require.Less(t, purgedAfter, limit*975/1000, "the purge keeps the last tenth of the time")
+	// How late a goroutine wakes depends on the load of the machine, so the
+	// test reads the deadlines that the run gave, and never the time that the
+	// purge took to start. The run splits what is left when it starts, and it
+	// starts between startedBefore and the first request.
+	askEnd := func(from time.Time) time.Time { return from.Add(runDeadline.Sub(from) * 9 / 10) }
+	slack := time.Millisecond
+	askDeadline, askStarted := env.gh.askDeadline, env.gh.askStarted
+	require.False(t, askDeadline.Before(askEnd(startedBefore).Add(-slack)), "a request in flight is not canceled before 90 percent of the time has passed")
+	require.False(t, askDeadline.After(askEnd(askStarted).Add(slack)), "the request is canceled at 90 percent, so the purge keeps the last tenth of the time")
+	require.True(t, spy.deadline.Equal(runDeadline), "the purge runs under the time of the whole run, not the request's")
+	require.False(t, spy.at.Before(askDeadline), "the purge starts after the request was canceled")
 }
 
 func TestAnAttemptThatGotNoAnswerOrARedirectIsAFailureAndOnlyA2xxIsNot(t *testing.T) {

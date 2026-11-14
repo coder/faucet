@@ -91,13 +91,22 @@ func unauthorized(w http.ResponseWriter) {
 // request to GitHub.
 func bearerToken(header string) (string, bool) {
 	scheme, token, ok := strings.Cut(header, " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") || token == "" || len(token) > maxTokenBytes {
+	if !ok || !strings.EqualFold(scheme, "Bearer") || !validBearerToken(token) {
 		return "", false
+	}
+	return token, true
+}
+
+// validBearerToken reports whether bearerToken can return token. A secret that
+// callers must send as a bearer token has to pass it, or no caller can send it.
+func validBearerToken(token string) bool {
+	if token == "" || len(token) > maxTokenBytes {
+		return false
 	}
 	for i := range len(token) {
 		if token[i] <= ' ' || token[i] > '~' {
-			return "", false
+			return false
 		}
 	}
-	return token, true
+	return true
 }

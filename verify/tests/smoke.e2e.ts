@@ -1,5 +1,4 @@
-import { readFileSync } from 'node:fs';
-import { describe, expect, test } from './support';
+import { appLog, describe, expect, test } from './support';
 
 describe('smoke', () => {
   test('the server answers and its database holds the migrated table', async ({ faucet }) => {
@@ -12,7 +11,7 @@ describe('smoke', () => {
   });
 
   test('the app log never holds the webhook secret', async ({ faucet }) => {
-    const log = readFileSync('.e2e/logs/app.log', 'utf8');
+    const log = appLog();
 
     expect(log).toContain('listening');
     expect(faucet.leaksSecret(log)).toBe(false);

@@ -371,6 +371,49 @@ func TestGitHubHookAdminSendsTheTokenOnlyToBaseURL(t *testing.T) {
 	}
 }
 
+// A redirect that keeps the host and changes the scheme would send the token
+// over plain http, or to a listener that nobody vouched for. A transport that
+// counts the requests stands in for the network, because one listener cannot
+// answer on two schemes.
+func TestGitHubHookAdminRefusesARedirectThatChangesTheScheme(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct{ base, location string }{
+		"https down to http": {"https://api.github.test", "http://api.github.test/moved"},
+		"http up to https":   {"http://127.0.0.1:8080", "https://127.0.0.1:8080/moved"},
+	} {
+		for call, run := range map[string]func(faucet.GitHubHookAdmin) error{
+			"list": func(a faucet.GitHubHookAdmin) error {
+				_, err := a.ListDeliveries(context.Background(), "")
+				return err
+			},
+			"redeliver": func(a faucet.GitHubHookAdmin) error { return a.Redeliver(context.Background(), 5) },
+		} {
+			t.Run(name+"/"+call, func(t *testing.T) {
+				t.Parallel()
+
+				var sent []string
+				client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					sent = append(sent, r.URL.Scheme+"://"+r.URL.Host+r.URL.Path)
+					return &http.Response{
+						StatusCode: http.StatusTemporaryRedirect,
+						Header:     http.Header{"Location": {tc.location}},
+						Body:       http.NoBody,
+						Request:    r,
+					}, nil
+				})}
+				admin, err := faucet.NewGitHubHookAdmin(tc.base, testHookToken, orgHook, client)
+				require.NoError(t, err)
+
+				err = run(admin)
+				require.Error(t, err)
+				requireNoHookToken(t, err.Error())
+				require.Len(t, sent, 1, "the redirect must not be followed, so the token goes out once: %v", sent)
+			})
+		}
+	}
+}
+
 func TestGitHubHookAdminRefusesAnUnsafeBaseURL(t *testing.T) {
 	t.Parallel()
 
