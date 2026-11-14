@@ -182,7 +182,7 @@ describe('redelivery', () => {
     });
   });
 
-  test('stops at a redelivery request that GitHub refuses, reports a generic error, and still spends the ask', async ({ cron, hooks }) => {
+  test('stops at a redelivery request that GitHub refuses, reports a generic error with its counts, and still spends the ask', async ({ cron, hooks }) => {
     await withHook(cron, async (started, output) => {
       const repoId = newRepoId();
       const guid = newDeliveryId();
@@ -191,8 +191,11 @@ describe('redelivery', () => {
       const reply = await started.cronJob('redeliver');
       const asks = (await hooks.requests()).filter((request) => request.method === 'POST');
 
+      const outcome = JSON.parse(reply.body) as Outcome & { error: string };
+
       expect(reply.status).toBe(500);
-      expect(reply.body).toBe('redelivery failed\n');
+      expect(outcome.error).toBe('redelivery failed');
+      expect(outcome, 'the failed run still reports what it did').toMatchObject({ tracked: 2, asked: 0, pending: 2 });
       expect(reply.body).not.toContain('403');
       expect(output(), 'the log keeps the status').toContain('403');
       expect(asks, 'one request, then the run stops').toHaveLength(1);
