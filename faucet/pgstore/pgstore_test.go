@@ -117,3 +117,51 @@ func createDatabase(t *testing.T, adminURL string) *sql.DB {
 
 	return db
 }
+
+func TestCheckSchemaAcceptsOnlyTheNewestVersionAndWritesNothing(t *testing.T) {
+	t.Parallel()
+	adminURL := testDatabaseURL(t)
+	ctx := context.Background()
+	setVersion := func(t *testing.T, db *sql.DB, version int, dirty bool) {
+		t.Helper()
+		_, err := db.ExecContext(ctx, `DELETE FROM `+pq.QuoteIdentifier(pgstore.MigrationsTable))
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, `INSERT INTO `+pq.QuoteIdentifier(pgstore.MigrationsTable)+` VALUES ($1, $2)`, version, dirty)
+		require.NoError(t, err)
+	}
+	hasTable := func(t *testing.T, db *sql.DB) (exists bool) {
+		t.Helper()
+		require.NoError(t, db.QueryRowContext(ctx, `SELECT to_regclass($1::text) IS NOT NULL`, pgstore.MigrationsTable).Scan(&exists))
+		return exists
+	}
+
+	t.Run("NoDatabaseSchema", func(t *testing.T) {
+		t.Parallel()
+		db := createDatabase(t, adminURL)
+		require.ErrorIs(t, pgstore.CheckSchema(ctx, db), pgstore.ErrSchemaNotCurrent)
+		require.False(t, hasTable(t, db), "the check created the migrations table")
+	})
+	t.Run("Migrated", func(t *testing.T) {
+		t.Parallel()
+		db := newDatabase(t, adminURL)
+		require.NoError(t, pgstore.CheckSchema(ctx, db))
+	})
+	t.Run("Behind", func(t *testing.T) {
+		t.Parallel()
+		db := newDatabase(t, adminURL)
+		setVersion(t, db, 5, false)
+		require.ErrorIs(t, pgstore.CheckSchema(ctx, db), pgstore.ErrSchemaNotCurrent)
+	})
+	t.Run("Ahead", func(t *testing.T) {
+		t.Parallel()
+		db := newDatabase(t, adminURL)
+		setVersion(t, db, 99, false)
+		require.ErrorIs(t, pgstore.CheckSchema(ctx, db), pgstore.ErrSchemaNotCurrent)
+	})
+	t.Run("FailedMigration", func(t *testing.T) {
+		t.Parallel()
+		db := newDatabase(t, adminURL)
+		setVersion(t, db, 6, true)
+		require.ErrorIs(t, pgstore.CheckSchema(ctx, db), pgstore.ErrSchemaNotCurrent)
+	})
+}
