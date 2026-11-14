@@ -29,6 +29,8 @@ const (
 	// RedeliveryStartLookback is how far back the first run of a webhook reads.
 	// The part of GitHub's retention before it is recorded as one gap, so the
 	// first run does not spend its pages on a history that nobody waits for.
+	// A run that reads an empty list puts its position this far behind
+	// GitHub's clock, so that a wrong Date cannot hide the next failure.
 	RedeliveryStartLookback = 24 * time.Hour
 
 	redeliveryLeaseTTL  = 2 * time.Minute
@@ -197,7 +199,9 @@ type RedeliverResult struct {
 // the ranges, newest first, with what the head read leaves of their page
 // limit. A cursor that GitHub gave is kept with the range, so a later run
 // continues right after the last attempt read. A range whose old end leaves
-// GitHub's retention before it is read becomes a gap.
+// GitHub's retention before it is read becomes a gap. Where that retention
+// begins is a time of GitHub's: the Date of the run's first page, never earlier
+// than the newest attempt on it. A run that has neither records no gap.
 //
 // A delivery is asked for at most MaxAsksPerDelivery times, on the schedule
 // that AskOffsets gives, and at most MaxAsksPerRun times in a run, the delivery
@@ -421,12 +425,13 @@ func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, er
 		r.floor = githubNow.Add(-GitHubDeliveryRetention)
 	}
 	step := head.step(r.epoch, now)
-	// The position is a time of GitHub's: the newest attempt, or GitHub's clock
-	// when the list is empty. Faucet's clock does not belong here (see
-	// DeliveryPage.At).
+	// The position is a time of GitHub's: the newest attempt, or, when the list
+	// is empty, GitHub's clock less the lookback. A Date that runs ahead of the
+	// list by less than that cannot put the next failure below the position.
+	// Faucet's clock does not belong here (see DeliveryPage.At).
 	step.Top = head.newest
-	if step.Top.IsZero() {
-		step.Top = head.at
+	if step.Top.IsZero() && !head.at.IsZero() {
+		step.Top = head.at.Add(-RedeliveryStartLookback)
 	}
 	cause := gapExpiredUnread
 	switch {

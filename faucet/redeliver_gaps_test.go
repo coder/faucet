@@ -1,6 +1,7 @@
 package faucet_test
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"cdr.dev/slog/v3"
 	"github.com/coder/faucet/faucet"
 )
 
@@ -130,4 +132,98 @@ func TestAQuietHookDrainsTheRangesThatABurstLeftOpen(t *testing.T) {
 	require.True(t, allStored(env, failed), "every failure of the burst is asked for within a few runs of silence")
 	require.Equal(t, 0, ranges[len(ranges)-1], "a quiet hook reads all that is open")
 	require.LessOrEqual(t, slices.Max(ranges), 1, "a silent run opens no range of what an earlier run read: %v", ranges)
+}
+
+// dateAdmin gives the pages of its HookAdmin another Date header: none, or one
+// that is shifted.
+type dateAdmin struct {
+	faucet.HookAdmin
+	missing bool
+	shift   time.Duration
+}
+
+func (a dateAdmin) ListDeliveries(ctx context.Context, cursor string) (faucet.DeliveryPage, error) {
+	page, err := a.HookAdmin.ListDeliveries(ctx, cursor)
+	page.At = page.At.Add(a.shift)
+	if a.missing {
+		page.At = time.Time{}
+	}
+	return page, err
+}
+
+// useHooks replaces the service with one that lists deliveries through hooks,
+// on the same store and logs.
+func (e *redeliveryEnv) useHooks(hooks faucet.HookAdmin) {
+	e.t.Helper()
+	deps := testDeps(e.store)
+	deps.Clock = e.clock
+	deps.Logger = slog.Make(e.logs)
+	deps.Redelivery = &faucet.RedeliveryDeps{Store: e.store, Hooks: hooks}
+	svc, err := faucet.New(deps)
+	require.NoError(e.t, err)
+	e.svc = svc
+}
+
+func TestADateAheadOfGitHubsListDoesNotHideTheNextFailure(t *testing.T) {
+	t.Parallel()
+
+	for _, ahead := range []time.Duration{time.Hour, 12 * time.Hour} {
+		t.Run(ahead.String(), func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t)
+			env.useHooks(dateAdmin{HookAdmin: env.gh, shift: ahead})
+			for range 3 {
+				require.Zero(t, env.run().Tracked)
+				env.advance(cronEvery)
+			}
+
+			env.gh.record("g1", env.gh.now().Add(-time.Minute), 503)
+			res := env.run()
+
+			require.Equal(t, 1, res.Tracked, "a Date that is wrong must not put the position past an attempt that GitHub has not listed yet")
+			require.True(t, env.stored("g1"))
+		})
+	}
+}
+
+func TestAMissingDateRecordsNoGapOnEveryEmptyRun(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a new hook", func(t *testing.T) {
+		t.Parallel()
+		env := newRedeliveryEnv(t)
+		env.useHooks(dateAdmin{HookAdmin: env.gh, missing: true})
+		var gaps int
+		for range 5 {
+			gaps += env.run().Gaps
+			env.advance(cronEvery)
+		}
+		require.Zero(t, gaps, "an empty list and no Date tell nothing about what expired")
+
+		env.gh.record("g1", env.gh.now().Add(-time.Minute), 503)
+		var tracked int
+		for range 5 {
+			res := env.run()
+			gaps, tracked = gaps+res.Gaps, tracked+res.Tracked
+			env.advance(cronEvery)
+		}
+		require.Equal(t, 1, tracked)
+		require.Equal(t, 1, gaps, "an attempt gives a time to take the first gap from, and it is recorded once")
+	})
+
+	t.Run("a hook quiet for longer than GitHub keeps attempts", func(t *testing.T) {
+		t.Parallel()
+		env := newRedeliveryEnv(t)
+		env.useHooks(dateAdmin{HookAdmin: env.gh, missing: true})
+		env.gh.record("g1", env.gh.now().Add(-time.Minute), http200)
+		env.run()
+		env.advance(faucet.GitHubDeliveryRetention + time.Hour)
+
+		var gaps int
+		for range 6 {
+			gaps += env.run().Gaps
+			env.advance(cronEvery)
+		}
+		require.Zero(t, gaps)
+	})
 }
