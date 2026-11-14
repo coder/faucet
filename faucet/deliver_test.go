@@ -991,3 +991,31 @@ func TestDeliverDueEndsASubscriptionWhoseArgumentsDoNotDecodeAndNeverRescansIt(t
 	d.deliverDue()
 	require.Equal(t, 1, strings.Count(d.logs.String(), "stored arguments do not decode"), "later runs do not read it again")
 }
+
+type finishFailsStore struct {
+	faucet.Store
+	before func()
+}
+
+func (s *finishFailsStore) FinishDelivery(context.Context, faucet.DeliveryRef, time.Time, faucet.Finish) (faucet.FinishResult, error) {
+	s.before()
+	return faucet.FinishResult{}, xerrors.New("connection reset by peer")
+}
+
+func TestDeliverDueReturnsAStoreErrorThatTheEndOfTheRunDidNotCause(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := newDeliverHarness(t, func(deps *faucet.Deps) {
+		deps.Store = &finishFailsStore{Store: deps.Store, before: cancel}
+	})
+	d.ledgerSkip = true
+	d.subscribeEndpoint(d.endpoint("/hook"))
+	d.advance(time.Second)
+	d.newRunEvent()
+
+	res, err := d.svc.DeliverDue(ctx)
+	require.ErrorContains(t, err, "connection reset by peer", "the run ended while the store failed for its own reason, and the failure is not hidden")
+	require.Equal(t, 1, res.Claimed)
+}
