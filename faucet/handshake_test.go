@@ -1,6 +1,8 @@
 package faucet_test
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +22,8 @@ import (
 	standardwebhooks "github.com/standard-webhooks/standard-webhooks/libraries/go"
 	"github.com/stretchr/testify/require"
 
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/sloghuman"
 	"github.com/coder/faucet/faucet"
 )
 
@@ -399,6 +403,31 @@ func TestVerifierGetsTheSubscriptionAndASignerButNotTheSecret(t *testing.T) {
 			out := fmt.Sprintf(verb, value)
 			require.NotContains(t, out, strings.TrimPrefix(secret, "whsec_"), "%s of %s", verb, name)
 			require.NotContains(t, out, testToken, "%s of %s", verb, name)
+		}
+	}
+}
+
+func TestCallbackRequestKeepsItsURLOutOfEveryLogFormat(t *testing.T) {
+	t.Parallel()
+
+	h := newWebhookHarness(t)
+	h.subscribe(subscribeTo(repoArgs(), callbackURL+"?token=r3c31v3r", newSecret(t, 32)))
+	require.Len(t, h.verifier.requests, 1)
+	req := h.verifier.requests[0]
+
+	type embedderState struct{ Pending faucet.CallbackRequest }
+	for name, value := range map[string]any{
+		"the request": req, "a pointer to it": &req, "a struct that holds it": embedderState{req},
+		"a list of requests": []faucet.CallbackRequest{req},
+	} {
+		var human bytes.Buffer
+		slog.Make(sloghuman.Sink(&human)).Info(context.Background(), "verifying", slog.F("request", value))
+		encoded, err := json.Marshal(value)
+		require.NoError(t, err)
+		for sink, out := range map[string]string{"sloghuman": human.String(), "encoding/json": string(encoded)} {
+			require.NotContains(t, out, "r3c31v3r", "%s of %s: the URL can hold a token", sink, name)
+			require.NotContains(t, out, "hooks.example.test", "%s of %s", sink, name)
+			require.Contains(t, out, "octocat", "%s of %s still names the login", sink, name)
 		}
 	}
 }
