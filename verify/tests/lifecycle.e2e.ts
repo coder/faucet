@@ -1,10 +1,14 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { promisify } from 'node:util';
 import { runDir } from '../runstate.mjs';
 import { describe, expect, test } from './support';
+
+const execFileAsync = promisify(execFile);
 
 const READY_MS = 120_000;
 const TEARDOWN_MS = 20_000;
@@ -36,6 +40,15 @@ function alive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+async function childrenOf(pid: number): Promise<number[]> {
+  const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,ppid=']);
+  return stdout
+    .split('\n')
+    .map((line) => line.trim().split(/\s+/).map(Number))
+    .filter(([, parent]) => parent === pid)
+    .map(([child]) => child as number);
 }
 
 async function healthy(port: number): Promise<boolean> {
@@ -133,6 +146,58 @@ describe('app lifecycle', () => {
       expect(await healthy(stack.port)).toBe(false);
     } finally {
       await stack.teardown();
+    }
+  });
+
+  test('SIGKILL of app.mjs itself tears faucet, Postgres and the run directory down', async () => {
+    const stack = await Stack.launch([]);
+    try {
+      await stack.ready();
+      const postgres = stack.postgresPid();
+
+      process.kill(stack.appPid, 'SIGKILL');
+      await waitFor('the run directory to go', TEARDOWN_MS, () => !existsSync(stack.dir));
+      await waitFor('Postgres to exit', TEARDOWN_MS, () => !alive(postgres));
+
+      expect(await healthy(stack.port)).toBe(false);
+    } finally {
+      await stack.teardown();
+    }
+  });
+
+  test('SIGKILL of the process that runs the stack leaves nothing of it, and app.mjs exits', async () => {
+    const stack = await Stack.launch([]);
+    try {
+      await stack.ready();
+      const postgres = stack.postgresPid();
+      const [runner] = await childrenOf(stack.appPid);
+      expect(runner, 'app.mjs has one child, the process that runs the stack').toBeGreaterThan(1);
+
+      process.kill(runner as number, 'SIGKILL');
+      await waitFor('the run directory to go', TEARDOWN_MS, () => !existsSync(stack.dir));
+      await waitFor('app.mjs and Postgres to exit', TEARDOWN_MS, () => !alive(stack.appPid) && !alive(postgres));
+
+      expect(await healthy(stack.port)).toBe(false);
+    } finally {
+      await stack.teardown();
+    }
+  });
+
+  test('app.mjs starts no stack when the process that was to start it has already exited', async () => {
+    const port = await freePort();
+    const gone = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await once(gone, 'exit');
+    const app = spawn(process.execPath, [resolve('app.mjs'), '--port', String(port)], {
+      env: { ...process.env, FAUCET_VERIFY_PARENT: String(gone.pid) },
+      stdio: 'ignore',
+    });
+    try {
+      const [code] = (await Promise.race([once(app, 'exit'), sleep(TEARDOWN_MS).then(() => [null])])) as [number | null];
+
+      expect(code, 'app.mjs exits with an error instead of running on').toBe(1);
+      expect(existsSync(runDir(port))).toBe(false);
+    } finally {
+      app.kill('SIGKILL');
     }
   });
 
