@@ -68,6 +68,21 @@ describe('startup rejects a bad DATABASE_URL without printing its password', () 
   }
 });
 
+describe('startup rejects a bad DATABASE_URL_UNPOOLED without printing its password', () => {
+  test('exits 1 and names only the variable', async ({ faucet }) => {
+    const result = await startFaucet(faucet, {
+      DATABASE_URL: WELL_FORMED_URL,
+      DATABASE_URL_UNPOOLED: MALFORMED_URLS['a space in the host'],
+      GITHUB_WEBHOOK_SECRET: FAKE_SECRET,
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.output).toContain('DATABASE_URL_UNPOOLED: not a valid Postgres connection string');
+    expect(occurrences(result.output, FAKE_DB_PASSWORD)).toBe(0);
+    expect(occurrences(result.output, FAKE_SECRET)).toBe(0);
+  });
+});
+
 describe('startup configuration', () => {
   const valid = { DATABASE_URL: WELL_FORMED_URL, GITHUB_WEBHOOK_SECRET: FAKE_SECRET };
   const webhook = { FAUCET_WEBHOOK_KEY: KEY_32, FAUCET_WEBHOOK_ALLOWED_ORIGINS: ORIGIN };

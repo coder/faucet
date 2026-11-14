@@ -10,7 +10,7 @@ VALUES (
   sqlc.arg(repo_id),
   sqlc.arg(prs)::int[],
   NULLIF(sqlc.arg(head_sha)::text, ''),
-  sqlc.arg(data)
+  sqlc.arg(data)::text::jsonb
 )
 ON CONFLICT (delivery_id) DO NOTHING
 RETURNING *;
@@ -97,7 +97,7 @@ VALUES (
   sqlc.arg(principal),
   sqlc.arg(callback_url),
   sqlc.arg(event_type),
-  sqlc.arg(arguments),
+  sqlc.arg(arguments)::text::jsonb,
   sqlc.arg(repo_id),
   sqlc.arg(secret_enc),
   sqlc.arg(cursor),

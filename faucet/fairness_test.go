@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/coder/faucet/faucet"
 )
 
 type stalledEndpoints struct {
@@ -106,4 +108,41 @@ func TestDeliverDueStallingGapEndpointsDoNotStarveAHealthyGap(t *testing.T) {
 	got := wait()
 	d.record(got)
 	require.Equal(t, stalling+1, got.GapsSent)
+}
+
+// A host whose subscribers all call back to one origin sends with 2 of the 8
+// workers by default, and raises that with MaxWorkersPerOrigin.
+func TestDeliverDueSendsToOneOriginWithAsManyWorkersAsMaxWorkersPerOriginAllows(t *testing.T) {
+	t.Parallel()
+
+	const workers = 8
+	for name, c := range map[string]struct {
+		setting int
+		want    int32
+	}{
+		"Default": {0, 2},
+		"Five":    {5, 5},
+		"NoCap":   {-1, workers},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			d := newDeliverHarness(t, func(deps *faucet.Deps) { deps.Webhook.MaxWorkersPerOrigin = c.setting })
+			slow := d.endpoint("/slow")
+			d.subscribeEndpoint(slow)
+			stalled := stall(t, d.rcv, slow.path)
+			d.advance(time.Second)
+			const queued = 2 * workers
+			for range queued {
+				d.newRunEvent()
+			}
+
+			wait := d.runDeliverDue()
+			stalled.requireHeldAtMost(t, c.want)
+			stalled.release()
+			res := wait()
+			d.record(res)
+			require.Equal(t, queued, res.Delivered)
+		})
+	}
 }

@@ -23,7 +23,7 @@ const (
 	deliverWorkers = 8
 	// A stalled endpoint costs a request timeout per attempt, so it must not
 	// hold every worker while other subscriptions wait.
-	maxWorkersPerEndpoint = 2
+	defaultMaxWorkersPerOrigin = 2
 	// maxClaimsPerRun bounds the work of one DeliverDue, so a run fits the
 	// deadline of the cron request that starts it.
 	maxClaimsPerRun = 200
@@ -90,14 +90,17 @@ type webhookBody struct {
 // A subscription that a purge overtook, one whose unread events were deleted,
 // gets one gap envelope when the call queues its next events. The queueing
 // makes no request: it records the gap on the subscription, and the envelope
-// goes out in the send phase, ahead of the deliveries, on the same workers and
-// under the same deadline, to the subscription as it is then. It is one attempt
-// with no retry, and the result counts it as sent or failed. A gap that no
+// goes out in the send phase, on the same workers and under the same deadline,
+// to the subscription as it is then. It is one attempt with no retry, and the
+// result counts it as sent or failed. Each worker takes gaps before its first
+// delivery, one after another, until none is left that its callback origin
+// limit allows, and then takes deliveries and looks for no more gaps. A gap
+// whose origin is at the limit when a worker looks is passed over. A gap that no
 // worker took before the call ended stays recorded, and the next call sends it.
 //
-// At most 2 of the 8 workers of a call send to one callback origin at a time,
-// for deliveries and gaps alike, so one endpoint that stalls cannot hold up the
-// others.
+// By default at most 2 of the 8 workers of a call send to one callback origin
+// at a time, for deliveries and gaps alike, so one endpoint that stalls cannot
+// hold up the others. WebhookDeps.MaxWorkersPerOrigin changes the number.
 //
 // Calls may overlap, in one process or in several. A claim gives an attempt to
 // one caller for 30 seconds, and a caller whose claim lapsed records nothing.
@@ -111,7 +114,7 @@ func (s *Service) DeliverDue(ctx context.Context) (DeliverResult, error) {
 	if s.webhook == nil {
 		return DeliverResult{}, ErrNoWebhook
 	}
-	run := &deliveryRun{svc: s, wh: s.webhook, result: DeliverResult{GaveUp: map[GiveUpReason]int{}}}
+	run := &deliveryRun{svc: s, wh: s.webhook, result: DeliverResult{GaveUp: map[GiveUpReason]int{}}, gate: endpointGate{limit: s.webhook.workersPerOrigin}}
 	if err := run.enqueue(ctx); err != nil {
 		return run.result, run.unlessEnded(ctx, err)
 	}
@@ -149,6 +152,8 @@ type deliveryRun struct {
 }
 
 type endpointGate struct {
+	// limit is how many workers may send to one origin. Negative is no limit.
+	limit   int
 	mu      sync.Mutex
 	workers map[string]int
 }
@@ -157,8 +162,11 @@ func (g *endpointGate) full() []string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	full := []string{}
+	if g.limit < 0 {
+		return full
+	}
 	for origin, n := range g.workers {
-		if n >= maxWorkersPerEndpoint {
+		if n >= g.limit {
 			full = append(full, origin)
 		}
 	}

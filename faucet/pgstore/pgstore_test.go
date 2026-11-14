@@ -41,6 +41,28 @@ func TestRedeliveryStore(t *testing.T) {
 	})
 }
 
+// A transaction-mode pooler such as Neon's pooled URL breaks lib/pq's default
+// parse-then-bind pair of batches, and binary_parameters=yes avoids it by
+// sending each query in one batch. That mode sends every []byte parameter in
+// binary, which a jsonb parameter cannot take, so the whole suite runs in it.
+func TestStoreOverBinaryParameters(t *testing.T) {
+	t.Parallel()
+	adminURL := withBinaryParameters(t, testDatabaseURL(t))
+
+	storetest.Run(t, func(t *testing.T) faucet.Store {
+		return pgstore.New(newDatabase(t, adminURL))
+	})
+}
+
+func TestRedeliveryStoreOverBinaryParameters(t *testing.T) {
+	t.Parallel()
+	adminURL := withBinaryParameters(t, testDatabaseURL(t))
+
+	storetest.RunRedelivery(t, func(t *testing.T) storetest.RedeliveryStore {
+		return pgstore.New(newDatabase(t, adminURL))
+	})
+}
+
 func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {
 	t.Parallel()
 	adminURL := testDatabaseURL(t)
@@ -72,6 +94,16 @@ func testDatabaseURL(t *testing.T) string {
 		t.Skipf("set %s to a Postgres URL, for example postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable", databaseURLEnv)
 	}
 	return adminURL
+}
+
+func withBinaryParameters(t *testing.T, rawURL string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	require.NoError(t, err)
+	q := u.Query()
+	q.Set("binary_parameters", "yes")
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func newDatabase(t *testing.T, adminURL string) *sql.DB {
@@ -195,6 +227,53 @@ func TestStoreCallThatItsContextCutShortWrapsTheContextError(t *testing.T) {
 			defer cancel()
 			_, err := store.ScanTargets(ctx, time.Now(), 10, 10)
 			require.ErrorIs(t, err, c.want, "the statement waits on the lock until the context ends it")
+		})
+	}
+}
+
+func TestRedeliveryStoreCallThatItsContextCutShortWrapsTheContextError(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	tx, err := db.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	for _, table := range []string{"faucet_redeliveries", "faucet_redelivery_scan", "faucet_redelivery_ranges"} {
+		_, err = tx.Exec("LOCK TABLE " + table + " IN ACCESS EXCLUSIVE MODE") //nolint:gosec // The names are constants.
+		require.NoError(t, err)
+	}
+
+	now := time.Now()
+	for name, call := range map[string]func(context.Context) error{
+		"AcquireRedeliveryLease": func(ctx context.Context) error {
+			_, _, err := store.AcquireRedeliveryLease(ctx, "hook", now, time.Minute)
+			return err
+		},
+		"ReleaseRedeliveryLease": func(ctx context.Context) error {
+			return store.ReleaseRedeliveryLease(ctx, 1)
+		},
+		"ApplyRedeliveryScan": func(ctx context.Context) error {
+			_, err := store.ApplyRedeliveryScan(ctx, faucet.ScanStep{Epoch: 1, Now: now})
+			return err
+		},
+		"SettleRedeliveries": func(ctx context.Context) error {
+			_, err := store.SettleRedeliveries(ctx, faucet.SettleRequest{Now: now, Retention: time.Hour, MaxAsks: 3})
+			return err
+		},
+		"ClaimRedelivery": func(ctx context.Context) error {
+			_, _, err := store.ClaimRedelivery(ctx, faucet.ClaimRequest{Now: now, Retention: time.Hour, MaxAsks: 1, Schedule: []time.Duration{time.Minute}})
+			return err
+		},
+		"PurgeRedeliveries": func(ctx context.Context) error {
+			_, err := store.PurgeRedeliveries(ctx, now)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			require.ErrorIs(t, call(ctx), context.DeadlineExceeded, "the statement waits on the lock until the context ends it")
 		})
 	}
 }

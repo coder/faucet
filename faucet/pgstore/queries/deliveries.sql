@@ -35,6 +35,8 @@ FROM unnest(sqlc.arg(event_ids)::bigint[]) WITH ORDINALITY AS e(event_id, n)
 JOIN unnest(sqlc.arg(message_ids)::text[]) WITH ORDINALITY AS m(message_id, n) USING (n);
 
 -- name: ClaimDelivery :one
+-- The origin expression below is faucet.CallbackOrigin written in SQL: the scheme
+-- and host with the user info dropped, in lower case. ClaimGap has the same one.
 WITH due AS (
   SELECT d.key_hash, d.event_id
   FROM faucet_deliveries d
@@ -42,7 +44,7 @@ WITH due AS (
   WHERE s.expires_at > sqlc.arg(now)
     AND d.next_attempt_at <= sqlc.arg(now)
     AND (d.lease_until IS NULL OR d.lease_until <= sqlc.arg(now))
-    AND COALESCE(substring(s.callback_url from '^[a-z][a-z0-9+.-]*://[^/?#]*'), '') <> ALL(sqlc.arg(skip_origins)::text[])
+    AND lower(COALESCE(regexp_replace(substring(s.callback_url from '^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*'), '^([^/]*//).*@', '\1'), '')) <> ALL(sqlc.arg(skip_origins)::text[])
   ORDER BY d.next_attempt_at, d.event_id
   LIMIT 1
   FOR UPDATE OF d SKIP LOCKED
@@ -108,7 +110,7 @@ WITH due AS (
   WHERE s.gap_through > 0
     AND s.expires_at > sqlc.arg(now)
     AND (s.gap_lease_until IS NULL OR s.gap_lease_until <= sqlc.arg(now))
-    AND COALESCE(substring(s.callback_url from '^[a-z][a-z0-9+.-]*://[^/?#]*'), '') <> ALL(sqlc.arg(skip_origins)::text[])
+    AND lower(COALESCE(regexp_replace(substring(s.callback_url from '^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*'), '^([^/]*//).*@', '\1'), '')) <> ALL(sqlc.arg(skip_origins)::text[])
   ORDER BY s.gap_through, s.key_hash
   LIMIT 1
   FOR UPDATE SKIP LOCKED

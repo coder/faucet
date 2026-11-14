@@ -25,6 +25,7 @@ var deliverySubtests = []subtest{
 	{"ClaimDeliveryReturnsTheDeliveryWithItsEventSecretAndWatermark", claimDeliveryReturnsTheDeliveryWithItsEventSecretAndWatermark},
 	{"ClaimsCarryThePreviousSecret", claimsCarryThePreviousSecret},
 	{"ClaimDeliveryPassesOverTheOriginsItIsToldTo", claimDeliveryPassesOverTheOriginsItIsToldTo},
+	{"ClaimsSkipTheOriginThatCallbackOriginNamesForAnyWayOfWritingTheURL", claimsSkipTheOriginThatCallbackOriginNamesForAnyWayOfWritingTheURL},
 	{"ClaimGapHandsOutARecordedGapToOneCallerUntilItIsFinished", claimGapHandsOutARecordedGapToOneCallerUntilItIsFinished},
 	{"FinishGapIgnoresAnOlderIncarnationAndKeepsANewerGap", finishGapIgnoresAnOlderIncarnationAndKeepsANewerGap},
 	{"EnqueueDeliveriesKeepsAnOwedGapAndItsHigherMark", enqueueDeliveriesKeepsAnOwedGapAndItsHigherMark},
@@ -835,6 +836,61 @@ func claimDeliveryPassesOverTheOriginsItIsToldTo(t *testing.T, s faucet.Store) {
 	require.NoError(t, err)
 	require.True(t, ok, "with nothing to skip it is claimed")
 	require.Equal(t, r.sub.KeyHash, claim.Ref.Key)
+}
+
+// The workers' cap counts a callback by faucet.CallbackOrigin, so a store must
+// match the skip list by the same rule. A stored URL that is not in canonical
+// form (an older row, or a Store of the host's) must still be held to the cap.
+func claimsSkipTheOriginThatCallbackOriginNamesForAnyWayOfWritingTheURL(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	now := subscriptionBase
+	for _, c := range []struct{ name, authority, origin string }{
+		{"Canonical", "https://example.com", "https://example.com"},
+		{"MixedCaseHost", "https://Example.COM", "https://example.com"},
+		{"UpperCaseScheme", "HTTPS://example.com", "https://example.com"},
+		{"UserInfo", "https://user:pass@example.com:8443", "https://example.com:8443"},
+		{"EscapedAtInUserInfo", "https://Us%40er@EXAMPLE.com", "https://example.com"},
+		{"AtInUserInfo", "https://a@b@example.com", "https://example.com"},
+		{"IPv6", "https://[2001:DB8::1]:8443", "https://[2001:db8::1]:8443"},
+	} {
+		require.Equal(t, c.origin, faucet.CallbackOrigin(c.authority+"/hook"), c.name)
+		skip := []string{c.origin}
+
+		deliverySub := newSubscription(c.name+"-delivery", c.authority+"/delivery", now.Add(time.Hour))
+		deliverySub.Cursor = 0
+		_, err := s.UpsertSubscription(ctx, deliverySub, now, 10)
+		require.NoError(t, err, c.name)
+		ev, _, err := s.InsertEvent(ctx, newEvent("origin-"+c.name))
+		require.NoError(t, err, c.name)
+		won, err := s.EnqueueDeliveries(ctx, now, faucet.Enqueue{
+			Key: deliverySub.KeyHash, NewScannedThrough: ev.ID,
+			Deliveries: []faucet.NewDelivery{{EventID: ev.ID, MessageID: "msg_" + c.name}},
+		})
+		require.NoError(t, err, c.name)
+		require.True(t, won, c.name)
+		_, ok, err := s.ClaimDelivery(ctx, now, testLease, skip)
+		require.NoError(t, err, c.name)
+		require.False(t, ok, "%s: a delivery whose callback has the skipped origin is passed over", c.name)
+		claim, ok, err := s.ClaimDelivery(ctx, now, testLease, []string{})
+		require.NoError(t, err, c.name)
+		require.True(t, ok, "%s: the delivery is due, so the skip list was the only thing that held it back", c.name)
+		require.Equal(t, deliverySub.KeyHash, claim.Ref.Key, c.name)
+
+		gapSub := newSubscription(c.name+"-gap", c.authority+"/gap", now.Add(time.Hour))
+		gapSub.Cursor = 0
+		_, err = s.UpsertSubscription(ctx, gapSub, now, 10)
+		require.NoError(t, err, c.name)
+		won, err = s.EnqueueDeliveries(ctx, now, faucet.Enqueue{Key: gapSub.KeyHash, NewScannedThrough: 5, GapThrough: 5})
+		require.NoError(t, err, c.name)
+		require.True(t, won, c.name)
+		_, ok, err = s.ClaimGap(ctx, now, testLease, skip)
+		require.NoError(t, err, c.name)
+		require.False(t, ok, "%s: a gap whose callback has the skipped origin is passed over", c.name)
+		gap, ok, err := s.ClaimGap(ctx, now, testLease, []string{})
+		require.NoError(t, err, c.name)
+		require.True(t, ok, "%s: the gap is owed, so the skip list was the only thing that held it back", c.name)
+		require.Equal(t, gapSub.KeyHash, gap.Ref.Key, c.name)
+	}
 }
 
 func claimGapHandsOutARecordedGapToOneCallerUntilItIsFinished(t *testing.T, s faucet.Store) {

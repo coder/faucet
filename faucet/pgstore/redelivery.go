@@ -16,7 +16,8 @@ var _ faucet.RedeliveryStore = (*Store)(nil)
 
 // AcquireRedeliveryLease locks the scan row, so two runs that start together
 // are decided one after the other, and the second sees the first one's lease.
-func (s *Store) AcquireRedeliveryLease(ctx context.Context, hook string, now time.Time, ttl time.Duration) (faucet.RedeliveryScan, bool, error) {
+func (s *Store) AcquireRedeliveryLease(ctx context.Context, hook string, now time.Time, ttl time.Duration) (_ faucet.RedeliveryScan, _ bool, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	if hook == "" || now.IsZero() || ttl <= 0 {
 		return faucet.RedeliveryScan{}, false, xerrors.New("a lease needs a hook, a time and a ttl")
 	}
@@ -77,7 +78,8 @@ func laterOf(a, b time.Time) time.Time {
 	return b
 }
 
-func (s *Store) ReleaseRedeliveryLease(ctx context.Context, epoch int64) error {
+func (s *Store) ReleaseRedeliveryLease(ctx context.Context, epoch int64) (err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	if err := s.q.ReleaseRedeliveryLease(ctx, epoch); err != nil {
 		return xerrors.Errorf("release lease: %w", err)
 	}
@@ -87,7 +89,8 @@ func (s *Store) ReleaseRedeliveryLease(ctx context.Context, epoch int64) error {
 // ApplyRedeliveryScan writes a step's attempts and its position move in one
 // transaction, after it has locked the scan row and checked the epoch. A run
 // whose lease was replaced therefore writes nothing.
-func (s *Store) ApplyRedeliveryScan(ctx context.Context, step faucet.ScanStep) (faucet.ScanResult, error) {
+func (s *Store) ApplyRedeliveryScan(ctx context.Context, step faucet.ScanStep) (_ faucet.ScanResult, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	if err := step.Validate(); err != nil {
 		return faucet.ScanResult{}, xerrors.Errorf("validate scan step: %w", err)
 	}
@@ -190,7 +193,8 @@ func wrapRange(err error, what string) error {
 	return nil
 }
 
-func (s *Store) SettleRedeliveries(ctx context.Context, req faucet.SettleRequest) (faucet.SettleResult, error) {
+func (s *Store) SettleRedeliveries(ctx context.Context, req faucet.SettleRequest) (_ faucet.SettleResult, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	if err := req.Validate(); err != nil {
 		return faucet.SettleResult{}, xerrors.Errorf("validate settle request: %w", err)
 	}
@@ -246,7 +250,8 @@ func compareStrings(a, b string) int {
 // so a run that crashes right after it has spent an ask and no two runs share
 // one. SKIP LOCKED lets a second claim take the next delivery instead of
 // waiting.
-func (s *Store) ClaimRedelivery(ctx context.Context, req faucet.ClaimRequest) (faucet.RedeliveryClaim, bool, error) {
+func (s *Store) ClaimRedelivery(ctx context.Context, req faucet.ClaimRequest) (_ faucet.RedeliveryClaim, _ bool, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	if err := req.Validate(); err != nil {
 		return faucet.RedeliveryClaim{}, false, xerrors.Errorf("validate claim request: %w", err)
 	}
@@ -266,7 +271,8 @@ func (s *Store) ClaimRedelivery(ctx context.Context, req faucet.ClaimRequest) (f
 	return faucet.RedeliveryClaim{GUID: row.Guid, AttemptID: row.LastAttemptID, Ask: int(row.Asks)}, true, nil
 }
 
-func (s *Store) PurgeRedeliveries(ctx context.Context, before time.Time) (int64, error) {
+func (s *Store) PurgeRedeliveries(ctx context.Context, before time.Time) (_ int64, err error) {
+	defer func() { err = endedBy(ctx, err) }()
 	deleted, err := s.q.PurgeRedeliveries(ctx, before)
 	if err != nil {
 		return 0, xerrors.Errorf("purge redeliveries: %w", err)
