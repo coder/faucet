@@ -340,8 +340,8 @@ func answersOK(req *http.Request) (*http.Response, error) {
 // echoes.
 //
 // A synctest bubble orders the two failures, with no margin of real time that a
-// loaded machine can eat. The bubble has no socket, as a goroutine that waits
-// on one does not count as waiting.
+// loaded machine can eat. The test closes the hook server's listener before the
+// run, as a goroutine that waits on a socket does not count as waiting.
 func TestDeliverDueReturnsTheFirstStoreFailureWhenWorkersFailInTurn(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
