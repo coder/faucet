@@ -293,10 +293,9 @@ func (r *redeliveryRun) execute(ctx context.Context, scan RedeliveryScan) (Redel
 
 // pageRead is what one page of the delivery list tells a run.
 type pageRead struct {
-	failed    []FailedAttempt
-	succeeded []string
-	attempts  int
-	// oldest is the oldest attempt on the page at or after the bound.
+	failed       []FailedAttempt
+	succeeded    []string
+	attempts     int
 	oldest       attemptTime
 	reachedBound bool
 	next         string
@@ -306,11 +305,8 @@ type pageRead struct {
 // it: the page reached the range's bound, or GitHub's list ended.
 func (p pageRead) finished() bool { return p.reachedBound || p.next == "" }
 
-// endOfList says that GitHub's list ended above the bound. What the read did
-// not see between the two has expired, or was never there.
 func (p pageRead) endOfList() bool { return !p.reachedBound && p.next == "" }
 
-// fetch reads one page of the list inside the time that the scan has.
 func (r *redeliveryRun) fetch(ctx context.Context, cursor string) (DeliveryPage, error) {
 	readCtx, cancel := until(ctx, r.budget.scanEnd)
 	defer cancel()
@@ -347,15 +343,10 @@ func (r *redeliveryRun) classify(page DeliveryPage, bound readBound) pageRead {
 	return p
 }
 
-// step starts the ScanStep of a page. Its time is faucet's clock, which the
-// store keeps for the settle, the asks and the purge. No bound and no gap
-// comes from it.
 func (r *redeliveryRun) step(p pageRead) ScanStep {
 	return ScanStep{Epoch: r.epoch, Now: r.svc.clock.Now(), Failed: p.failed, Succeeded: p.succeeded}
 }
 
-// gapBetween is the gap from one time to another. There is none without a
-// start, and none when the start is not before the end.
 func gapBetween(from, to time.Time) *RedeliveryGap {
 	if from.IsZero() || !from.Before(to) {
 		return nil
@@ -398,9 +389,6 @@ func (r *redeliveryRun) countGap(ctx context.Context, gap RedeliveryGap, cause s
 
 // scan reads the head of the list and then the open ranges, newest first. It
 // returns whether the head read worked.
-//
-// The head read is one page. Its Date must be usable, because it becomes the
-// stored clear and decides which ranges have expired.
 func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, error) {
 	top, anchor := topOf(scan), clearOf(scan)
 	page, err := r.fetch(ctx, "")
@@ -425,9 +413,6 @@ func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, er
 	cause := gapExpiredUnread
 	switch {
 	case first && !newest.at.IsZero():
-		// Tracking begins here, or it began at the clear. Below the bound lies
-		// the time before that. With a clear, a list that ends above the bound
-		// has also lost what expired since, and one gap holds both.
 		to := bound.stop
 		if anchor.set() && head.endOfList() {
 			to = laterOf(to, date.gapEnd(head.oldest))
@@ -457,10 +442,6 @@ func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, er
 	return true, r.readRanges(ctx, live, top.orLater(newest))
 }
 
-// closeExpired closes, without a read, each range whose new end GitHub has
-// deleted, and with it all of the range. It returns the others. A range whose
-// page fails, because GitHub refuses its cursor or sends no usable Date, ends
-// here.
 func (r *redeliveryRun) closeExpired(ctx context.Context, ranges []RedeliveryRange, date pageDate, anchor clearAnchor) ([]RedeliveryRange, error) {
 	floor, ok := date.expiredBelow(anchor)
 	if !ok {
@@ -481,8 +462,6 @@ func (r *redeliveryRun) closeExpired(ctx context.Context, ranges []RedeliveryRan
 	return live, nil
 }
 
-// readRanges reads the ranges, newest first, with the pages that the run has
-// left. top is the newest attempt that the run knows.
 func (r *redeliveryRun) readRanges(ctx context.Context, ranges []RedeliveryRange, top attemptTime) error {
 	for _, rg := range ranges {
 		if err := r.readRange(ctx, rg, top); err != nil {
@@ -492,11 +471,8 @@ func (r *redeliveryRun) readRanges(ctx context.Context, ranges []RedeliveryRange
 	return nil
 }
 
-// readRange reads one range until it ends or the run has no page left. A page
-// that reaches the bound ends it without a gap: GitHub deletes in the order
-// of the attempt times, so nothing above an attempt that it still lists has
-// expired. A page that ends the list ends the range with the gap that its
-// Date gives, and the range stays open when that Date is not usable.
+// GitHub deletes attempts in the order of their times, so a page that reaches
+// the bound ends the range without a gap.
 func (r *redeliveryRun) readRange(ctx context.Context, rg RedeliveryRange, top attemptTime) error {
 	bound := rg.olderEnd().bound()
 	for r.res.Pages < r.state.maxPages && ctx.Err() == nil && !r.budget.pastScan() {

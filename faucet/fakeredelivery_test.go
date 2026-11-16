@@ -323,17 +323,12 @@ func TestFakeRedeliveryStoreMatchesContract(t *testing.T) {
 	storetest.RunRedelivery(t, func(*testing.T) storetest.RedeliveryStore { return newFakeRedeliveryStore(nil) })
 }
 
-// migrate does what migration 000008 does to the row of a build before it:
-// the top moves to the clear, and the top is reset.
 func (s *fakeRedeliveryStore) migrate() {
 	s.rmu.Lock()
 	defer s.rmu.Unlock()
 	s.clearAt, s.top = s.top, time.Time{}
 }
 
-// seedMigrated puts a new store where the migration puts a build whose top
-// was oldTop. Such a build took its top from the newest attempt, or from
-// GitHub's Date when the list was empty.
 func (s *fakeRedeliveryStore) seedMigrated(oldTop time.Time) {
 	s.rmu.Lock()
 	s.top = oldTop

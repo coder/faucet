@@ -88,8 +88,6 @@ type cronHooks struct {
 
 func (*cronHooks) Hook() string { return "/orgs/octo-org/hooks/9" }
 
-// ListDeliveries lists one attempt of an event that faucet does not store,
-// with GitHub's Date, so that a run finds a list to start its tracking at.
 func (h *cronHooks) ListDeliveries(context.Context, string) (faucet.DeliveryPage, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

@@ -330,12 +330,6 @@ func TestALateFailureEndsInAGapWhenGitHubDeletesItBeforeARunReadsTheRangeAboveIt
 	}
 }
 
-// The tests below give GitHub a clock of its own, a Date that leads or lags,
-// pages that take time and cursors that it refuses. In each, a failure that
-// GitHub listed must end tracked or inside a gap that a run logged.
-
-// requireListed fails unless GitHub's list holds the attempt now. A test calls
-// it before the attempt expires, to show that a run could have read it.
 func requireListed(t *testing.T, env *redeliveryEnv, a ghAttempt) {
 	t.Helper()
 	require.True(t, env.gh.lists(a.guid), "GitHub must list %s, or the scenario proves nothing", a.guid)
@@ -354,8 +348,6 @@ func TestAnExpiredFailureIsInsideTheGapWhenFaucetsClockLagsGitHubs(t *testing.T)
 			env.gh.record("A", t0.Add(-time.Minute), http200)
 			env.run()
 
-			// F leaves GitHub's list half a lag before the run after the outage.
-			// Faucet's clock says that GitHub still keeps it.
 			f := env.gh.record("F", t0.Add(8*time.Hour-lag/2), 503)
 			env.advance(8 * time.Hour)
 			requireListed(t, env, f)
@@ -377,8 +369,6 @@ func TestTheFirstRunsGapStartsBelowGitHubsListWhenFaucetsClockRunsAhead(t *testi
 			env.clock.WithLogger(quartz.NoOpLogger)
 			env.gh.skew = -ahead
 			t0 := env.gh.now()
-			// F is the oldest attempt that GitHub lists. On faucet's clock its
-			// 72 hours are over.
 			f := env.gh.record("F", t0.Add(-faucet.GitHubDeliveryRetention+ahead/2), 503)
 			env.gh.record("A", t0.Add(-time.Minute), http200)
 			requireListed(t, env, f)
@@ -424,8 +414,6 @@ func TestAPageThatIsSlowToArriveLosesNoFailureThatGitHubDeletesMeanwhile(t *test
 			env.gh.record("A", t0.Add(-time.Second), http200)
 			env.run()
 
-			// F is the oldest attempt of a burst. The run after it has one page,
-			// which holds the newest 100, so F stays in the range below them.
 			f := env.gh.record("F", t0.Add(time.Minute), 503)
 			for i := range 150 {
 				env.gh.record(fmt.Sprintf("b-%03d", i), t0.Add(2*time.Minute+time.Duration(i)*4*time.Second), http200)
@@ -434,8 +422,6 @@ func TestAPageThatIsSlowToArriveLosesNoFailureThatGitHubDeletesMeanwhile(t *test
 			require.Equal(t, 1, env.run().Ranges, "the burst leaves a range down to A")
 			requireListed(t, env, f)
 
-			// GitHub lists F while the first page is on its way, and has deleted it
-			// when the page of the range arrives.
 			env.advance(f.at.Add(faucet.GitHubDeliveryRetention - latency*3/2).Sub(env.gh.now()))
 			env.useMaxPages(faucet.DefaultMaxPagesPerRun)
 			env.slowPages(latency)
@@ -528,7 +514,6 @@ func TestTheFirstRunClosesNoRangeOnTheWordOfOneDate(t *testing.T) {
 		}
 	}
 
-	// No clear is stored yet, so this Date is the only one that the run has.
 	env.gh.date = dateOff(80 * time.Hour)
 	first := env.run()
 	require.Equal(t, 1, first.Ranges, "the range that the first run opens stays open")
@@ -548,8 +533,6 @@ func TestTheFirstRunOfAHookWithoutAClearRecordsOnlyTheTimeBeforeItsLookback(t *t
 	env := newRedeliveryEnv(t)
 	env.clock.WithLogger(quartz.NoOpLogger)
 	t0 := env.gh.now()
-	// The list is two days stale and ends above the bound of the first run.
-	// Nothing was tracked before this run, so nothing that expired counts.
 	newest := env.gh.record("newer", t0.Add(-50*time.Hour), 503)
 	env.gh.record("older", t0.Add(-60*time.Hour), 503)
 
@@ -605,9 +588,6 @@ func TestTrackingThatBeganWithAnEmptyListOrTheMigrationHoldsThroughAnOutage(t *t
 func TestAfterTheMigrationATopThatWasADateAheadDropsNoFailure(t *testing.T) {
 	t.Parallel()
 
-	// A build before the migration took its top from GitHub's Date when the
-	// list was empty. A Date that ran ahead then put the next failures below
-	// the read bound.
 	for _, lead := range []time.Duration{time.Hour, 7 * time.Hour} {
 		t.Run(fmt.Sprintf("the cron keeps running,lead=%s", lead), func(t *testing.T) {
 			t.Parallel()
@@ -627,9 +607,6 @@ func TestAfterTheMigrationATopThatWasADateAheadDropsNoFailure(t *testing.T) {
 			}
 		})
 	}
-	// With an outage after the migration, the failures expire unread. The gap
-	// covers them while the Date was ahead by no more than the margin and the
-	// overlap.
 	for _, lead := range []time.Duration{time.Hour, 6 * time.Hour} {
 		t.Run(fmt.Sprintf("the cron is down for 80 hours,lead=%s", lead), func(t *testing.T) {
 			t.Parallel()
@@ -699,8 +676,6 @@ func TestARangeIsReadThroughPagesThatCarryNoDate(t *testing.T) {
 	env.advance(cronEvery)
 	require.Equal(t, 1, env.run().Ranges)
 
-	// Only the first page of a run has a Date. Every page of a range either
-	// goes on or reaches the range's bound, and neither uses a Date.
 	env.gh.date = func(_ int, cursor string, at time.Time) time.Time {
 		if cursor != "" {
 			return time.Time{}
@@ -729,9 +704,6 @@ func TestARangeWhosePageFailsStaysOpenUntilGitHubHasDeletedItAndEndsAsAGap(t *te
 			}
 			return at
 		},
-		// The newest attempt that the run knows is a minute old, and it is on
-		// the first page of this run. The top that the store gave is 11 minutes
-		// old, and the attempts on the page of the range are days old.
 		"the Date of the page that ends the list is more than the slack behind the newest attempt of the run": func(_ int, cursor string, at time.Time) time.Time {
 			if cursor != "" {
 				return at.Add(-faucet.RedeliveryDateSlack - 2*time.Minute)
@@ -759,11 +731,6 @@ func TestARangeWhosePageFailsStaysOpenUntilGitHubHasDeletedItAndEndsAsAGap(t *te
 			require.Equal(t, 1, env.run().Ranges, "the one page holds the newest 100, and the failures are in the range below")
 			requireListed(t, env, failures[0])
 
-			// A run reads one page, so the range stays unread while the hook
-			// goes on. Then the fault begins, and the runs get their pages back.
-			// A Date fault begins while GitHub still lists the failures. A cursor
-			// is stale only after GitHub has deleted its attempt, which is newer
-			// than they are.
 			trickle := func() {
 				env.advance(cronEvery)
 				env.gh.record(fmt.Sprintf("t-%s", env.gh.now().Sub(t0)), env.gh.now().Add(-time.Minute), http200)
@@ -813,8 +780,6 @@ func TestAWholeSecondDateAsFarBehindAsTheSlackStillEndsTheGapAboveWhatGitHubDele
 			f := env.gh.record("F", t0.Add(time.Hour+400*time.Millisecond), 503)
 			requireListed(t, env, f)
 
-			// The run starts 300 ms after GitHub deleted F. The Date drops the
-			// fraction of its second, which puts it before the deletion.
 			env.advance(f.at.Add(faucet.GitHubDeliveryRetention + 300*time.Millisecond).Sub(env.gh.now()))
 			require.False(t, env.gh.lists(f.guid))
 			env.run()
@@ -901,8 +866,6 @@ func TestAChangedHookStartsWithoutTheOldHooksClear(t *testing.T) {
 	env.run()
 	env.advance(80 * time.Hour)
 
-	// The host replaces the webhook after an outage. The old hook's clear is
-	// 80 hours old, which on that hook is a gap. The new hook has lost nothing.
 	env.gh.name = "/orgs/acme/hooks/8"
 	res := env.run()
 
@@ -975,8 +938,6 @@ func TestAQuietHookLogsNoGapInTenDays(t *testing.T) {
 func TestAQuietHookLogsAGapOnlyAfterAnOutageThatTheDateMarginsDoNotCover(t *testing.T) {
 	t.Parallel()
 
-	// After a silence a gap is [clear - margin - overlap, Date - retention +
-	// slack]. It is empty until the runs are this far apart.
 	threshold := faucet.GitHubDeliveryRetention - faucet.RedeliveryDateSlack - faucet.RedeliveryDateMargin - faucet.RedeliveryReadOverlap
 	for _, listed := range []string{"an empty hook", "a hook whose last attempt is 10 hours old"} {
 		for _, tc := range []struct {

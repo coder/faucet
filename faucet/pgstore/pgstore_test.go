@@ -122,10 +122,6 @@ func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {
 	require.EqualValues(t, 8, faucetVersion)
 }
 
-// A build before the clear migration kept its position in top_at alone, and
-// after an empty list that position was GitHub's Date. The migration cannot
-// tell the two apart, so it makes the next run a first run that knows when
-// tracking began. The down migration gives such a build its position back.
 func TestTheClearMigrationMovesTheOldTopToTheClearAndBack(t *testing.T) {
 	t.Parallel()
 	db := newDatabase(t, testDatabaseURL(t))

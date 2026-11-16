@@ -24,10 +24,7 @@ type simPhase struct {
 }
 
 type simSpec struct {
-	// setup changes the env before the first delivery: GitHub's clock, the
-	// Date that it sends, the time that a page takes.
-	setup func(*redeliveryEnv)
-	// beforeRun runs before each run, with the time since the first run.
+	setup     func(*redeliveryEnv)
 	beforeRun func(env *redeliveryEnv, since time.Duration)
 	phases    []simPhase
 	// outage is when faucet answers 503, relative to the first run.
@@ -81,8 +78,6 @@ func runSim(t *testing.T, spec simSpec) simOutcome {
 	if spec.setup != nil {
 		spec.setup(env)
 	}
-	// The deliveries, the outage and the cron follow GitHub's clock, which
-	// stamps the attempts. It is faucet's clock unless setup moved it.
 	t0 := env.gh.now()
 	down := func(at time.Time) bool {
 		return spec.outageLength > 0 && !at.Before(t0.Add(spec.outageFrom)) && at.Before(t0.Add(spec.outageFrom+spec.outageLength))
@@ -349,8 +344,6 @@ func rangesOf(runs []faucet.RedeliverResult) []int {
 func TestSimADateThatLagsLessThanTheSlackFailsNoRunAndLosesNothing(t *testing.T) {
 	t.Parallel()
 
-	// An HTTP Date is a whole second, and the attempt times have fractions, so
-	// even a Date that is right lies before the newest attempt on its page.
 	for _, lag := range []time.Duration{0, 2 * time.Second, 30 * time.Minute, 59 * time.Minute} {
 		t.Run(lag.String(), func(t *testing.T) {
 			t.Parallel()
@@ -373,8 +366,6 @@ func TestSimADateThatLagsLessThanTheSlackFailsNoRunAndLosesNothing(t *testing.T)
 func TestSimAnOutageLongerThanGitHubKeepsADeliveryLosesNothingSilentlyWhateverTheClocks(t *testing.T) {
 	t.Parallel()
 
-	// skew is GitHub's clock minus faucet's. Faucet and its cron are down for
-	// the outage, and GitHub deletes the first failures before a run reads them.
 	for _, skew := range []time.Duration{-25 * time.Hour, -time.Hour, 0, time.Hour, 25 * time.Hour} {
 		for _, outage := range []time.Duration{71 * time.Hour, 80 * time.Hour} {
 			t.Run(fmt.Sprintf("skew=%s,outage=%s", skew, outage), func(t *testing.T) {
@@ -400,10 +391,6 @@ func TestSimAnOutageLongerThanGitHubKeepsADeliveryLosesNothingSilentlyWhateverTh
 
 func TestSimTheMigrationReadsTheLastDayAgainAndLosesNothingSilently(t *testing.T) {
 	t.Parallel()
-	// The law of the capacity at a hundredth of the scale: pages of 1 attempt,
-	// 20 a run, so 42 and 70 an hour stand for 4,200 and 7,000. The store is
-	// migrated 6 hours in, while the hook delivers. The failures that count
-	// are the ones inside the lookback of the first run, and all later ones.
 	const pages, pageSize = 20, 1
 
 	for _, tc := range []struct {

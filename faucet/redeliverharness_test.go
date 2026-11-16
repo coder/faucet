@@ -66,12 +66,7 @@ type fakeGitHub struct {
 	// listDelay and askDelay make every list call and every redelivery request
 	// take that long, or until its context ends.
 	listDelay, askDelay time.Duration
-	// date gives the Date header of a list response (DeliveryPage.At), from the
-	// number of the list call, its cursor and GitHub's clock when it answered.
-	// A zero time is a response without a Date. Nil sends GitHub's clock.
-	date func(call int, cursor string, at time.Time) time.Time
-	// refusesStaleCursors makes GitHub answer a cursor whose attempt it has
-	// deleted with an error. By default it lists on from where the attempt was.
+	date                func(call int, cursor string, at time.Time) time.Time
 	refusesStaleCursors bool
 }
 
@@ -214,7 +209,6 @@ func (g *fakeGitHub) ListDeliveries(ctx context.Context, cursor string) (faucet.
 	return page, nil
 }
 
-// lists says whether GitHub's list holds an attempt at guid now.
 func (g *fakeGitHub) lists(guid string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -277,8 +271,6 @@ func (g *fakeGitHub) totalAsks() int {
 	return n
 }
 
-// The clock tests lean on what the fake GitHub does with a Date, a slow page
-// and a stale cursor, so this pins each of them.
 func TestFakeGitHubSendsTheDateTakesTheTimeAndRefusesTheCursorThatATestSets(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -455,14 +447,10 @@ func (e *redeliveryEnv) advance(d time.Duration) {
 	e.clock.Advance(d).MustWait(context.Background())
 }
 
-// slowPages makes every list request take d to reach GitHub: the clock moves
-// forward by d inside the call, before GitHub reads its list.
 func (e *redeliveryEnv) slowPages(d time.Duration) {
 	e.gh.listGate = func() { e.advance(d) }
 }
 
-// dateOff is a Date that is d away from GitHub's clock: ahead of it when d is
-// positive, behind it when d is negative.
 func dateOff(d time.Duration) func(int, string, time.Time) time.Time {
 	return func(_ int, _ string, at time.Time) time.Time { return at.Add(d) }
 }

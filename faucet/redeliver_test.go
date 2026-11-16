@@ -726,9 +726,6 @@ func TestEveryRedeliveryLogLineHoldsNoCursorOrURL(t *testing.T) {
 	require.NotContains(t, text, "http")
 }
 
-// The scan keeps the time of an attempt, GitHub's Date and the stored clear
-// apart by type, so that a Date cannot become a read bound. That holds while
-// redelivertime.go alone makes a value of those types.
 func TestOnlyRedeliverTimeMakesTheTimesThatTheScanKeepsApart(t *testing.T) {
 	t.Parallel()
 	made := regexp.MustCompile(`\b(attemptTime|readBound|pageDate|clearAnchor)\{`)

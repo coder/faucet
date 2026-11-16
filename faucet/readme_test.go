@@ -60,8 +60,6 @@ func TestReadmeStatesTheRedeliveryCapacityThatTheConstantsGive(t *testing.T) {
 	require.Greater(t, keepsUpWith, 4200, "the capacity must cover the busiest hook that the simulations model")
 }
 
-// The README also states how far redelivery trusts GitHub's Date header, and
-// what follows from that for a quiet hook and for the two residual risks.
 func TestReadmeStatesTheDateWindowThatTheConstantsGive(t *testing.T) {
 	t.Parallel()
 

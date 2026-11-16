@@ -4,9 +4,6 @@
 -- GitHub's list. top_at keeps attempt times only.
 ALTER TABLE faucet_redelivery_scan ADD COLUMN clear_at timestamptz;
 
--- Until now top_at was GitHub's Date when a run read an empty list, and no
--- row says which of the two it holds. So the old top moves to clear_at, and
--- the next run starts as a first run that knows when tracking began: it reads
--- the last 24 hours of the list again, and back to the old top less a margin
--- when that is older, and it records what lies below as a gap.
+-- Until now top_at could hold a Date that ran ahead of GitHub's list, and no
+-- row says whether it does (see #26).
 UPDATE faucet_redelivery_scan SET clear_at = top_at, top_at = NULL;

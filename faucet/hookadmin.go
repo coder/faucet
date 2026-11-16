@@ -47,13 +47,9 @@ type DeliveryPage struct {
 	// Next is the cursor of the next, older page. It is empty on the last page.
 	Next string
 	// At is GitHub's own clock when it answered, which GitHub's Date header
-	// carries. It is zero when GitHub sent none. Redeliver takes from it where
-	// GitHub's retention has ended and when a run last saw the top of the
-	// list. It never takes a read position from it: a Date can run ahead of
-	// GitHub's list, and a position ahead of the list would make the next
-	// failed attempt look as if an earlier run had read it. Redeliver needs At
-	// on the first page and on a page that ends the list. There it fails the
-	// read when At is zero, or more than RedeliveryDateSlack before the newest
+	// carries. It is zero when GitHub sent none. Redeliver needs At on the
+	// first page and on a page that ends the list. There it fails the read
+	// when At is zero, or more than RedeliveryDateSlack before the newest
 	// attempt that it knows.
 	At time.Time
 }
@@ -195,8 +191,6 @@ func (a GitHubHookAdmin) ListDeliveries(ctx context.Context, cursor string) (Del
 	if err != nil {
 		return DeliveryPage{}, err
 	}
-	// A missing or malformed Date leaves At zero and does not fail the page:
-	// most pages of a range need no Date, and Redeliver knows which do.
 	at, _ := http.ParseTime(resp.Header.Get("Date"))
 	page := DeliveryPage{Deliveries: make([]HookDelivery, len(raw)), Next: next, At: at}
 	for i, d := range raw {
