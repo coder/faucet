@@ -5,6 +5,7 @@ const run = samples['workflow_run.completed'];
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const MAX_ASKS = 7;
+const START_LOOKBACK = 24 * HOUR;
 const PAGES_PER_RUN = 20;
 const HOOK = '/orgs/verify/hooks/7';
 
@@ -150,7 +151,9 @@ describe('redelivery', () => {
     await withHook(cron, async (started, output) => {
       const recent = newRepoId();
       const before = newRepoId();
-      await hooks.arm(started, [failed(recent, newDeliveryId(), 20 * HOUR), failed(before, newDeliveryId(), 50 * HOUR)]);
+      const newestAge = 20 * HOUR;
+      const belowTheLookback = newestAge + START_LOOKBACK + 6 * HOUR;
+      await hooks.arm(started, [failed(recent, newDeliveryId(), newestAge), failed(before, newDeliveryId(), belowTheLookback)]);
 
       const first = await sweep(started);
       const second = await sweep(started);

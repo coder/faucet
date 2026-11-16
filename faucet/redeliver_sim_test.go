@@ -392,33 +392,37 @@ func TestSimAnOutageLongerThanGitHubKeepsADeliveryLosesNothingSilentlyWhateverTh
 func TestSimTheMigrationReadsTheLastDayAgainAndLosesNothingSilently(t *testing.T) {
 	t.Parallel()
 	const pages, pageSize = 20, 1
+	const migratedAt = 6 * time.Hour
+	capacity := steadyCapacity(pages*pageSize, cronEvery+faucet.RedeliveryReadOverlap)
+	beforeTheFirstLookback := -faucet.RedeliveryStartLookback - 3*time.Hour
+	insideTheFirstLookback := -faucet.RedeliveryStartLookback + time.Hour
 
 	for _, tc := range []struct {
 		name      string
 		perHour   int
 		catchesUp bool
 	}{
-		{"below the capacity", 42, true},
-		{"near the capacity", 70, false},
+		{"at half the capacity", capacity / 2, true},
+		{"near the capacity", capacity * 95 / 100, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			migrated := false
 			out := runSim(t, simSpec{
-				phases: []simPhase{{from: -27 * time.Hour, to: 90 * time.Hour, perHour: tc.perHour}},
+				phases: []simPhase{{from: beforeTheFirstLookback, to: 90 * time.Hour, perHour: tc.perHour}},
 				blip:   func(_, i int) bool { return i%25 == 7 },
 				beforeRun: func(env *redeliveryEnv, since time.Duration) {
-					if since == 6*time.Hour {
-						env.store.migrate()
+					if since == migratedAt {
+						env.store.applyMigration000008()
 						migrated = true
 					}
 				},
-				countFrom: -23 * time.Hour,
+				countFrom: insideTheFirstLookback,
 				horizon:   90 * time.Hour,
 				pages:     pages,
 				pageSize:  pageSize,
 			})
-			t.Logf("RESULT %d an hour with pages of %d, migrated at 6h: %s, ranges after the last run %d", tc.perHour, pageSize, out, out.runs[len(out.runs)-1].Ranges)
+			t.Logf("RESULT %d an hour of a capacity of %d, migrated at %s: %s, ranges after the last run %d", tc.perHour, capacity, migratedAt, out, out.runs[len(out.runs)-1].Ranges)
 			require.True(t, migrated)
 			require.Greater(t, out.failed, 100)
 			require.Zero(t, out.silentLost)

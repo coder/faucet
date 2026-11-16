@@ -88,14 +88,17 @@ type cronHooks struct {
 
 func (*cronHooks) Hook() string { return "/orgs/octo-org/hooks/9" }
 
+var attemptThatStartsTracking = faucet.HookDelivery{
+	ID: 1, GUID: "g-listed", DeliveredAt: time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC), StatusCode: http.StatusOK, Event: "ping",
+}
+
 func (h *cronHooks) ListDeliveries(context.Context, string) (faucet.DeliveryPage, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.lists++
-	listed := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
 	return faucet.DeliveryPage{
-		Deliveries: []faucet.HookDelivery{{ID: 1, GUID: "g-listed", DeliveredAt: listed, StatusCode: http.StatusOK, Event: "ping"}},
-		At:         listed.Add(time.Second),
+		Deliveries: []faucet.HookDelivery{attemptThatStartsTracking},
+		At:         attemptThatStartsTracking.DeliveredAt.Add(time.Second),
 	}, nil
 }
 

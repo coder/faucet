@@ -323,17 +323,17 @@ func TestFakeRedeliveryStoreMatchesContract(t *testing.T) {
 	storetest.RunRedelivery(t, func(*testing.T) storetest.RedeliveryStore { return newFakeRedeliveryStore(nil) })
 }
 
-func (s *fakeRedeliveryStore) migrate() {
+func (s *fakeRedeliveryStore) applyMigration000008() {
 	s.rmu.Lock()
 	defer s.rmu.Unlock()
 	s.clearAt, s.top = s.top, time.Time{}
 }
 
-func (s *fakeRedeliveryStore) seedMigrated(oldTop time.Time) {
+func (s *fakeRedeliveryStore) seedMigratedTop(oldTop time.Time) {
 	s.rmu.Lock()
 	s.top = oldTop
 	s.rmu.Unlock()
-	s.migrate()
+	s.applyMigration000008()
 }
 
 func (s *fakeRedeliveryStore) rowCount() int {
