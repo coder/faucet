@@ -336,6 +336,10 @@ func (p pageRead) step(epoch int64, now time.Time) ScanStep {
 	return ScanStep{Epoch: epoch, Now: now, Failed: p.failed, Succeeded: p.succeeded}
 }
 
+// gapOf says which part of a read expired before a run made it. bound is where
+// the read stops. coveredFrom is how far down a read has got, or the range's
+// new end when it got nowhere. Only the part below the retention floor is gone.
+// A part above it that holds no attempt was quiet.
 func gapOf(bound, floor, coveredFrom time.Time) *RedeliveryGap {
 	to := coveredFrom
 	if floor.Before(to) {
