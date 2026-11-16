@@ -24,6 +24,9 @@ type simPhase struct {
 }
 
 type simSpec struct {
+	// setup changes the env before the first delivery: GitHub's clock, the
+	// Date that it sends, the time that a page takes.
+	setup  func(*redeliveryEnv)
 	phases []simPhase
 	// outage is when faucet answers 503, relative to the first run.
 	outageFrom, outageLength time.Duration
@@ -73,7 +76,12 @@ func runSim(t *testing.T, spec simSpec) simOutcome {
 			o.pageSize = spec.pageSize
 		}
 	})
-	t0 := env.now()
+	if spec.setup != nil {
+		spec.setup(env)
+	}
+	// The deliveries, the outage and the cron follow GitHub's clock, which
+	// stamps the attempts. It is faucet's clock unless setup moved it.
+	t0 := env.gh.now()
 	down := func(at time.Time) bool {
 		return spec.outageLength > 0 && !at.Before(t0.Add(spec.outageFrom)) && at.Before(t0.Add(spec.outageFrom+spec.outageLength))
 	}
@@ -109,8 +117,8 @@ func runSim(t *testing.T, spec simSpec) simOutcome {
 	var out simOutcome
 	var failedFirst []simDelivery
 	next := 0
-	for env.now().Before(t0.Add(spec.horizon)) {
-		now := env.now()
+	for env.gh.now().Before(t0.Add(spec.horizon)) {
+		now := env.gh.now()
 		for next < len(deliveries) && !deliveries[next].at.After(now) {
 			d := deliveries[next]
 			next++
