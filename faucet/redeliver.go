@@ -462,7 +462,7 @@ func (r *redeliveryRun) closeExpired(ctx context.Context, ranges []RedeliveryRan
 			live = append(live, rg)
 			continue
 		}
-		gap := RedeliveryGap{From: rg.bound().stop, To: laterOf(rg.NewerAt, rg.OlderAt)}
+		gap := rg.UnreadGap()
 		if _, err := r.apply(ctx, ScanStep{Epoch: r.epoch, Now: r.svc.clock.Now(), CloseID: rg.ID, Gap: &gap}, gapExpiredUnread); err != nil {
 			return nil, err
 		}

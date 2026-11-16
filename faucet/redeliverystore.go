@@ -72,6 +72,14 @@ type RedeliveryGap struct {
 	From, To time.Time
 }
 
+// UnreadGap is the gap that the range leaves when it closes before a run has
+// read it to its end. It starts where a read of the range would have stopped,
+// RedeliveryReadOverlap below OlderAt, and ends at NewerAt, or at OlderAt when
+// NewerAt lies inside the overlap.
+func (r RedeliveryRange) UnreadGap() RedeliveryGap {
+	return RedeliveryGap{From: r.bound().stop, To: laterOf(r.NewerAt, r.OlderAt)}
+}
+
 // RedeliveryScan is what a run knows when it takes the lease.
 type RedeliveryScan struct {
 	// Epoch fences the run's writes. A later lease has a higher epoch.
@@ -91,8 +99,8 @@ type RedeliveryScan struct {
 	Ranges []RedeliveryRange
 	// HookChanged is true when the lease found state of another webhook. The
 	// store has reset Top and Clear and closed that state's open ranges as
-	// ClosedGaps. Each gap starts RedeliveryReadOverlap below the range's
-	// OlderAt, where the read of the range would have stopped.
+	// ClosedGaps: each one is the range's UnreadGap, and the store keeps it
+	// as it reports it.
 	HookChanged bool
 	ClosedGaps  []RedeliveryGap
 }

@@ -38,8 +38,37 @@ func TestRedeliveryStore(t *testing.T) {
 	adminURL := testDatabaseURL(t)
 
 	storetest.RunRedelivery(t, func(t *testing.T) storetest.RedeliveryStore {
-		return pgstore.New(newDatabase(t, adminURL))
+		return newGapRecordingStore(newDatabase(t, adminURL))
 	})
+}
+
+// gapRecordingStore lets storetest read the gaps that pgstore keeps.
+type gapRecordingStore struct {
+	*pgstore.Store
+	db *sql.DB
+}
+
+var _ storetest.GapRecords = gapRecordingStore{}
+
+func newGapRecordingStore(db *sql.DB) gapRecordingStore {
+	return gapRecordingStore{Store: pgstore.New(db), db: db}
+}
+
+func (s gapRecordingStore) RecordedRedeliveryGaps(ctx context.Context) ([]faucet.RedeliveryGap, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT older_at, newer_at FROM faucet_redelivery_ranges WHERE state = 'gap'`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var gaps []faucet.RedeliveryGap
+	for rows.Next() {
+		var gap faucet.RedeliveryGap
+		if err := rows.Scan(&gap.From, &gap.To); err != nil {
+			return nil, err
+		}
+		gaps = append(gaps, gap)
+	}
+	return gaps, rows.Err()
 }
 
 // A transaction-mode pooler such as Neon's pooled URL breaks lib/pq's default
@@ -60,7 +89,7 @@ func TestRedeliveryStoreOverBinaryParameters(t *testing.T) {
 	adminURL := withBinaryParameters(t, testDatabaseURL(t))
 
 	storetest.RunRedelivery(t, func(t *testing.T) storetest.RedeliveryStore {
-		return pgstore.New(newDatabase(t, adminURL))
+		return newGapRecordingStore(newDatabase(t, adminURL))
 	})
 }
 

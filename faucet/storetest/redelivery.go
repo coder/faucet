@@ -18,6 +18,16 @@ type RedeliveryStore interface {
 	faucet.RedeliveryStore
 }
 
+// GapRecords is what a RedeliveryStore can also implement so that
+// RunRedelivery checks the gaps that it keeps as final states: each one as a
+// step gave it, or as the store reported it when the hook changed. Without it
+// the suite checks only the gaps that the store reports.
+type GapRecords interface {
+	// RecordedRedeliveryGaps returns every gap that the store keeps, in any
+	// order.
+	RecordedRedeliveryGaps(ctx context.Context) ([]faucet.RedeliveryGap, error)
+}
+
 // RunRedelivery runs the redelivery contract against stores returned by
 // newStore. Every call must return an empty store that does not share state
 // with the others, because the subtests run in parallel.
@@ -341,6 +351,7 @@ func scanPositionSurvivesBetweenRuns(t *testing.T, s RedeliveryStore) {
 	apply(t, s, faucet.ScanStep{Epoch: third.Epoch, Now: t0.Add(5 * time.Minute), CloseID: opened.OpenedID, Gap: &faucet.RedeliveryGap{From: gapFrom, To: gapTo}})
 	apply(t, s, faucet.ScanStep{Epoch: third.Epoch, Now: t0.Add(5 * time.Minute), Gap: &faucet.RedeliveryGap{From: gapFrom.Add(-time.Hour), To: gapFrom}})
 	require.NoError(t, s.ReleaseRedeliveryLease(ctx, third.Epoch))
+	requireRecordedGaps(t, s, []faucet.RedeliveryGap{{From: gapFrom, To: gapTo}, {From: gapFrom.Add(-time.Hour), To: gapFrom}}, "a store keeps each gap as its step gave it")
 
 	last := acquire(t, s, testHook, t0.Add(10*time.Minute))
 	require.Empty(t, last.Ranges, "a closed range, finished or a gap, is no longer open")
@@ -367,6 +378,25 @@ func theClearIsTheLatestTimeAStepSetNotTheHighest(t *testing.T, s RedeliveryStor
 	last := acquire(t, s, testHook, later.Add(time.Minute))
 	require.True(t, later.Equal(last.Clear), "an earlier clear replaces a later one, and a step without a clear leaves it: %s", last.Clear)
 	require.True(t, t0.Add(-time.Minute).Equal(last.Top), "a clear never moves the top")
+}
+
+func requireRecordedGaps(t *testing.T, s RedeliveryStore, want []faucet.RedeliveryGap, msg string) {
+	t.Helper()
+	records, ok := s.(GapRecords)
+	if !ok {
+		return
+	}
+	got, err := records.RecordedRedeliveryGaps(context.Background())
+	require.NoError(t, err)
+	require.ElementsMatch(t, normalizeGaps(want), normalizeGaps(got), msg)
+}
+
+func normalizeGaps(gaps []faucet.RedeliveryGap) []faucet.RedeliveryGap {
+	out := make([]faucet.RedeliveryGap, len(gaps))
+	for i, g := range gaps {
+		out[i] = faucet.RedeliveryGap{From: g.From.UTC(), To: g.To.UTC()}
+	}
+	return out
 }
 
 func normalizeRanges(ranges []faucet.RedeliveryRange) []faucet.RedeliveryRange {
@@ -396,16 +426,16 @@ func aFailedScanStepRecordsNothing(t *testing.T, s RedeliveryStore) {
 
 func changingTheHookClosesOpenRangesAsGaps(t *testing.T, s RedeliveryStore) {
 	ctx := context.Background()
+	long := faucet.RedeliveryRange{NewerAt: t0.Add(-time.Hour), OlderAt: t0.Add(-48 * time.Hour), Cursor: "cursor-1"}
+	insideTheOverlap := faucet.RedeliveryRange{NewerAt: t0.Add(-50*time.Hour - 2*time.Minute), OlderAt: t0.Add(-50 * time.Hour), Cursor: "cursor-2"}
 	lease := acquire(t, s, testHook, t0)
-	apply(t, s, faucet.ScanStep{
-		Epoch: lease.Epoch, Now: t0, Top: t0, Clear: t0.Add(time.Second),
-		Open: &faucet.RedeliveryRange{NewerAt: t0.Add(-time.Hour), OlderAt: t0.Add(-48 * time.Hour), Cursor: "cursor-1"},
-	})
+	apply(t, s, faucet.ScanStep{Epoch: lease.Epoch, Now: t0, Top: t0, Clear: t0.Add(time.Second), Open: &long})
+	apply(t, s, faucet.ScanStep{Epoch: lease.Epoch, Now: t0, Open: &insideTheOverlap})
 	require.NoError(t, s.ReleaseRedeliveryLease(ctx, lease.Epoch))
 
 	same := acquire(t, s, testHook, t0.Add(time.Minute))
 	require.False(t, same.HookChanged)
-	require.Len(t, same.Ranges, 1)
+	require.Len(t, same.Ranges, 2)
 	require.False(t, same.Clear.IsZero())
 	require.NoError(t, s.ReleaseRedeliveryLease(ctx, same.Epoch))
 
@@ -414,10 +444,11 @@ func changingTheHookClosesOpenRangesAsGaps(t *testing.T, s RedeliveryStore) {
 	require.True(t, other.Top.IsZero(), "a new hook starts from scratch")
 	require.True(t, other.Clear.IsZero(), "the clear is a time of the old hook's list, and the new hook has not been read: %s", other.Clear)
 	require.Empty(t, other.Ranges)
-	require.Len(t, other.ClosedGaps, 1)
-	require.True(t, t0.Add(-48*time.Hour-faucet.RedeliveryReadOverlap).Equal(other.ClosedGaps[0].From),
-		"the gap starts where the read of the range would have stopped, the overlap below its old end: %s", other.ClosedGaps[0].From)
-	require.True(t, t0.Add(-time.Hour).Equal(other.ClosedGaps[0].To))
+	require.ElementsMatch(t, []faucet.RedeliveryGap{
+		{From: long.OlderAt.Add(-faucet.RedeliveryReadOverlap), To: long.NewerAt},
+		{From: insideTheOverlap.OlderAt.Add(-faucet.RedeliveryReadOverlap), To: insideTheOverlap.OlderAt},
+	}, normalizeGaps(other.ClosedGaps), "each gap starts where the read of its range would have stopped, the overlap below its old end")
+	requireRecordedGaps(t, s, other.ClosedGaps, "a store keeps each gap of a changed hook as it reports it")
 	require.NoError(t, s.ReleaseRedeliveryLease(ctx, other.Epoch))
 
 	again := acquire(t, s, "/orgs/acme/hooks/8", t0.Add(3*time.Minute))

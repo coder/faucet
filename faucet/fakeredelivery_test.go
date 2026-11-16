@@ -94,13 +94,12 @@ func (s *fakeRedeliveryStore) AcquireRedeliveryLease(_ context.Context, hook str
 	scan := faucet.RedeliveryScan{}
 	if s.epoch > 0 && s.hook != hook {
 		scan.HookChanged = true
-		for _, r := range s.ranges {
-			if r.gap {
-				continue
-			}
-			r.gap, r.closedAt = true, now
-			from := r.OlderAt.Add(-faucet.RedeliveryReadOverlap)
-			scan.ClosedGaps = append(scan.ClosedGaps, faucet.RedeliveryGap{From: from, To: laterOf(r.NewerAt, r.OlderAt)})
+		open := s.openRangesLocked()
+		s.ranges = slices.DeleteFunc(s.ranges, func(r *fakeRange) bool { return !r.gap })
+		for _, r := range open {
+			gap := r.UnreadGap()
+			s.recordGapLocked(gap, now)
+			scan.ClosedGaps = append(scan.ClosedGaps, gap)
 		}
 		s.top, s.clearAt = time.Time{}, time.Time{}
 	}
@@ -209,13 +208,17 @@ func (s *fakeRedeliveryStore) ApplyRedeliveryScan(_ context.Context, step faucet
 		s.ranges = slices.DeleteFunc(s.ranges, func(x *fakeRange) bool { return x == r })
 	}
 	if step.Gap != nil {
-		s.nextRangeID++
-		s.ranges = append(s.ranges, &fakeRange{
-			RedeliveryRange: faucet.RedeliveryRange{ID: s.nextRangeID, NewerAt: step.Gap.To, OlderAt: step.Gap.From},
-			gap:             true, closedAt: step.Now,
-		})
+		s.recordGapLocked(*step.Gap, step.Now)
 	}
 	return res, nil
+}
+
+func (s *fakeRedeliveryStore) recordGapLocked(gap faucet.RedeliveryGap, now time.Time) {
+	s.nextRangeID++
+	s.ranges = append(s.ranges, &fakeRange{
+		RedeliveryRange: faucet.RedeliveryRange{ID: s.nextRangeID, NewerAt: gap.To, OlderAt: gap.From},
+		gap:             true, closedAt: now,
+	})
 }
 
 func (s *fakeRedeliveryStore) openRangeLocked(id int64) *fakeRange {
@@ -321,6 +324,20 @@ func TestFakeRedeliveryStoreMatchesContract(t *testing.T) {
 	t.Parallel()
 
 	storetest.RunRedelivery(t, func(*testing.T) storetest.RedeliveryStore { return newFakeRedeliveryStore(nil) })
+}
+
+var _ storetest.GapRecords = (*fakeRedeliveryStore)(nil)
+
+func (s *fakeRedeliveryStore) RecordedRedeliveryGaps(context.Context) ([]faucet.RedeliveryGap, error) {
+	s.rmu.Lock()
+	defer s.rmu.Unlock()
+	var gaps []faucet.RedeliveryGap
+	for _, r := range s.ranges {
+		if r.gap {
+			gaps = append(gaps, faucet.RedeliveryGap{From: r.OlderAt, To: r.NewerAt})
+		}
+	}
+	return gaps, nil
 }
 
 func (s *fakeRedeliveryStore) applyMigration000008() {

@@ -81,27 +81,36 @@ func (q *Queries) ClaimRedelivery(ctx context.Context, arg ClaimRedeliveryParams
 	return i, err
 }
 
-const closeOpenRedeliveryRanges = `-- name: CloseOpenRedeliveryRanges :many
-UPDATE faucet_redelivery_ranges
-SET state = 'gap', closed_at = $1::timestamptz
-WHERE state = 'open'
+const countPendingRedeliveries = `-- name: CountPendingRedeliveries :one
+SELECT COUNT(*)::bigint AS pending FROM faucet_redeliveries WHERE state = 'pending'
+`
+
+func (q *Queries) CountPendingRedeliveries(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countPendingRedeliveries)
+	var pending int64
+	err := row.Scan(&pending)
+	return pending, err
+}
+
+const deleteOpenRedeliveryRanges = `-- name: DeleteOpenRedeliveryRanges :many
+DELETE FROM faucet_redelivery_ranges WHERE state = 'open'
 RETURNING older_at, newer_at
 `
 
-type CloseOpenRedeliveryRangesRow struct {
+type DeleteOpenRedeliveryRangesRow struct {
 	OlderAt time.Time
 	NewerAt time.Time
 }
 
-func (q *Queries) CloseOpenRedeliveryRanges(ctx context.Context, now time.Time) ([]CloseOpenRedeliveryRangesRow, error) {
-	rows, err := q.db.QueryContext(ctx, closeOpenRedeliveryRanges, now)
+func (q *Queries) DeleteOpenRedeliveryRanges(ctx context.Context) ([]DeleteOpenRedeliveryRangesRow, error) {
+	rows, err := q.db.QueryContext(ctx, deleteOpenRedeliveryRanges)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []CloseOpenRedeliveryRangesRow
+	var items []DeleteOpenRedeliveryRangesRow
 	for rows.Next() {
-		var i CloseOpenRedeliveryRangesRow
+		var i DeleteOpenRedeliveryRangesRow
 		if err := rows.Scan(&i.OlderAt, &i.NewerAt); err != nil {
 			return nil, err
 		}
@@ -114,17 +123,6 @@ func (q *Queries) CloseOpenRedeliveryRanges(ctx context.Context, now time.Time) 
 		return nil, err
 	}
 	return items, nil
-}
-
-const countPendingRedeliveries = `-- name: CountPendingRedeliveries :one
-SELECT COUNT(*)::bigint AS pending FROM faucet_redeliveries WHERE state = 'pending'
-`
-
-func (q *Queries) CountPendingRedeliveries(ctx context.Context) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countPendingRedeliveries)
-	var pending int64
-	err := row.Scan(&pending)
-	return pending, err
 }
 
 const ensureRedeliveryScan = `-- name: EnsureRedeliveryScan :exec

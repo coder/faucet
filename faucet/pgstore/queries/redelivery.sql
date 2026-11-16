@@ -6,10 +6,8 @@ ON CONFLICT (id) DO NOTHING;
 -- name: LockRedeliveryScan :one
 SELECT hook, epoch, lease_until, top_attempt_at FROM faucet_redelivery_scan FOR UPDATE;
 
--- name: CloseOpenRedeliveryRanges :many
-UPDATE faucet_redelivery_ranges
-SET state = 'gap', closed_at = sqlc.arg(now)::timestamptz
-WHERE state = 'open'
+-- name: DeleteOpenRedeliveryRanges :many
+DELETE FROM faucet_redelivery_ranges WHERE state = 'open'
 RETURNING older_at, newer_at;
 
 -- name: TakeRedeliveryLease :one
