@@ -728,7 +728,7 @@ func TestEveryRedeliveryLogLineHoldsNoCursorOrURL(t *testing.T) {
 
 func TestOnlyRedeliverTimeMakesTheTimesThatTheScanKeepsApart(t *testing.T) {
 	t.Parallel()
-	made := regexp.MustCompile(`\b(attemptTime|readBound|pageDate|clearAnchor)\{`)
+	made := regexp.MustCompile(`\b(attemptTime|readBound|pageDate|storedClear)\{`)
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)
 	require.Contains(t, files, "redelivertime.go")

@@ -27,8 +27,6 @@ func topOf(scan RedeliveryScan) attemptTime { return attemptTime{scan.Top} }
 
 func deliveredAt(d HookDelivery) attemptTime { return attemptTime{d.DeliveredAt} }
 
-func (r RedeliveryRange) olderEnd() attemptTime { return attemptTime{r.OlderAt} }
-
 func (r RedeliveryRange) newerEnd() attemptTime { return attemptTime{r.NewerAt} }
 
 func newestOn(page DeliveryPage) attemptTime {
@@ -39,6 +37,8 @@ func newestOn(page DeliveryPage) attemptTime {
 	return newest
 }
 
+func (a attemptTime) set() bool { return !a.at.IsZero() }
+
 func (a attemptTime) orLater(b attemptTime) attemptTime {
 	if b.at.After(a.at) {
 		return b
@@ -47,7 +47,12 @@ func (a attemptTime) orLater(b attemptTime) attemptTime {
 }
 
 func (a attemptTime) orEarlier(b attemptTime) attemptTime {
-	if a.at.IsZero() || (!b.at.IsZero() && b.at.Before(a.at)) {
+	switch {
+	case !a.set():
+		return b
+	case !b.set():
+		return a
+	case b.at.Before(a.at):
 		return b
 	}
 	return a
@@ -57,16 +62,18 @@ type readBound struct{ stop time.Time }
 
 func (a attemptTime) bound() readBound { return readBound{a.at.Add(-RedeliveryReadOverlap)} }
 
+func (r RedeliveryRange) bound() readBound { return readBound{r.OlderAt.Add(-RedeliveryReadOverlap)} }
+
 func (b readBound) excludes(a attemptTime) bool { return a.at.Before(b.stop) }
 
-func (b readBound) rangeEnd() attemptTime { return attemptTime{b.stop} }
+func (b readBound) loweredTo(t time.Time) readBound { return readBound{earlierOf(b.stop, t)} }
 
 type pageDate struct{ date time.Time }
 
 var errUnusableDate = xerrors.New("GitHub's Date header is unusable")
 
-func checkDate(page DeliveryPage, top attemptTime) (pageDate, error) {
-	known := top.orLater(newestOn(page))
+func checkDate(page DeliveryPage, newestKnown attemptTime) (pageDate, error) {
+	known := newestKnown.orLater(newestOn(page))
 	switch {
 	case page.At.IsZero():
 		return pageDate{}, xerrors.Errorf("%w: the page has none", errUnusableDate)
@@ -79,52 +86,60 @@ func checkDate(page DeliveryPage, top attemptTime) (pageDate, error) {
 
 func (d pageDate) gapEnd(covered attemptTime) time.Time {
 	end := d.date.Add(redeliveryDateResolution - GitHubDeliveryRetention + RedeliveryDateSlack)
-	if !covered.at.IsZero() && covered.at.Before(end) {
+	if covered.set() && covered.at.Before(end) {
 		end = covered.at
 	}
 	return end
 }
 
-func (d pageDate) expiredBelow(anchor clearAnchor) (time.Time, bool) {
-	if !anchor.set() {
+type storedClear struct{ clearAt time.Time }
+
+func clearOf(scan RedeliveryScan) storedClear { return storedClear{scan.Clear} }
+
+func (c storedClear) set() bool { return !c.clearAt.IsZero() }
+
+func expiredByBoth(d pageDate, c storedClear) (time.Time, bool) {
+	if !c.set() {
 		return time.Time{}, false
 	}
-	return earlierOf(d.date, anchor.headDate).Add(-GitHubDeliveryRetention), true
+	return earlierOf(d.date, c.clearAt).Add(-GitHubDeliveryRetention), true
 }
 
-type clearAnchor struct{ headDate time.Time }
-
-func clearOf(scan RedeliveryScan) clearAnchor { return clearAnchor{scan.Clear} }
-
-func (c clearAnchor) set() bool { return !c.headDate.IsZero() }
-
-func (c clearAnchor) unseenFrom() time.Time {
-	return c.headDate.Add(-RedeliveryDateMargin - RedeliveryReadOverlap)
+func (c storedClear) unseenFrom() time.Time {
+	return c.clearAt.Add(-RedeliveryDateMargin - RedeliveryReadOverlap)
 }
 
-func (c clearAnchor) headGapStart(top attemptTime) time.Time {
-	var start time.Time
-	if !top.at.IsZero() {
-		start = top.bound().stop
+func (c storedClear) headGapStart(top attemptTime) (time.Time, bool) {
+	switch {
+	case top.set() && c.set():
+		return laterOf(top.bound().stop, c.unseenFrom()), true
+	case top.set():
+		return top.bound().stop, true
+	case c.set():
+		return c.unseenFrom(), true
 	}
-	if c.set() && c.unseenFrom().After(start) {
-		start = c.unseenFrom()
-	}
-	return start
+	return time.Time{}, false
 }
 
-func (c clearAnchor) firstRunBound(newest attemptTime) readBound {
-	stop := newest.at.Add(-RedeliveryStartLookback)
+func (c storedClear) firstRunBound(newest attemptTime) readBound {
+	bound := readBound{newest.at.Add(-RedeliveryStartLookback)}
 	if c.set() {
-		stop = earlierOf(stop, c.headDate.Add(-RedeliveryDateMargin))
+		bound = bound.loweredTo(c.clearAt.Add(-RedeliveryDateMargin))
 	}
-	return readBound{stop}
+	return bound
 }
 
-func (c clearAnchor) firstRunGapStart(newest attemptTime) time.Time {
+func (c storedClear) firstRunGapStart(newest attemptTime) time.Time {
 	start := newest.at.Add(-GitHubDeliveryRetention)
 	if c.set() {
 		start = earlierOf(start, c.unseenFrom())
 	}
 	return start
+}
+
+func (c storedClear) firstRunGapEnd(bound readBound, expiredEnd time.Time) time.Time {
+	if !c.set() {
+		return bound.stop
+	}
+	return laterOf(bound.stop, expiredEnd)
 }

@@ -348,7 +348,7 @@ func (r *redeliveryRun) step(p pageRead) ScanStep {
 }
 
 func gapBetween(from, to time.Time) *RedeliveryGap {
-	if from.IsZero() || !from.Before(to) {
+	if !from.Before(to) {
 		return nil
 	}
 	return &RedeliveryGap{From: from, To: to}
@@ -390,7 +390,7 @@ func (r *redeliveryRun) countGap(ctx context.Context, gap RedeliveryGap, cause s
 // scan reads the head of the list and then the open ranges, newest first. It
 // returns whether the head read worked.
 func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, error) {
-	top, anchor := topOf(scan), clearOf(scan)
+	top, clearAt := topOf(scan), clearOf(scan)
 	page, err := r.fetch(ctx, "")
 	if err != nil {
 		return false, err
@@ -401,28 +401,30 @@ func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, er
 	}
 	newest := newestOn(page)
 
-	first := top.at.IsZero()
-	bound, olderAt := top.bound(), top
+	first := !top.set()
+	bound, olderAt := top.bound(), top.at
 	if first {
-		bound = anchor.firstRunBound(newest)
-		olderAt = bound.rangeEnd()
+		bound = clearAt.firstRunBound(newest)
+		olderAt = bound.stop
 	}
 	head := r.classify(page, bound)
 	step := r.step(head)
 	step.Top, step.Clear = newest.at, date.date
 	cause := gapExpiredUnread
 	switch {
-	case first && !newest.at.IsZero():
+	case first && newest.set():
 		to := bound.stop
-		if anchor.set() && head.endOfList() {
-			to = laterOf(to, date.gapEnd(head.oldest))
+		if head.endOfList() {
+			to = clearAt.firstRunGapEnd(bound, date.gapEnd(head.oldest))
 		}
-		step.Gap, cause = gapBetween(anchor.firstRunGapStart(newest), to), gapBeforeTracking
+		step.Gap, cause = gapBetween(clearAt.firstRunGapStart(newest), to), gapBeforeTracking
 	case head.endOfList():
-		step.Gap = gapBetween(anchor.headGapStart(top), date.gapEnd(head.oldest))
+		if from, ok := clearAt.headGapStart(top); ok {
+			step.Gap = gapBetween(from, date.gapEnd(head.oldest))
+		}
 	}
 	if !head.finished() {
-		step.Open = &RedeliveryRange{NewerAt: head.oldest.at, OlderAt: olderAt.at, Cursor: head.next}
+		step.Open = &RedeliveryRange{NewerAt: head.oldest.at, OlderAt: olderAt, Cursor: head.next}
 	}
 	res, err := r.apply(ctx, step, cause)
 	if err != nil {
@@ -435,15 +437,15 @@ func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, er
 		r.res.Ranges++
 		ranges = append([]RedeliveryRange{opened}, ranges...)
 	}
-	live, err := r.closeExpired(ctx, ranges, date, anchor)
+	live, err := r.closeExpired(ctx, ranges, date, clearAt)
 	if err != nil {
 		return true, err
 	}
 	return true, r.readRanges(ctx, live, top.orLater(newest))
 }
 
-func (r *redeliveryRun) closeExpired(ctx context.Context, ranges []RedeliveryRange, date pageDate, anchor clearAnchor) ([]RedeliveryRange, error) {
-	floor, ok := date.expiredBelow(anchor)
+func (r *redeliveryRun) closeExpired(ctx context.Context, ranges []RedeliveryRange, date pageDate, clearAt storedClear) ([]RedeliveryRange, error) {
+	floor, ok := expiredByBoth(date, clearAt)
 	if !ok {
 		return ranges, nil
 	}
@@ -453,7 +455,7 @@ func (r *redeliveryRun) closeExpired(ctx context.Context, ranges []RedeliveryRan
 			live = append(live, rg)
 			continue
 		}
-		gap := RedeliveryGap{From: rg.olderEnd().bound().stop, To: laterOf(rg.NewerAt, rg.OlderAt)}
+		gap := RedeliveryGap{From: rg.bound().stop, To: laterOf(rg.NewerAt, rg.OlderAt)}
 		if _, err := r.apply(ctx, ScanStep{Epoch: r.epoch, Now: r.svc.clock.Now(), CloseID: rg.ID, Gap: &gap}, gapExpiredUnread); err != nil {
 			return nil, err
 		}
@@ -462,9 +464,9 @@ func (r *redeliveryRun) closeExpired(ctx context.Context, ranges []RedeliveryRan
 	return live, nil
 }
 
-func (r *redeliveryRun) readRanges(ctx context.Context, ranges []RedeliveryRange, top attemptTime) error {
+func (r *redeliveryRun) readRanges(ctx context.Context, ranges []RedeliveryRange, newestKnown attemptTime) error {
 	for _, rg := range ranges {
-		if err := r.readRange(ctx, rg, top); err != nil {
+		if err := r.readRange(ctx, rg, newestKnown); err != nil {
 			return err
 		}
 	}
@@ -473,8 +475,8 @@ func (r *redeliveryRun) readRanges(ctx context.Context, ranges []RedeliveryRange
 
 // GitHub deletes attempts in the order of their times, so a page that reaches
 // the bound ends the range without a gap.
-func (r *redeliveryRun) readRange(ctx context.Context, rg RedeliveryRange, top attemptTime) error {
-	bound := rg.olderEnd().bound()
+func (r *redeliveryRun) readRange(ctx context.Context, rg RedeliveryRange, newestKnown attemptTime) error {
+	bound := rg.bound()
 	for r.res.Pages < r.state.maxPages && ctx.Err() == nil && !r.budget.pastScan() {
 		page, err := r.fetch(ctx, rg.Cursor)
 		if errors.Is(err, errScanBudget) {
@@ -490,7 +492,7 @@ func (r *redeliveryRun) readRange(ctx context.Context, rg RedeliveryRange, top a
 		case p.reachedBound:
 			step.CloseID = rg.ID
 		case p.endOfList():
-			date, err := checkDate(page, top)
+			date, err := checkDate(page, newestKnown)
 			if err != nil {
 				return xerrors.Errorf("range page: %w", err)
 			}
