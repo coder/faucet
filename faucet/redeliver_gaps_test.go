@@ -20,6 +20,10 @@ type gapWindow struct{ from, to time.Time }
 
 func (w gapWindow) holds(at time.Time) bool { return !at.Before(w.from) && !at.After(w.to) }
 
+func (w gapWindow) String() string {
+	return w.from.Format(time.DateTime) + " to " + w.to.Format(time.DateTime)
+}
+
 // loggedGaps are the time ranges of the gaps that the runs logged.
 func (e *redeliveryEnv) loggedGaps() []gapWindow {
 	var gaps []gapWindow
@@ -50,7 +54,7 @@ func requireNoSilentLoss(t *testing.T, env *redeliveryEnv, failures []ghAttempt)
 		for _, w := range gaps {
 			covered = covered || w.holds(f.at)
 		}
-		require.True(t, covered, "%s failed at %s and has no final state: no run tracked it and no gap covers it", f.guid, f.at.Format(time.TimeOnly))
+		require.True(t, covered, "%s failed at %s and has no final state: no run tracked it and no gap covers it, gaps %v", f.guid, f.at.Format(time.DateTime), gaps)
 	}
 }
 
@@ -279,5 +283,49 @@ func TestALateAttemptIsReadWhileARangeStandsAtThePosition(t *testing.T) {
 				require.Empty(t, lost, "L is listed late inside the overlap, so a run must still read it when this many attempts are new")
 			})
 		}
+	}
+}
+
+func TestALateFailureEndsInAGapWhenTheCronIsDownLongerThanGitHubKeepsIt(t *testing.T) {
+	t.Parallel()
+	env := newRedeliveryEnv(t)
+	env.clock.WithLogger(quartz.NoOpLogger)
+	a := env.gh.record("A", env.gh.now().Add(-time.Second), http200)
+	env.run()
+	l := env.gh.record("L", a.at.Add(-3*time.Second), 503)
+
+	env.advance(80 * time.Hour)
+	env.run()
+
+	requireNoSilentLoss(t, env, []ghAttempt{l})
+}
+
+func TestALateFailureEndsInAGapWhenGitHubDeletesItBeforeARunReadsTheRangeAboveIt(t *testing.T) {
+	t.Parallel()
+
+	for name, listStart := range map[string]time.Duration{
+		"the range expires unread":                 8 * time.Hour,
+		"the range is read to the end of the list": time.Minute,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t, func(o *envOptions) { o.maxPages = 1 })
+			env.clock.WithLogger(quartz.NoOpLogger)
+			t0 := env.gh.now()
+			a := env.gh.record("A", t0.Add(-time.Second), http200)
+			env.run()
+			l := env.gh.record("L", a.at.Add(-3*time.Second), 503)
+			for i := range 150 {
+				env.gh.record(fmt.Sprintf("b-%03d", i), t0.Add(cronEvery-time.Duration(i+1)*2*time.Second), http200)
+			}
+			env.advance(cronEvery)
+			require.Equal(t, 1, env.run().Ranges, "the burst leaves a range down to A")
+
+			env.advance(t0.Add(listStart + faucet.GitHubDeliveryRetention).Sub(env.gh.now()))
+			env.useMaxPages(faucet.DefaultMaxPagesPerRun)
+			env.run()
+
+			requireNoSilentLoss(t, env, []ghAttempt{l})
+		})
 	}
 }
