@@ -77,9 +77,9 @@ type RedeliveryScan struct {
 	// Epoch fences the run's writes. A later lease has a higher epoch.
 	Epoch int64
 	// Top is the time of the newest attempt that an earlier run read, or zero
-	// when no run has read one. It is the only stored time that a read bound
-	// comes from, so it is always an attempt time: a run that reads an empty
-	// list leaves it as it is.
+	// when no run has read one. The next head read stops below it, so it is
+	// always an attempt time: a run that reads an empty list leaves it as it
+	// is.
 	Top time.Time
 	// Clear is the Date header that GitHub sent with the first page of the
 	// last run whose head read worked, or zero before one. It says when a run

@@ -201,17 +201,19 @@ type RedeliverResult struct {
 // GitHub's retention before it is read becomes a gap, together with the
 // RedeliveryReadOverlap below that end, where a late attempt is listed.
 //
-// The scan reads no clock of faucet's, because that clock and GitHub's
-// differ. Where a read stops comes from the time of an attempt, which GitHub's
-// clock had passed when it listed the attempt. A first run is the exception:
-// after an empty list or the migration it also reads back to the Date of
-// that time, less RedeliveryDateMargin, and its gap covers what lies below.
-// Where GitHub's retention has ended comes from the Date header of the page
-// that saw the end of the list, and a gap ends RedeliveryDateSlack above it.
-// After a silence, a gap starts at the Date of the run before, less
-// RedeliveryDateMargin. A Date that is missing, or further behind an attempt
-// than the slack, fails its read: on the first page the run fails, and on a
-// later page the range stays open until it expires.
+// The scan takes no read bound and no gap from faucet's clock, because that
+// clock and GitHub's differ. Faucet's clock is only the time of record that
+// each step gives the store (ScanStep.Now). Where a read stops comes from the
+// time of an attempt, which GitHub's clock had passed when it listed the
+// attempt. A Date can only lower that bound: the first run after an empty list
+// or the migration also reads back to the Date of that time, less
+// RedeliveryDateMargin, and its gap covers what lies below. Where GitHub's
+// retention has ended comes from the Date header of the page that saw the end
+// of the list, and a gap ends RedeliveryDateSlack above it. After a silence, a
+// gap starts at the Date of the run before, less RedeliveryDateMargin. A Date
+// that is missing, or further behind an attempt than the slack, fails its
+// read: on the first page the run fails, and on a later page the range stays
+// open until it expires.
 //
 // A delivery is asked for at most MaxAsksPerDelivery times, on the schedule
 // that AskOffsets gives, and at most MaxAsksPerRun times in a run, the delivery
