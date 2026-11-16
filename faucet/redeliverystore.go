@@ -84,7 +84,8 @@ type RedeliveryScan struct {
 	// Clear is the Date header that GitHub sent with the first page of the
 	// last run whose head read worked, or zero before one. It says when a run
 	// last saw the top of the list. A run takes gap starts from it, and the
-	// bound of a first run, and never another read bound.
+	// bound of a first run, and never another read bound. A store keeps it
+	// with the Top: a run fails on a Top without a Clear.
 	Clear time.Time
 	// Ranges are the open ranges, newest first.
 	Ranges []RedeliveryRange

@@ -23,8 +23,6 @@ const (
 
 type attemptTime struct{ at time.Time }
 
-func topOf(scan RedeliveryScan) attemptTime { return attemptTime{scan.Top} }
-
 func deliveredAt(d HookDelivery) attemptTime { return attemptTime{d.DeliveredAt} }
 
 func (r RedeliveryRange) newerEnd() attemptTime { return attemptTime{r.NewerAt} }
@@ -94,7 +92,15 @@ func (d pageDate) gapEnd(covered attemptTime) time.Time {
 
 type storedClear struct{ clearAt time.Time }
 
-func clearOf(scan RedeliveryScan) storedClear { return storedClear{scan.Clear} }
+var errTopWithoutClear = xerrors.New("the store returned a top without a clear: a RedeliveryStore must keep Clear, and must move a top that it stored before into Clear")
+
+func topAndClearOf(scan RedeliveryScan) (attemptTime, storedClear, error) {
+	top, clearAt := attemptTime{scan.Top}, storedClear{scan.Clear}
+	if top.set() && !clearAt.set() {
+		return attemptTime{}, storedClear{}, errTopWithoutClear
+	}
+	return top, clearAt, nil
+}
 
 func (c storedClear) set() bool { return !c.clearAt.IsZero() }
 
@@ -111,14 +117,12 @@ func (c storedClear) unseenFrom() time.Time {
 
 func (c storedClear) headGapStart(top attemptTime) (time.Time, bool) {
 	switch {
-	case top.set() && c.set():
-		return laterOf(top.bound().stop, c.unseenFrom()), true
-	case top.set():
-		return top.bound().stop, true
-	case c.set():
+	case !c.set():
+		return time.Time{}, false
+	case !top.set():
 		return c.unseenFrom(), true
 	}
-	return time.Time{}, false
+	return laterOf(top.bound().stop, c.unseenFrom()), true
 }
 
 func (c storedClear) firstRunBound(newest attemptTime) readBound {

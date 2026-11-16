@@ -329,10 +329,14 @@ func (s *fakeRedeliveryStore) applyMigration000008() {
 	s.clearAt, s.top = s.top, time.Time{}
 }
 
-func (s *fakeRedeliveryStore) seedMigratedTop(oldTop time.Time) {
+func (s *fakeRedeliveryStore) seedTopWithoutClear(top time.Time) {
 	s.rmu.Lock()
-	s.top = oldTop
-	s.rmu.Unlock()
+	defer s.rmu.Unlock()
+	s.top = top
+}
+
+func (s *fakeRedeliveryStore) seedMigratedTop(oldTop time.Time) {
+	s.seedTopWithoutClear(oldTop)
 	s.applyMigration000008()
 }
 

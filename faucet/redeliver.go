@@ -213,7 +213,9 @@ type RedeliverResult struct {
 // gap starts at the Date of the run before, less RedeliveryDateMargin. A Date
 // that is missing, or further behind an attempt than the slack, fails its
 // read: on the first page the run fails, and on a later page the range stays
-// open until it expires.
+// open until it expires. A top that the store returns without a clear fails
+// the run before it reads: the store did not keep the clear, or it holds a top
+// from before there was one, which can be a Date.
 //
 // A delivery is asked for at most MaxAsksPerDelivery times, on the schedule
 // that AskOffsets gives, and at most MaxAsksPerRun times in a run, the delivery
@@ -392,7 +394,10 @@ func (r *redeliveryRun) countGap(ctx context.Context, gap RedeliveryGap, cause s
 // scan reads the head of the list and then the open ranges, newest first. It
 // returns whether the head read worked.
 func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, error) {
-	top, clearAt := topOf(scan), clearOf(scan)
+	top, clearAt, err := topAndClearOf(scan)
+	if err != nil {
+		return false, err
+	}
 	page, err := r.fetch(ctx, "")
 	if err != nil {
 		return false, err

@@ -643,6 +643,26 @@ func TestAfterTheMigrationATopThatWasADateAheadDropsNoFailure(t *testing.T) {
 	}
 }
 
+func TestATopThatTheStoreReturnsWithoutAClearFailsTheRunUntilItMovesToTheClear(t *testing.T) {
+	t.Parallel()
+	env := newRedeliveryEnv(t)
+	env.clock.WithLogger(quartz.NoOpLogger)
+	t0 := env.gh.now()
+	env.store.seedTopWithoutClear(t0.Add(-time.Hour))
+	f := env.gh.record("F", t0.Add(-time.Minute), 503)
+
+	res, err := env.svc.Redeliver(context.Background())
+
+	require.ErrorContains(t, err, "a top without a clear")
+	require.Zero(t, res.Pages, "the run reads nothing below a top that may be a Date")
+	require.Zero(t, res.Asked)
+	require.False(t, env.tracked(f.guid))
+
+	env.store.applyMigration000008()
+	require.Equal(t, 1, env.run().Tracked, "the migration moves the top to the clear, and the next run is a first run")
+	require.True(t, env.tracked(f.guid))
+}
+
 func TestALateWriteBelowTheTopIsInsideTheGapWhileTheDateLeadsByLessThanTheMarginAndTheOverlap(t *testing.T) {
 	t.Parallel()
 
