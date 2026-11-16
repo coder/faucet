@@ -119,7 +119,64 @@ func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {
 	require.EqualValues(t, 400, hostVersion)
 	var faucetVersion int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM `+pq.QuoteIdentifier(pgstore.MigrationsTable)).Scan(&faucetVersion))
-	require.EqualValues(t, 7, faucetVersion)
+	require.EqualValues(t, 8, faucetVersion)
+}
+
+// A build before the clear migration kept its position in top_at alone, and
+// after an empty list that position was GitHub's Date. The migration cannot
+// tell the two apart, so it makes the next run a first run that knows when
+// tracking began. The down migration gives such a build its position back.
+func TestTheClearMigrationMovesTheOldTopToTheClearAndBack(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	ctx := context.Background()
+	const hook = "/orgs/acme/hooks/7"
+	migrate := func(direction string) {
+		t.Helper()
+		statements, err := os.ReadFile("migrations/000008_redelivery_clear." + direction + ".sql")
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, string(statements))
+		require.NoError(t, err)
+	}
+	storedTop := func() (top sql.NullTime) {
+		t.Helper()
+		require.NoError(t, db.QueryRowContext(ctx, `SELECT top_at FROM faucet_redelivery_scan`).Scan(&top))
+		return top
+	}
+	now := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	oldTop := now.Add(-10 * time.Minute)
+
+	lease, ok, err := store.AcquireRedeliveryLease(ctx, hook, now, time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok)
+	_, err = store.ApplyRedeliveryScan(ctx, faucet.ScanStep{
+		Epoch: lease.Epoch, Now: now, Top: oldTop,
+		Open: &faucet.RedeliveryRange{NewerAt: now.Add(-time.Hour), OlderAt: now.Add(-48 * time.Hour), Cursor: "cursor-1"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.ReleaseRedeliveryLease(ctx, lease.Epoch))
+	migrate("down")
+	require.True(t, oldTop.Equal(storedTop().Time), "this is the row of a build before the migration")
+
+	migrate("up")
+	migrated, ok, err := store.AcquireRedeliveryLease(ctx, hook, now.Add(time.Minute), time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.True(t, migrated.Top.IsZero(), "the next run is a first run: %s", migrated.Top)
+	require.True(t, oldTop.Equal(migrated.Clear), "that knows when the old build last saw the top of the list: %s", migrated.Clear)
+	require.False(t, migrated.HookChanged)
+	require.Len(t, migrated.Ranges, 1, "an open range stays open")
+
+	migrate("down")
+	require.True(t, oldTop.Equal(storedTop().Time), "a scan that read nothing since the migration gets its position back")
+
+	migrate("up")
+	attempt, date := now.Add(time.Hour), now.Add(time.Hour+time.Second)
+	_, err = store.ApplyRedeliveryScan(ctx, faucet.ScanStep{Epoch: migrated.Epoch, Now: now.Add(time.Hour), Top: attempt, Clear: date})
+	require.NoError(t, err)
+	migrate("down")
+	require.True(t, attempt.Equal(storedTop().Time), "a scan that has read an attempt keeps that attempt's time, not the Date")
 }
 
 func testDatabaseURL(t *testing.T) string {

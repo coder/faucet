@@ -51,6 +51,7 @@ type fakeRedeliveryStore struct {
 	epoch       int64
 	leaseUntil  time.Time
 	top         time.Time
+	clearAt     time.Time
 	ranges      []*fakeRange
 	nextRangeID int64
 }
@@ -98,14 +99,15 @@ func (s *fakeRedeliveryStore) AcquireRedeliveryLease(_ context.Context, hook str
 				continue
 			}
 			r.gap, r.closedAt = true, now
-			scan.ClosedGaps = append(scan.ClosedGaps, faucet.RedeliveryGap{From: r.OlderAt, To: laterOf(r.NewerAt, r.OlderAt)})
+			from := r.OlderAt.Add(-faucet.RedeliveryReadOverlap)
+			scan.ClosedGaps = append(scan.ClosedGaps, faucet.RedeliveryGap{From: from, To: laterOf(r.NewerAt, r.OlderAt)})
 		}
-		s.top = time.Time{}
+		s.top, s.clearAt = time.Time{}, time.Time{}
 	}
 	s.hook = hook
 	s.epoch++
 	s.leaseUntil = now.Add(ttl)
-	scan.Epoch, scan.Top = s.epoch, s.top
+	scan.Epoch, scan.Top, scan.Clear = s.epoch, s.top, s.clearAt
 	scan.Ranges = s.openRangesLocked()
 	return scan, true, nil
 }
@@ -188,6 +190,9 @@ func (s *fakeRedeliveryStore) ApplyRedeliveryScan(_ context.Context, step faucet
 	}
 	if step.Top.After(s.top) {
 		s.top = step.Top
+	}
+	if !step.Clear.IsZero() {
+		s.clearAt = step.Clear
 	}
 	switch {
 	case step.Open != nil:

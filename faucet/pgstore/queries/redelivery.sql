@@ -17,8 +17,9 @@ UPDATE faucet_redelivery_scan
 SET hook = sqlc.arg(hook),
     epoch = epoch + 1,
     lease_until = sqlc.arg(lease_until)::timestamptz,
-    top_at = CASE WHEN sqlc.arg(reset_top)::boolean THEN NULL ELSE top_at END
-RETURNING epoch, top_at;
+    top_at = CASE WHEN sqlc.arg(hook_changed)::boolean THEN NULL ELSE top_at END,
+    clear_at = CASE WHEN sqlc.arg(hook_changed)::boolean THEN NULL ELSE clear_at END
+RETURNING epoch, top_at, clear_at;
 
 -- name: ListOpenRedeliveryRanges :many
 SELECT id, newer_at, older_at, cursor
@@ -63,6 +64,9 @@ RETURNING guid;
 
 -- name: RaiseRedeliveryTop :exec
 UPDATE faucet_redelivery_scan SET top_at = GREATEST(top_at, sqlc.arg(top)::timestamptz);
+
+-- name: SetRedeliveryClear :exec
+UPDATE faucet_redelivery_scan SET clear_at = sqlc.arg(clear_at)::timestamptz;
 
 -- name: InsertRedeliveryRange :one
 INSERT INTO faucet_redelivery_ranges (newer_at, older_at, cursor)

@@ -323,6 +323,15 @@ func (q *Queries) ReleaseRedeliveryLease(ctx context.Context, epoch int64) error
 	return err
 }
 
+const setRedeliveryClear = `-- name: SetRedeliveryClear :exec
+UPDATE faucet_redelivery_scan SET clear_at = $1::timestamptz
+`
+
+func (q *Queries) SetRedeliveryClear(ctx context.Context, clearAt time.Time) error {
+	_, err := q.db.ExecContext(ctx, setRedeliveryClear, clearAt)
+	return err
+}
+
 const settleExpiredRedeliveries = `-- name: SettleExpiredRedeliveries :many
 UPDATE faucet_redeliveries
 SET state = 'gave_up', reason = 'expired', settled_at = $1::timestamptz
@@ -441,25 +450,27 @@ UPDATE faucet_redelivery_scan
 SET hook = $1,
     epoch = epoch + 1,
     lease_until = $2::timestamptz,
-    top_at = CASE WHEN $3::boolean THEN NULL ELSE top_at END
-RETURNING epoch, top_at
+    top_at = CASE WHEN $3::boolean THEN NULL ELSE top_at END,
+    clear_at = CASE WHEN $3::boolean THEN NULL ELSE clear_at END
+RETURNING epoch, top_at, clear_at
 `
 
 type TakeRedeliveryLeaseParams struct {
-	Hook       string
-	LeaseUntil time.Time
-	ResetTop   bool
+	Hook        string
+	LeaseUntil  time.Time
+	HookChanged bool
 }
 
 type TakeRedeliveryLeaseRow struct {
-	Epoch int64
-	TopAt sql.NullTime
+	Epoch   int64
+	TopAt   sql.NullTime
+	ClearAt sql.NullTime
 }
 
 func (q *Queries) TakeRedeliveryLease(ctx context.Context, arg TakeRedeliveryLeaseParams) (TakeRedeliveryLeaseRow, error) {
-	row := q.db.QueryRowContext(ctx, takeRedeliveryLease, arg.Hook, arg.LeaseUntil, arg.ResetTop)
+	row := q.db.QueryRowContext(ctx, takeRedeliveryLease, arg.Hook, arg.LeaseUntil, arg.HookChanged)
 	var i TakeRedeliveryLeaseRow
-	err := row.Scan(&i.Epoch, &i.TopAt)
+	err := row.Scan(&i.Epoch, &i.TopAt, &i.ClearAt)
 	return i, err
 }
 

@@ -80,10 +80,17 @@ type RedeliveryScan struct {
 	// GitHub's clock when it read an empty list, or zero before the first
 	// run. It is always a time that GitHub gave, never one of faucet's clock.
 	Top time.Time
+	// Clear is the Date header that GitHub sent with the first page of the
+	// last run whose head read worked, or zero before one. It says when a run
+	// last saw the top of the list. A run takes gap starts from it, and the
+	// bound of a first run, and never another read bound.
+	Clear time.Time
 	// Ranges are the open ranges, newest first.
 	Ranges []RedeliveryRange
 	// HookChanged is true when the lease found state of another webhook. The
-	// store has reset Top and closed that state's open ranges as ClosedGaps.
+	// store has reset Top and Clear and closed that state's open ranges as
+	// ClosedGaps. Each gap starts RedeliveryReadOverlap below the range's
+	// OlderAt, where the read of the range would have stopped.
 	HookChanged bool
 	ClosedGaps  []RedeliveryGap
 }
@@ -109,6 +116,10 @@ type ScanStep struct {
 	// Top raises the stored top to this time. A zero time, or one that is not
 	// later than the stored top, leaves it.
 	Top time.Time
+	// Clear replaces the stored clear with this time, also when it is earlier:
+	// the store keeps the latest Date, not the highest, so that one Date that
+	// ran ahead does not stay. A zero time leaves the stored clear.
+	Clear time.Time
 	// At most one of Open, Advance and CloseID is set. CloseID deletes an open
 	// range that has been read to its end.
 	Open    *RedeliveryRange
@@ -246,7 +257,8 @@ type RedeliveryStore interface {
 	// AcquireRedeliveryLease starts a run for hook. It returns false when
 	// another run holds a lease that has not run out at now. A lease lasts ttl.
 	// When the stored scan belongs to another hook, the call resets it: Top
-	// goes back to zero and the open ranges close as gaps (see HookChanged).
+	// and Clear go back to zero and the open ranges close as gaps (see
+	// HookChanged).
 	AcquireRedeliveryLease(ctx context.Context, hook string, now time.Time, ttl time.Duration) (RedeliveryScan, bool, error)
 	// ReleaseRedeliveryLease ends the lease of epoch. It does nothing when
 	// another lease has replaced it.

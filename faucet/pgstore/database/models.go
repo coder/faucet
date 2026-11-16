@@ -65,6 +65,7 @@ type FaucetRedeliveryScan struct {
 	Epoch      int64
 	LeaseUntil sql.NullTime
 	TopAt      sql.NullTime
+	ClearAt    sql.NullTime
 }
 
 type FaucetSubscription struct {

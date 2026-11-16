@@ -47,16 +47,20 @@ func (s *Store) AcquireRedeliveryLease(ctx context.Context, hook string, now tim
 			return faucet.RedeliveryScan{}, false, xerrors.Errorf("close ranges of the old hook: %w", err)
 		}
 		for _, r := range closed {
-			scan.ClosedGaps = append(scan.ClosedGaps, faucet.RedeliveryGap{From: r.OlderAt.UTC(), To: laterOf(r.NewerAt, r.OlderAt).UTC()})
+			from := r.OlderAt.Add(-faucet.RedeliveryReadOverlap)
+			scan.ClosedGaps = append(scan.ClosedGaps, faucet.RedeliveryGap{From: from.UTC(), To: laterOf(r.NewerAt, r.OlderAt).UTC()})
 		}
 	}
-	taken, err := q.TakeRedeliveryLease(ctx, database.TakeRedeliveryLeaseParams{Hook: hook, LeaseUntil: now.Add(ttl), ResetTop: scan.HookChanged})
+	taken, err := q.TakeRedeliveryLease(ctx, database.TakeRedeliveryLeaseParams{Hook: hook, LeaseUntil: now.Add(ttl), HookChanged: scan.HookChanged})
 	if err != nil {
 		return faucet.RedeliveryScan{}, false, xerrors.Errorf("take lease: %w", err)
 	}
 	scan.Epoch = taken.Epoch
 	if taken.TopAt.Valid {
 		scan.Top = taken.TopAt.Time.UTC()
+	}
+	if taken.ClearAt.Valid {
+		scan.Clear = taken.ClearAt.Time.UTC()
 	}
 	ranges, err := q.ListOpenRedeliveryRanges(ctx)
 	if err != nil {
@@ -135,6 +139,11 @@ func (s *Store) ApplyRedeliveryScan(ctx context.Context, step faucet.ScanStep) (
 	if !step.Top.IsZero() {
 		if err := q.RaiseRedeliveryTop(ctx, step.Top); err != nil {
 			return faucet.ScanResult{}, xerrors.Errorf("raise top: %w", err)
+		}
+	}
+	if !step.Clear.IsZero() {
+		if err := q.SetRedeliveryClear(ctx, step.Clear); err != nil {
+			return faucet.ScanResult{}, xerrors.Errorf("set clear: %w", err)
 		}
 	}
 	if res.OpenedID, err = moveRange(ctx, q, step); err != nil {
