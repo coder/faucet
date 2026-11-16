@@ -43,7 +43,6 @@ func (r RedeliveryRange) olderEnd() attemptTime { return attemptTime{r.OlderAt} 
 
 func (r RedeliveryRange) newerEnd() attemptTime { return attemptTime{r.NewerAt} }
 
-// newestOn is the newest attempt on a page.
 func newestOn(page DeliveryPage) attemptTime {
 	var newest attemptTime
 	for _, d := range page.Deliveries {
@@ -59,8 +58,8 @@ func (a attemptTime) orLater(b attemptTime) attemptTime {
 	return a
 }
 
-// orEarlier is the earlier of two attempts, where no attempt is later than
-// any.
+// orEarlier is the earlier of two attempts. No attempt counts as later than
+// any attempt.
 func (a attemptTime) orEarlier(b attemptTime) attemptTime {
 	if a.at.IsZero() || (!b.at.IsZero() && b.at.Before(a.at)) {
 		return b
@@ -164,8 +163,8 @@ func (c clearAnchor) headGapStart(top attemptTime) time.Time {
 // firstRunBound is the bound of a run that has no top: the lookback below the
 // newest attempt, and lower when an earlier run or the migration left a
 // clear, because tracking began then. It is the one bound that a Date takes
-// part in. That is safe only because the gap of the first run covers
-// everything below it.
+// part in. That is safe because the clear can only lower the bound, and the
+// gap of the first run covers everything below it.
 func (c clearAnchor) firstRunBound(newest attemptTime) readBound {
 	stop := newest.at.Add(-RedeliveryStartLookback)
 	if c.set() {

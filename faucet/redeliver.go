@@ -325,7 +325,6 @@ func (r *redeliveryRun) fetch(ctx context.Context, cursor string) (DeliveryPage,
 	return page, nil
 }
 
-// classify sorts the attempts of a page that are at or after bound.
 func (r *redeliveryRun) classify(page DeliveryPage, bound readBound) pageRead {
 	p := pageRead{next: page.Next}
 	for _, d := range page.Deliveries {
