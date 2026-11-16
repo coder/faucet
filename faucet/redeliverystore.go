@@ -72,18 +72,36 @@ type RedeliveryGap struct {
 	From, To time.Time
 }
 
+// UnreadGap is the gap that the range leaves when it closes before a run has
+// read it to its end. It starts where a read of the range would have stopped,
+// RedeliveryReadOverlap below OlderAt, and ends at NewerAt, the oldest attempt
+// read above it, or at its start when NewerAt is lower.
+func (r RedeliveryRange) UnreadGap() RedeliveryGap {
+	from := r.bound().stop
+	return RedeliveryGap{From: from, To: laterOf(r.NewerAt, from)}
+}
+
 // RedeliveryScan is what a run knows when it takes the lease.
 type RedeliveryScan struct {
 	// Epoch fences the run's writes. A later lease has a higher epoch.
 	Epoch int64
-	// Top is the time of the newest attempt that an earlier run read, or
-	// GitHub's clock when it read an empty list, or zero before the first
-	// run. It is always a time that GitHub gave, never one of faucet's clock.
+	// Top is the time of the newest attempt that an earlier run read, or zero
+	// when no run has read one. The next head read stops below it, so it is
+	// always an attempt time: a run that reads an empty list leaves it as it
+	// is.
 	Top time.Time
+	// Clear is the Date header that GitHub sent with the first page of the
+	// last run whose head read worked, or zero before one. It says when a run
+	// last saw the top of the list. A run takes gap starts from it, and the
+	// bound of a first run, and never another read bound. A store keeps it
+	// with the Top: a run fails on a Top without a Clear.
+	Clear time.Time
 	// Ranges are the open ranges, newest first.
 	Ranges []RedeliveryRange
 	// HookChanged is true when the lease found state of another webhook. The
-	// store has reset Top and closed that state's open ranges as ClosedGaps.
+	// store has reset Top and Clear and closed that state's open ranges as
+	// ClosedGaps: each one is the range's UnreadGap, and the store keeps it
+	// as it reports it.
 	HookChanged bool
 	ClosedGaps  []RedeliveryGap
 }
@@ -109,6 +127,10 @@ type ScanStep struct {
 	// Top raises the stored top to this time. A zero time, or one that is not
 	// later than the stored top, leaves it.
 	Top time.Time
+	// Clear replaces the stored clear with this time, also when it is earlier:
+	// the store keeps the latest Date, not the highest, so that one Date that
+	// ran ahead does not stay. A zero time leaves the stored clear.
+	Clear time.Time
 	// At most one of Open, Advance and CloseID is set. CloseID deletes an open
 	// range that has been read to its end.
 	Open    *RedeliveryRange
@@ -246,7 +268,8 @@ type RedeliveryStore interface {
 	// AcquireRedeliveryLease starts a run for hook. It returns false when
 	// another run holds a lease that has not run out at now. A lease lasts ttl.
 	// When the stored scan belongs to another hook, the call resets it: Top
-	// goes back to zero and the open ranges close as gaps (see HookChanged).
+	// and Clear go back to zero and the open ranges close as gaps (see
+	// HookChanged).
 	AcquireRedeliveryLease(ctx context.Context, hook string, now time.Time, ttl time.Duration) (RedeliveryScan, bool, error)
 	// ReleaseRedeliveryLease ends the lease of epoch. It does nothing when
 	// another lease has replaced it.

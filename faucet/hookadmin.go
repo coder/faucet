@@ -47,11 +47,10 @@ type DeliveryPage struct {
 	// Next is the cursor of the next, older page. It is empty on the last page.
 	Next string
 	// At is GitHub's own clock when it answered, which GitHub's Date header
-	// carries. It is zero when GitHub sent none. When the whole list is empty,
-	// Redeliver moves its position to At and never to the time of faucet's
-	// clock: the clocks differ, and a position ahead of GitHub's would make
-	// the next failed attempt look as if an earlier run had read it. A
-	// HookAdmin that leaves At zero leaves the position where it was.
+	// carries. It is zero when GitHub sent none. Redeliver needs At on the
+	// first page and on a page that ends the list. There it fails the read
+	// when At is zero, or more than RedeliveryDateSlack before the newest
+	// attempt that it knows.
 	At time.Time
 }
 
@@ -66,7 +65,9 @@ type HookAdmin interface {
 	// ListDeliveries returns one page of delivery attempts, newest first.
 	// cursor is empty for the first page and a DeliveryPage.Next after that.
 	// GitHub's cursor is opaque. A cursor that an earlier call returned must
-	// still continue the same list after newer attempts have arrived.
+	// still continue the same list after newer attempts have arrived. The
+	// call must not fail a page for its Date: it sets DeliveryPage.At, or
+	// leaves it zero, and Redeliver decides whether it needs it.
 	ListDeliveries(ctx context.Context, cursor string) (DeliveryPage, error)
 	// Redeliver asks GitHub to send the attempt with this ID again.
 	Redeliver(ctx context.Context, attemptID int64) error
@@ -190,7 +191,6 @@ func (a GitHubHookAdmin) ListDeliveries(ctx context.Context, cursor string) (Del
 	if err != nil {
 		return DeliveryPage{}, err
 	}
-	// A missing or malformed Date leaves At zero.
 	at, _ := http.ParseTime(resp.Header.Get("Date"))
 	page := DeliveryPage{Deliveries: make([]HookDelivery, len(raw)), Next: next, At: at}
 	for i, d := range raw {

@@ -81,27 +81,36 @@ func (q *Queries) ClaimRedelivery(ctx context.Context, arg ClaimRedeliveryParams
 	return i, err
 }
 
-const closeOpenRedeliveryRanges = `-- name: CloseOpenRedeliveryRanges :many
-UPDATE faucet_redelivery_ranges
-SET state = 'gap', closed_at = $1::timestamptz
-WHERE state = 'open'
+const countPendingRedeliveries = `-- name: CountPendingRedeliveries :one
+SELECT COUNT(*)::bigint AS pending FROM faucet_redeliveries WHERE state = 'pending'
+`
+
+func (q *Queries) CountPendingRedeliveries(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countPendingRedeliveries)
+	var pending int64
+	err := row.Scan(&pending)
+	return pending, err
+}
+
+const deleteOpenRedeliveryRanges = `-- name: DeleteOpenRedeliveryRanges :many
+DELETE FROM faucet_redelivery_ranges WHERE state = 'open'
 RETURNING older_at, newer_at
 `
 
-type CloseOpenRedeliveryRangesRow struct {
+type DeleteOpenRedeliveryRangesRow struct {
 	OlderAt time.Time
 	NewerAt time.Time
 }
 
-func (q *Queries) CloseOpenRedeliveryRanges(ctx context.Context, now time.Time) ([]CloseOpenRedeliveryRangesRow, error) {
-	rows, err := q.db.QueryContext(ctx, closeOpenRedeliveryRanges, now)
+func (q *Queries) DeleteOpenRedeliveryRanges(ctx context.Context) ([]DeleteOpenRedeliveryRangesRow, error) {
+	rows, err := q.db.QueryContext(ctx, deleteOpenRedeliveryRanges)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []CloseOpenRedeliveryRangesRow
+	var items []DeleteOpenRedeliveryRangesRow
 	for rows.Next() {
-		var i CloseOpenRedeliveryRangesRow
+		var i DeleteOpenRedeliveryRangesRow
 		if err := rows.Scan(&i.OlderAt, &i.NewerAt); err != nil {
 			return nil, err
 		}
@@ -114,17 +123,6 @@ func (q *Queries) CloseOpenRedeliveryRanges(ctx context.Context, now time.Time) 
 		return nil, err
 	}
 	return items, nil
-}
-
-const countPendingRedeliveries = `-- name: CountPendingRedeliveries :one
-SELECT COUNT(*)::bigint AS pending FROM faucet_redeliveries WHERE state = 'pending'
-`
-
-func (q *Queries) CountPendingRedeliveries(ctx context.Context) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countPendingRedeliveries)
-	var pending int64
-	err := row.Scan(&pending)
-	return pending, err
 }
 
 const ensureRedeliveryScan = `-- name: EnsureRedeliveryScan :exec
@@ -228,14 +226,14 @@ func (q *Queries) ListOpenRedeliveryRanges(ctx context.Context) ([]ListOpenRedel
 }
 
 const lockRedeliveryScan = `-- name: LockRedeliveryScan :one
-SELECT hook, epoch, lease_until, top_at FROM faucet_redelivery_scan FOR UPDATE
+SELECT hook, epoch, lease_until, top_attempt_at FROM faucet_redelivery_scan FOR UPDATE
 `
 
 type LockRedeliveryScanRow struct {
-	Hook       string
-	Epoch      int64
-	LeaseUntil sql.NullTime
-	TopAt      sql.NullTime
+	Hook         string
+	Epoch        int64
+	LeaseUntil   sql.NullTime
+	TopAttemptAt sql.NullTime
 }
 
 func (q *Queries) LockRedeliveryScan(ctx context.Context) (LockRedeliveryScanRow, error) {
@@ -245,7 +243,7 @@ func (q *Queries) LockRedeliveryScan(ctx context.Context) (LockRedeliveryScanRow
 		&i.Hook,
 		&i.Epoch,
 		&i.LeaseUntil,
-		&i.TopAt,
+		&i.TopAttemptAt,
 	)
 	return i, err
 }
@@ -271,7 +269,7 @@ func (q *Queries) PurgeRedeliveries(ctx context.Context, before time.Time) (int6
 }
 
 const raiseRedeliveryTop = `-- name: RaiseRedeliveryTop :exec
-UPDATE faucet_redelivery_scan SET top_at = GREATEST(top_at, $1::timestamptz)
+UPDATE faucet_redelivery_scan SET top_attempt_at = GREATEST(top_attempt_at, $1::timestamptz)
 `
 
 func (q *Queries) RaiseRedeliveryTop(ctx context.Context, top time.Time) error {
@@ -320,6 +318,15 @@ UPDATE faucet_redelivery_scan SET lease_until = NULL WHERE epoch = $1
 
 func (q *Queries) ReleaseRedeliveryLease(ctx context.Context, epoch int64) error {
 	_, err := q.db.ExecContext(ctx, releaseRedeliveryLease, epoch)
+	return err
+}
+
+const setRedeliveryClear = `-- name: SetRedeliveryClear :exec
+UPDATE faucet_redelivery_scan SET clear_at = $1::timestamptz
+`
+
+func (q *Queries) SetRedeliveryClear(ctx context.Context, clearAt time.Time) error {
+	_, err := q.db.ExecContext(ctx, setRedeliveryClear, clearAt)
 	return err
 }
 
@@ -441,25 +448,27 @@ UPDATE faucet_redelivery_scan
 SET hook = $1,
     epoch = epoch + 1,
     lease_until = $2::timestamptz,
-    top_at = CASE WHEN $3::boolean THEN NULL ELSE top_at END
-RETURNING epoch, top_at
+    top_attempt_at = CASE WHEN $3::boolean THEN NULL ELSE top_attempt_at END,
+    clear_at = CASE WHEN $3::boolean THEN NULL ELSE clear_at END
+RETURNING epoch, top_attempt_at, clear_at
 `
 
 type TakeRedeliveryLeaseParams struct {
-	Hook       string
-	LeaseUntil time.Time
-	ResetTop   bool
+	Hook        string
+	LeaseUntil  time.Time
+	HookChanged bool
 }
 
 type TakeRedeliveryLeaseRow struct {
-	Epoch int64
-	TopAt sql.NullTime
+	Epoch        int64
+	TopAttemptAt sql.NullTime
+	ClearAt      sql.NullTime
 }
 
 func (q *Queries) TakeRedeliveryLease(ctx context.Context, arg TakeRedeliveryLeaseParams) (TakeRedeliveryLeaseRow, error) {
-	row := q.db.QueryRowContext(ctx, takeRedeliveryLease, arg.Hook, arg.LeaseUntil, arg.ResetTop)
+	row := q.db.QueryRowContext(ctx, takeRedeliveryLease, arg.Hook, arg.LeaseUntil, arg.HookChanged)
 	var i TakeRedeliveryLeaseRow
-	err := row.Scan(&i.Epoch, &i.TopAt)
+	err := row.Scan(&i.Epoch, &i.TopAttemptAt, &i.ClearAt)
 	return i, err
 }
 

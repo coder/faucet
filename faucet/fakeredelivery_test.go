@@ -51,6 +51,7 @@ type fakeRedeliveryStore struct {
 	epoch       int64
 	leaseUntil  time.Time
 	top         time.Time
+	clearAt     time.Time
 	ranges      []*fakeRange
 	nextRangeID int64
 }
@@ -93,19 +94,19 @@ func (s *fakeRedeliveryStore) AcquireRedeliveryLease(_ context.Context, hook str
 	scan := faucet.RedeliveryScan{}
 	if s.epoch > 0 && s.hook != hook {
 		scan.HookChanged = true
-		for _, r := range s.ranges {
-			if r.gap {
-				continue
-			}
-			r.gap, r.closedAt = true, now
-			scan.ClosedGaps = append(scan.ClosedGaps, faucet.RedeliveryGap{From: r.OlderAt, To: laterOf(r.NewerAt, r.OlderAt)})
+		open := s.openRangesLocked()
+		s.ranges = slices.DeleteFunc(s.ranges, func(r *fakeRange) bool { return !r.gap })
+		for _, r := range open {
+			gap := r.UnreadGap()
+			s.recordGapLocked(gap, now)
+			scan.ClosedGaps = append(scan.ClosedGaps, gap)
 		}
-		s.top = time.Time{}
+		s.top, s.clearAt = time.Time{}, time.Time{}
 	}
 	s.hook = hook
 	s.epoch++
 	s.leaseUntil = now.Add(ttl)
-	scan.Epoch, scan.Top = s.epoch, s.top
+	scan.Epoch, scan.Top, scan.Clear = s.epoch, s.top, s.clearAt
 	scan.Ranges = s.openRangesLocked()
 	return scan, true, nil
 }
@@ -189,6 +190,9 @@ func (s *fakeRedeliveryStore) ApplyRedeliveryScan(_ context.Context, step faucet
 	if step.Top.After(s.top) {
 		s.top = step.Top
 	}
+	if !step.Clear.IsZero() {
+		s.clearAt = step.Clear
+	}
 	switch {
 	case step.Open != nil:
 		s.nextRangeID++
@@ -204,13 +208,17 @@ func (s *fakeRedeliveryStore) ApplyRedeliveryScan(_ context.Context, step faucet
 		s.ranges = slices.DeleteFunc(s.ranges, func(x *fakeRange) bool { return x == r })
 	}
 	if step.Gap != nil {
-		s.nextRangeID++
-		s.ranges = append(s.ranges, &fakeRange{
-			RedeliveryRange: faucet.RedeliveryRange{ID: s.nextRangeID, NewerAt: step.Gap.To, OlderAt: step.Gap.From},
-			gap:             true, closedAt: step.Now,
-		})
+		s.recordGapLocked(*step.Gap, step.Now)
 	}
 	return res, nil
+}
+
+func (s *fakeRedeliveryStore) recordGapLocked(gap faucet.RedeliveryGap, now time.Time) {
+	s.nextRangeID++
+	s.ranges = append(s.ranges, &fakeRange{
+		RedeliveryRange: faucet.RedeliveryRange{ID: s.nextRangeID, NewerAt: gap.To, OlderAt: gap.From},
+		gap:             true, closedAt: now,
+	})
 }
 
 func (s *fakeRedeliveryStore) openRangeLocked(id int64) *fakeRange {
@@ -316,6 +324,37 @@ func TestFakeRedeliveryStoreMatchesContract(t *testing.T) {
 	t.Parallel()
 
 	storetest.RunRedelivery(t, func(*testing.T) storetest.RedeliveryStore { return newFakeRedeliveryStore(nil) })
+}
+
+var _ storetest.GapRecords = (*fakeRedeliveryStore)(nil)
+
+func (s *fakeRedeliveryStore) RecordedRedeliveryGaps(context.Context) ([]faucet.RedeliveryGap, error) {
+	s.rmu.Lock()
+	defer s.rmu.Unlock()
+	var gaps []faucet.RedeliveryGap
+	for _, r := range s.ranges {
+		if r.gap {
+			gaps = append(gaps, faucet.RedeliveryGap{From: r.OlderAt, To: r.NewerAt})
+		}
+	}
+	return gaps, nil
+}
+
+func (s *fakeRedeliveryStore) applyMigration000008() {
+	s.rmu.Lock()
+	defer s.rmu.Unlock()
+	s.clearAt, s.top = s.top, time.Time{}
+}
+
+func (s *fakeRedeliveryStore) seedTopWithoutClear(top time.Time) {
+	s.rmu.Lock()
+	defer s.rmu.Unlock()
+	s.top = top
+}
+
+func (s *fakeRedeliveryStore) seedMigratedTop(oldTop time.Time) {
+	s.seedTopWithoutClear(oldTop)
+	s.applyMigration000008()
 }
 
 func (s *fakeRedeliveryStore) rowCount() int {

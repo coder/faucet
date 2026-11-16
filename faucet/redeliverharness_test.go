@@ -66,6 +66,8 @@ type fakeGitHub struct {
 	// listDelay and askDelay make every list call and every redelivery request
 	// take that long, or until its context ends.
 	listDelay, askDelay time.Duration
+	date                func(call int, cursor string, at time.Time) time.Time
+	refusesStaleCursors bool
 }
 
 var _ faucet.HookAdmin = (*fakeGitHub)(nil)
@@ -180,11 +182,17 @@ func (g *fakeGitHub) ListDeliveries(ctx context.Context, cursor string) (faucet.
 		if !ok {
 			return faucet.DeliveryPage{}, fmt.Errorf("GitHub rejected the cursor")
 		}
+		if g.refusesStaleCursors && !key.at.After(g.now().Add(-faucet.GitHubDeliveryRetention)) {
+			return faucet.DeliveryPage{}, fmt.Errorf("GitHub answered the delivery list with status 422")
+		}
 		start = sort.Search(len(visible), func(i int) bool { return !olderThan(visible[i], key) })
 	}
 	start = max(start, 0)
 	end := max(start-g.pageSize, 0)
 	page := faucet.DeliveryPage{At: g.now()}
+	if g.date != nil {
+		page.At = g.date(g.listCalls, cursor, g.now())
+	}
 	for i := start - 1; i >= end; i-- {
 		a := visible[i]
 		page.Deliveries = append(page.Deliveries, faucet.HookDelivery{
@@ -201,10 +209,16 @@ func (g *fakeGitHub) ListDeliveries(ctx context.Context, cursor string) (faucet.
 	return page, nil
 }
 
+func (g *fakeGitHub) lists(guid string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.ContainsFunc(g.visibleLocked(), func(a ghAttempt) bool { return a.guid == guid })
+}
+
 func (g *fakeGitHub) attemptLocked(id int64) (ghAttempt, bool) {
-	for _, a := range g.attempts {
-		if a.id == id {
-			return a, true
+	for i := range g.attempts {
+		if g.attempts[i].id == id {
+			return g.attempts[i], true
 		}
 	}
 	return ghAttempt{}, false
@@ -255,6 +269,84 @@ func (g *fakeGitHub) totalAsks() int {
 		n += len(times)
 	}
 	return n
+}
+
+func TestFakeGitHubSendsTheDateTakesTheTimeAndRefusesTheCursorThatATestSets(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("the Date is GitHub's clock unless the test gives one", func(t *testing.T) {
+		t.Parallel()
+		env := newRedeliveryEnv(t, func(o *envOptions) { o.pageSize = 1 })
+		env.gh.skew = time.Hour
+		for i := range 2 {
+			env.gh.record(fmt.Sprintf("g-%d", i), env.gh.now().Add(-time.Duration(i+1)*time.Minute), http200)
+		}
+
+		first, err := env.gh.ListDeliveries(ctx, "")
+		require.NoError(t, err)
+		require.True(t, env.now().Add(time.Hour).Equal(first.At), "the Date is on GitHub's clock, not faucet's")
+
+		env.gh.date = func(call int, cursor string, at time.Time) time.Time {
+			if cursor != "" {
+				return time.Time{}
+			}
+			return at.Add(time.Duration(call) * time.Minute)
+		}
+		head, err := env.gh.ListDeliveries(ctx, "")
+		require.NoError(t, err)
+		require.True(t, env.gh.now().Add(2*time.Minute).Equal(head.At), "the second list call got the Date of call 2")
+		next, err := env.gh.ListDeliveries(ctx, head.Next)
+		require.NoError(t, err)
+		require.True(t, next.At.IsZero(), "a zero time is a response without a Date")
+
+		env.gh.date = dateOff(-time.Second)
+		behind, err := env.gh.ListDeliveries(ctx, "")
+		require.NoError(t, err)
+		require.True(t, env.gh.now().Add(-time.Second).Equal(behind.At))
+	})
+
+	t.Run("a slow page is read after GitHub's clock has moved", func(t *testing.T) {
+		t.Parallel()
+		env := newRedeliveryEnv(t)
+		leaving := env.gh.now().Add(-faucet.GitHubDeliveryRetention + time.Second)
+		env.gh.record("leaving", leaving, 503)
+		env.gh.record("staying", env.gh.now().Add(-time.Minute), http200)
+		asked := env.gh.now()
+		env.slowPages(2 * time.Second)
+
+		page, err := env.gh.ListDeliveries(ctx, "")
+		require.NoError(t, err)
+		require.Len(t, page.Deliveries, 1, "GitHub deleted the old attempt while the request was on its way")
+		require.Equal(t, "staying", page.Deliveries[0].GUID)
+		require.True(t, asked.Add(2*time.Second).Equal(page.At), "the Date is the time of the answer, not of the request")
+	})
+
+	t.Run("a cursor of a deleted attempt lists on, or is refused when the test says so", func(t *testing.T) {
+		t.Parallel()
+		env := newRedeliveryEnv(t, func(o *envOptions) { o.pageSize = 1 })
+		old := env.gh.now().Add(-faucet.GitHubDeliveryRetention + time.Minute)
+		env.gh.record("older", old, http200)
+		env.gh.record("old", old.Add(time.Second), http200)
+		env.gh.record("new", env.gh.now().Add(-time.Minute), http200)
+		head, err := env.gh.ListDeliveries(ctx, "")
+		require.NoError(t, err)
+		middle, err := env.gh.ListDeliveries(ctx, head.Next)
+		require.NoError(t, err)
+		require.Equal(t, "old", middle.Deliveries[0].GUID)
+		require.NotEmpty(t, middle.Next)
+
+		env.advance(2 * time.Minute)
+		rest, err := env.gh.ListDeliveries(ctx, middle.Next)
+		require.NoError(t, err, "by default the list goes on from where the deleted attempt was")
+		require.Empty(t, rest.Deliveries)
+
+		env.gh.refusesStaleCursors = true
+		_, err = env.gh.ListDeliveries(ctx, middle.Next)
+		require.ErrorContains(t, err, "422")
+		_, err = env.gh.ListDeliveries(ctx, head.Next)
+		require.NoError(t, err, "a cursor of an attempt that GitHub still lists is not stale")
+	})
 }
 
 // captureSink keeps the structure of every log entry.
@@ -353,6 +445,14 @@ func (e *redeliveryEnv) useMaxPages(pages int) {
 func (e *redeliveryEnv) advance(d time.Duration) {
 	e.t.Helper()
 	e.clock.Advance(d).MustWait(context.Background())
+}
+
+func (e *redeliveryEnv) slowPages(d time.Duration) {
+	e.gh.listGate = func() { e.advance(d) }
+}
+
+func dateOff(d time.Duration) func(int, string, time.Time) time.Time {
+	return func(_ int, _ string, at time.Time) time.Time { return at.Add(d) }
 }
 
 func (e *redeliveryEnv) run() faucet.RedeliverResult {

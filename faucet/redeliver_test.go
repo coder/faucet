@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -467,8 +471,8 @@ func TestTheFirstRunReadsTheLastDayAndRecordsTheRestOfRetentionAsOneGap(t *testi
 	t.Parallel()
 	env := newRedeliveryEnv(t)
 	start := env.now()
-	env.gh.record("inside", start.Add(-20*time.Hour), 503)
-	env.gh.record("before", start.Add(-30*time.Hour), 503)
+	newest := env.gh.record("inside", start.Add(-20*time.Hour), 503)
+	env.gh.record("before", newest.at.Add(-faucet.RedeliveryStartLookback-time.Hour), 503)
 
 	first := env.run()
 	require.Equal(t, 1, first.Tracked, "only the delivery inside the lookback is tracked")
@@ -480,12 +484,12 @@ func TestTheFirstRunReadsTheLastDayAndRecordsTheRestOfRetentionAsOneGap(t *testi
 	require.Equal(t, "before tracking began", lines[0]["cause"])
 	require.Equal(t, "gap", lines[0]["reason"])
 	from, to := logTime(t, lines[0]["from"]), logTime(t, lines[0]["to"])
-	require.True(t, start.Add(-faucet.GitHubDeliveryRetention).Equal(from))
-	require.True(t, start.Add(-faucet.RedeliveryStartLookback).Equal(to))
+	require.True(t, newest.at.Add(-faucet.GitHubDeliveryRetention).Equal(from), "the gap is counted from the newest attempt, which is a time of GitHub's: %s", from)
+	require.True(t, newest.at.Add(-faucet.RedeliveryStartLookback).Equal(to), "and so is the lookback: %s", to)
 	require.False(t, env.stored("before"), "the delivery before the lookback is inside the recorded gap, so no ask goes out for it")
 }
 
-func TestAnEmptyListIsCoveredSoTheFirstGapIsNotRecordedAgain(t *testing.T) {
+func TestAnEmptyListRecordsNoGapAndTheFirstAttemptRecordsTheFirstGapOnce(t *testing.T) {
 	t.Parallel()
 	env := newRedeliveryEnv(t)
 
@@ -494,11 +498,18 @@ func TestAnEmptyListIsCoveredSoTheFirstGapIsNotRecordedAgain(t *testing.T) {
 		gaps += env.run().Gaps
 		env.advance(cronEvery)
 	}
+	require.Zero(t, gaps, "nothing is listed, so nothing lies before tracking and nothing expired")
 
-	require.Equal(t, 1, gaps)
+	env.gh.record("first", env.gh.now().Add(-time.Minute), http200)
+	for range 5 {
+		gaps += env.run().Gaps
+		env.advance(cronEvery)
+	}
+	require.Equal(t, 1, gaps, "the first attempt starts the tracking, and the time before it is one gap")
+	require.Equal(t, "before tracking began", env.logged("redelivery gap")[0]["cause"])
 }
 
-func TestAnEmptyListMovesThePositionToGitHubsClockNotFaucets(t *testing.T) {
+func TestAnEmptyListLeavesThePositionSoTheNextFailureIsReadWhateverTheClocks(t *testing.T) {
 	t.Parallel()
 
 	// skew is GitHub's clock minus faucet's. A position on faucet's clock puts
@@ -510,7 +521,7 @@ func TestAnEmptyListMovesThePositionToGitHubsClockNotFaucets(t *testing.T) {
 			env := newRedeliveryEnv(t)
 			env.gh.skew = skew
 
-			require.Equal(t, 1, env.run().Gaps, "an empty list is the first run")
+			require.Zero(t, env.run().Gaps, "an empty list records nothing")
 			env.advance(time.Minute)
 			env.gh.record("g1", env.gh.now(), 503)
 
@@ -597,8 +608,9 @@ func TestRedeliverRecordsOnlyTheExpiredPartOfARangeAsAGap(t *testing.T) {
 	require.Len(t, lines, 2)
 	require.Equal(t, "expired unread", lines[1]["cause"])
 	from, to := logTime(t, lines[1]["from"]), logTime(t, lines[1]["to"])
-	require.WithinDuration(t, start.Add(-faucet.RedeliveryReadOverlap), from, time.Minute, "the gap starts where the read of the range stops, the overlap below the position of the earlier run")
-	require.WithinDuration(t, env.now().Add(-faucet.GitHubDeliveryRetention), to, time.Minute, "and ends where GitHub's list begins")
+	require.WithinDuration(t, start.Add(-faucet.RedeliveryDateMargin-faucet.RedeliveryReadOverlap), from, time.Minute,
+		"the gap starts where the read of the range stops. The first run found an empty list at start, so the range ends at that Date less the margin, and its read stops the overlap below")
+	require.WithinDuration(t, env.now().Add(-faucet.GitHubDeliveryRetention), to, 2*time.Minute, "and ends at the oldest attempt that GitHub still lists, one attempt above where its list begins")
 }
 
 func TestTwoRunsAtOnceSendOneRequestPerDelivery(t *testing.T) {
@@ -712,4 +724,20 @@ func TestEveryRedeliveryLogLineHoldsNoCursorOrURL(t *testing.T) {
 	text := env.logs.text()
 	require.NotContains(t, text, "v1_", "a cursor is GitHub's opaque value and stays out of logs")
 	require.NotContains(t, text, "http")
+}
+
+func TestOnlyRedeliverTimeMakesTheTimesThatTheScanKeepsApart(t *testing.T) {
+	t.Parallel()
+	made := regexp.MustCompile(`\b(attemptTime|readBound|pageDate|storedClear)\{`)
+	files, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	require.Contains(t, files, "redelivertime.go")
+	for _, file := range files {
+		if file == "redelivertime.go" || strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		source, err := os.ReadFile(file)
+		require.NoError(t, err)
+		require.Empty(t, made.FindAllString(string(source), -1), "%s makes a time of one role from a bare time", file)
+	}
 }

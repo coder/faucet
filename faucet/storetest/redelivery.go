@@ -18,6 +18,16 @@ type RedeliveryStore interface {
 	faucet.RedeliveryStore
 }
 
+// GapRecords is what a RedeliveryStore can also implement so that
+// RunRedelivery checks the gaps that it keeps as final states: each one as a
+// step gave it, or as the store reported it when the hook changed. Without it
+// the suite checks only the gaps that the store reports.
+type GapRecords interface {
+	// RecordedRedeliveryGaps returns every gap that the store keeps, in any
+	// order.
+	RecordedRedeliveryGaps(ctx context.Context) ([]faucet.RedeliveryGap, error)
+}
+
 // RunRedelivery runs the redelivery contract against stores returned by
 // newStore. Every call must return an empty store that does not share state
 // with the others, because the subtests run in parallel.
@@ -36,6 +46,7 @@ func RunRedelivery(t *testing.T, newStore func(t *testing.T) RedeliveryStore) {
 		{"ClaimPicksTheDeliveryDueLongest", claimPicksTheDeliveryDueLongest},
 		{"ConcurrentClaimsNeverReturnOneAskTwice", concurrentClaimsNeverReturnOneAskTwice},
 		{"ScanPositionSurvivesBetweenRuns", scanPositionSurvivesBetweenRuns},
+		{"TheClearIsTheLatestTimeAStepSetNotTheHighest", theClearIsTheLatestTimeAStepSetNotTheHighest},
 		{"AFailedScanStepRecordsNothing", aFailedScanStepRecordsNothing},
 		{"ChangingTheHookClosesOpenRangesAsGaps", changingTheHookClosesOpenRangesAsGaps},
 		{"ClaimSkipsTheDeliveriesOfAnotherHook", claimSkipsTheDeliveriesOfAnotherHook},
@@ -115,6 +126,7 @@ func leaseIsExclusiveAndFencesAStaleHolder(t *testing.T, s RedeliveryStore) {
 
 	first := acquire(t, s, testHook, t0)
 	require.True(t, first.Top.IsZero())
+	require.True(t, first.Clear.IsZero())
 	require.Empty(t, first.Ranges)
 	require.False(t, first.HookChanged)
 
@@ -339,12 +351,52 @@ func scanPositionSurvivesBetweenRuns(t *testing.T, s RedeliveryStore) {
 	apply(t, s, faucet.ScanStep{Epoch: third.Epoch, Now: t0.Add(5 * time.Minute), CloseID: opened.OpenedID, Gap: &faucet.RedeliveryGap{From: gapFrom, To: gapTo}})
 	apply(t, s, faucet.ScanStep{Epoch: third.Epoch, Now: t0.Add(5 * time.Minute), Gap: &faucet.RedeliveryGap{From: gapFrom.Add(-time.Hour), To: gapFrom}})
 	require.NoError(t, s.ReleaseRedeliveryLease(ctx, third.Epoch))
+	requireRecordedGaps(t, s, []faucet.RedeliveryGap{{From: gapFrom, To: gapTo}, {From: gapFrom.Add(-time.Hour), To: gapFrom}}, "a store keeps each gap as its step gave it")
 
 	last := acquire(t, s, testHook, t0.Add(10*time.Minute))
 	require.Empty(t, last.Ranges, "a closed range, finished or a gap, is no longer open")
 	deleted, err := s.PurgeRedeliveries(ctx, t0.Add(6*time.Minute))
 	require.NoError(t, err)
 	require.EqualValues(t, 2, deleted, "a gap is kept as a final state until it is purged, whether or not a range held it, and a finished range leaves no row")
+}
+
+func theClearIsTheLatestTimeAStepSetNotTheHighest(t *testing.T, s RedeliveryStore) {
+	ctx := context.Background()
+	ahead, later := t0.Add(100*time.Hour), t0.Add(10*time.Minute)
+
+	lease := acquire(t, s, testHook, t0)
+	apply(t, s, faucet.ScanStep{Epoch: lease.Epoch, Now: t0, Top: t0.Add(-time.Minute), Clear: ahead})
+	require.NoError(t, s.ReleaseRedeliveryLease(ctx, lease.Epoch))
+
+	next := acquire(t, s, testHook, t0.Add(time.Minute))
+	require.True(t, ahead.Equal(next.Clear), "a step's clear is stored: %s", next.Clear)
+	require.True(t, t0.Add(-time.Minute).Equal(next.Top), "and it is not the top")
+	apply(t, s, faucet.ScanStep{Epoch: next.Epoch, Now: later, Clear: later})
+	apply(t, s, faucet.ScanStep{Epoch: next.Epoch, Now: later, Failed: []faucet.FailedAttempt{failedAt("guid-a", 1, t0)}})
+	require.NoError(t, s.ReleaseRedeliveryLease(ctx, next.Epoch))
+
+	last := acquire(t, s, testHook, later.Add(time.Minute))
+	require.True(t, later.Equal(last.Clear), "an earlier clear replaces a later one, and a step without a clear leaves it: %s", last.Clear)
+	require.True(t, t0.Add(-time.Minute).Equal(last.Top), "a clear never moves the top")
+}
+
+func requireRecordedGaps(t *testing.T, s RedeliveryStore, want []faucet.RedeliveryGap, msg string) {
+	t.Helper()
+	records, ok := s.(GapRecords)
+	if !ok {
+		return
+	}
+	got, err := records.RecordedRedeliveryGaps(context.Background())
+	require.NoError(t, err)
+	require.ElementsMatch(t, normalizeGaps(want), normalizeGaps(got), msg)
+}
+
+func normalizeGaps(gaps []faucet.RedeliveryGap) []faucet.RedeliveryGap {
+	out := make([]faucet.RedeliveryGap, len(gaps))
+	for i, g := range gaps {
+		out[i] = faucet.RedeliveryGap{From: g.From.UTC(), To: g.To.UTC()}
+	}
+	return out
 }
 
 func normalizeRanges(ranges []faucet.RedeliveryRange) []faucet.RedeliveryRange {
@@ -359,7 +411,7 @@ func aFailedScanStepRecordsNothing(t *testing.T, s RedeliveryStore) {
 	lease := acquire(t, s, testHook, t0)
 
 	_, err := s.ApplyRedeliveryScan(context.Background(), faucet.ScanStep{
-		Epoch: lease.Epoch, Now: t0, Failed: []faucet.FailedAttempt{failedAt("guid-a", 1, t0)}, Top: t0,
+		Epoch: lease.Epoch, Now: t0, Failed: []faucet.FailedAttempt{failedAt("guid-a", 1, t0)}, Top: t0, Clear: t0,
 		Advance: &faucet.RangeAdvance{ID: 9999, NewerAt: t0, Cursor: "cursor"},
 	})
 	require.Error(t, err, "a range that does not exist cannot move")
@@ -367,30 +419,42 @@ func aFailedScanStepRecordsNothing(t *testing.T, s RedeliveryStore) {
 
 	require.Zero(t, settle(t, s, t0).Pending, "the attempts of a failed step are not recorded")
 	require.NoError(t, s.ReleaseRedeliveryLease(context.Background(), lease.Epoch))
-	require.True(t, acquire(t, s, testHook, t0).Top.IsZero(), "and neither is its top")
+	next := acquire(t, s, testHook, t0)
+	require.True(t, next.Top.IsZero(), "and neither is its top")
+	require.True(t, next.Clear.IsZero(), "nor its clear")
 }
 
 func changingTheHookClosesOpenRangesAsGaps(t *testing.T, s RedeliveryStore) {
 	ctx := context.Background()
+	long := faucet.RedeliveryRange{NewerAt: t0.Add(-time.Hour), OlderAt: t0.Add(-48 * time.Hour), Cursor: "cursor-1"}
+	insideTheOverlap := faucet.RedeliveryRange{NewerAt: t0.Add(-50*time.Hour - 2*time.Minute), OlderAt: t0.Add(-50 * time.Hour), Cursor: "cursor-2"}
 	lease := acquire(t, s, testHook, t0)
-	apply(t, s, faucet.ScanStep{
-		Epoch: lease.Epoch, Now: t0, Top: t0,
-		Open: &faucet.RedeliveryRange{NewerAt: t0.Add(-time.Hour), OlderAt: t0.Add(-48 * time.Hour), Cursor: "cursor-1"},
-	})
+	apply(t, s, faucet.ScanStep{Epoch: lease.Epoch, Now: t0, Top: t0, Clear: t0.Add(time.Second), Open: &long})
+	apply(t, s, faucet.ScanStep{Epoch: lease.Epoch, Now: t0, Open: &insideTheOverlap})
 	require.NoError(t, s.ReleaseRedeliveryLease(ctx, lease.Epoch))
 
 	same := acquire(t, s, testHook, t0.Add(time.Minute))
 	require.False(t, same.HookChanged)
-	require.Len(t, same.Ranges, 1)
+	require.Len(t, same.Ranges, 2)
+	require.False(t, same.Clear.IsZero())
 	require.NoError(t, s.ReleaseRedeliveryLease(ctx, same.Epoch))
 
 	other := acquire(t, s, "/orgs/acme/hooks/8", t0.Add(2*time.Minute))
 	require.True(t, other.HookChanged)
 	require.True(t, other.Top.IsZero(), "a new hook starts from scratch")
+	require.True(t, other.Clear.IsZero(), "the clear is a time of the old hook's list, and the new hook has not been read: %s", other.Clear)
 	require.Empty(t, other.Ranges)
-	require.Len(t, other.ClosedGaps, 1)
-	require.True(t, t0.Add(-48*time.Hour).Equal(other.ClosedGaps[0].From))
-	require.True(t, t0.Add(-time.Hour).Equal(other.ClosedGaps[0].To))
+	require.ElementsMatch(t, []faucet.RedeliveryGap{
+		{From: long.OlderAt.Add(-faucet.RedeliveryReadOverlap), To: long.NewerAt},
+		{From: insideTheOverlap.OlderAt.Add(-faucet.RedeliveryReadOverlap), To: insideTheOverlap.NewerAt},
+	}, normalizeGaps(other.ClosedGaps), "each gap starts where the read of its range would have stopped, the overlap below its old end, and ends at the oldest attempt read above it")
+	requireRecordedGaps(t, s, other.ClosedGaps, "a store keeps each gap of a changed hook as it reports it")
+	require.NoError(t, s.ReleaseRedeliveryLease(ctx, other.Epoch))
+
+	again := acquire(t, s, "/orgs/acme/hooks/8", t0.Add(3*time.Minute))
+	require.False(t, again.HookChanged)
+	require.True(t, again.Clear.IsZero(), "the reset is stored")
+	require.Empty(t, again.ClosedGaps, "the closed ranges are reported once")
 }
 
 func claimSkipsTheDeliveriesOfAnotherHook(t *testing.T, s RedeliveryStore) {
