@@ -978,7 +978,6 @@ func TestAQuietHookLogsAGapOnlyAfterAnOutageThatTheDateMarginsDoNotCover(t *test
 	// After a silence a gap is [clear - margin - overlap, Date - retention +
 	// slack]. It is empty until the runs are this far apart.
 	threshold := faucet.GitHubDeliveryRetention - faucet.RedeliveryDateSlack - faucet.RedeliveryDateMargin - faucet.RedeliveryReadOverlap
-	require.Equal(t, 64*time.Hour+55*time.Minute, threshold)
 	for _, listed := range []string{"an empty hook", "a hook whose last attempt is 10 hours old"} {
 		for _, tc := range []struct {
 			apart time.Duration

@@ -60,6 +60,35 @@ func TestReadmeStatesTheRedeliveryCapacityThatTheConstantsGive(t *testing.T) {
 	require.Greater(t, keepsUpWith, 4200, "the capacity must cover the busiest hook that the simulations model")
 }
 
+// The README also states how far redelivery trusts GitHub's Date header, and
+// what follows from that for a quiet hook and for the two residual risks.
+func TestReadmeStatesTheDateWindowThatTheConstantsGive(t *testing.T) {
+	t.Parallel()
+
+	slack, margin := faucet.RedeliveryDateSlack, faucet.RedeliveryDateMargin
+	marginAndOverlap := hoursAndMinutes(margin + faucet.RedeliveryReadOverlap)
+	quietFor := hoursAndMinutes(faucet.GitHubDeliveryRetention - slack - margin - faucet.RedeliveryReadOverlap)
+
+	readme, err := os.ReadFile("../README.md")
+	require.NoError(t, err)
+	text := string(readme)
+
+	for _, want := range []string{
+		fmt.Sprintf("a slack of %d hour", int(slack/time.Hour)),
+		fmt.Sprintf("a margin of %d hour", int(margin/time.Hour)),
+		fmt.Sprintf("starts %s before the `Date` of the run before it", marginAndOverlap),
+		fmt.Sprintf("two runs are about %s apart", quietFor),
+		fmt.Sprintf("more than %s ahead of GitHub's list", marginAndOverlap),
+		fmt.Sprintf("more than %d hour behind the clock that deletes", int(slack/time.Hour)),
+	} {
+		require.Contains(t, text, want)
+	}
+}
+
+func hoursAndMinutes(d time.Duration) string {
+	return fmt.Sprintf("%d hours and %d minutes", int(d/time.Hour), int(d%time.Hour/time.Minute))
+}
+
 func thousands(n int) string {
 	return fmt.Sprintf("%d,%03d", n/1000, n%1000)
 }
