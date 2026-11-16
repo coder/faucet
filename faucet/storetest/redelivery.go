@@ -446,8 +446,8 @@ func changingTheHookClosesOpenRangesAsGaps(t *testing.T, s RedeliveryStore) {
 	require.Empty(t, other.Ranges)
 	require.ElementsMatch(t, []faucet.RedeliveryGap{
 		{From: long.OlderAt.Add(-faucet.RedeliveryReadOverlap), To: long.NewerAt},
-		{From: insideTheOverlap.OlderAt.Add(-faucet.RedeliveryReadOverlap), To: insideTheOverlap.OlderAt},
-	}, normalizeGaps(other.ClosedGaps), "each gap starts where the read of its range would have stopped, the overlap below its old end")
+		{From: insideTheOverlap.OlderAt.Add(-faucet.RedeliveryReadOverlap), To: insideTheOverlap.NewerAt},
+	}, normalizeGaps(other.ClosedGaps), "each gap starts where the read of its range would have stopped, the overlap below its old end, and ends at the oldest attempt read above it")
 	requireRecordedGaps(t, s, other.ClosedGaps, "a store keeps each gap of a changed hook as it reports it")
 	require.NoError(t, s.ReleaseRedeliveryLease(ctx, other.Epoch))
 

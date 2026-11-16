@@ -330,6 +330,34 @@ func TestALateFailureEndsInAGapWhenGitHubDeletesItBeforeARunReadsTheRangeAboveIt
 	}
 }
 
+func TestARangeThatExpiresUnreadEndsAsAGapFromTheOverlapBelowItsOldEndToTheOldestAttemptReadAboveIt(t *testing.T) {
+	t.Parallel()
+	env := newRedeliveryEnv(t, func(o *envOptions) { o.maxPages, o.pageSize = 1, 3 })
+	env.clock.WithLogger(quartz.NoOpLogger)
+	t0 := env.gh.now()
+	top := env.gh.record("A", t0, http200)
+	env.run()
+
+	unread := env.gh.record("unread", top.at.Add(-4*time.Minute), 503)
+	oldestRead := env.gh.record("read", top.at.Add(-3*time.Minute), 503)
+	env.gh.record("new", top.at.Add(time.Second), http200)
+	env.advance(cronEvery)
+	require.Equal(t, 1, env.run().Ranges, "the one page ends at an attempt inside the overlap, above a late one")
+
+	env.advance(faucet.GitHubDeliveryRetention + time.Hour)
+	require.False(t, env.gh.lists(unread.guid))
+	require.Equal(t, 1, env.run().Ranges, "the stored Date is from before the outage, so it closes nothing yet")
+	env.advance(cronEvery)
+	before := len(env.loggedGaps())
+	res := env.run()
+
+	require.Zero(t, res.Ranges)
+	require.Equal(t, 1, res.Pages, "the head read took the only page, so no read of the range closed it")
+	require.Equal(t, []gapWindow{{from: top.at.Add(-faucet.RedeliveryReadOverlap), to: oldestRead.at}}, env.loggedGaps()[before:],
+		"the gap starts where a read of the range would have stopped and ends at the oldest attempt read above it")
+	requireNoSilentLoss(t, env, []ghAttempt{unread})
+}
+
 const (
 	newestAttemptAge    = time.Minute
 	dateLagPastTheSlack = newestAttemptAge + faucet.RedeliveryDateSlack + time.Minute

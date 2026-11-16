@@ -74,10 +74,11 @@ type RedeliveryGap struct {
 
 // UnreadGap is the gap that the range leaves when it closes before a run has
 // read it to its end. It starts where a read of the range would have stopped,
-// RedeliveryReadOverlap below OlderAt, and ends at NewerAt, or at OlderAt when
-// NewerAt lies inside the overlap.
+// RedeliveryReadOverlap below OlderAt, and ends at NewerAt, the oldest attempt
+// read above it, or at its start when NewerAt is lower.
 func (r RedeliveryRange) UnreadGap() RedeliveryGap {
-	return RedeliveryGap{From: r.bound().stop, To: laterOf(r.NewerAt, r.OlderAt)}
+	from := r.bound().stop
+	return RedeliveryGap{From: from, To: laterOf(r.NewerAt, from)}
 }
 
 // RedeliveryScan is what a run knows when it takes the lease.
