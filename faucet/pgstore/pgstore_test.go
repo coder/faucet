@@ -42,7 +42,6 @@ func TestRedeliveryStore(t *testing.T) {
 	})
 }
 
-// gapRecordingStore lets storetest read the gaps that pgstore keeps.
 type gapRecordingStore struct {
 	*pgstore.Store
 	db *sql.DB

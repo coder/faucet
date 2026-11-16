@@ -16,8 +16,6 @@ import (
 	"github.com/coder/quartz"
 )
 
-// The statements on the scan row of the build before migration
-// 000008_redelivery_clear, as sqlc generated them at e8382ff.
 const (
 	mainEnsureRedeliveryScan = `INSERT INTO faucet_redelivery_scan (id, hook, epoch)
 VALUES (true, $1, 0)
@@ -33,9 +31,6 @@ RETURNING epoch, top_at`
 	mainReleaseRedeliveryLease = `UPDATE faucet_redelivery_scan SET lease_until = NULL WHERE epoch = $1`
 )
 
-// mainBuild takes the lease and applies a step that carries only a top, in
-// the order and the transactions of the build before the migration. On an
-// empty list that build's top is the Date.
 type mainBuild struct {
 	db   *sql.DB
 	hook string
