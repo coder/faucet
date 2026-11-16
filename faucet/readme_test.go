@@ -78,6 +78,8 @@ func TestReadmeStatesTheDateWindowThatTheConstantsGive(t *testing.T) {
 		fmt.Sprintf("two runs are about %s apart", quietFor),
 		fmt.Sprintf("more than %s ahead of GitHub's list", marginAndOverlap),
 		fmt.Sprintf("more than %d hour behind the clock that deletes", int(slack/time.Hour)),
+		fmt.Sprintf("when it runs the margin of %d hours ahead, up to about %d hours", int(margin/time.Hour), int((margin+slack)/time.Hour)),
+		fmt.Sprintf("the last run that read the list was about %s before it", quietFor),
 	} {
 		require.Contains(t, text, want)
 	}

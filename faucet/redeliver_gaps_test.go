@@ -1063,6 +1063,27 @@ func TestAQuietHookLogsNoGapInTenDays(t *testing.T) {
 	}
 }
 
+func TestAGapReachesPastGitHubsRetentionByTheSlackASecondAndAsFarAsTheDateRunsAhead(t *testing.T) {
+	t.Parallel()
+
+	for _, lead := range []time.Duration{0, faucet.RedeliveryDateMargin} {
+		t.Run(lead.String(), func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t)
+			env.clock.WithLogger(quartz.NoOpLogger)
+			env.gh.record("A", env.gh.now().Add(-time.Minute), http200)
+			env.run()
+			env.advance(80 * time.Hour)
+			env.gh.date = dateOff(lead)
+			before := len(env.loggedGaps())
+			require.Equal(t, 1, env.run().Gaps)
+
+			retentionEnd := env.gh.now().Add(-faucet.GitHubDeliveryRetention)
+			require.Equal(t, faucet.RedeliveryDateSlack+time.Second+lead, env.loggedGaps()[before].to.Sub(retentionEnd))
+		})
+	}
+}
+
 func TestAQuietHookLogsAGapOnlyAfterAnOutageThatTheDateMarginsDoNotCover(t *testing.T) {
 	t.Parallel()
 
