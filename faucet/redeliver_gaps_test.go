@@ -863,6 +863,32 @@ func TestAWholeSecondDateAsFarBehindAsTheSlackStillEndsTheGapAboveWhatGitHubDele
 	}
 }
 
+func TestAWholeSecondDateAsFarBehindAsTheSlackPassesTheCheckAgainstAnAttemptLaterInItsSecond(t *testing.T) {
+	t.Parallel()
+
+	for _, lag := range []time.Duration{faucet.RedeliveryDateSlack - 500*time.Millisecond, faucet.RedeliveryDateSlack} {
+		t.Run(lag.String(), func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t)
+			env.clock.WithLogger(quartz.NoOpLogger)
+			wholeSecondDate := func(at time.Time) time.Time { return at.Add(-lag).Truncate(time.Second) }
+			env.gh.date = func(_ int, _ string, at time.Time) time.Time { return wholeSecondDate(at) }
+			intoItsSecond := 200 * time.Millisecond
+			env.advance(env.gh.now().Truncate(time.Second).Add(time.Second + intoItsSecond).Sub(env.gh.now()))
+
+			for i := range 6 {
+				f := env.gh.record(fmt.Sprintf("f-%d", i), env.gh.now().Add(-50*time.Millisecond), 503)
+				require.True(t, wholeSecondDate(env.gh.now()).Before(f.at.Add(-faucet.RedeliveryDateSlack)),
+					"the Date drops more of its second than the slack leaves above it, or the scenario proves nothing")
+				res, err := env.svc.Redeliver(context.Background())
+				require.NoError(t, err, "the clock that the Date shows is no more than the slack behind %s", f.guid)
+				require.Equal(t, 1, res.Tracked)
+				env.advance(cronEvery)
+			}
+		})
+	}
+}
+
 func TestAFirstPageWithoutAUsableDateFailsTheRunWhichAsksForNothing(t *testing.T) {
 	t.Parallel()
 

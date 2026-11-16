@@ -75,9 +75,9 @@ func checkDate(page DeliveryPage, newestKnown attemptTime) (pageDate, error) {
 	switch {
 	case page.At.IsZero():
 		return pageDate{}, xerrors.Errorf("%w: the page has none", errUnusableDate)
-	case page.At.Before(known.at.Add(-RedeliveryDateSlack)):
+	case page.At.Add(redeliveryDateResolution).Before(known.at.Add(-RedeliveryDateSlack)):
 		return pageDate{}, xerrors.Errorf("%w: it is %s before the newest attempt, and at most %s is allowed",
-			errUnusableDate, known.at.Sub(page.At), RedeliveryDateSlack)
+			errUnusableDate, known.at.Sub(page.At), RedeliveryDateSlack+redeliveryDateResolution)
 	}
 	return pageDate{page.At}, nil
 }
