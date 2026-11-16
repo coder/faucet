@@ -88,11 +88,17 @@ type cronHooks struct {
 
 func (*cronHooks) Hook() string { return "/orgs/octo-org/hooks/9" }
 
+// ListDeliveries lists one attempt of an event that faucet does not store,
+// with GitHub's Date, so that a run finds a list to start its tracking at.
 func (h *cronHooks) ListDeliveries(context.Context, string) (faucet.DeliveryPage, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.lists++
-	return faucet.DeliveryPage{}, nil
+	listed := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	return faucet.DeliveryPage{
+		Deliveries: []faucet.HookDelivery{{ID: 1, GUID: "g-listed", DeliveredAt: listed, StatusCode: http.StatusOK, Event: "ping"}},
+		At:         listed.Add(time.Second),
+	}, nil
 }
 
 func (*cronHooks) Redeliver(context.Context, int64) error { return nil }
@@ -373,7 +379,7 @@ func TestCronRedeliverReportsEveryOutcome(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, status, body)
 	require.JSONEq(t, `{
-		"busy": false, "pages": 1, "attempts": 0, "tracked": 0, "asked": 0,
+		"busy": false, "pages": 1, "attempts": 1, "tracked": 0, "asked": 0,
 		"recovered": 2, "gave_up": {"limit": 1, "expired": 1}, "gaps": 1, "pending": 3, "ranges": 0
 	}`, body, "recoveries, both kinds of give-up and the gap before tracking are counted in the reply")
 	require.Equal(t, 1, strings.Count(srv.logs.String(), "g-3"), "a give-up is logged once")
@@ -433,7 +439,7 @@ func TestCronRedeliverFailureStillReportsTheOutcomesItRecorded(t *testing.T) {
 
 	require.Equal(t, http.StatusInternalServerError, status, "a failed run is still a failure")
 	require.JSONEq(t, `{
-		"busy": false, "pages": 1, "attempts": 0, "tracked": 0, "asked": 0,
+		"busy": false, "pages": 1, "attempts": 1, "tracked": 0, "asked": 0,
 		"recovered": 2, "gave_up": {"limit": 1, "expired": 0}, "gaps": 1, "pending": 3, "ranges": 0,
 		"error": "redelivery failed"
 	}`, body, "the outcomes that the run recorded before it failed are in the reply, and the log has them too")

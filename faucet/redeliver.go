@@ -26,9 +26,10 @@ const (
 	// late appears below one that ended earlier. The delivery timeout is 10
 	// seconds, so this is a wide margin.
 	RedeliveryReadOverlap = 5 * time.Minute
-	// RedeliveryStartLookback is how far back the first run of a webhook reads.
-	// The part of GitHub's retention before it is recorded as one gap, so the
-	// first run does not spend its pages on a history that nobody waits for.
+	// RedeliveryStartLookback is how far below the newest attempt the first
+	// run of a webhook reads. The part of GitHub's retention before it is
+	// recorded as one gap, so the first run does not spend its pages on a
+	// history that nobody waits for.
 	RedeliveryStartLookback = 24 * time.Hour
 
 	redeliveryLeaseTTL  = 2 * time.Minute
@@ -200,12 +201,25 @@ type RedeliverResult struct {
 // GitHub's retention before it is read becomes a gap, together with the
 // RedeliveryReadOverlap below that end, where a late attempt is listed.
 //
+// The scan reads no clock of faucet's, because that clock and GitHub's
+// differ. Where a read stops comes from the time of an attempt, which GitHub's
+// clock had passed when it listed the attempt. A first run is the exception:
+// after an empty list or the migration it also reads back to the Date of
+// that time, less RedeliveryDateMargin, and its gap covers what lies below.
+// Where GitHub's retention has ended comes from the Date header of the page
+// that saw the end of the list, and a gap ends RedeliveryDateSlack above it.
+// After a silence, a gap starts at the Date of the run before, less
+// RedeliveryDateMargin. A Date that is missing, or further behind an attempt
+// than the slack, fails its read: on the first page the run fails, and on a
+// later page the range stays open until it expires.
+//
 // A delivery is asked for at most MaxAsksPerDelivery times, on the schedule
 // that AskOffsets gives, and at most MaxAsksPerRun times in a run, the delivery
 // that has waited longest first. The ask count is raised before the request,
 // so a crash costs an ask and two runs never send the same one. A request that
 // fails stops the asks of the run, and a failed first page stops them as well,
-// because both mean that the token, the hook or GitHub is not working.
+// because both mean that the token, the hook or GitHub is not working. A
+// first page without a usable Date is a failed first page.
 //
 // When ctx has a deadline, the run keeps to it by construction. It reads the
 // list for half of the time that is left at its start, and a page that is not
@@ -282,11 +296,8 @@ type pageRead struct {
 	failed    []FailedAttempt
 	succeeded []string
 	attempts  int
-	// newest is the time of the newest attempt on the page. oldest is the
-	// time of the oldest one at or after the bound, and zero when there is none.
-	newest, oldest time.Time
-	// at is the page's DeliveryPage.At.
-	at           time.Time
+	// oldest is the oldest attempt on the page at or after the bound.
+	oldest       attemptTime
 	reachedBound bool
 	next         string
 }
@@ -295,30 +306,35 @@ type pageRead struct {
 // it: the page reached the range's bound, or GitHub's list ended.
 func (p pageRead) finished() bool { return p.reachedBound || p.next == "" }
 
-func (r *redeliveryRun) read(ctx context.Context, cursor string, bound time.Time) (pageRead, error) {
+// endOfList says that GitHub's list ended above the bound. What the read did
+// not see between the two has expired, or was never there.
+func (p pageRead) endOfList() bool { return !p.reachedBound && p.next == "" }
+
+// fetch reads one page of the list inside the time that the scan has.
+func (r *redeliveryRun) fetch(ctx context.Context, cursor string) (DeliveryPage, error) {
 	readCtx, cancel := until(ctx, r.budget.scanEnd)
 	defer cancel()
 	page, err := r.state.hooks.ListDeliveries(readCtx, cursor)
 	if err != nil {
 		if ctx.Err() == nil && readCtx.Err() != nil {
-			return pageRead{}, errScanBudget
+			return DeliveryPage{}, errScanBudget
 		}
-		return pageRead{}, xerrors.Errorf("list deliveries: %w", err)
+		return DeliveryPage{}, xerrors.Errorf("list deliveries: %w", err)
 	}
 	r.res.Pages++
-	p := pageRead{next: page.Next, at: page.At}
+	return page, nil
+}
+
+// classify sorts the attempts of a page that are at or after bound.
+func (r *redeliveryRun) classify(page DeliveryPage, bound readBound) pageRead {
+	p := pageRead{next: page.Next}
 	for _, d := range page.Deliveries {
-		if d.DeliveredAt.After(p.newest) {
-			p.newest = d.DeliveredAt
-		}
-		if d.DeliveredAt.Before(bound) {
+		if bound.excludes(deliveredAt(d)) {
 			p.reachedBound = true
 			continue
 		}
 		p.attempts++
-		if p.oldest.IsZero() || d.DeliveredAt.Before(p.oldest) {
-			p.oldest = d.DeliveredAt
-		}
+		p.oldest = p.oldest.orEarlier(deliveredAt(d))
 		if !storesDelivery(d.Event, d.Action) {
 			continue
 		}
@@ -329,26 +345,23 @@ func (r *redeliveryRun) read(ctx context.Context, cursor string, bound time.Time
 		p.failed = append(p.failed, FailedAttempt{GUID: d.GUID, AttemptID: d.ID, DeliveredAt: d.DeliveredAt})
 	}
 	r.res.Attempts += p.attempts
-	return p, nil
+	return p
 }
 
-func (p pageRead) step(epoch int64, now time.Time) ScanStep {
-	return ScanStep{Epoch: epoch, Now: now, Failed: p.failed, Succeeded: p.succeeded}
+// step starts the ScanStep of a page. Its time is faucet's clock, which the
+// store keeps for the settle, the asks and the purge. No bound and no gap
+// comes from it.
+func (r *redeliveryRun) step(p pageRead) ScanStep {
+	return ScanStep{Epoch: r.epoch, Now: r.svc.clock.Now(), Failed: p.failed, Succeeded: p.succeeded}
 }
 
-// gapOf says which part of a read expired before a run made it. bound is where
-// the read stops. coveredFrom is how far down a read has got, or the range's
-// new end when it got nowhere. Only the part below the retention floor is gone.
-// A part above it that holds no attempt was quiet.
-func gapOf(bound, floor, coveredFrom time.Time) *RedeliveryGap {
-	to := coveredFrom
-	if floor.Before(to) {
-		to = floor
-	}
-	if !bound.Before(to) {
+// gapBetween is the gap from one time to another. There is none without a
+// start, and none when the start is not before the end.
+func gapBetween(from, to time.Time) *RedeliveryGap {
+	if from.IsZero() || !from.Before(to) {
 		return nil
 	}
-	return &RedeliveryGap{From: bound, To: to}
+	return &RedeliveryGap{From: from, To: to}
 }
 
 func (r *redeliveryRun) apply(ctx context.Context, step ScanStep, cause string) (ScanResult, error) {
@@ -386,42 +399,47 @@ func (r *redeliveryRun) countGap(ctx context.Context, gap RedeliveryGap, cause s
 
 // scan reads the head of the list and then the open ranges, newest first. It
 // returns whether the head read worked.
+//
+// The head read is one page. Its Date must be usable, because it becomes the
+// stored clear and decides which ranges have expired.
 func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, error) {
-	now := r.svc.clock.Now()
-	floor := now.Add(-GitHubDeliveryRetention)
-	olderAt, bound := scan.Top, scan.Top.Add(-RedeliveryReadOverlap)
-	var gap *RedeliveryGap
-	cause := gapExpiredUnread
-	if scan.Top.IsZero() {
-		olderAt = now.Add(-RedeliveryStartLookback)
-		bound = olderAt
-		gap, cause = &RedeliveryGap{From: floor, To: olderAt}, gapBeforeTracking
-	}
-
-	head, err := r.read(ctx, "", bound)
+	top, anchor := topOf(scan), clearOf(scan)
+	page, err := r.fetch(ctx, "")
 	if err != nil {
 		return false, err
 	}
-	step := head.step(r.epoch, now)
-	// The position is a time of GitHub's: the newest attempt, or GitHub's clock
-	// when the list is empty. Faucet's clock does not belong here (see
-	// DeliveryPage.At).
-	step.Top = head.newest
-	if step.Top.IsZero() {
-		step.Top = head.at
+	date, err := checkDate(page, top)
+	if err != nil {
+		return false, xerrors.Errorf("first page: %w", err)
 	}
-	if head.finished() {
-		covered := now
-		if !head.oldest.IsZero() {
-			covered = head.oldest
-		}
-		if gap == nil {
-			gap = gapOf(bound, floor, covered)
-		}
-	} else {
-		step.Open = &RedeliveryRange{NewerAt: head.oldest, OlderAt: olderAt, Cursor: head.next}
+	newest := newestOn(page)
+
+	first := top.at.IsZero()
+	bound, olderAt := top.bound(), top
+	if first {
+		bound = anchor.firstRunBound(newest)
+		olderAt = bound.rangeEnd()
 	}
-	step.Gap = gap
+	head := r.classify(page, bound)
+	step := r.step(head)
+	step.Top, step.Clear = newest.at, date.date
+	cause := gapExpiredUnread
+	switch {
+	case first && !newest.at.IsZero():
+		// Tracking begins here, or it began at the clear. Below the bound lies
+		// the time before that. With a clear, a list that ends above the bound
+		// has also lost what expired since, and one gap holds both.
+		to := bound.stop
+		if anchor.set() && head.endOfList() {
+			to = laterOf(to, date.gapEnd(head.oldest))
+		}
+		step.Gap, cause = gapBetween(anchor.firstRunGapStart(newest), to), gapBeforeTracking
+	case head.endOfList():
+		step.Gap = gapBetween(anchor.headGapStart(top), date.gapEnd(head.oldest))
+	}
+	if !head.finished() {
+		step.Open = &RedeliveryRange{NewerAt: head.oldest.at, OlderAt: olderAt.at, Cursor: head.next}
+	}
 	res, err := r.apply(ctx, step, cause)
 	if err != nil {
 		return false, err
@@ -433,55 +451,87 @@ func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, er
 		r.res.Ranges++
 		ranges = append([]RedeliveryRange{opened}, ranges...)
 	}
-	return true, r.readRanges(ctx, ranges)
+	live, err := r.closeExpired(ctx, ranges, date, anchor)
+	if err != nil {
+		return true, err
+	}
+	return true, r.readRanges(ctx, live, top.orLater(newest))
 }
 
-func (r *redeliveryRun) readRanges(ctx context.Context, ranges []RedeliveryRange) error {
-	floor := r.svc.clock.Now().Add(-GitHubDeliveryRetention)
+// closeExpired closes, without a read, each range whose new end GitHub has
+// deleted, and with it all of the range. It returns the others. A range whose
+// page fails, because GitHub refuses its cursor or sends no usable Date, ends
+// here.
+func (r *redeliveryRun) closeExpired(ctx context.Context, ranges []RedeliveryRange, date pageDate, anchor clearAnchor) ([]RedeliveryRange, error) {
+	floor, ok := date.expiredBelow(anchor)
+	if !ok {
+		return ranges, nil
+	}
 	live := ranges[:0:0]
 	for _, rg := range ranges {
 		if !rg.NewerAt.Before(floor) {
 			live = append(live, rg)
 			continue
 		}
-		gap := RedeliveryGap{From: rg.OlderAt.Add(-RedeliveryReadOverlap), To: laterOf(rg.NewerAt, rg.OlderAt)}
+		gap := RedeliveryGap{From: rg.olderEnd().bound().stop, To: laterOf(rg.NewerAt, rg.OlderAt)}
 		if _, err := r.apply(ctx, ScanStep{Epoch: r.epoch, Now: r.svc.clock.Now(), CloseID: rg.ID, Gap: &gap}, gapExpiredUnread); err != nil {
-			return err
+			return nil, err
 		}
 		r.res.Ranges--
 	}
-	for _, rg := range live {
-		bound := rg.OlderAt.Add(-RedeliveryReadOverlap)
-		for r.res.Pages < r.state.maxPages && ctx.Err() == nil && !r.budget.pastScan() {
-			now := r.svc.clock.Now()
-			p, err := r.read(ctx, rg.Cursor, bound)
-			if errors.Is(err, errScanBudget) {
-				return nil // the range stays open where the last page left it
-			}
+	return live, nil
+}
+
+// readRanges reads the ranges, newest first, with the pages that the run has
+// left. top is the newest attempt that the run knows.
+func (r *redeliveryRun) readRanges(ctx context.Context, ranges []RedeliveryRange, top attemptTime) error {
+	for _, rg := range ranges {
+		if err := r.readRange(ctx, rg, top); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// readRange reads one range until it ends or the run has no page left. A page
+// that reaches the bound ends it without a gap: GitHub deletes in the order
+// of the attempt times, so nothing above an attempt that it still lists has
+// expired. A page that ends the list ends the range with the gap that its
+// Date gives, and the range stays open when that Date is not usable.
+func (r *redeliveryRun) readRange(ctx context.Context, rg RedeliveryRange, top attemptTime) error {
+	bound := rg.olderEnd().bound()
+	for r.res.Pages < r.state.maxPages && ctx.Err() == nil && !r.budget.pastScan() {
+		page, err := r.fetch(ctx, rg.Cursor)
+		if errors.Is(err, errScanBudget) {
+			return nil // the range stays open where the last page left it
+		}
+		if err != nil {
+			return err
+		}
+		p := r.classify(page, bound)
+		step := r.step(p)
+		newerEnd := rg.newerEnd().orEarlier(p.oldest)
+		switch {
+		case p.reachedBound:
+			step.CloseID = rg.ID
+		case p.endOfList():
+			date, err := checkDate(page, top)
 			if err != nil {
-				return err
-			}
-			step := p.step(r.epoch, now)
-			if !p.finished() {
-				step.Advance = &RangeAdvance{ID: rg.ID, NewerAt: earlierOf(rg.NewerAt, p.oldest), Cursor: p.next}
-				if _, err := r.apply(ctx, step, gapExpiredUnread); err != nil {
-					return err
-				}
-				rg.Cursor = p.next
-				continue
-			}
-			covered := rg.NewerAt
-			if !p.oldest.IsZero() {
-				covered = p.oldest
+				return xerrors.Errorf("range page: %w", err)
 			}
 			step.CloseID = rg.ID
-			step.Gap = gapOf(bound, now.Add(-GitHubDeliveryRetention), covered)
-			if _, err := r.apply(ctx, step, gapExpiredUnread); err != nil {
-				return err
-			}
-			r.res.Ranges--
-			break
+			step.Gap = gapBetween(bound.stop, date.gapEnd(newerEnd))
+		default:
+			step.Advance = &RangeAdvance{ID: rg.ID, NewerAt: newerEnd.at, Cursor: p.next}
 		}
+		if _, err := r.apply(ctx, step, gapExpiredUnread); err != nil {
+			return err
+		}
+		if step.Advance == nil {
+			r.res.Ranges--
+			return nil
+		}
+		rg.NewerAt, rg.Cursor = newerEnd.at, p.next
 	}
 	return nil
 }

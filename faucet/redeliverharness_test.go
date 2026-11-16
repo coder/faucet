@@ -214,10 +214,17 @@ func (g *fakeGitHub) ListDeliveries(ctx context.Context, cursor string) (faucet.
 	return page, nil
 }
 
+// lists says whether GitHub's list holds an attempt at guid now.
+func (g *fakeGitHub) lists(guid string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.ContainsFunc(g.visibleLocked(), func(a ghAttempt) bool { return a.guid == guid })
+}
+
 func (g *fakeGitHub) attemptLocked(id int64) (ghAttempt, bool) {
-	for _, a := range g.attempts {
-		if a.id == id {
-			return a, true
+	for i := range g.attempts {
+		if g.attempts[i].id == id {
+			return g.attempts[i], true
 		}
 	}
 	return ghAttempt{}, false

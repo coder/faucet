@@ -26,8 +26,10 @@ type simPhase struct {
 type simSpec struct {
 	// setup changes the env before the first delivery: GitHub's clock, the
 	// Date that it sends, the time that a page takes.
-	setup  func(*redeliveryEnv)
-	phases []simPhase
+	setup func(*redeliveryEnv)
+	// beforeRun runs before each run, with the time since the first run.
+	beforeRun func(env *redeliveryEnv, since time.Duration)
+	phases    []simPhase
 	// outage is when faucet answers 503, relative to the first run.
 	outageFrom, outageLength time.Duration
 	// cronDuringOutage is false when the platform that runs the cron is faucet
@@ -128,6 +130,9 @@ func runSim(t *testing.T, spec simSpec) simOutcome {
 			}
 		}
 		if spec.cronDuringOutage || !down(now) {
+			if spec.beforeRun != nil {
+				spec.beforeRun(env, now.Sub(t0))
+			}
 			res := env.run()
 			out.runs = append(out.runs, res)
 			out.sumRecovered += res.Recovered
@@ -339,4 +344,103 @@ func rangesOf(runs []faucet.RedeliverResult) []int {
 		counts[i] = res.Ranges
 	}
 	return counts
+}
+
+func TestSimADateThatLagsLessThanTheSlackFailsNoRunAndLosesNothing(t *testing.T) {
+	t.Parallel()
+
+	// An HTTP Date is a whole second, and the attempt times have fractions, so
+	// even a Date that is right lies before the newest attempt on its page.
+	for _, lag := range []time.Duration{0, 2 * time.Second, 30 * time.Minute, 59 * time.Minute} {
+		t.Run(lag.String(), func(t *testing.T) {
+			t.Parallel()
+			out := runSim(t, simSpec{
+				setup: func(env *redeliveryEnv) {
+					env.gh.date = func(_ int, _ string, at time.Time) time.Time { return at.Add(-lag).Truncate(time.Second) }
+				},
+				phases:  steady(1200, 4*time.Hour),
+				blip:    func(_, i int) bool { return i%100 == 37 },
+				horizon: 4 * time.Hour,
+			})
+			t.Logf("RESULT 1200 an hour, 1%% blips, a whole-second Date %s behind: %s", lag, out)
+			require.Greater(t, out.failed, 10)
+			require.Zero(t, out.silentLost)
+			require.Equal(t, out.failed, out.recovered, "every run read its list, so every blip is recovered")
+		})
+	}
+}
+
+func TestSimAnOutageLongerThanGitHubKeepsADeliveryLosesNothingSilentlyWhateverTheClocks(t *testing.T) {
+	t.Parallel()
+
+	// skew is GitHub's clock minus faucet's. Faucet and its cron are down for
+	// the outage, and GitHub deletes the first failures before a run reads them.
+	for _, skew := range []time.Duration{-25 * time.Hour, -time.Hour, 0, time.Hour, 25 * time.Hour} {
+		for _, outage := range []time.Duration{71 * time.Hour, 80 * time.Hour} {
+			t.Run(fmt.Sprintf("skew=%s,outage=%s", skew, outage), func(t *testing.T) {
+				t.Parallel()
+				out := runSim(t, simSpec{
+					setup:        func(env *redeliveryEnv) { env.gh.skew = skew },
+					phases:       steady(6, 96*time.Hour),
+					outageFrom:   time.Hour,
+					outageLength: outage,
+					blip:         func(_, i int) bool { return i%2 == 0 },
+					horizon:      96 * time.Hour,
+				})
+				t.Logf("RESULT 6 an hour, faucet and cron down for %s, GitHub's clock %s ahead of faucet's: %s", outage, skew, out)
+				require.Greater(t, out.failed, 400)
+				require.Zero(t, out.silentLost)
+				if outage > faucet.GitHubDeliveryRetention {
+					require.Positive(t, out.inGap, "what GitHub deleted during the outage is inside a gap")
+				}
+			})
+		}
+	}
+}
+
+func TestSimTheMigrationReadsTheLastDayAgainAndLosesNothingSilently(t *testing.T) {
+	t.Parallel()
+	// The law of the capacity at a hundredth of the scale: pages of 1 attempt,
+	// 20 a run, so 42 and 70 an hour stand for 4,200 and 7,000. The store is
+	// migrated 6 hours in, while the hook delivers. The failures that count
+	// are the ones inside the lookback of the first run, and all later ones.
+	const pages, pageSize = 20, 1
+
+	for _, tc := range []struct {
+		name      string
+		perHour   int
+		catchesUp bool
+	}{
+		{"below the capacity", 42, true},
+		{"near the capacity", 70, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			migrated := false
+			out := runSim(t, simSpec{
+				phases: []simPhase{{from: -27 * time.Hour, to: 90 * time.Hour, perHour: tc.perHour}},
+				blip:   func(_, i int) bool { return i%25 == 7 },
+				beforeRun: func(env *redeliveryEnv, since time.Duration) {
+					if since == 6*time.Hour {
+						env.store.migrate()
+						migrated = true
+					}
+				},
+				countFrom: -23 * time.Hour,
+				horizon:   90 * time.Hour,
+				pages:     pages,
+				pageSize:  pageSize,
+			})
+			t.Logf("RESULT %d an hour with pages of %d, migrated at 6h: %s, ranges after the last run %d", tc.perHour, pageSize, out, out.runs[len(out.runs)-1].Ranges)
+			require.True(t, migrated)
+			require.Greater(t, out.failed, 100)
+			require.Zero(t, out.silentLost)
+			if tc.catchesUp {
+				require.Equal(t, out.failed, out.recovered, "the sweep reads the last day again, and the migration costs no recovery")
+				require.Zero(t, out.runs[len(out.runs)-1].Ranges)
+				return
+			}
+			require.Positive(t, out.inGap, "what the sweep cannot read again before GitHub deletes it is inside a gap")
+		})
+	}
 }

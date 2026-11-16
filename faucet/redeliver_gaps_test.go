@@ -329,3 +329,673 @@ func TestALateFailureEndsInAGapWhenGitHubDeletesItBeforeARunReadsTheRangeAboveIt
 		})
 	}
 }
+
+// The tests below give GitHub a clock of its own, a Date that leads or lags,
+// pages that take time and cursors that it refuses. In each, a failure that
+// GitHub listed must end tracked or inside a gap that a run logged.
+
+// requireListed fails unless GitHub's list holds the attempt now. A test calls
+// it before the attempt expires, to show that a run could have read it.
+func requireListed(t *testing.T, env *redeliveryEnv, a ghAttempt) {
+	t.Helper()
+	require.True(t, env.gh.lists(a.guid), "GitHub must list %s, or the scenario proves nothing", a.guid)
+}
+
+func TestAnExpiredFailureIsInsideTheGapWhenFaucetsClockLagsGitHubs(t *testing.T) {
+	t.Parallel()
+
+	for _, lag := range []time.Duration{10 * time.Minute, time.Hour} {
+		t.Run(lag.String(), func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t)
+			env.clock.WithLogger(quartz.NoOpLogger)
+			env.gh.skew = lag
+			t0 := env.gh.now()
+			env.gh.record("A", t0.Add(-time.Minute), http200)
+			env.run()
+
+			// F leaves GitHub's list half a lag before the run after the outage.
+			// Faucet's clock says that GitHub still keeps it.
+			f := env.gh.record("F", t0.Add(8*time.Hour-lag/2), 503)
+			env.advance(8 * time.Hour)
+			requireListed(t, env, f)
+			env.advance(faucet.GitHubDeliveryRetention)
+			env.run()
+
+			requireNoSilentLoss(t, env, []ghAttempt{f})
+		})
+	}
+}
+
+func TestTheFirstRunsGapStartsBelowGitHubsListWhenFaucetsClockRunsAhead(t *testing.T) {
+	t.Parallel()
+
+	for _, ahead := range []time.Duration{10 * time.Minute, time.Hour} {
+		t.Run(ahead.String(), func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t)
+			env.clock.WithLogger(quartz.NoOpLogger)
+			env.gh.skew = -ahead
+			t0 := env.gh.now()
+			// F is the oldest attempt that GitHub lists. On faucet's clock its
+			// 72 hours are over.
+			f := env.gh.record("F", t0.Add(-faucet.GitHubDeliveryRetention+ahead/2), 503)
+			env.gh.record("A", t0.Add(-time.Minute), http200)
+			requireListed(t, env, f)
+
+			env.run()
+
+			requireNoSilentLoss(t, env, []ghAttempt{f})
+		})
+	}
+}
+
+func TestADateAheadOfGitHubsListDoesNotMoveThePositionPastTheNextFailure(t *testing.T) {
+	t.Parallel()
+
+	for _, lead := range []time.Duration{10 * time.Minute, time.Hour} {
+		t.Run(lead.String(), func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t)
+			env.clock.WithLogger(quartz.NoOpLogger)
+			env.gh.date = dateOff(lead)
+			env.run()
+			env.advance(time.Minute)
+			f := env.gh.record("F", env.gh.now(), 503)
+			env.advance(cronEvery)
+
+			res := env.run()
+
+			require.Equal(t, 1, res.Tracked, "the list was empty before F, so F is above everything that a run has read")
+			require.True(t, env.stored(f.guid))
+		})
+	}
+}
+
+func TestAPageThatIsSlowToArriveLosesNoFailureThatGitHubDeletesMeanwhile(t *testing.T) {
+	t.Parallel()
+
+	for _, latency := range []time.Duration{600 * time.Millisecond, 5 * time.Second} {
+		t.Run(latency.String(), func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t, func(o *envOptions) { o.maxPages = 1 })
+			env.clock.WithLogger(quartz.NoOpLogger)
+			t0 := env.gh.now()
+			env.gh.record("A", t0.Add(-time.Second), http200)
+			env.run()
+
+			// F is the oldest attempt of a burst. The run after it has one page,
+			// which holds the newest 100, so F stays in the range below them.
+			f := env.gh.record("F", t0.Add(time.Minute), 503)
+			for i := range 150 {
+				env.gh.record(fmt.Sprintf("b-%03d", i), t0.Add(2*time.Minute+time.Duration(i)*4*time.Second), http200)
+			}
+			env.advance(15 * time.Minute)
+			require.Equal(t, 1, env.run().Ranges, "the burst leaves a range down to A")
+			requireListed(t, env, f)
+
+			// GitHub lists F while the first page is on its way, and has deleted it
+			// when the page of the range arrives.
+			env.advance(f.at.Add(faucet.GitHubDeliveryRetention - latency*3/2).Sub(env.gh.now()))
+			env.useMaxPages(faucet.DefaultMaxPagesPerRun)
+			env.slowPages(latency)
+			require.Zero(t, env.run().Ranges, "the range is read to the end of the list")
+
+			requireNoSilentLoss(t, env, []ghAttempt{f})
+		})
+	}
+}
+
+func TestOneDateFarAheadDoesNotStayAsTheStartOfLaterGaps(t *testing.T) {
+	t.Parallel()
+	env := newRedeliveryEnv(t)
+	env.clock.WithLogger(quartz.NoOpLogger)
+	t0 := env.gh.now()
+	env.gh.record("A", t0.Add(-time.Minute), http200)
+	env.gh.date = dateOff(100 * time.Hour)
+	env.run()
+	env.gh.date = nil
+	env.advance(cronEvery)
+	env.run()
+
+	f := env.gh.record("F", t0.Add(time.Hour), 503)
+	env.advance(2 * time.Hour)
+	requireListed(t, env, f)
+	env.advance(78 * time.Hour)
+	env.run()
+
+	requireNoSilentLoss(t, env, []ghAttempt{f})
+}
+
+func TestOneDateFarAheadClosesNoRangeThatGitHubStillLists(t *testing.T) {
+	t.Parallel()
+
+	for _, lead := range []time.Duration{80 * time.Hour, 30 * 24 * time.Hour} {
+		t.Run(lead.String(), func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t, func(o *envOptions) { o.maxPages = 1 })
+			env.clock.WithLogger(quartz.NoOpLogger)
+			t0 := env.gh.now()
+			env.gh.record("A", t0.Add(-time.Second), http200)
+			env.run()
+			var failures []ghAttempt
+			for i := range 150 {
+				status := http200
+				if i < 50 && i%10 == 0 {
+					status = 503
+				}
+				a := env.gh.record(fmt.Sprintf("b-%03d", i), t0.Add(time.Minute+time.Duration(i)*2*time.Second), status)
+				if status != http200 {
+					failures = append(failures, a)
+				}
+			}
+			env.advance(cronEvery)
+			require.Equal(t, 1, env.run().Ranges, "one page holds the newest 100, and the failures are in the range below")
+
+			env.advance(cronEvery)
+			env.useMaxPages(faucet.DefaultMaxPagesPerRun)
+			env.gh.date = func(_ int, cursor string, at time.Time) time.Time {
+				if cursor == "" {
+					return at.Add(lead)
+				}
+				return at
+			}
+			res := env.run()
+
+			require.Zero(t, res.Gaps, "GitHub lists the whole range, so nothing expired")
+			require.Zero(t, res.Ranges)
+			for _, f := range failures {
+				require.True(t, env.tracked(f.guid), "%s is in a range that GitHub still lists, so the run reads it", f.guid)
+			}
+		})
+	}
+}
+
+func TestTheFirstRunClosesNoRangeOnTheWordOfOneDate(t *testing.T) {
+	t.Parallel()
+	env := newRedeliveryEnv(t, func(o *envOptions) { o.maxPages = 1 })
+	env.clock.WithLogger(quartz.NoOpLogger)
+	t0 := env.gh.now()
+	var failures []ghAttempt
+	for i := range 150 {
+		status := http200
+		if i < 50 && i%10 == 0 {
+			status = 503
+		}
+		a := env.gh.record(fmt.Sprintf("b-%03d", i), t0.Add(-time.Hour+time.Duration(i)*2*time.Second), status)
+		if status != http200 {
+			failures = append(failures, a)
+		}
+	}
+
+	// No clear is stored yet, so this Date is the only one that the run has.
+	env.gh.date = dateOff(80 * time.Hour)
+	first := env.run()
+	require.Equal(t, 1, first.Ranges, "the range that the first run opens stays open")
+	require.Equal(t, 1, first.Gaps, "and the only gap is the time before tracking")
+
+	env.gh.date = nil
+	env.advance(cronEvery)
+	env.useMaxPages(faucet.DefaultMaxPagesPerRun)
+	require.Zero(t, env.run().Ranges)
+	for _, f := range failures {
+		require.True(t, env.tracked(f.guid), "%s is in a range that GitHub still lists, so the next run reads it", f.guid)
+	}
+}
+
+func TestTheFirstRunOfAHookWithoutAClearRecordsOnlyTheTimeBeforeItsLookback(t *testing.T) {
+	t.Parallel()
+	env := newRedeliveryEnv(t)
+	env.clock.WithLogger(quartz.NoOpLogger)
+	t0 := env.gh.now()
+	// The list is two days stale and ends above the bound of the first run.
+	// Nothing was tracked before this run, so nothing that expired counts.
+	newest := env.gh.record("newer", t0.Add(-50*time.Hour), 503)
+	env.gh.record("older", t0.Add(-60*time.Hour), 503)
+
+	res := env.run()
+
+	require.Equal(t, 2, res.Tracked)
+	gaps := env.loggedGaps()
+	require.Len(t, gaps, 1)
+	require.True(t, newest.at.Add(-faucet.GitHubDeliveryRetention).Equal(gaps[0].from), "%s", gaps[0])
+	require.True(t, newest.at.Add(-faucet.RedeliveryStartLookback).Equal(gaps[0].to), "the gap ends at the bound of the run, below every attempt that it read: %s", gaps[0])
+}
+
+func TestTrackingThatBeganWithAnEmptyListOrTheMigrationHoldsThroughAnOutage(t *testing.T) {
+	t.Parallel()
+
+	for _, began := range []string{"an empty first run", "the migration"} {
+		for _, tc := range []struct {
+			outage    time.Duration
+			listEmpty bool
+		}{{30 * time.Hour, false}, {80 * time.Hour, false}, {80 * time.Hour, true}} {
+			t.Run(fmt.Sprintf("%s,outage=%s,listEmpty=%v", began, tc.outage, tc.listEmpty), func(t *testing.T) {
+				t.Parallel()
+				env := newRedeliveryEnv(t)
+				env.clock.WithLogger(quartz.NoOpLogger)
+				t0 := env.gh.now()
+				if began == "the migration" {
+					env.store.seedMigrated(t0)
+				} else {
+					env.run()
+				}
+				f := env.gh.record("F", t0.Add(time.Hour), 503)
+				env.advance(2 * time.Hour)
+				requireListed(t, env, f)
+				env.advance(tc.outage - 2*time.Hour)
+				if !tc.listEmpty {
+					env.gh.record("G", env.gh.now().Add(-time.Second), http200)
+				}
+				for range 3 {
+					env.run()
+					env.advance(cronEvery)
+				}
+
+				if tc.outage < faucet.GitHubDeliveryRetention {
+					require.True(t, env.stored(f.guid), "GitHub still lists F, and tracking began before F, so the run reads it")
+					return
+				}
+				requireNoSilentLoss(t, env, []ghAttempt{f})
+			})
+		}
+	}
+}
+
+func TestAfterTheMigrationATopThatWasADateAheadDropsNoFailure(t *testing.T) {
+	t.Parallel()
+
+	// A build before the migration took its top from GitHub's Date when the
+	// list was empty. A Date that ran ahead then put the next failures below
+	// the read bound.
+	for _, lead := range []time.Duration{time.Hour, 7 * time.Hour} {
+		t.Run(fmt.Sprintf("the cron keeps running,lead=%s", lead), func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t)
+			env.clock.WithLogger(quartz.NoOpLogger)
+			env.store.seedMigrated(env.gh.now().Add(lead))
+
+			var failures []ghAttempt
+			for i := range 12 {
+				failures = append(failures, env.gh.record(fmt.Sprintf("f-%02d", i), env.gh.now().Add(-time.Second), 503))
+				env.advance(cronEvery)
+				env.run()
+			}
+
+			for _, f := range failures {
+				require.True(t, env.stored(f.guid), "%s was listed above everything that a run had read", f.guid)
+			}
+		})
+	}
+	// With an outage after the migration, the failures expire unread. The gap
+	// covers them while the Date was ahead by no more than the margin and the
+	// overlap.
+	for _, lead := range []time.Duration{time.Hour, 6 * time.Hour} {
+		t.Run(fmt.Sprintf("the cron is down for 80 hours,lead=%s", lead), func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t)
+			env.clock.WithLogger(quartz.NoOpLogger)
+			env.store.seedMigrated(env.gh.now().Add(lead))
+
+			var failures []ghAttempt
+			for i := range 30 {
+				env.advance(cronEvery)
+				failures = append(failures, env.gh.record(fmt.Sprintf("f-%02d", i), env.gh.now().Add(-time.Second), 503))
+			}
+			requireListed(t, env, failures[0])
+			env.advance(80 * time.Hour)
+			env.gh.record("G", env.gh.now().Add(-time.Second), http200)
+			for range 3 {
+				env.run()
+				env.advance(cronEvery)
+			}
+
+			requireNoSilentLoss(t, env, failures)
+		})
+	}
+}
+
+func TestALateWriteBelowTheTopIsInsideTheGapWhileTheDateLeadsByLessThanTheMarginAndTheOverlap(t *testing.T) {
+	t.Parallel()
+
+	for _, lead := range []time.Duration{0, time.Hour, faucet.RedeliveryDateMargin + faucet.RedeliveryReadOverlap - 10*time.Second} {
+		t.Run(lead.String(), func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t)
+			env.clock.WithLogger(quartz.NoOpLogger)
+			env.gh.date = dateOff(lead)
+			a := env.gh.record("A", env.gh.now().Add(-time.Second), http200)
+			env.run()
+			l := env.gh.record("L", a.at.Add(-3*time.Second), 503)
+			requireListed(t, env, l)
+
+			env.advance(80 * time.Hour)
+			env.run()
+
+			requireNoSilentLoss(t, env, []ghAttempt{l})
+		})
+	}
+}
+
+func TestARangeIsReadThroughPagesThatCarryNoDate(t *testing.T) {
+	t.Parallel()
+	env := newRedeliveryEnv(t, func(o *envOptions) { o.maxPages = 1 })
+	env.clock.WithLogger(quartz.NoOpLogger)
+	t0 := env.gh.now()
+	env.gh.record("Z", t0.Add(-10*time.Minute), http200)
+	env.gh.record("A", t0.Add(-time.Second), http200)
+	env.run()
+	var failures []ghAttempt
+	for i := range 250 {
+		status := http200
+		if i < 150 && i%10 == 0 {
+			status = 503
+		}
+		a := env.gh.record(fmt.Sprintf("b-%03d", i), t0.Add(time.Minute+time.Duration(i)*2*time.Second), status)
+		if status != http200 {
+			failures = append(failures, a)
+		}
+	}
+	env.advance(cronEvery)
+	require.Equal(t, 1, env.run().Ranges)
+
+	// Only the first page of a run has a Date. Every page of a range either
+	// goes on or reaches the range's bound, and neither uses a Date.
+	env.gh.date = func(_ int, cursor string, at time.Time) time.Time {
+		if cursor != "" {
+			return time.Time{}
+		}
+		return at
+	}
+	env.advance(cronEvery)
+	env.useMaxPages(faucet.DefaultMaxPagesPerRun)
+	res := env.run()
+
+	require.Zero(t, res.Ranges, "a page that reaches the bound of its range ends it")
+	require.Zero(t, res.Gaps)
+	for _, f := range failures {
+		require.True(t, env.tracked(f.guid), "%s is on a page without a Date, and the run reads it", f.guid)
+	}
+}
+
+func TestARangeWhosePageFailsStaysOpenUntilGitHubHasDeletedItAndEndsAsAGap(t *testing.T) {
+	t.Parallel()
+
+	const refusedCursor = "GitHub refuses the cursor of an attempt that it deleted"
+	for name, date := range map[string]func(int, string, time.Time) time.Time{
+		"the page that ends the list has no Date": func(_ int, cursor string, at time.Time) time.Time {
+			if cursor != "" {
+				return time.Time{}
+			}
+			return at
+		},
+		// The newest attempt that the run knows is a minute old, and it is on
+		// the first page of this run. The top that the store gave is 11 minutes
+		// old, and the attempts on the page of the range are days old.
+		"the Date of the page that ends the list is more than the slack behind the newest attempt of the run": func(_ int, cursor string, at time.Time) time.Time {
+			if cursor != "" {
+				return at.Add(-faucet.RedeliveryDateSlack - 2*time.Minute)
+			}
+			return at
+		},
+		refusedCursor: nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t, func(o *envOptions) { o.maxPages = 1 })
+			env.clock.WithLogger(quartz.NoOpLogger)
+			t0 := env.gh.now()
+			var failures []ghAttempt
+			for i := range 150 {
+				status := http200
+				if i < 50 && i%10 == 0 {
+					status = 503
+				}
+				a := env.gh.record(fmt.Sprintf("b-%03d", i), t0.Add(-12*time.Minute+time.Duration(i)*4*time.Second), status)
+				if status != http200 {
+					failures = append(failures, a)
+				}
+			}
+			require.Equal(t, 1, env.run().Ranges, "the one page holds the newest 100, and the failures are in the range below")
+			requireListed(t, env, failures[0])
+
+			// A run reads one page, so the range stays unread while the hook
+			// goes on. Then the fault begins, and the runs get their pages back.
+			// A Date fault begins while GitHub still lists the failures. A cursor
+			// is stale only after GitHub has deleted its attempt, which is newer
+			// than they are.
+			trickle := func() {
+				env.advance(cronEvery)
+				env.gh.record(fmt.Sprintf("t-%s", env.gh.now().Sub(t0)), env.gh.now().Add(-time.Minute), http200)
+			}
+			lastRunBeforeTheFault := t0.Add(faucet.GitHubDeliveryRetention - 30*time.Minute)
+			if name == refusedCursor {
+				lastRunBeforeTheFault = t0.Add(faucet.GitHubDeliveryRetention - 10*time.Minute)
+			}
+			for env.gh.now().Before(lastRunBeforeTheFault) {
+				trickle()
+				require.Equal(t, 1, env.run().Ranges)
+			}
+			trickle()
+			env.gh.date, env.gh.refusesStaleCursors = date, name == refusedCursor
+			env.useMaxPages(faucet.DefaultMaxPagesPerRun)
+
+			res, err := env.svc.Redeliver(context.Background())
+			require.Error(t, err, "the page of the range fails")
+			require.Equal(t, 1, res.Ranges, "and the range stays open")
+			open := 1
+			for range 6 {
+				trickle()
+				res, _ = env.svc.Redeliver(context.Background())
+				open = res.Ranges
+			}
+
+			require.Zero(t, open, "the range ends without a read once GitHub has deleted all of it")
+			requireNoSilentLoss(t, env, failures)
+		})
+	}
+}
+
+func TestAWholeSecondDateAsFarBehindAsTheSlackStillEndsTheGapAboveWhatGitHubDeleted(t *testing.T) {
+	t.Parallel()
+
+	for _, lag := range []time.Duration{0, faucet.RedeliveryDateSlack - time.Second, faucet.RedeliveryDateSlack} {
+		t.Run(lag.String(), func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t)
+			env.clock.WithLogger(quartz.NoOpLogger)
+			env.gh.date = func(_ int, _ string, at time.Time) time.Time { return at.Add(-lag).Truncate(time.Second) }
+			t0 := env.gh.now()
+			env.advance(time.Second)
+			env.gh.record("A", t0, http200)
+			env.run()
+			env.advance(time.Hour)
+			f := env.gh.record("F", t0.Add(time.Hour+400*time.Millisecond), 503)
+			requireListed(t, env, f)
+
+			// The run starts 300 ms after GitHub deleted F. The Date drops the
+			// fraction of its second, which puts it before the deletion.
+			env.advance(f.at.Add(faucet.GitHubDeliveryRetention + 300*time.Millisecond).Sub(env.gh.now()))
+			require.False(t, env.gh.lists(f.guid))
+			env.run()
+
+			requireNoSilentLoss(t, env, []ghAttempt{f})
+		})
+	}
+}
+
+func TestAFirstPageWithoutAUsableDateFailsTheRunWhichAsksForNothing(t *testing.T) {
+	t.Parallel()
+
+	for name, date := range map[string]func(int, string, time.Time) time.Time{
+		"no Date": func(int, string, time.Time) time.Time { return time.Time{} },
+		"a Date more than the slack behind the newest attempt": dateOff(-faucet.RedeliveryDateSlack - 2*time.Minute),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t)
+			env.clock.WithLogger(quartz.NoOpLogger)
+			env.gh.answer = failing(400, "due")
+			env.gh.record("due", env.gh.now().Add(-time.Minute), 400)
+			require.Equal(t, 1, env.run().Asked)
+			env.advance(cronEvery)
+			env.gh.record("new", env.gh.now().Add(-time.Minute), 503)
+
+			env.gh.date = date
+			res, err := env.svc.Redeliver(context.Background())
+
+			require.ErrorContains(t, err, "Date")
+			require.Zero(t, res.Tracked, "a page whose Date is not usable is not used")
+			require.Zero(t, res.Asked, "the second ask of due was due, and it did not go out")
+			require.Equal(t, 1, res.Pending, "the settle needs no GitHub, so it still runs")
+
+			env.gh.date = nil
+			res = env.run()
+			require.Equal(t, 1, res.Tracked, "the failed run moved no position, so the next run reads what it left")
+			require.Equal(t, 2, res.Asked)
+		})
+	}
+}
+
+func TestRunsWithoutADateFailLoudlyAndTheNextRunWithOneLosesNothing(t *testing.T) {
+	t.Parallel()
+
+	for _, listed := range []string{"an empty hook", "a hook whose failure expired during an outage"} {
+		t.Run(listed, func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t)
+			env.clock.WithLogger(quartz.NoOpLogger)
+			var failures []ghAttempt
+			if listed != "an empty hook" {
+				t0 := env.gh.now()
+				env.gh.record("A", t0.Add(-time.Minute), http200)
+				env.run()
+				failures = append(failures, env.gh.record("F", t0.Add(time.Hour), 503))
+				env.advance(2 * time.Hour)
+				requireListed(t, env, failures[0])
+				env.advance(78 * time.Hour)
+			}
+
+			env.gh.date = func(int, string, time.Time) time.Time { return time.Time{} }
+			for range 12 {
+				res, err := env.svc.Redeliver(context.Background())
+				require.ErrorContains(t, err, "Date", "a list without a Date says nothing about what GitHub has deleted")
+				require.Zero(t, res.Gaps)
+				env.advance(cronEvery)
+			}
+			env.gh.date = nil
+			res := env.run()
+
+			require.Equal(t, len(failures), res.Gaps, "the run with a Date records what expired, and an empty hook lost nothing")
+			if len(failures) > 0 {
+				requireNoSilentLoss(t, env, failures)
+			}
+		})
+	}
+}
+
+func TestAChangedHookStartsWithoutTheOldHooksClear(t *testing.T) {
+	t.Parallel()
+	env := newRedeliveryEnv(t)
+	env.clock.WithLogger(quartz.NoOpLogger)
+	env.run()
+	env.advance(80 * time.Hour)
+
+	// The host replaces the webhook after an outage. The old hook's clear is
+	// 80 hours old, which on that hook is a gap. The new hook has lost nothing.
+	env.gh.name = "/orgs/acme/hooks/8"
+	res := env.run()
+
+	require.Zero(t, res.Gaps, "the new hook has no attempt yet, so nothing of it expired")
+	require.Empty(t, env.logged("redelivery gap"))
+}
+
+func TestAChangedHooksOpenRangeEndsAsAGapThatHoldsTheOverlapBelowIt(t *testing.T) {
+	t.Parallel()
+	env := newRedeliveryEnv(t, func(o *envOptions) { o.maxPages = 1 })
+	env.clock.WithLogger(quartz.NoOpLogger)
+	t0 := env.gh.now()
+	a := env.gh.record("A", t0.Add(-time.Second), http200)
+	env.run()
+	l := env.gh.record("L", a.at.Add(-3*time.Second), 503)
+	for i := range 150 {
+		env.gh.record(fmt.Sprintf("b-%03d", i), t0.Add(time.Minute+time.Duration(i)*2*time.Second), http200)
+	}
+	env.advance(cronEvery)
+	require.Equal(t, 1, env.run().Ranges, "the burst leaves a range down to A")
+	requireListed(t, env, l)
+
+	env.gh.name = "/orgs/acme/hooks/8"
+	env.gh.attempts = nil
+	env.advance(cronEvery)
+	env.run()
+
+	requireNoSilentLoss(t, env, []ghAttempt{l})
+}
+
+func TestAQuietHookLogsNoGapInTenDays(t *testing.T) {
+	t.Parallel()
+
+	for name, date := range map[string]func(int, string, time.Time) time.Time{
+		"its Date is right":             nil,
+		"its Date is 4 minutes behind":  dateOff(-4 * time.Minute),
+		"its Date is an hour ahead":     dateOff(time.Hour),
+		"its Date is a whole second":    func(_ int, _ string, at time.Time) time.Time { return at.Truncate(time.Second) },
+		"its Date is an hour behind it": dateOff(-faucet.RedeliveryDateSlack),
+	} {
+		for _, listed := range []string{"an empty hook", "a hook with one attempt every 80 hours"} {
+			t.Run(listed+","+name, func(t *testing.T) {
+				t.Parallel()
+				env := newRedeliveryEnv(t)
+				env.clock.WithLogger(quartz.NoOpLogger)
+				env.gh.date = date
+				want := 0
+				if listed != "an empty hook" {
+					for i := range 3 {
+						env.gh.record(fmt.Sprintf("a-%d", i), env.gh.now().Add(time.Hour+time.Duration(i)*80*time.Hour+500*time.Millisecond), http200)
+					}
+					want = 1
+				}
+
+				var gaps int
+				for range 10 * 24 * int(time.Hour/cronEvery) {
+					gaps += env.run().Gaps
+					env.advance(cronEvery)
+				}
+
+				require.Equal(t, want, gaps, "a silence is not a gap, and only the time before the first attempt is one")
+				for _, line := range env.logged("redelivery gap") {
+					require.Equal(t, "before tracking began", line["cause"])
+				}
+			})
+		}
+	}
+}
+
+func TestAQuietHookLogsAGapOnlyAfterAnOutageThatTheDateMarginsDoNotCover(t *testing.T) {
+	t.Parallel()
+
+	// After a silence a gap is [clear - margin - overlap, Date - retention +
+	// slack]. It is empty until the runs are this far apart.
+	threshold := faucet.GitHubDeliveryRetention - faucet.RedeliveryDateSlack - faucet.RedeliveryDateMargin - faucet.RedeliveryReadOverlap
+	require.Equal(t, 64*time.Hour+55*time.Minute, threshold)
+	for _, listed := range []string{"an empty hook", "a hook whose last attempt is 10 hours old"} {
+		for _, tc := range []struct {
+			apart time.Duration
+			gaps  int
+		}{{threshold - time.Minute, 0}, {threshold + time.Minute, 1}} {
+			t.Run(fmt.Sprintf("%s,apart=%s", listed, tc.apart), func(t *testing.T) {
+				t.Parallel()
+				env := newRedeliveryEnv(t)
+				env.clock.WithLogger(quartz.NoOpLogger)
+				if listed != "an empty hook" {
+					env.gh.record("A", env.gh.now().Add(-10*time.Hour), http200)
+				}
+				env.run()
+				env.advance(tc.apart)
+
+				require.Equal(t, tc.gaps, env.run().Gaps)
+			})
+		}
+	}
+}

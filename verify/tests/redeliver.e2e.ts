@@ -150,7 +150,8 @@ describe('redelivery', () => {
     await withHook(cron, async (started, output) => {
       const recent = newRepoId();
       const before = newRepoId();
-      await hooks.arm(started, [failed(recent, newDeliveryId(), 20 * HOUR), failed(before, newDeliveryId(), 30 * HOUR)]);
+      // The lookback is 24 hours below the newest attempt, so the second delivery is 30 hours older than the first.
+      await hooks.arm(started, [failed(recent, newDeliveryId(), 20 * HOUR), failed(before, newDeliveryId(), 50 * HOUR)]);
 
       const first = await sweep(started);
       const second = await sweep(started);
