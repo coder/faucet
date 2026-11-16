@@ -197,7 +197,8 @@ type RedeliverResult struct {
 // the ranges, newest first, with what the head read leaves of their page
 // limit. A cursor that GitHub gave is kept with the range, so a later run
 // continues right after the last attempt read. A range whose old end leaves
-// GitHub's retention before it is read becomes a gap.
+// GitHub's retention before it is read becomes a gap, together with the
+// RedeliveryReadOverlap below that end, where a late attempt is listed.
 //
 // A delivery is asked for at most MaxAsksPerDelivery times, on the schedule
 // that AskOffsets gives, and at most MaxAsksPerRun times in a run, the delivery
@@ -335,19 +336,19 @@ func (p pageRead) step(epoch int64, now time.Time) ScanStep {
 	return ScanStep{Epoch: epoch, Now: now, Failed: p.failed, Succeeded: p.succeeded}
 }
 
-// gapOf says which part of a range expired before a run read it. olderAt is
-// the range's old end. coveredFrom is how far down a read has got, or the
-// range's new end when it got nowhere. Only the part below the retention floor
-// is gone. A part above it that holds no attempt was quiet.
-func gapOf(olderAt, floor, coveredFrom time.Time) *RedeliveryGap {
+// gapOf says which part of a read expired before a run made it. bound is where
+// the read stops. coveredFrom is how far down a read has got, or the range's
+// new end when it got nowhere. Only the part below the retention floor is gone.
+// A part above it that holds no attempt was quiet.
+func gapOf(bound, floor, coveredFrom time.Time) *RedeliveryGap {
 	to := coveredFrom
 	if floor.Before(to) {
 		to = floor
 	}
-	if !olderAt.Before(to) {
+	if !bound.Before(to) {
 		return nil
 	}
-	return &RedeliveryGap{From: olderAt, To: to}
+	return &RedeliveryGap{From: bound, To: to}
 }
 
 func (r *redeliveryRun) apply(ctx context.Context, step ScanStep, cause string) (ScanResult, error) {
@@ -415,7 +416,7 @@ func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, er
 			covered = head.oldest
 		}
 		if gap == nil {
-			gap = gapOf(olderAt, floor, covered)
+			gap = gapOf(bound, floor, covered)
 		}
 	} else {
 		step.Open = &RedeliveryRange{NewerAt: head.oldest, OlderAt: olderAt, Cursor: head.next}
@@ -443,16 +444,17 @@ func (r *redeliveryRun) readRanges(ctx context.Context, ranges []RedeliveryRange
 			live = append(live, rg)
 			continue
 		}
-		gap := RedeliveryGap{From: rg.OlderAt, To: laterOf(rg.NewerAt, rg.OlderAt)}
+		gap := RedeliveryGap{From: rg.OlderAt.Add(-RedeliveryReadOverlap), To: laterOf(rg.NewerAt, rg.OlderAt)}
 		if _, err := r.apply(ctx, ScanStep{Epoch: r.epoch, Now: r.svc.clock.Now(), CloseID: rg.ID, Gap: &gap}, gapExpiredUnread); err != nil {
 			return err
 		}
 		r.res.Ranges--
 	}
 	for _, rg := range live {
+		bound := rg.OlderAt.Add(-RedeliveryReadOverlap)
 		for r.res.Pages < r.state.maxPages && ctx.Err() == nil && !r.budget.pastScan() {
 			now := r.svc.clock.Now()
-			p, err := r.read(ctx, rg.Cursor, rg.OlderAt.Add(-RedeliveryReadOverlap))
+			p, err := r.read(ctx, rg.Cursor, bound)
 			if errors.Is(err, errScanBudget) {
 				return nil // the range stays open where the last page left it
 			}
@@ -473,7 +475,7 @@ func (r *redeliveryRun) readRanges(ctx context.Context, ranges []RedeliveryRange
 				covered = p.oldest
 			}
 			step.CloseID = rg.ID
-			step.Gap = gapOf(rg.OlderAt, now.Add(-GitHubDeliveryRetention), covered)
+			step.Gap = gapOf(bound, now.Add(-GitHubDeliveryRetention), covered)
 			if _, err := r.apply(ctx, step, gapExpiredUnread); err != nil {
 				return err
 			}
