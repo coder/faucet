@@ -56,8 +56,8 @@ func (s *Store) AcquireRedeliveryLease(ctx context.Context, hook string, now tim
 		return faucet.RedeliveryScan{}, false, xerrors.Errorf("take lease: %w", err)
 	}
 	scan.Epoch = taken.Epoch
-	if taken.TopAt.Valid {
-		scan.Top = taken.TopAt.Time.UTC()
+	if taken.TopAttemptAt.Valid {
+		scan.Top = taken.TopAttemptAt.Time.UTC()
 	}
 	if taken.ClearAt.Valid {
 		scan.Clear = taken.ClearAt.Time.UTC()

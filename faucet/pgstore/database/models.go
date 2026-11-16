@@ -60,12 +60,12 @@ type FaucetRedeliveryRange struct {
 }
 
 type FaucetRedeliveryScan struct {
-	ID         bool
-	Hook       string
-	Epoch      int64
-	LeaseUntil sql.NullTime
-	TopAt      sql.NullTime
-	ClearAt    sql.NullTime
+	ID           bool
+	Hook         string
+	Epoch        int64
+	LeaseUntil   sql.NullTime
+	TopAttemptAt sql.NullTime
+	ClearAt      sql.NullTime
 }
 
 type FaucetSubscription struct {
