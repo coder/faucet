@@ -66,7 +66,7 @@ func (s *testServer) connectEvents(ctx context.Context, t *testing.T, token stri
 		require.NoError(t, mcp.AddSendingCustomMethod[*eventsParams, *eventsResult](client, method))
 	}
 	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint:             s.URL + "/mcp",
+		Endpoint:             s.URL + s.mcpPath,
 		HTTPClient:           &http.Client{Transport: eventNameTransport{next: bearerTransport{token, s.Client().Transport}}},
 		DisableStandaloneSSE: true,
 	}, nil)
@@ -104,46 +104,53 @@ func TestMCPDiscoveryAdvertisesEvents(t *testing.T) {
 func TestMCPEventsListAndPollOverHTTP(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-	srv := newTestServer(t)
-	session := srv.connectEvents(ctx, t, aliceToken)
+	for _, path := range mcpPaths {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
 
-	list, err := callEvents(ctx, session, "events/list", nil)
-	require.NoError(t, err)
-	var events []struct {
-		Name     string   `json:"name"`
-		Delivery []string `json:"delivery"`
-	}
-	require.NoError(t, json.Unmarshal(list["events"], &events))
-	require.Len(t, events, 15)
-	require.Equal(t, []string{"poll"}, events[0].Delivery)
+			ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+			defer cancel()
+			srv := newTestServer(t)
+			srv.mcpPath = path
+			session := srv.connectEvents(ctx, t, aliceToken)
 
-	head, err := callEvents(ctx, session, "events/poll", pollParams("o/r", nil))
-	require.NoError(t, err)
-	require.JSONEq(t, `[]`, string(head["events"]))
-	var cursor string
-	require.NoError(t, json.Unmarshal(head["cursor"], &cursor))
-	require.NotEmpty(t, cursor)
+			list, err := callEvents(ctx, session, "events/list", nil)
+			require.NoError(t, err)
+			var events []struct {
+				Name     string   `json:"name"`
+				Delivery []string `json:"delivery"`
+			}
+			require.NoError(t, json.Unmarshal(list["events"], &events))
+			require.Len(t, events, 15)
+			require.Equal(t, []string{"poll"}, events[0].Delivery)
 
-	res, err := callEvents(ctx, session, "events/poll", pollParams("o/r", &cursor))
-	require.NoError(t, err)
-	var polled []struct {
-		EventID string         `json:"eventId"`
-		Name    string         `json:"name"`
-		Data    map[string]any `json:"data"`
-	}
-	require.NoError(t, json.Unmarshal(res["events"], &polled))
-	require.Len(t, polled, 1)
-	require.Equal(t, "d", polled[0].EventID)
-	require.Equal(t, "ci.run_completed", polled[0].Name)
-	require.Equal(t, "success", polled[0].Data["conclusion"])
-	require.Equal(t, []any{float64(3)}, polled[0].Data["prs"])
+			head, err := callEvents(ctx, session, "events/poll", pollParams("o/r", nil))
+			require.NoError(t, err)
+			require.JSONEq(t, `[]`, string(head["events"]))
+			var cursor string
+			require.NoError(t, json.Unmarshal(head["cursor"], &cursor))
+			require.NotEmpty(t, cursor)
 
-	paths, auth := srv.github.seen()
-	require.Contains(t, paths, "/repos/o/r")
-	for _, a := range auth {
-		require.Equal(t, "Bearer "+aliceToken, a, "GitHub got the caller's own token")
+			res, err := callEvents(ctx, session, "events/poll", pollParams("o/r", &cursor))
+			require.NoError(t, err)
+			var polled []struct {
+				EventID string         `json:"eventId"`
+				Name    string         `json:"name"`
+				Data    map[string]any `json:"data"`
+			}
+			require.NoError(t, json.Unmarshal(res["events"], &polled))
+			require.Len(t, polled, 1)
+			require.Equal(t, "d", polled[0].EventID)
+			require.Equal(t, "ci.run_completed", polled[0].Name)
+			require.Equal(t, "success", polled[0].Data["conclusion"])
+			require.Equal(t, []any{float64(3)}, polled[0].Data["prs"])
+
+			paths, auth := srv.github.seen()
+			require.Contains(t, paths, "/repos/o/r")
+			for _, a := range auth {
+				require.Equal(t, "Bearer "+aliceToken, a, "GitHub got the caller's own token")
+			}
+		})
 	}
 }
 
@@ -209,7 +216,7 @@ func postEventsPoll(t *testing.T, srv *testServer, token, name, params string) (
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	payload := `{"jsonrpc":"2.0","id":7,"method":"events/poll","params":` + params + `}`
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/mcp", strings.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+srv.mcpPath, strings.NewReader(payload))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
