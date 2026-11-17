@@ -383,3 +383,89 @@ func TestPrincipalNeverPrintsItsToken(t *testing.T) {
 	requireNoToken(t, "json", string(asJSON))
 	require.Contains(t, fmt.Sprint(p), "octocat")
 }
+
+func TestAnOAuthUserCarriesItsOwnSession(t *testing.T) {
+	t.Parallel()
+
+	read := []faucet.Scope{faucet.ScopeEventsRead}
+	idle, err := faucet.NewOAuthUser("alice", faucet.OAuthSession{SessionID: "sess_idle", ConnectionID: "conn_alice"}, read)
+	require.NoError(t, err)
+	active, err := faucet.NewOAuthUser("alice", faucet.OAuthSession{SessionID: "sess_active", ConnectionID: "conn_alice"}, read)
+	require.NoError(t, err)
+
+	got, ok := active.OAuthSession()
+	require.True(t, ok)
+	require.Equal(t, faucet.OAuthSession{SessionID: "sess_active", ConnectionID: "conn_alice"}, got,
+		"two sessions of one connection stay apart, so a check that one session made fresh is not fresh for the other")
+	other, _ := idle.OAuthSession()
+	require.NotEqual(t, got.SessionID, other.SessionID)
+	require.Equal(t, "alice", active.Login, "the login is the bare GitHub login, as for a pasted token")
+	require.True(t, active.HasScope(faucet.ScopeEventsRead))
+	require.False(t, active.HasScope(faucet.ScopeEventsSubscribe))
+
+	_, ok = principal(t).OAuthSession()
+	require.False(t, ok, "a caller with a GitHub token has no OAuth session")
+	_, ok = principal(t).ServiceClient()
+	require.False(t, ok)
+}
+
+func TestAServiceIsNamedAfterItsClientAndKeepsItsGrants(t *testing.T) {
+	t.Parallel()
+
+	grants := []string{"repo:octo/repo"}
+	p, err := faucet.NewService(faucet.ServiceClient{ClientID: "ci-bot", Grants: grants}, []faucet.Scope{faucet.ScopeEventsSubscribe})
+	require.NoError(t, err)
+	require.Equal(t, "svc:ci-bot", p.Login)
+	grants[0] = "all"
+
+	client, ok := p.ServiceClient()
+	require.True(t, ok)
+	require.Equal(t, faucet.ServiceClient{ClientID: "ci-bot", Grants: []string{"repo:octo/repo"}}, client, "the caller's slice does not reach the principal")
+	client.Grants[0] = "all"
+	again, _ := p.ServiceClient()
+	require.Equal(t, []string{"repo:octo/repo"}, again.Grants, "a returned slice does not reach the principal")
+	_, ok = p.OAuthSession()
+	require.False(t, ok)
+}
+
+func TestPrincipalKindsNeedTheirFields(t *testing.T) {
+	t.Parallel()
+
+	read := []faucet.Scope{faucet.ScopeEventsRead}
+	session := faucet.OAuthSession{SessionID: "s", ConnectionID: "c"}
+	for name, build := range map[string]func() (faucet.Principal, error){
+		"oauth user without a login": func() (faucet.Principal, error) { return faucet.NewOAuthUser("", session, read) },
+		"oauth user without a session": func() (faucet.Principal, error) {
+			return faucet.NewOAuthUser("a", faucet.OAuthSession{ConnectionID: "c"}, read)
+		},
+		"oauth user without a connection": func() (faucet.Principal, error) {
+			return faucet.NewOAuthUser("a", faucet.OAuthSession{SessionID: "s"}, read)
+		},
+		"oauth user without a scope":       func() (faucet.Principal, error) { return faucet.NewOAuthUser("a", session, nil) },
+		"oauth user with an unknown scope": func() (faucet.Principal, error) { return faucet.NewOAuthUser("a", session, []faucet.Scope{"repo"}) },
+		"service without a client ID":      func() (faucet.Principal, error) { return faucet.NewService(faucet.ServiceClient{}, read) },
+		"service without a scope": func() (faucet.Principal, error) {
+			return faucet.NewService(faucet.ServiceClient{ClientID: "x"}, []faucet.Scope{})
+		},
+		"service with an unknown scope": func() (faucet.Principal, error) {
+			return faucet.NewService(faucet.ServiceClient{ClientID: "x"}, []faucet.Scope{"events:*"})
+		},
+	} {
+		_, err := build()
+		require.Error(t, err, name)
+	}
+}
+
+func TestNoPrincipalKindPrintsMoreThanItsLogin(t *testing.T) {
+	t.Parallel()
+
+	user, err := faucet.NewOAuthUser("alice", faucet.OAuthSession{SessionID: "sess_secretish", ConnectionID: "conn_x"}, []faucet.Scope{faucet.ScopeEventsRead})
+	require.NoError(t, err)
+	service, err := faucet.NewService(faucet.ServiceClient{ClientID: "bot", Grants: []string{"all"}}, []faucet.Scope{faucet.ScopeEventsRead})
+	require.NoError(t, err)
+	for _, p := range []faucet.Principal{principal(t), user, service} {
+		for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+			require.Equal(t, fmt.Sprintf("Principal{Login:%q}", p.Login), fmt.Sprintf(verb, p))
+		}
+	}
+}

@@ -173,7 +173,7 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	}
 	logger := s.logger.With(slog.F("repo", in.Repo))
 
-	p, err := s.principal(ctx, logger, "wait")
+	p, err := s.principal(ctx, logger, "wait", ScopeEventsRead)
 	if err != nil {
 		return nil, waitOutput{}, err
 	}
@@ -206,19 +206,25 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	return nil, out, nil
 }
 
-func (s *Service) authorize(ctx context.Context, logger slog.Logger, op, repo string) (int64, error) {
-	p, err := s.principal(ctx, logger, op)
+func (s *Service) authorize(ctx context.Context, logger slog.Logger, op string, scope Scope, repo string) (int64, error) {
+	p, err := s.principal(ctx, logger, op, scope)
 	if err != nil {
 		return 0, err
 	}
 	return s.authorizeRepo(ctx, logger, p, op, repo)
 }
 
-func (s *Service) principal(ctx context.Context, logger slog.Logger, op string) (Principal, error) {
+// principal returns the caller of this request when it holds scope, the
+// scope of op, before any repository is looked up.
+func (s *Service) principal(ctx context.Context, logger slog.Logger, op string, scope Scope) (Principal, error) {
 	p, err := s.principalFrom(ctx)
 	if err != nil {
 		logger.Info(ctx, op+" without a principal", slog.Error(err))
 		return Principal{}, errAuthRequired
+	}
+	if !p.HasScope(scope) {
+		logger.Info(ctx, op+" denied, scope missing", slog.F("login", p.Login), slog.F("scope", scope))
+		return Principal{}, xerrors.Errorf("the token does not grant the %s scope", scope)
 	}
 	return p, nil
 }
@@ -228,13 +234,9 @@ func (s *Service) authorizeRepo(ctx context.Context, logger slog.Logger, p Princ
 }
 
 // authorizeFreshRepo is authorizeRepo that ignores what the Authorizer
-// remembers, when it can.
+// remembers.
 func (s *Service) authorizeFreshRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo string) (int64, error) {
-	lookup := s.authorizer.RepoID
-	if u, ok := s.authorizer.(uncachedAuthorizer); ok {
-		lookup = u.RepoIDUncached
-	}
-	return checkRepo(ctx, logger, p, op, repo, lookup)
+	return checkRepo(ctx, logger, p, op, repo, s.authorizer.RepoIDFresh)
 }
 
 func checkRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo string, lookup func(context.Context, Principal, string) (int64, error)) (int64, error) {

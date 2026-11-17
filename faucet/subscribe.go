@@ -318,10 +318,10 @@ func (s *Service) unsubscribeMethod(ctx context.Context, _ *mcp.ServerSession, p
 	return &eventsUnsubscribeResult{ResultType: resultComplete}, nil
 }
 
-// subscriber rejects a principal without a login, because subscriptions are
-// keyed by it.
+// subscriber needs the events:subscribe scope, and rejects a principal
+// without a login, because subscriptions are keyed by it.
 func (s *Service) subscriber(ctx context.Context, logger slog.Logger, op string) (Principal, error) {
-	p, err := s.principal(ctx, logger, op)
+	p, err := s.principal(ctx, logger, op, ScopeEventsSubscribe)
 	if err == nil && p.Login == "" {
 		logger.Info(ctx, op+" by a principal without a login")
 		err = errAuthRequired
