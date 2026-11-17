@@ -133,7 +133,12 @@ export interface McpReply<R = Record<string, unknown>> extends Reply {
   error: McpError | null;
 }
 
+// McpPath is a path of the GitHub events MCP endpoint. /mcp is its alias for one release.
+export type McpPath = '/github/mcp' | '/mcp';
+
 export interface McpOptions {
+  // path defaults to /github/mcp.
+  path?: McpPath;
   token?: string | null;
   // as 'other' sends the second principal's token, the one the stub answers as verify-other. token must then be unset.
   as?: 'other';
@@ -360,7 +365,7 @@ export class Faucet {
     return this.request(`/cron/${job}${query === undefined ? '' : `?${query}`}`, { method: opts.method ?? 'GET', headers, body });
   }
 
-  // waitForEvents calls the wait_for_github_events tool on /mcp the way a
+  // waitForEvents calls the wait_for_github_events tool on /github/mcp the way a
   // stateless 2026-07-28 client does. A string token replaces the run's valid
   // GitHub token and null sends no Authorization header.
   async waitForEvents(args: Record<string, unknown>, token: string | null = this.#state.githubToken): Promise<WaitOutcome> {
@@ -387,7 +392,7 @@ export class Faucet {
         },
       },
     });
-    const reply = await this.request('/mcp', { method: 'POST', headers, body });
+    const reply = await this.request('/github/mcp', { method: 'POST', headers, body });
     const outcome: WaitOutcome = { ...reply, isError: false, text: '', events: null, cursor: null, truncated: null };
     if (reply.status !== 200) return outcome;
 
@@ -436,7 +441,7 @@ export class Faucet {
         },
       },
     });
-    const reply = await this.request('/mcp', { method: 'POST', headers, body });
+    const reply = await this.request(opts.path ?? '/github/mcp', { method: 'POST', headers, body });
     if (!(reply.headers.get('content-type') ?? '').includes('json')) {
       return { ...reply, id: null, result: null, error: null };
     }
