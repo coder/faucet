@@ -8,7 +8,9 @@ const noHeadCommit = ['pr.comments', 'pr.comment_created'];
 const noPullRequest = ['ci.jobs', 'ci.statuses'];
 const fieldFilters: Record<string, string[]> = {
   'ci.runs': ['conclusion', 'head_branch'],
+  'ci.jobs': ['conclusion'],
   'ci.checks': ['conclusion'],
+  'ci.suites': ['conclusion'],
   'pr.activity': ['base_branch', 'head_branch'],
 };
 const WEBHOOK_UNSUPPORTED = {

@@ -4,7 +4,7 @@ An agent asks for only the events it wants by a field of their data: `base_branc
 
 ## Sub-features
 
-- `events/list` offers a filter only on a family whose data has the field: `ci.runs` takes `head_branch` and `conclusion`, `ci.checks` takes `conclusion`, and `pr.activity` takes `base_branch` and `head_branch`. The exact types offer none. A filter that the name does not offer, an empty list or a value that is not a list of strings is `InvalidParams` for a poll and for a subscribe, and the subscribe stores nothing.
+- `events/list` offers a filter only on a family whose data has the field: `ci.runs` takes `head_branch` and `conclusion`, `ci.jobs`, `ci.checks` and `ci.suites` take `conclusion`, and `pr.activity` takes `base_branch` and `head_branch`. `ci.statuses` and the exact types offer none. A null field, such as the `conclusion` of a job that has not completed, matches no value. A filter that the name does not offer, an empty list or a value that is not a list of strings is `InvalidParams` for a poll and for a subscribe, and the subscribe stores nothing.
 - "CI failed on main" is `ci.runs` with `actions: ["completed"]`, `head_branch: ["main"]` and `conclusion: ["failure", "timed_out"]`. "Pull requests into main to review" is `pr.activity` with the actions that ask for a review and `base_branch: ["main"]`.
 - The store applies the filters before the page limit, so `maxEvents`, `hasMore` and the cursor count only the matching events, and a webhook subscription is sent only them.
 - `head_branch` never matches a branch of a fork. `ci.runs` and `pr.activity` events carry `from_fork`, true when the head repository is another one or, for a pull request, a fork that was deleted, and the filter matches only events whose `from_fork` is false.

@@ -91,6 +91,7 @@ var families = []*family{
 		githubEvent: "workflow_job",
 		description: "Jobs of GitHub Actions workflow runs. GitHub names no pull request in these events, so filter by sha and not by pr.",
 		noPRs:       true,
+		filters:     []string{"conclusion"},
 		properties: `{
     "job_id": {"type": "integer"},
     "run_id": {"type": "integer"},
@@ -129,6 +130,7 @@ var families = []*family{
 		name:        "ci.suites",
 		githubEvent: "check_suite",
 		description: "Check suites on a commit. A suite holds the check runs of one app, and it completes when they all have.",
+		filters:     []string{"conclusion"},
 		properties: `{
     "check_suite_id": {"type": "integer"},
     "status": {"type": ["string", "null"]},
@@ -252,7 +254,7 @@ var fieldFilters = []fieldFilter{
 		description:  "Only events whose head_branch is one of these branches of this repository. A branch of a fork never matches, so main is this repository's main.",
 		requireFalse: "from_fork",
 	},
-	{name: "conclusion", description: "Only events whose conclusion is one of these, for example failure or timed_out."},
+	{name: "conclusion", description: "Only events whose conclusion is one of these, for example failure or timed_out. An event whose conclusion is null, one that has not completed, never matches."},
 }
 
 // fieldArguments are the field filters of the arguments, by the name of their

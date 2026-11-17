@@ -158,6 +158,21 @@ describe('field filters', () => {
     expect(all.events.map((e) => [e.data.head_branch, e.data.from_fork])).toEqual([['main', false], ['main', true], ['main', true]]);
   });
 
+  test('a conclusion filter matches no job or check that has not completed', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const repo = repoOf(repoId);
+    const { cursor } = await polled(faucet, 'ci.jobs', { repo });
+    await store(faucet, 'workflow_job', recorded('workflow_job_queued', repoId));
+    const failedJob = await store(faucet, 'workflow_job', recorded('workflow_job_completed', repoId));
+    await store(faucet, 'check_run', recorded('check_run_created', repoId));
+    const passedCheck = await store(faucet, 'check_run', recorded('check_run_completed', repoId));
+
+    const jobs = await polled(faucet, 'ci.jobs', { repo, conclusion: ['failure', 'success'] }, { cursor });
+    const checks = await polled(faucet, 'ci.checks', { repo, conclusion: ['failure', 'success'] }, { cursor });
+    expect(jobs.events.map((e) => [e.eventId, e.data.conclusion])).toEqual([[failedJob, 'failure']]);
+    expect(checks.events.map((e) => [e.eventId, e.data.conclusion])).toEqual([[passedCheck, 'success']]);
+  });
+
   test('reordered or repeated filter values address the same subscription', async ({ faucet }) => {
     const repoId = newRepoId();
     const marker = newMarker();
@@ -180,6 +195,9 @@ describe('field filters', () => {
       ['ci.runs', { branch: ['main'] }],
       ['ci.runs', { base_branch: ['main'] }],
       ['ci.checks', { head_branch: ['main'] }],
+      ['ci.jobs', { head_branch: ['main'] }],
+      ['ci.suites', { head_branch: ['main'] }],
+      ['ci.statuses', { conclusion: ['failure'] }],
       ['pr.activity', { conclusion: ['failure'] }],
       ['ci.run_completed', { head_branch: ['main'] }],
       ['ci.runs', { head_branch: [] }],

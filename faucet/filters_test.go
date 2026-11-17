@@ -233,16 +233,19 @@ func TestAFieldFilterThatTheNameDoesNotOfferIsInvalidParams(t *testing.T) {
 		event     string
 		arguments map[string]any
 	}{
-		"an unknown filter":                    {"ci.runs", repoArgs("branch", []string{"main"})},
-		"a filter of another family":           {"ci.runs", repoArgs("base_branch", []string{"main"})},
-		"a filter whose field the data lacks":  {"ci.checks", repoArgs("head_branch", []string{"main"})},
-		"a conclusion for pull requests":       {"pr.activity", repoArgs("conclusion", []string{"failure"})},
-		"a filter of a family with no filters": {"pr.reviews", repoArgs("head_branch", []string{"main"})},
-		"a filter for an exact type":           {"ci.run_completed", repoArgs("head_branch", []string{"main"})},
-		"no value":                             {"ci.runs", repoArgs("head_branch", []string{})},
-		"a value that is not a list":           {"ci.runs", repoArgs("head_branch", "main")},
-		"values that are not strings":          {"ci.runs", repoArgs("conclusion", []int{1})},
-		"a known filter beside an unknown one": {"ci.runs", repoArgs("conclusion", []string{"failure"}, "status", []string{"completed"})},
+		"an unknown filter":          {"ci.runs", repoArgs("branch", []string{"main"})},
+		"a filter of another family": {"ci.runs", repoArgs("base_branch", []string{"main"})},
+		"a head branch of check runs, which name no head repository": {"ci.checks", repoArgs("head_branch", []string{"main"})},
+		"a head branch of jobs":                        {"ci.jobs", repoArgs("head_branch", []string{"main"})},
+		"a head branch of check suites":                {"ci.suites", repoArgs("head_branch", []string{"main"})},
+		"a conclusion of statuses, which have a state": {"ci.statuses", repoArgs("conclusion", []string{"failure"})},
+		"a conclusion for pull requests":               {"pr.activity", repoArgs("conclusion", []string{"failure"})},
+		"a filter of a family with no filters":         {"pr.reviews", repoArgs("head_branch", []string{"main"})},
+		"a filter for an exact type":                   {"ci.run_completed", repoArgs("head_branch", []string{"main"})},
+		"no value":                                     {"ci.runs", repoArgs("head_branch", []string{})},
+		"a value that is not a list":                   {"ci.runs", repoArgs("head_branch", "main")},
+		"values that are not strings":                  {"ci.runs", repoArgs("conclusion", []int{1})},
+		"a known filter beside an unknown one":         {"ci.runs", repoArgs("conclusion", []string{"failure"}, "status", []string{"completed"})},
 	} {
 		require.EqualValues(t, codeInvalidParams, h.pollError(pollParams(params.event, params.arguments, nil)).Code, "poll with %s", name)
 		require.EqualValues(t, codeInvalidParams, h.subscribeError(&rawParams{
@@ -276,7 +279,9 @@ func TestEventsListOffersEachFieldFilterOnlyWhereTheDataHasTheField(t *testing.T
 	require.NoError(t, json.Unmarshal(res.fields["events"], &events))
 	want := map[string][]string{
 		"ci.runs":     {"conclusion", "head_branch"},
+		"ci.jobs":     {"conclusion"},
 		"ci.checks":   {"conclusion"},
+		"ci.suites":   {"conclusion"},
 		"pr.activity": {"base_branch", "head_branch"},
 	}
 	fieldFilters := []string{"base_branch", "conclusion", "head_branch"}
@@ -344,5 +349,37 @@ func TestWaitWithAFieldFilterLeavesTheNamesThatDoNotOfferItWhole(t *testing.T) {
 		"a filter of none of several":   {"types", []string{"pr.activity", "pr.reviews"}, "conclusion", []string{"failure"}},
 	} {
 		require.Contains(t, h.call(args(append([]any{"repo", testRepo, "cursor", 0}, filters...)...)).failure(t), "is a filter of none of the names in types", name)
+	}
+}
+
+func TestAConclusionFilterMatchesOnlyTheCIEventsThatEndedSo(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		family, event, unfinished, finished, conclusion string
+	}{
+		{"ci.runs", "workflow_run", "workflow_run_requested", "workflow_run_completed", "success"},
+		{"ci.jobs", "workflow_job", "workflow_job_queued", "workflow_job_completed", "failure"},
+		{"ci.checks", "check_run", "check_run_created", "check_run_completed", "success"},
+		{"ci.suites", "check_suite", "", "check_suite_completed", "success"},
+	} {
+		t.Run(tc.family, func(t *testing.T) {
+			t.Parallel()
+
+			h := newEventsHarness(t)
+			start := h.headCursor(repoArgs())
+			if tc.unfinished != "" {
+				storeDelivery(h.ctx, t, h.store, tc.event, tc.unfinished, "unfinished")
+			}
+			finished := storeDelivery(h.ctx, t, h.store, tc.event, tc.finished, "finished")
+
+			conclusion := func(values ...string) []string {
+				t.Helper()
+				return h.poll(pollParams(tc.family, repoArgs("conclusion", values), cursorOf(start))).eventIDs()
+			}
+			require.Equal(t, []string{finished.DeliveryID}, conclusion(tc.conclusion, "null", ""),
+				"an event whose conclusion is still null matches no value")
+			require.Empty(t, conclusion("neutral"))
+		})
 	}
 }
