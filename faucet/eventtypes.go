@@ -184,6 +184,9 @@ var shaInputResolved = mustResolve(fmt.Sprintf(pollArgumentsTemplate, shaArgumen
 func init() {
 	byEvent := map[string]*family{}
 	for _, f := range families {
+		if _, dup := byEvent[f.githubEvent]; dup {
+			panic(fmt.Sprintf("two event families read the GitHub event %s", f.githubEvent))
+		}
 		byEvent[f.githubEvent] = f
 	}
 	for _, key := range slices.Sorted(maps.Keys(rules)) {
