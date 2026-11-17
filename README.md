@@ -10,10 +10,10 @@ Faucet receives GitHub webhooks, stores them as typed events, and lets an agent 
 
 - `faucet`: `Event`, `Store`, `Normalize`, `Service.WebhookHandler`, `Service.Register` (the MCP tool and the `events/list`, `events/poll`, `events/subscribe` and `events/unsubscribe` methods), `ServerCapabilities` and `RequireEventName` (the Events extension), and `Principal` with `NewPrincipal`, `NewOAuthUser` and `NewService` (the three kinds of caller), `Scope` (what each method needs), `Authorizer` and `TokenAuthorizer` (the per-repo access check), `Service.Purge` (retention), and `WebhookDeps`, `WebhookKey`, `CallbackVerifier`, `NewCallbackAllowlist` and `NewCallbackHandshake` (webhook subscriptions), `NewHTTPClient` and `SignWebhook` (the guarded client and the signer that deliveries use), and `Service.DeliverDue` (webhook delivery).
 - `faucet/redelivery`: `New`, `Runner.Run`, `Store`, `HookAdmin` and `GitHubHookAdmin` (redelivery of failed webhooks).
-- `faucet/oauth`: `NewVerifier`, `Store` and `Minted` (the access tokens that faucet mints; nothing mints them yet).
+- `faucet/oauth`: `NewServer` (the token endpoint and its metadata), `NewClient`, `ServiceResolver` and `NewServiceAccess` (service clients and their repo grants), and `NewVerifier`, `Store` and `Minted` (the access tokens that faucet mints).
 - `faucet/pgstore`: the Postgres store, with embedded migrations and sqlc queries.
 - `faucet/storetest`: the contract tests every `Store` must pass.
-- `cmd/faucet`: the server. It serves `POST /webhook/github`, `/github/mcp` (and `/mcp`, its alias for one release), `GET /healthz`, `GET /cron/purge` `GET /cron/deliver` and `GET /cron/redeliver`.
+- `cmd/faucet`: the server. It serves `POST /webhook/github`, `/github/mcp` (and `/mcp`, its alias for one release), `GET /healthz`, `GET /cron/purge` `GET /cron/deliver` and `GET /cron/redeliver`, and with `FAUCET_PUBLIC_URL` set, `POST /oauth/token` and the `/.well-known/oauth-*` documents (see **Service accounts**). `faucet clients` makes the clients of services.
 
 ## Run the server
 
@@ -64,7 +64,7 @@ Every CI event carries `html_url` (except a check suite, which GitHub gives none
 
 ## Wait for events
 
-`/github/mcp` is a stateless MCP endpoint, the one for GitHub events. Every request must carry `Authorization: Bearer <GitHub token>`. Faucet checks the token with `GET /user`, then checks that the same token can read the repository with `GET /repos/{owner}/{name}`. The token is held for that one request and sent only to the GitHub API URL. A bearer that starts with `fct_`, `fcr_` or `fcs_` is a faucet token: faucet checks it itself and never sends it to GitHub. This version mints none, so each one is 401. Faucet remembers a successful answer for 60 seconds, keyed by a hash of the token and never the token (see **GitHub API cost**). `FAUCET_GITHUB_API_URL` sets that URL. It defaults to `https://api.github.com`, and it must be `https`, except `http` is accepted for a loopback host.
+`/github/mcp` is a stateless MCP endpoint, the one for GitHub events. Every request must carry `Authorization: Bearer <GitHub token>`. Faucet checks the token with `GET /user`, then checks that the same token can read the repository with `GET /repos/{owner}/{name}`. The token is held for that one request and sent only to the GitHub API URL. A bearer that starts with `fct_`, `fcr_` or `fcs_` is a faucet token: faucet checks it itself and never sends it to GitHub. Faucet mints access tokens for service clients only (see **Service accounts**), and any other faucet token is 401. Faucet remembers a successful answer for 60 seconds, keyed by a hash of the token and never the token (see **GitHub API cost**). `FAUCET_GITHUB_API_URL` sets that URL. It defaults to `https://api.github.com`, and it must be `https`, except `http` is accepted for a loopback host.
 
 `wait_for_github_events` takes:
 
@@ -153,6 +153,23 @@ Faucet holds no GitHub token of its own, so it sees a revoked grant **only when 
 
 The route answers `{"enqueued", "gaps", "gaps_sent", "gaps_failed", "claimed", "sent", "delivered", "retried", "gave_up": {reason: count}, "superseded", "previous_secrets_cleared", "incomplete"}`. `superseded` counts attempts whose result the store refused, because another run owns the delivery now (that run counts its end) or because its subscription was deleted meanwhile. `incomplete: true` says that a limit stopped the run with due work left. `/cron/deliver` answers 503 when webhook mode is off.
 
+## Service accounts
+
+A service agent, such as one that analyzes GitHub events, can log in with a client ID and secret that an operator made ahead of time, with preset repo grants and no GitHub token. Set `FAUCET_PUBLIC_URL` to the URL that clients call, such as `https://faucet.example.com`: `https` (`http` only on a loopback host), a lower-case host, no default port and no path, not even a trailing slash. The server refuses to start with any other form, because a client compares the URLs it computes byte for byte. Unset, none of this exists, and a 401 carries the bare `WWW-Authenticate: Bearer` of before. On Vercel, set it for Production only.
+
+Make a client with the database URL of the deployment:
+
+```sh
+DATABASE_URL='<the production database URL>' go run ./cmd/faucet clients create \
+  -resource https://faucet.example.com/github/mcp -grant repo:coder/faucet ci-watcher
+```
+
+It prints `client_id` and `client_secret` once. Faucet keeps only the SHA-256 of the secret, `fcs_` and 32 random bytes in base64url. `-resource` is the one endpoint that the client's tokens are for (`/github/mcp`, or `/mcp`), `-scope` the scopes that they can hold (`events:read,events:subscribe` by default), and each `-grant repo:<owner>/<name>` a repository that the client may read. `faucet clients list` shows every client without its secret. `faucet clients disable <client-id>` ends one: it gets no new token, and the token it holds fails on its next request. A client ID is never given to a second client, because the login `svc:<client-id>` owns that client's subscriptions. The commands never migrate, so the database must be at the newest migration.
+
+The service's MCP client needs only the endpoint URL, the client ID and the secret, and go-sdk's `extauth.ClientCredentialsHandler` is such a client. A request without a token gets 401 with `WWW-Authenticate: Bearer resource_metadata="<FAUCET_PUBLIC_URL>/.well-known/oauth-protected-resource/github/mcp", scope="events:read events:subscribe"`. That document (RFC 9728) names faucet as the authorization server, and faucet's metadata at `/.well-known/oauth-authorization-server` names `POST /oauth/token`. The token endpoint takes the `client_credentials` grant with HTTP Basic client authentication (`client_secret_basic`, the ID and secret URL-encoded first, as RFC 6749 section 2.3.1 says). The token holds the scopes that the request asks for and the client holds, named in `scope`, and a request for none of them is `invalid_scope`. A request without `resource` gets the client's endpoint, and one for another endpoint is `invalid_target`. The access token starts with `fct_`, lasts 15 minutes and comes without a refresh token: the client asks again with its secret.
+
+A service may read a repository that one of its grants names, matched by name and ignoring case, as GitHub does. Faucet never asks GitHub about it. It learns the ID of a repository from the signed deliveries that name it, stored or ignored, so a granted repository is readable once GitHub has sent one delivery from it. Until then the wait tool says so. After a rename, the grant must name the new name. `/mcp` has its own metadata document and is its own resource, so a client made for `/github/mcp` cannot use `/mcp`.
+
 ## Retention
 
 `GET /cron/purge` keeps the event table small. Together with `/cron/deliver` above, a scheduler calls each route with `GET` and `Authorization: Bearer <CRON_SECRET>`. Vercel Cron does this for a project that has `CRON_SECRET`, from the `crons` entries of its `vercel.json`.
@@ -239,6 +256,7 @@ The server applies pending migrations when a production instance starts, over `D
 
 `pgstore.Migrate` applies every schema change. The server runs it at start, and on Vercel only in production, see **Deploy on Vercel**.
 
+- **Service accounts and migration `000011_service_clients_and_repos`.** The migration adds `faucet_service_clients` and `faucet_repos`. Every signed delivery that names a repository now writes a row of `faucet_repos` first, ping and ignored events too, and the webhook answers 500 when that write fails. Nothing else changes until you set `FAUCET_PUBLIC_URL` (see **Service accounts**). A `Store` of your own gains `UpsertRepository` and `RepositoryByName`, and an `oauth.Store` gains `InsertClient`, `Client`, `Clients` and `DisableClient`; `storetest` checks each one. An `Authorizer` may now return an error that wraps `ErrNoAccess` and says why, and the caller reads its text. An Instant Rollback past this migration cannot start, see **Deploy on Vercel**.
 - **The MCP endpoint is now `/github/mcp`.** Faucet will serve one MCP endpoint per service, and this one serves GitHub events. Point MCP clients at `https://<your host>/github/mcp`. `/mcp` still serves the same endpoint, with the same token check, and a later release removes it. An Instant Rollback to a build before this one answers 404 to clients that already call `/github/mcp`.
 - **An `Authorizer` of your own, and the scopes of a `Principal`.** `Authorizer` has a second method, `RepoIDFresh`, which `events/subscribe` calls for every renewal. `AccessCache.RepoIDUncached` is now `AccessCache.RepoIDFresh`, and `TokenAuthorizer.RepoIDFresh` is its `RepoID`. A `Principal` from `NewPrincipal` holds both scopes, as before, and `NewPrincipal` refuses a login with a colon, which GitHub never gives. One built by hand, as `faucet.Principal{Login: ...}`, or one whose `Login` was changed after a constructor built it, is no kind of caller (`Principal.Authenticated` says so): every method but `events/list` answers it `authentication required`. `TokenAuthorizer` answers a caller without a GitHub token with `ErrNoAccess` and asks GitHub nothing; before, the caller saw `could not verify repository access, try again`. Migration `000010_access_tokens` adds the table `faucet_access_tokens`, which nothing writes yet.
 - **Rows sealed before secret rotation existed.** The first refresh of such a row with the same secret counts as one rotation, because the new sealing of the secret is not the old bytes. For up to 10 minutes the old sealing is the previous secret. It opens to the same secret, so a signature has one `v1,` entry.
