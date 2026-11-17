@@ -222,7 +222,7 @@ func (s *Service) principal(ctx context.Context, logger slog.Logger, op string, 
 	case err != nil:
 		logger.Info(ctx, op+" without a principal", slog.Error(err))
 		return Principal{}, errAuthRequired
-	case !p.authenticated():
+	case !p.Authenticated():
 		logger.Info(ctx, op+" by a principal of no kind")
 		return Principal{}, errAuthRequired
 	case !p.HasScope(scope):

@@ -186,10 +186,19 @@ func (p Principal) Scopes() []Scope {
 	return slices.DeleteFunc(slices.Clone(knownScopes), func(s Scope) bool { return !p.HasScope(s) })
 }
 
-// authenticated reports whether p came from one of the constructors. A
-// Principal built by hand is no kind of caller.
-func (p Principal) authenticated() bool {
-	return p.kind != 0
+// Authenticated reports whether p came from one of the constructors and
+// still has the login that it gave: a GitHub login for a caller with a GitHub
+// token or an OAuth user, and "svc:" and the client ID for a service. A
+// Principal built by hand, or one whose Login was changed, is no kind of
+// caller.
+func (p Principal) Authenticated() bool {
+	switch p.kind {
+	case kindGitHubToken, kindOAuthUser:
+		return githubLogin(p.Login) == nil
+	case kindService:
+		return p.Login == "svc:"+p.clientID
+	}
+	return false
 }
 
 // OAuthSession returns the session of an OAuth user, and false for any other

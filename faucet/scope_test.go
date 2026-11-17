@@ -71,7 +71,19 @@ func TestSubscribeScopeSubscribesButCannotWaitOrPoll(t *testing.T) {
 func TestAPrincipalOfNoKindIsNotAuthenticated(t *testing.T) {
 	t.Parallel()
 
-	for _, p := range []faucet.Principal{{}, {Login: "octocat"}} {
+	cleared, err := faucet.NewPrincipal("octocat", testToken)
+	require.NoError(t, err)
+	cleared.Login = ""
+	colon, err := faucet.NewPrincipal("octocat", testToken)
+	require.NoError(t, err)
+	colon.Login = "svc:ci-bot"
+	renamed, err := faucet.NewService(faucet.ServiceClient{ClientID: "ci-bot"}, []faucet.Scope{faucet.ScopeEventsRead, faucet.ScopeEventsSubscribe})
+	require.NoError(t, err)
+	renamed.Login = "octocat"
+	user, err := faucet.NewOAuthUser("alice", faucet.OAuthSession{SessionID: "s", ConnectionID: "c"}, []faucet.Scope{faucet.ScopeEventsRead, faucet.ScopeEventsSubscribe})
+	require.NoError(t, err)
+	user.Login = "a:b"
+	for _, p := range []faucet.Principal{{}, {Login: "octocat"}, cleared, colon, renamed, user} {
 		h := newWebhookHarness(t, func(d *faucet.Deps) {
 			d.PrincipalFrom = func(context.Context) (faucet.Principal, error) { return p, nil }
 		})
@@ -88,7 +100,17 @@ func TestAPrincipalOfNoKindIsNotAuthenticated(t *testing.T) {
 			require.Equal(t, "authentication required", rpcErr.Message, "%+v is no kind of caller, as on the subscribe path before kinds", p)
 		}
 		require.Zero(t, h.authz.callCount())
+		require.Zero(t, h.verifier.callCount(), "%+v is refused before the callback handshake", p)
 	}
+}
+
+func TestEventsListNeedsNoScope(t *testing.T) {
+	t.Parallel()
+
+	h := newEventsHarness(t, func(d *faucet.Deps) { d.PrincipalFrom = failingPrincipal })
+	res, err := h.call(methodList, &rawParams{})
+	require.NoError(t, err, "events/list returns the catalog and reads no principal")
+	require.Contains(t, res.fields, "events")
 }
 
 func TestACallerWithoutAGitHubTokenHasNoAccessThroughTheTokenAuthorizer(t *testing.T) {

@@ -386,6 +386,20 @@ func TestPrincipalNeverPrintsItsToken(t *testing.T) {
 	require.Contains(t, fmt.Sprint(p), "octocat")
 }
 
+func TestAnOAuthUserKeepsItsSessionAndConnection(t *testing.T) {
+	t.Parallel()
+
+	p, err := faucet.NewOAuthUser("alice", faucet.OAuthSession{SessionID: "sess_active", ConnectionID: "conn_alice"}, []faucet.Scope{faucet.ScopeEventsRead})
+	require.NoError(t, err)
+	session, ok := p.OAuthSession()
+	require.True(t, ok)
+	require.Equal(t, "sess_active", session.SessionID)
+	require.Equal(t, "conn_alice", session.ConnectionID, "the access checks of PR 5 are kept per connection")
+	require.Equal(t, "alice", p.Login)
+	_, ok = principal(t).OAuthSession()
+	require.False(t, ok, "a caller with a GitHub token has no OAuth session")
+}
+
 func TestAServiceIsNamedAfterItsClientAndKeepsItsGrants(t *testing.T) {
 	t.Parallel()
 
