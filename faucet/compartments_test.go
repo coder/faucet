@@ -29,7 +29,10 @@ const module = "github.com/coder/faucet"
 // new helper or adapter fails closed.
 var (
 	internals = []string{"faucet/internal/githubapi", "faucet/internal/pgtest"}
-	adapters  = []string{"faucet/pgstore", "faucet/pgstore/database", "faucet/storetest"}
+	// testHelpers are the internals that only test files import, so that no
+	// build of the server links testing and testify.
+	testHelpers = []string{"faucet/internal/pgtest"}
+	adapters    = []string{"faucet/pgstore", "faucet/pgstore/database", "faucet/storetest"}
 )
 
 // coreUses lists, for each feature, the core identifiers that its non-test
@@ -151,6 +154,9 @@ func compartmentViolations(pkgs []goPackage, coreUses map[string][]string) []str
 				if slices.ContainsFunc(strings.Split(target, "/"), skipped) {
 					add("R7: %s imports %s: the walk reads no testdata, _ or . directory", where, imp.path)
 				}
+				if slices.Contains(testHelpers, target) && !f.test() {
+					add("R9: %s imports %s: only test files import a test helper", where, imp.path)
+				}
 				tr, tfeature := roleOf(target)
 				switch r {
 				case roleCore:
@@ -189,14 +195,19 @@ func compartmentViolations(pkgs []goPackage, coreUses map[string][]string) []str
 				}
 			}
 			if r == roleCore {
-				parts := strings.Split(strings.TrimSuffix(strings.TrimSuffix(f.name, ".go"), "_test"), "_")
+				base := strings.TrimSuffix(strings.TrimSuffix(f.name, ".go"), "_test")
+				parts := strings.Split(base, "_")
 				for feature := range features {
-					// A part of the name is the feature's name, or that name less
-					// a trailing y or s, so that the verb (redeliver) counts as
-					// well as the noun (redelivery).
-					if slices.ContainsFunc(parts, func(p string) bool {
-						return p != "" && (p == feature || p+"y" == feature || p+"s" == feature)
-					}) {
+					// The feature's name less a trailing y or s is its stem, so
+					// that the verb (redeliver) counts as well as the noun
+					// (redelivery). A part of the file name that is the name or
+					// the stem matches, and so does a file name that starts with
+					// a stem of 4 or more letters, because this repo runs words
+					// together (redeliverystore.go). The length keeps a short
+					// feature name from matching every core file.
+					stem := strings.TrimSuffix(strings.TrimSuffix(feature, "y"), "s")
+					if slices.ContainsFunc(parts, func(p string) bool { return p == feature || p == stem }) ||
+						(len(stem) >= 4 && strings.HasPrefix(base, stem)) {
 						add("R6: %s is named like the feature %s: its code belongs in faucet/%s", where, feature, feature)
 					}
 				}
@@ -399,6 +410,10 @@ func TestCompartmentRulesRejectEachBreach(t *testing.T) {
 		{"core imports a package under a dot directory", addFile("faucet", fileOf("x.go", use(helper+"/.x", "New"))), "R7: faucet/x.go imports " + helper + "/.x"},
 		{"a core file named like a feature's verb", addFile("faucet", fileOf("redeliver_probe.go")), "R6: faucet/redeliver_probe.go is named like the feature redelivery"},
 		{"a core test named like a feature", addFile("faucet", fileOf("redelivery_test.go")), "R6: faucet/redelivery_test.go is named like the feature redelivery"},
+		{"a core file that runs a feature's name into another word", addFile("faucet", fileOf("redeliverystore.go")), "R6: faucet/redeliverystore.go is named like the feature redelivery"},
+		{"a core test that runs a feature's verb into another word", addFile("faucet", fileOf("redeliverharness_test.go")), "R6: faucet/redeliverharness_test.go is named like the feature redelivery"},
+		{"code imports a test helper", addFile("faucet/redelivery", fileOf("x.go", use(pgtest, "NewDB"))), "R9: faucet/redelivery/x.go imports " + pgtest},
+		{"core code imports a test helper", addFile("faucet", fileOf("x.go", use(pgtest, "NewDB"))), "R9: faucet/x.go imports " + pgtest},
 		{"a core file whose last part is a feature's verb", addFile("faucet", fileOf("hook_redeliver.go")), "R6: faucet/hook_redeliver.go is named like the feature redelivery"},
 		{"no feature", func(pkgs []goPackage) []goPackage {
 			return slices.DeleteFunc(pkgs, func(p goPackage) bool { r, _ := roleOf(p.dir); return r == roleFeature })
