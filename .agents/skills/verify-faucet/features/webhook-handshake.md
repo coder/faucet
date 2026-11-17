@@ -17,7 +17,7 @@ An agent that subscribes a callback URL with `events/subscribe` can ask the oper
 
 ## How to get to it (user POV)
 
-An agent that runs a webhook receiver sends `events/subscribe` to `/mcp` with `Authorization: Bearer <GitHub token>` and `Mcp-Name: <event name>`. It generates the `whsec_` secret itself, and it must verify the signature of the first request before it answers. The reply is the usual subscribe result, or one of the errors above. The agent cannot see any of the nonce, the signature, the log or the other hosts' buckets.
+An agent that runs a webhook receiver sends `events/subscribe` to `/github/mcp` with `Authorization: Bearer <GitHub token>` and `Mcp-Name: <event name>`. It generates the `whsec_` secret itself, and it must verify the signature of the first request before it answers. The reply is the usual subscribe result, or one of the errors above. The agent cannot see any of the nonce, the signature, the log or the other hosts' buckets.
 
 ## Driving it with e2e
 

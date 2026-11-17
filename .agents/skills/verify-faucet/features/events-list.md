@@ -1,6 +1,6 @@
 # Events list
 
-An agent finds out which events faucet offers through `server/discover` and `events/list` on `POST /mcp`. This is the discovery half of the MCP Events extension (SEP-3415). The agent reads it before it polls with [events/poll](events-poll.md).
+An agent finds out which events faucet offers through `server/discover` and `events/list` on `POST /github/mcp`. This is the discovery half of the MCP Events extension (SEP-3415). The agent reads it before it polls with [events/poll](events-poll.md).
 
 ## Sub-features
 
@@ -14,7 +14,7 @@ An agent finds out which events faucet offers through `server/discover` and `eve
 
 ## How to get to it (user POV)
 
-An agent's MCP client sends `server/discover`, then `events/list`, to `/mcp` with `Authorization: Bearer <GitHub token>`. Both are stateless 2026-07-28 requests: the header `MCP-Protocol-Version: 2026-07-28`, an `Mcp-Method` header and the `_meta` triple in `params`. The stub plays GitHub: it knows one token. The test plays the agent through `faucet.mcp`.
+An agent's MCP client sends `server/discover`, then `events/list`, to `/github/mcp` with `Authorization: Bearer <GitHub token>`. Both are stateless 2026-07-28 requests: the header `MCP-Protocol-Version: 2026-07-28`, an `Mcp-Method` header and the `_meta` triple in `params`. The stub plays GitHub: it knows one token. The test plays the agent through `faucet.mcp`.
 
 ## Driving it with e2e
 

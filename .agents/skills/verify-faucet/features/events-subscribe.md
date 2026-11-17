@@ -1,6 +1,6 @@
 # Events subscribe
 
-An agent asks faucet to send the events of one repository to a webhook it runs, through `events/subscribe` on `POST /mcp`. This is the webhook delivery mode of the MCP Events extension (SEP-3415). Faucet stores the subscription and makes no request to the callback URL when it does. A later call to `GET /cron/deliver` sends the events, see [delivery](delivery.md). The agent ends a subscription with [events/unsubscribe](events-unsubscribe.md). [events/list](events-list.md) says whether the mode is offered, and [startup](startup.md) says what turns it on.
+An agent asks faucet to send the events of one repository to a webhook it runs, through `events/subscribe` on `POST /github/mcp`. This is the webhook delivery mode of the MCP Events extension (SEP-3415). Faucet stores the subscription and makes no request to the callback URL when it does. A later call to `GET /cron/deliver` sends the events, see [delivery](delivery.md). The agent ends a subscription with [events/unsubscribe](events-unsubscribe.md). [events/list](events-list.md) says whether the mode is offered, and [startup](startup.md) says what turns it on.
 
 ## Sub-features
 
@@ -22,7 +22,7 @@ An agent asks faucet to send the events of one repository to a webhook it runs, 
 
 ## How to get to it (user POV)
 
-An agent that runs a webhook receiver sends `events/subscribe` to `/mcp` with `Authorization: Bearer <GitHub token>` and `Mcp-Name: <event name>`, as a stateless 2026-07-28 request. It sends again before `refreshBefore` to keep the subscription, and `events/unsubscribe` to end it. The stub plays GitHub: it knows two tokens, for `verify-user` and `verify-other`, and the repositories `verify/r<id>`. The test plays the agent through `faucet.mcp`, `subscribe` in `tests/subscriptions.ts`, and the second principal through `{ as: 'other' }`.
+An agent that runs a webhook receiver sends `events/subscribe` to `/github/mcp` with `Authorization: Bearer <GitHub token>` and `Mcp-Name: <event name>`, as a stateless 2026-07-28 request. It sends again before `refreshBefore` to keep the subscription, and `events/unsubscribe` to end it. The stub plays GitHub: it knows two tokens, for `verify-user` and `verify-other`, and the repositories `verify/r<id>`. The test plays the agent through `faucet.mcp`, `subscribe` in `tests/subscriptions.ts`, and the second principal through `{ as: 'other' }`.
 
 ## Driving it with e2e
 
