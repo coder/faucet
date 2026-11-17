@@ -5,6 +5,7 @@ const MERGE_SHA = 'fedcba9876543210fedcba9876543210fedcba98';
 const BASE_SHA = '00112233445566778899aabbccddeeff00112233';
 const PR = 7;
 const FORK_PR = 99;
+const SENDER = { login: 'octocat', id: 583231 };
 
 function pullRequestRef(number: number, repoId: number, baseRepoId: number = repoId): object {
   return {
@@ -53,14 +54,18 @@ export const samples: Record<string, Sample> = {
     payload: (repoId) => ({
       action: 'completed',
       repository: { id: repoId },
+      sender: SENDER,
       workflow_run: {
         id: 9001,
         name: 'ci',
+        status: 'completed',
         conclusion: 'success',
         head_branch: 'feat/example',
         head_sha: HEAD_SHA,
+        event: 'pull_request',
         html_url: 'https://github.com/example/repo/actions/runs/9001',
         run_attempt: 2,
+        workflow_id: 9100,
         pull_requests: [pullRequestRef(PR, repoId), pullRequestRef(FORK_PR, repoId, repoId + 1)],
       },
     }),
@@ -73,10 +78,15 @@ export const samples: Record<string, Sample> = {
       data: {
         run_id: 9001,
         name: 'ci',
+        status: 'completed',
         conclusion: 'success',
         head_branch: 'feat/example',
+        trigger_event: 'pull_request',
         html_url: 'https://github.com/example/repo/actions/runs/9001',
         run_attempt: 2,
+        workflow_id: 9100,
+        sender_login: SENDER.login,
+        sender_id: SENDER.id,
       },
     },
   },
@@ -85,9 +95,11 @@ export const samples: Record<string, Sample> = {
     payload: (repoId) => ({
       action: 'completed',
       repository: { id: repoId },
+      sender: SENDER,
       check_run: {
         id: 9002,
         name: 'lint',
+        status: 'completed',
         conclusion: 'failure',
         head_sha: HEAD_SHA,
         html_url: 'https://github.com/example/repo/runs/9002',
@@ -97,6 +109,7 @@ export const samples: Record<string, Sample> = {
           pullRequestRef(FORK_PR, repoId, repoId + 1),
         ],
         app: { slug: 'github-actions' },
+        check_suite: { id: 9200, head_branch: 'feat/example' },
       },
     }),
     expected: {
@@ -108,9 +121,14 @@ export const samples: Record<string, Sample> = {
       data: {
         check_run_id: 9002,
         name: 'lint',
+        status: 'completed',
         conclusion: 'failure',
         html_url: 'https://github.com/example/repo/runs/9002',
         app_slug: 'github-actions',
+        check_suite_id: 9200,
+        head_branch: 'feat/example',
+        sender_login: SENDER.login,
+        sender_id: SENDER.id,
       },
     },
   },
@@ -214,7 +232,8 @@ const RECORDED_PR = {
 
 // recordedSamples are webhooks of actions that no exact type of events/list
 // names. They are recorded payloads from faucet/testdata, so they are polled
-// by their family.
+// by their family. recorded() moves only repository.id, so the pull requests of
+// a recorded check, based on GitHub's sample repository, are not in prs.
 export const recordedSamples: Record<string, Sample> = {
   'pull_request.opened': {
     event: 'pull_request',
@@ -303,6 +322,145 @@ export const recordedSamples: Record<string, Sample> = {
         comment_ids: [284312630],
         user_login: 'Codertocat',
         html_url: 'https://github.com/Codertocat/Hello-World/pull/2#discussion_r284312630',
+        sender_login: 'Codertocat',
+        sender_id: 21031067,
+      },
+    },
+  },
+  'workflow_run.requested': {
+    event: 'workflow_run',
+    payload: (repoId) => recorded('workflow_run_requested', repoId),
+    expected: {
+      type: 'ci.run_requested',
+      family: 'ci.runs',
+      action: 'requested',
+      prs: [],
+      headSha: '3484a3fb816e0859fd6e1cea078d76385ff50625',
+      data: {
+        run_id: 289782451,
+        name: '',
+        status: 'queued',
+        conclusion: null,
+        head_branch: 'master',
+        trigger_event: 'repository_dispatch',
+        html_url: 'https://github.com/octo-org/octo-repo/actions/runs/289782451',
+        run_attempt: 1,
+        workflow_id: 2823525,
+        sender_login: 'Codertocat',
+        sender_id: 15669918,
+      },
+    },
+  },
+  'workflow_job.queued': {
+    event: 'workflow_job',
+    payload: (repoId) => recorded('workflow_job_queued', repoId),
+    expected: {
+      type: 'ci.job_queued',
+      family: 'ci.jobs',
+      action: 'queued',
+      prs: [],
+      headSha: '3484a3fb816e0859fd6e1cea078d76385ff50625',
+      data: {
+        job_id: 289782451,
+        run_id: 2202229078,
+        run_attempt: 1,
+        name: 'update',
+        workflow_name: 'CodeQL',
+        status: 'queued',
+        conclusion: null,
+        head_branch: 'main',
+        runner_name: 'GitHub Actions 5',
+        labels: ['ubuntu-latest'],
+        html_url: 'https://github.com/octo-org/octo-repo/runs/1291536064',
+        sender_login: 'Codertocat',
+        sender_id: 21031067,
+      },
+    },
+  },
+  'workflow_job.completed': {
+    event: 'workflow_job',
+    payload: (repoId) => recorded('workflow_job_completed', repoId),
+    expected: {
+      type: 'ci.job_completed',
+      family: 'ci.jobs',
+      action: 'completed',
+      prs: [],
+      headSha: '3484a3fb816e0859fd6e1cea078d76385ff50625',
+      data: {
+        job_id: 289782451,
+        run_id: 2202229078,
+        run_attempt: 1,
+        name: 'linters',
+        workflow_name: 'CodeQL',
+        status: 'completed',
+        conclusion: 'failure',
+        head_branch: 'main',
+        runner_name: 'GitHub Actions 5',
+        labels: ['ubuntu-latest'],
+        html_url: 'https://github.com/octo-org/octo-repo/runs/1291536064',
+        sender_login: 'Codertocat',
+        sender_id: 21031067,
+      },
+    },
+  },
+  'check_run.created': {
+    event: 'check_run',
+    payload: (repoId) => recorded('check_run_created', repoId),
+    expected: {
+      type: 'ci.check_created',
+      family: 'ci.checks',
+      action: 'created',
+      prs: [],
+      headSha: 'ec26c3e57ca3a959ca5aad62de7213c562f8c821',
+      data: {
+        check_run_id: 128620228,
+        name: 'Octocoders-linter',
+        status: 'queued',
+        conclusion: null,
+        html_url: 'https://github.com/Codertocat/Hello-World/runs/128620228',
+        app_slug: '',
+        check_suite_id: 118578147,
+        head_branch: 'changes',
+        sender_login: 'Codertocat',
+        sender_id: 21031067,
+      },
+    },
+  },
+  'check_suite.completed': {
+    event: 'check_suite',
+    payload: (repoId) => recorded('check_suite_completed', repoId),
+    expected: {
+      type: 'ci.suite_completed',
+      family: 'ci.suites',
+      action: 'completed',
+      prs: [],
+      headSha: 'ec26c3e57ca3a959ca5aad62de7213c562f8c821',
+      data: {
+        check_suite_id: 118578147,
+        status: 'completed',
+        conclusion: 'success',
+        head_branch: 'changes',
+        app_slug: '',
+        sender_login: 'Codertocat',
+        sender_id: 21031067,
+      },
+    },
+  },
+  'status.success': {
+    event: 'status',
+    payload: (repoId) => recorded('status_success', repoId),
+    expected: {
+      type: 'ci.status_success',
+      family: 'ci.statuses',
+      action: 'success',
+      prs: [],
+      headSha: '6113728f27ae82c7b1a177c8d03f9e96e0adf246',
+      data: {
+        state: 'success',
+        context: 'default',
+        target_url: null,
+        branches: ['master', 'changes', 'gh-pages'],
+        html_url: 'https://github.com/Codertocat/Hello-World/commit/6113728f27ae82c7b1a177c8d03f9e96e0adf246',
         sender_login: 'Codertocat',
         sender_id: 21031067,
       },

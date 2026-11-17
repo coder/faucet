@@ -105,7 +105,13 @@ func TestRedeliverTracksOnlyWhatNormalizeStores(t *testing.T) {
 	var webhooks []webhook
 	for _, c := range []struct{ event, fixture string }{
 		{"workflow_run", "workflow_run_completed"},
+		{"workflow_run", "workflow_run_requested"},
+		{"workflow_job", "workflow_job_queued"},
+		{"workflow_job", "workflow_job_completed"},
 		{"check_run", "check_run_completed"},
+		{"check_run", "check_run_created"},
+		{"check_suite", "check_suite_completed"},
+		{"status", "status_success"},
 		{"pull_request_review", "pull_request_review_submitted"},
 		{"pull_request", "pull_request_closed"},
 		{"pull_request", "pull_request_opened"},
@@ -146,7 +152,7 @@ func TestRedeliverTracksOnlyWhatNormalizeStores(t *testing.T) {
 			stored++
 		}
 	}
-	require.Equal(t, 13, stored, "the table covers every event that faucet stores")
+	require.Equal(t, 20, stored, "the table covers every event that faucet stores, and a status with an action, which it reads by its state")
 }
 
 func TestRedeliverAsksAgainForAFailedPullRequestOpened(t *testing.T) {
@@ -158,6 +164,19 @@ func TestRedeliverAsksAgainForAFailedPullRequestOpened(t *testing.T) {
 	require.Equal(t, 1, res.Tracked, "faucet stores every pull request action, so the sweep tracks a failed one")
 	require.Equal(t, 1, res.Asked)
 	require.Len(t, env.gh.askedTimes("opened"), 1)
+}
+
+// A status has no action, so GitHub's list of deliveries names none for it.
+func TestRedeliverAsksAgainForAFailedStatus(t *testing.T) {
+	t.Parallel()
+	env := newRedeliveryEnv(t)
+	env.gh.recordEvent("status-guid", env.now().Add(-time.Minute), 500, "status", "")
+
+	first := env.run()
+	require.Equal(t, 1, first.Tracked)
+	require.Equal(t, 1, first.Asked)
+	require.Len(t, env.gh.askedTimes("status-guid"), 1)
+	require.Equal(t, 1, env.run().Recovered, "the redelivery succeeded")
 }
 
 func TestRedeliverDoesNotAskForADeliveryThatAlreadyWorked(t *testing.T) {

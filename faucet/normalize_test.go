@@ -74,7 +74,7 @@ func TestNormalize(t *testing.T) {
 			wantRepo: 300029405,
 			wantPRs:  []int32{},
 			wantSHA:  "3484a3fb816e0859fd6e1cea078d76385ff50625",
-			wantData: `{"run_id":289782451,"name":"CI","conclusion":"success","head_branch":"master","html_url":"https://github.com/octo-org/octo-repo/actions/runs/289782451","run_attempt":1}`,
+			wantData: `{"run_id":289782451,"name":"CI","status":"completed","conclusion":"success","head_branch":"master","trigger_event":"repository_dispatch","html_url":"https://github.com/octo-org/octo-repo/actions/runs/289782451","run_attempt":1,"workflow_id":2823525,"sender_login":"Codertocat","sender_id":15669918}`,
 		},
 		{
 			name:     "WorkflowRunWithTwoPRs",
@@ -84,7 +84,47 @@ func TestNormalize(t *testing.T) {
 			wantRepo: 300029405,
 			wantPRs:  []int32{2, 3},
 			wantSHA:  "3484a3fb816e0859fd6e1cea078d76385ff50625",
-			wantData: `{"run_id":289782451,"name":"CI","conclusion":"success","head_branch":"master","html_url":"https://github.com/octo-org/octo-repo/actions/runs/289782451","run_attempt":1}`,
+			wantData: `{"run_id":289782451,"name":"CI","status":"completed","conclusion":"success","head_branch":"master","trigger_event":"repository_dispatch","html_url":"https://github.com/octo-org/octo-repo/actions/runs/289782451","run_attempt":1,"workflow_id":2823525,"sender_login":"Codertocat","sender_id":15669918}`,
+		},
+		{
+			name:     "WorkflowRunRequested",
+			event:    "workflow_run",
+			fixture:  "workflow_run_requested",
+			wantType: "ci.run_requested",
+			wantRepo: 300029405,
+			wantPRs:  []int32{},
+			wantSHA:  "3484a3fb816e0859fd6e1cea078d76385ff50625",
+			wantData: `{"run_id":289782451,"name":"","status":"queued","conclusion":null,"head_branch":"master","trigger_event":"repository_dispatch","html_url":"https://github.com/octo-org/octo-repo/actions/runs/289782451","run_attempt":1,"workflow_id":2823525,"sender_login":"Codertocat","sender_id":15669918}`,
+		},
+		{
+			name:     "WorkflowJobQueued",
+			event:    "workflow_job",
+			fixture:  "workflow_job_queued",
+			wantType: "ci.job_queued",
+			wantRepo: 186853002,
+			wantPRs:  []int32{},
+			wantSHA:  "3484a3fb816e0859fd6e1cea078d76385ff50625",
+			wantData: `{"job_id":289782451,"run_id":2202229078,"run_attempt":1,"name":"update","workflow_name":"CodeQL","status":"queued","conclusion":null,"head_branch":"main","runner_name":"GitHub Actions 5","labels":["ubuntu-latest"],"html_url":"https://github.com/octo-org/octo-repo/runs/1291536064","sender_login":"Codertocat","sender_id":21031067}`,
+		},
+		{
+			name:     "WorkflowJobWaitingWithoutRunner",
+			event:    "workflow_job",
+			fixture:  "workflow_job_waiting",
+			wantType: "ci.job_waiting",
+			wantRepo: 591427149,
+			wantPRs:  []int32{},
+			wantSHA:  "16c5286e8d9a0629956a28938386b36608707a71",
+			wantData: `{"job_id":12877621891,"run_id":4747967848,"run_attempt":1,"name":"test","workflow_name":"Env Test","status":"waiting","conclusion":null,"head_branch":"main","runner_name":null,"labels":["self-hosted","k8s"],"html_url":"https://github.com/lineville/elastic-machines-testing/actions/runs/4747967848/jobs/8433573014","sender_login":"lineville","sender_id":25349044}`,
+		},
+		{
+			name:     "WorkflowJobCompleted",
+			event:    "workflow_job",
+			fixture:  "workflow_job_completed",
+			wantType: "ci.job_completed",
+			wantRepo: 186853002,
+			wantPRs:  []int32{},
+			wantSHA:  "3484a3fb816e0859fd6e1cea078d76385ff50625",
+			wantData: `{"job_id":289782451,"run_id":2202229078,"run_attempt":1,"name":"linters","workflow_name":"CodeQL","status":"completed","conclusion":"failure","head_branch":"main","runner_name":"GitHub Actions 5","labels":["ubuntu-latest"],"html_url":"https://github.com/octo-org/octo-repo/runs/1291536064","sender_login":"Codertocat","sender_id":21031067}`,
 		},
 		{
 			name:     "CheckRun",
@@ -94,7 +134,37 @@ func TestNormalize(t *testing.T) {
 			wantRepo: 186853002,
 			wantPRs:  []int32{2},
 			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
-			wantData: `{"check_run_id":128620228,"name":"Octocoders-linter","conclusion":"success","html_url":"https://github.com/Codertocat/Hello-World/runs/128620228","app_slug":"octoapp"}`,
+			wantData: `{"check_run_id":128620228,"name":"Octocoders-linter","status":"completed","conclusion":"success","html_url":"https://github.com/Codertocat/Hello-World/runs/128620228","app_slug":"octoapp","check_suite_id":118578147,"head_branch":"changes","sender_login":"Codertocat","sender_id":21031067}`,
+		},
+		{
+			name:     "CheckRunCreated",
+			event:    "check_run",
+			fixture:  "check_run_created",
+			wantType: "ci.check_created",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: `{"check_run_id":128620228,"name":"Octocoders-linter","status":"queued","conclusion":null,"html_url":"https://github.com/Codertocat/Hello-World/runs/128620228","app_slug":"","check_suite_id":118578147,"head_branch":"changes","sender_login":"Codertocat","sender_id":21031067}`,
+		},
+		{
+			name:     "CheckSuiteCompleted",
+			event:    "check_suite",
+			fixture:  "check_suite_completed",
+			wantType: "ci.suite_completed",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: `{"check_suite_id":118578147,"status":"completed","conclusion":"success","head_branch":"changes","app_slug":"","sender_login":"Codertocat","sender_id":21031067}`,
+		},
+		{
+			name:     "StatusWithNoActionIsReadByItsState",
+			event:    "status",
+			fixture:  "status_success",
+			wantType: "ci.status_success",
+			wantRepo: 186853002,
+			wantPRs:  []int32{},
+			wantSHA:  "6113728f27ae82c7b1a177c8d03f9e96e0adf246",
+			wantData: `{"state":"success","context":"default","target_url":null,"branches":["master","changes","gh-pages"],"html_url":"https://github.com/Codertocat/Hello-World/commit/6113728f27ae82c7b1a177c8d03f9e96e0adf246","sender_login":"Codertocat","sender_id":21031067}`,
 		},
 		{
 			name:     "ReviewSubmitted",
@@ -315,6 +385,7 @@ func TestNormalizeKeepsOnlyPullRequestsOfTheRepository(t *testing.T) {
 	}{
 		{"workflow_run", "workflow_run_completed"},
 		{"check_run", "check_run_completed"},
+		{"check_suite", "check_suite_completed"},
 	}
 	cases := []struct {
 		name string
@@ -363,14 +434,11 @@ func TestNormalizeIgnores(t *testing.T) {
 		event   string
 		payload func(t *testing.T) []byte
 	}{
-		{"WorkflowRunRequested", "workflow_run", func(t *testing.T) []byte {
-			return mutate(t, "workflow_run_completed", withAction("requested"))
+		{"CheckRunRerequested", "check_run", func(t *testing.T) []byte {
+			return mutate(t, "check_run_completed", withAction("rerequested"))
 		}},
-		{"WorkflowRunInProgress", "workflow_run", func(t *testing.T) []byte {
-			return mutate(t, "workflow_run_completed", withAction("in_progress"))
-		}},
-		{"CheckRunCreated", "check_run", func(t *testing.T) []byte {
-			return mutate(t, "check_run_completed", withAction("created"))
+		{"CheckSuiteRequested", "check_suite", func(t *testing.T) []byte {
+			return mutate(t, "check_suite_completed", withAction("requested"))
 		}},
 		{"PullRequestActionThatGitHubDoesNotDocument", "pull_request", func(t *testing.T) []byte {
 			return mutate(t, "pull_request_opened", withAction("exploded"))
@@ -384,6 +452,9 @@ func TestNormalizeIgnores(t *testing.T) {
 				require.True(t, ok)
 				delete(issue, "pull_request")
 			})
+		}},
+		{"StatusOfAStateGitHubNeverSends", "status", func(t *testing.T) []byte {
+			return mutate(t, "status_success", func(doc map[string]any) { doc["state"] = "exploded" })
 		}},
 		{"UnhandledEventIsNotParsed", "push", func(*testing.T) []byte {
 			return []byte("not json")
@@ -407,16 +478,20 @@ func TestNormalizeRejects(t *testing.T) {
 	t.Parallel()
 
 	handled := []struct {
-		event   string
-		fixture string
+		event        string
+		fixture      string
+		actionMember string
 	}{
-		{"workflow_run", "workflow_run_completed"},
-		{"check_run", "check_run_completed"},
-		{"pull_request_review", "pull_request_review_submitted"},
-		{"pull_request", "pull_request_closed"},
-		{"issue_comment", "issue_comment_created_on_pr"},
-		{"pull_request_review_comment", "pull_request_review_comment_created"},
-		{"pull_request_review_thread", "pull_request_review_thread_resolved"},
+		{"workflow_run", "workflow_run_completed", "action"},
+		{"check_run", "check_run_completed", "action"},
+		{"workflow_job", "workflow_job_queued", "action"},
+		{"check_suite", "check_suite_completed", "action"},
+		{"status", "status_success", "state"},
+		{"pull_request_review", "pull_request_review_submitted", "action"},
+		{"pull_request", "pull_request_closed", "action"},
+		{"issue_comment", "issue_comment_created_on_pr", "action"},
+		{"pull_request_review_comment", "pull_request_review_comment_created", "action"},
+		{"pull_request_review_thread", "pull_request_review_thread_resolved", "action"},
 	}
 	for _, h := range handled {
 		t.Run(h.event, func(t *testing.T) {
@@ -425,7 +500,8 @@ func TestNormalizeRejects(t *testing.T) {
 			cases := map[string][]byte{
 				"MalformedJSON":      []byte(`{"action":`),
 				"NotAnObject":        []byte(`[]`),
-				"NoAction":           mutate(t, h.fixture, func(doc map[string]any) { delete(doc, "action") }),
+				"NoActionWord":       mutate(t, h.fixture, func(doc map[string]any) { delete(doc, h.actionMember) }),
+				"ActionWordNotText":  mutate(t, h.fixture, func(doc map[string]any) { doc[h.actionMember] = 1 }),
 				"NoRepository":       mutate(t, h.fixture, func(doc map[string]any) { delete(doc, "repository") }),
 				"ZeroRepositoryID":   mutate(t, h.fixture, func(doc map[string]any) { doc["repository"] = map[string]any{"id": 0} }),
 				"StringRepositoryID": mutate(t, h.fixture, func(doc map[string]any) { doc["repository"] = map[string]any{"id": "1"} }),

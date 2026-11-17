@@ -4,13 +4,14 @@ A signed delivery of a handled event and action is normalized and stored as one 
 
 ## Sub-features
 
-- `workflow_run` with action `completed` becomes `ci.run_completed`.
-- `check_run` with action `completed` becomes `ci.check_completed`.
+- Every action of `workflow_run` becomes `ci.run_<action>` and every action of `workflow_job` `ci.job_<action>`, for example `ci.run_requested` and `ci.job_queued`.
+- `check_run` with action `created` or `completed` becomes `ci.check_created` or `ci.check_completed`, and `check_suite` with action `completed` becomes `ci.suite_completed`.
+- `status`, which has no action, becomes `ci.status_<state>`, for example `ci.status_success`.
 - Every action of `pull_request` becomes `pr.<action>`, for example `closed` becomes `pr.closed` and `synchronize` becomes `pr.synchronize`.
 - Every action of `pull_request_review` becomes `pr.review_<action>`, for example `pr.review_submitted` and `pr.review_dismissed`.
 - Every action of `issue_comment` on a pull request becomes `pr.comment_<action>`, for example `pr.comment_created` and `pr.comment_deleted`.
 - Every action of `pull_request_review_comment` becomes `pr.review_comment_<action>`, and every action of `pull_request_review_thread` becomes `pr.review_thread_<action>`.
-- `workflow_run` and `check_run` store only the pull requests whose base is this repository. A pull request whose base is another repository, such as a fork's pull request to upstream, is dropped from `prs`.
+- `workflow_run`, `check_run` and `check_suite` store only the pull requests whose base is this repository. A pull request whose base is another repository, such as a fork's pull request to upstream, is dropped from `prs`. `workflow_job` and `status` name no pull request, so their `prs` is empty.
 - The reply is 200 with the body `stored`.
 
 ## How to get to it (user POV)
@@ -19,7 +20,7 @@ GitHub POSTs `/webhook/github` with `X-GitHub-Event`, `X-GitHub-Delivery` and `X
 
 ## Driving it with e2e
 
-`tests/ingest-stored.e2e.ts` runs one test per sample in `tests/payloads.ts`, each with its own `newRepoId()`: the hand-built `samples` of the five exact types, and the `recordedSamples` that send recorded GitHub payloads from `faucet/testdata` for one new action of each pull request family (`opened`, `synchronize`, `dismissed`, `deleted`, a review comment `created` and a thread `resolved`). Live: not reachable from a browser, use `run_tests {files: ["tests/ingest-stored.e2e.ts"]}`.
+`tests/ingest-stored.e2e.ts` runs one test per sample in `tests/payloads.ts`, each with its own `newRepoId()`: the hand-built `samples` of the five exact types, and the `recordedSamples` that send recorded GitHub payloads from `faucet/testdata` for one new action of each pull request family (`opened`, `synchronize`, `dismissed`, `deleted`, a review comment `created` and a thread `resolved`) and for the CI families (`workflow_run` `requested`, `workflow_job` `queued` and `completed`, `check_run` `created`, `check_suite` `completed` and a `status`). Live: not reachable from a browser, use `run_tests {files: ["tests/ingest-stored.e2e.ts"]}`.
 
 ## Proof
 

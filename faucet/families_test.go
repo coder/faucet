@@ -3,6 +3,8 @@ package faucet_test
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -13,26 +15,37 @@ import (
 )
 
 var (
-	allFamilies = []string{"ci.runs", "ci.checks", "pr.activity", "pr.reviews", "pr.comments", "pr.review_comments", "pr.review_threads"}
+	allFamilies = []string{"ci.runs", "ci.jobs", "ci.checks", "ci.suites", "ci.statuses", "pr.activity", "pr.reviews", "pr.comments", "pr.review_comments", "pr.review_threads"}
 	allNames    = append(slices.Clone(allFamilies), allTypes...)
 	// typePrefix is the naming rule of the exact types: the exact type of
 	// action X of a family is its prefix followed by X.
 	typePrefix = map[string]string{
 		"ci.runs":            "ci.run_",
+		"ci.jobs":            "ci.job_",
 		"ci.checks":          "ci.check_",
+		"ci.suites":          "ci.suite_",
+		"ci.statuses":        "ci.status_",
 		"pr.activity":        "pr.",
 		"pr.reviews":         "pr.review_",
 		"pr.comments":        "pr.comment_",
 		"pr.review_comments": "pr.review_comment_",
 		"pr.review_threads":  "pr.review_thread_",
 	}
-	// documentedActions are the actions of each pull request event in GitHub's
-	// published webhook schemas, which octokit/webhooks keeps in
-	// payload-schemas/api.github.com/<event>/<action>.schema.json.
+	// documentedActions are the actions of each event in GitHub's published
+	// webhook schemas, which octokit/webhooks keeps in
+	// payload-schemas/api.github.com/<event>/<action>.schema.json. Of
+	// check_run and check_suite they are the actions that GitHub's docs say a
+	// repository or organization webhook receives. A status has no action, and
+	// its states stand in.
 	documentedActions = map[string]struct {
 		event   string
 		actions []string
 	}{
+		"ci.runs":     {"workflow_run", []string{"completed", "in_progress", "requested"}},
+		"ci.jobs":     {"workflow_job", []string{"completed", "in_progress", "queued", "waiting"}},
+		"ci.checks":   {"check_run", []string{"completed", "created"}},
+		"ci.suites":   {"check_suite", []string{"completed"}},
+		"ci.statuses": {"status", []string{"error", "failure", "pending", "success"}},
 		"pr.activity": {"pull_request", []string{
 			"assigned", "auto_merge_disabled", "auto_merge_enabled", "closed", "converted_to_draft", "demilestoned", "dequeued",
 			"edited", "enqueued", "labeled", "locked", "milestoned", "opened", "ready_for_review", "reopened",
@@ -84,7 +97,7 @@ func listFamilies(t *testing.T, h *eventsHarness) map[string]familyDescriptor {
 	return families
 }
 
-func TestEachPullRequestFamilyStoresEveryActionThatGitHubDocuments(t *testing.T) {
+func TestEachFamilyStoresEveryActionThatGitHubDocuments(t *testing.T) {
 	t.Parallel()
 
 	families := listFamilies(t, newEventsHarness(t))
@@ -123,6 +136,52 @@ func storeDelivery(ctx context.Context, t *testing.T, store faucet.Store, event,
 	require.NoError(t, err)
 	require.True(t, inserted)
 	return stored
+}
+
+// SEP-3415 lets the payloadSchema of a name change only by addition.
+func TestAnExactTypeOnlyGainsOptionalPayloadProperties(t *testing.T) {
+	t.Parallel()
+
+	type payloadSchema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+		Required   []string                   `json:"required"`
+	}
+	golden, err := os.ReadFile(filepath.Join("testdata", "exact_type_payload_schemas.json"))
+	require.NoError(t, err)
+	var before map[string]payloadSchema
+	require.NoError(t, json.Unmarshal(golden, &before))
+
+	h := newEventsHarness(t)
+	res, err := h.call(methodList, nil)
+	require.NoError(t, err)
+	var events []struct {
+		Name          string        `json:"name"`
+		PayloadSchema payloadSchema `json:"payloadSchema"`
+	}
+	require.NoError(t, json.Unmarshal(res.fields["events"], &events))
+	seen := 0
+	for _, e := range events {
+		old, ok := before[e.Name]
+		if !ok {
+			continue
+		}
+		seen++
+		require.Equal(t, old.Required, e.PayloadSchema.Required, e.Name)
+		for name, property := range old.Properties {
+			require.Contains(t, e.PayloadSchema.Properties, name, e.Name)
+			require.Equal(t, withoutDescription(t, property), withoutDescription(t, e.PayloadSchema.Properties[name]),
+				"%s keeps the property %s as it was, its description aside", e.Name, name)
+		}
+	}
+	require.Equal(t, len(before), seen, "events/list offers every exact type of the golden file")
+}
+
+func withoutDescription(t *testing.T, property json.RawMessage) map[string]any {
+	t.Helper()
+	var p map[string]any
+	require.NoError(t, json.Unmarshal(property, &p))
+	delete(p, "description")
+	return p
 }
 
 func TestPollOfAFamilyNamesEachEventByTheFamilyAndCarriesItsExactType(t *testing.T) {

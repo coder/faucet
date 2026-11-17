@@ -1,6 +1,7 @@
 package faucet
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -21,6 +22,7 @@ type family struct {
 	// noHeadSHA is set when GitHub's payload names no head commit, so no event
 	// of the family has a head_sha and a sha filter could never match one.
 	noHeadSHA bool
+	noPRs     bool
 	// properties are the payload properties of the family's data, written as
 	// a JSON object.
 	properties string
@@ -34,9 +36,10 @@ type family struct {
 // it did before families. SEP-3415 asks that the schemas of a name change only
 // by addition, so it keeps the fields it always required.
 type legacyName struct {
-	name        string
-	description string
-	required    []string
+	name             string
+	description      string
+	required         []string
+	frozenProperties string
 }
 
 // catalogEntry is one name that events/list offers.
@@ -67,10 +70,36 @@ var families = []*family{
 		properties: `{
     "run_id": {"type": "integer"},
     "name": {"type": "string", "description": "The workflow name."},
-    "conclusion": {"type": "string", "description": "For example success, failure or timed_out."},
+    "status": {"type": "string", "description": "For example queued, in_progress or completed."},
+    "conclusion": {"type": ["string", "null"], "description": "For example success, failure or timed_out. Null until the run completes."},
     "head_branch": {"type": "string"},
+    "trigger_event": {"type": "string", "description": "The GitHub event that started the run, for example push or pull_request."},
     "html_url": {"type": "string"},
-    "run_attempt": {"type": "integer"}
+    "run_attempt": {"type": "integer"},
+    "workflow_id": {"type": "integer"},
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
+}`,
+	},
+	{
+		name:        "ci.jobs",
+		githubEvent: "workflow_job",
+		description: "Jobs of GitHub Actions workflow runs. GitHub names no pull request in these events, so filter by sha and not by pr.",
+		noPRs:       true,
+		properties: `{
+    "job_id": {"type": "integer"},
+    "run_id": {"type": "integer"},
+    "run_attempt": {"type": "integer"},
+    "name": {"type": "string", "description": "The job name."},
+    "workflow_name": {"type": ["string", "null"]},
+    "status": {"type": "string", "description": "For example queued, waiting, in_progress or completed."},
+    "conclusion": {"type": ["string", "null"], "description": "For example success, failure or skipped. Null until the job completes."},
+    "head_branch": {"type": ["string", "null"]},
+    "runner_name": {"type": ["string", "null"]},
+    "labels": {"type": "array", "items": {"type": "string"}, "description": "The runner labels that the job asks for."},
+    "html_url": {"type": "string"},
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
 }`,
 	},
 	{
@@ -80,9 +109,43 @@ var families = []*family{
 		properties: `{
     "check_run_id": {"type": "integer"},
     "name": {"type": "string", "description": "The check name."},
-    "conclusion": {"type": "string", "description": "For example success, failure or timed_out."},
+    "status": {"type": "string", "description": "For example queued, in_progress or completed."},
+    "conclusion": {"type": ["string", "null"], "description": "For example success, failure or timed_out. Null until the check completes."},
     "html_url": {"type": "string"},
-    "app_slug": {"type": "string", "description": "The app that ran the check."}
+    "app_slug": {"type": "string", "description": "The app that ran the check."},
+    "check_suite_id": {"type": "integer"},
+    "head_branch": {"type": ["string", "null"], "description": "The branch of the check suite. Null for a push to a fork."},
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
+}`,
+	},
+	{
+		name:        "ci.suites",
+		githubEvent: "check_suite",
+		description: "Check suites on a commit. A suite holds the check runs of one app, and it completes when they all have.",
+		properties: `{
+    "check_suite_id": {"type": "integer"},
+    "status": {"type": ["string", "null"]},
+    "conclusion": {"type": ["string", "null"], "description": "For example success, failure or timed_out."},
+    "head_branch": {"type": ["string", "null"], "description": "Null for a push to a fork."},
+    "app_slug": {"type": "string", "description": "The app whose check runs the suite holds."},
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
+}`,
+	},
+	{
+		name:        "ci.statuses",
+		githubEvent: "status",
+		description: "Commit statuses, which CI services and apps set on a commit. The action is the state: pending, success, failure or error. GitHub names no pull request in these events, so filter by sha and not by pr.",
+		noPRs:       true,
+		properties: `{
+    "state": {"type": "string", "description": "pending, success, failure or error, the same as action."},
+    "context": {"type": "string", "description": "The label that tells this status from those of other systems, for example default."},
+    "target_url": {"type": ["string", "null"], "description": "The link that GitHub shows with the status."},
+    "branches": {"type": "array", "items": {"type": "string"}, "description": "Up to 10 branches that hold the commit. It need not be their head."},
+    "html_url": {"type": "string", "description": "The commit page."},
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
 }`,
 	},
 	{
@@ -166,14 +229,16 @@ var families = []*family{
 
 var legacyNames = []legacyName{
 	{
-		name:        "ci.check_completed",
-		description: "A check run finished on a commit, from GitHub Actions or another app.",
-		required:    []string{"check_run_id", "name", "conclusion", "html_url", "app_slug"},
+		name:             "ci.check_completed",
+		description:      "A check run finished on a commit, from GitHub Actions or another app.",
+		required:         []string{"check_run_id", "name", "conclusion", "html_url", "app_slug"},
+		frozenProperties: `{"conclusion": {"type": "string", "description": "For example success, failure or timed_out."}}`,
 	},
 	{
-		name:        "ci.run_completed",
-		description: "A GitHub Actions workflow run finished. It fires once per run attempt.",
-		required:    []string{"run_id", "name", "conclusion", "head_branch", "html_url", "run_attempt"},
+		name:             "ci.run_completed",
+		description:      "A GitHub Actions workflow run finished. It fires once per run attempt.",
+		required:         []string{"run_id", "name", "conclusion", "head_branch", "html_url", "run_attempt"},
+		frozenProperties: `{"conclusion": {"type": "string", "description": "For example success, failure or timed_out."}}`,
 	},
 	{
 		name:        "pr.closed",
@@ -206,11 +271,15 @@ var (
 	headSHAProperty = map[string]any{"type": "string", "description": "The head commit SHA. Absent when the event has none."}
 )
 
-// argumentsSchema is the inputSchema of an event name: repo and pr, and the
-// filters of the name. It offers sha unless the family's events carry no head
-// commit (no family means sha), and actions when it is given them.
+// argumentsSchema is the inputSchema of an event name: repo and the filters of
+// the name. It offers pr and sha unless the family's events name no pull
+// request or no head commit (no family means both), and actions when it is
+// given them.
 func argumentsSchema(f *family, actions []string) json.RawMessage {
-	properties := map[string]any{"repo": repoArgument, "pr": prArgument}
+	properties := map[string]any{"repo": repoArgument}
+	if f == nil || !f.noPRs {
+		properties["pr"] = prArgument
+	}
 	if f == nil || !f.noHeadSHA {
 		properties["sha"] = shaArgument
 	}
@@ -279,7 +348,7 @@ func newFamilyEntry(f *family) *catalogEntry {
 		description:   f.description,
 		family:        f,
 		inputSchema:   input,
-		payloadSchema: payloadSchemaOf(f, f.types, f.actions, []string{"prs", "event", "action"}),
+		payloadSchema: payloadSchemaOf(f, f.types, f.actions, []string{"prs", "event", "action"}, ""),
 		input:         resolved,
 		endInput:      resolved,
 	}
@@ -293,17 +362,13 @@ func newLegacyEntry(l legacyName, t storedType) *catalogEntry {
 		family:        t.family,
 		legacy:        true,
 		inputSchema:   input,
-		payloadSchema: payloadSchemaOf(t.family, []string{l.name}, []string{t.action}, append([]string{"prs"}, l.required...)),
+		payloadSchema: payloadSchemaOf(t.family, []string{l.name}, []string{t.action}, append([]string{"prs"}, l.required...), l.frozenProperties),
 		input:         mustResolve(string(input)),
 		endInput:      shaInputResolved,
 	}
 }
 
-func payloadSchemaOf(f *family, types, actions, required []string) json.RawMessage {
-	var own map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(f.properties), &own); err != nil {
-		panic(fmt.Sprintf("payload properties of %s: %v", f.name, err))
-	}
+func payloadSchemaOf(f *family, types, actions, required []string, frozenProperties string) json.RawMessage {
 	properties := map[string]any{
 		"prs":    prsProperty,
 		"event":  map[string]any{"type": "string", "enum": types, "description": "The exact event type, for example pr.closed."},
@@ -312,8 +377,14 @@ func payloadSchemaOf(f *family, types, actions, required []string) json.RawMessa
 	if !f.noHeadSHA {
 		properties["head_sha"] = headSHAProperty
 	}
-	for name, property := range own {
-		properties[name] = property
+	for _, own := range []string{f.properties, cmp.Or(frozenProperties, "{}")} {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(own), &object); err != nil {
+			panic(fmt.Sprintf("payload properties of %s: %v", f.name, err))
+		}
+		for name, property := range object {
+			properties[name] = property
+		}
 	}
 	schema := marshalRaw(map[string]any{"type": "object", "properties": properties, "required": required})
 	mustResolve(string(schema))

@@ -270,7 +270,11 @@ func TestEventsListDescribesEveryEventType(t *testing.T) {
 		}
 		require.NoError(t, json.Unmarshal(e.InputSchema, &input))
 		require.Equal(t, []string{"repo"}, input.Required)
-		require.Contains(t, input.Properties, "pr")
+		if slices.Contains(noPRNames, e.Name) {
+			require.NotContains(t, input.Properties, "pr", "GitHub names no pull request in %s, so a pr filter could never match", e.Name)
+		} else {
+			require.Contains(t, input.Properties, "pr", e.Name)
+		}
 		_, legacy := legacyRequired[e.Name]
 		_, takesActions := input.Properties["actions"]
 		require.Equal(t, !legacy, takesActions, "%s: a family takes actions and an exact type does not", e.Name)
@@ -303,6 +307,24 @@ var legacyRequired = map[string][]string{
 	"pr.closed":           {"prs", "merged", "merge_commit_sha", "html_url"},
 	"pr.comment_created":  {"prs", "comment_id", "user_login", "html_url"},
 	"pr.review_submitted": {"prs", "review_id", "state", "user_login", "html_url"},
+}
+
+var noPRNames = []string{"ci.jobs", "ci.statuses"}
+
+func TestPRFilterIsRefusedForEventsThatNameNoPullRequest(t *testing.T) {
+	t.Parallel()
+
+	h := newWebhookHarness(t)
+	secret := newSecret(t, 32)
+	for _, name := range noPRNames {
+		withPR := args("repo", testRepo, "pr", 7)
+		require.EqualValues(t, codeInvalidParams, h.pollError(pollParams(name, withPR, nil)).Code, name)
+		require.EqualValues(t, codeInvalidParams, h.subscribeError(&rawParams{
+			Name: name, Arguments: raw(withPR), Delivery: deliveryTo(callbackURL, secret),
+		}).Code, name)
+		h.poll(pollParams(name, args("repo", testRepo, "sha", testShaA), nil))
+	}
+	require.Empty(t, h.rows(), "a subscription that could never fire is refused, not stored")
 }
 
 func TestEventsListSaysAClosedPullRequestMayCarryAMergeCommitSHA(t *testing.T) {
@@ -396,7 +418,14 @@ func TestPolledDataMatchesThePayloadSchema(t *testing.T) {
 	deliveries := []struct{ event, fixture string }{
 		{"workflow_run", "workflow_run_completed"},
 		{"workflow_run", "workflow_run_completed_two_prs"},
+		{"workflow_run", "workflow_run_requested"},
+		{"workflow_job", "workflow_job_queued"},
+		{"workflow_job", "workflow_job_waiting"},
+		{"workflow_job", "workflow_job_completed"},
 		{"check_run", "check_run_completed"},
+		{"check_run", "check_run_created"},
+		{"check_suite", "check_suite_completed"},
+		{"status", "status_success"},
 		{"pull_request_review", "pull_request_review_submitted"},
 		{"pull_request_review", "pull_request_review_dismissed"},
 		{"pull_request", "pull_request_closed"},

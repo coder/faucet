@@ -8,13 +8,18 @@ const closed = samples['pull_request.closed'];
 const comment = samples['issue_comment.created'];
 
 const RUN = run.expected.type;
-// otherAction is an action of each family that no sample in recordedSamples has.
-const otherAction: Record<string, string> = {
-  'pr.activity': 'closed',
-  'pr.reviews': 'submitted',
-  'pr.comments': 'created',
-  'pr.review_comments': 'edited',
-  'pr.review_threads': 'unresolved',
+// otherAction holds actions of each family that no sample in recordedSamples has. ci.suites has one action only.
+const otherAction: Record<string, string[]> = {
+  'ci.runs': ['in_progress'],
+  'ci.jobs': ['in_progress', 'waiting'],
+  'ci.checks': ['completed'],
+  'ci.suites': [],
+  'ci.statuses': ['error', 'failure', 'pending'],
+  'pr.activity': ['closed'],
+  'pr.reviews': ['submitted'],
+  'pr.comments': ['created'],
+  'pr.review_comments': ['edited'],
+  'pr.review_threads': ['unresolved'],
 };
 const REPO_DENIED = 'repository not found or not accessible';
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
@@ -160,13 +165,38 @@ describe('events poll', () => {
       const { family, action } = sample.expected;
 
       const narrowed = await pollRepo(faucet, family, repoId, { cursor }, { actions: [action] });
-      const other = await pollRepo(faucet, family, repoId, { cursor }, { actions: [otherAction[family]] });
+      const others = otherAction[family]!;
+      const other = others.length > 0 ? await pollRepo(faucet, family, repoId, { cursor }, { actions: others }) : null;
 
       expect(narrowed.events.map((e) => [e.eventId, e.name])).toEqual([[delivery, family]]);
       expect(narrowed.events[0]?.data).toEqual(dataOf(sample));
-      expect(other.events).toEqual([]);
+      expect(other?.events ?? []).toEqual([]);
     });
   }
+
+  test('ci.runs with actions completed returns a completed run and not a requested one', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const cursor = await startCursor(faucet, repoId);
+    await deliverSample(faucet, recordedSamples['workflow_run.requested']!, repoId);
+    const completed = await deliverSample(faucet, run, repoId);
+
+    const narrowed = await pollRepo(faucet, 'ci.runs', repoId, { cursor }, { actions: ['completed'] });
+    const every = await pollRepo(faucet, 'ci.runs', repoId, { cursor });
+
+    expect(narrowed.events.map((e) => [e.eventId, e.data.event, e.data.action])).toEqual([[completed, RUN, 'completed']]);
+    expect(every.events.map((e) => e.data.action)).toEqual(['requested', 'completed']);
+  });
+
+  test('ci.jobs and ci.statuses take no pr, because GitHub names no pull request in them, and a pr is -32602', async ({ faucet }) => {
+    const repo = repoOf(newRepoId());
+    for (const name of ['ci.jobs', 'ci.statuses']) {
+      const reply = await poll(faucet, name, { repo, pr: 7 }, {}, { name });
+      expect(reply.status, name).toBe(400);
+      expect(reply.error?.code, name).toBe(-32602);
+      const bySha = await poll(faucet, name, { repo, sha: '6113728f27ae82c7b1a177c8d03f9e96e0adf246' }, {}, { name });
+      expect(bySha.status, `${name} by sha`).toBe(200);
+    }
+  });
 
   test('a recorded pull request webhook is polled under pr.activity and pr.closed with its exact type and action', async ({ faucet }) => {
     const repoId = newRepoId();
