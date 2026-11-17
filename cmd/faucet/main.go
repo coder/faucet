@@ -215,7 +215,15 @@ func newHookAdmin(githubAPI, token, org, repo, rawID string) (redelivery.HookAdm
 }
 
 func main() {
-	if err := run(); err != nil {
+	var err error
+	if len(os.Args) > 1 && os.Args[1] == "clients" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err = runClients(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr)
+		stop()
+	} else {
+		err = run()
+	}
+	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "faucet:", err)
 		os.Exit(1)
 	}
