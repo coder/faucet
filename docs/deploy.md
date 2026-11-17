@@ -43,7 +43,7 @@ A preview runs any branch's code, and the Neon integration gives previews the pr
 
 ## Scheduled routes
 
-Each `/cron/*` route answers 200 with a JSON object of counts. The result type in the table documents each field. A failed `/cron/redeliver` run answers 500 with the counts it made and an `error` that names nothing, and the log has the cause. A failed `/cron/deliver` or `/cron/purge` answers 500 with no counts.
+Each `/cron/*` route answers 200 with a JSON object, and the result type in the table documents each field. A failed `/cron/redeliver` run answers 500 with the same object, holding what the run did, and an `error` that names nothing; the log has the cause. A failed `/cron/deliver` or `/cron/purge` answers 500 with a line of text and no object. A route whose feature is off answers 503.
 
 <!-- BEGIN generated:cron-replies -->
 | Route | Reply fields | Documented on |

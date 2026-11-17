@@ -19,6 +19,23 @@ This came in [#48](https://github.com/coder/faucet/pull/48). The MCP endpoint is
 
 These came in [#44](https://github.com/coder/faucet/pull/44), [#45](https://github.com/coder/faucet/pull/45), [#46](https://github.com/coder/faucet/pull/46) and [#47](https://github.com/coder/faucet/pull/47).
 
-- **Tick the new events on the GitHub hook.** A hook made before them sends only Pull requests, Pull request reviews, Issue comments, Workflow runs and Check runs. Also tick Pull request review comments, Pull request review threads, Workflow jobs, Check suites and Statuses, or their families get no events, and nothing tells you so (see [events.md](events.md#the-github-webhook)).
+- **Tick the new events on the GitHub hook.** A hook made before them may lack Pull request review comments, Pull request review threads, Workflow jobs, Check suites and Statuses. Tick them, or their families get no events, and nothing tells you so (see [events.md](events.md#the-github-webhook)).
 - **New actions widen old subscriptions.** A family subscription without `actions` picks up every new action at its next renewal, and a `ci.runs` or `ci.checks` one without `actions` now matches runs and checks that have not finished. Pass `actions: ["completed"]` to keep to finished ones. The five exact types match what they did.
-- **A rolling deploy drops some events.** Until every instance runs the new build, an old instance answers 202 to a delivery of an action that it does not store. GitHub counts that as delivered, so [redelivery](redelivery.md) never asks for it again, and the event is never stored. An old instance also answers `InvalidParams` to a field filter, `NotFound` to a family name, and its `/cron/deliver` can send a filtered subscription events that its filters drop.
+- **A rolling deploy drops some events.** Until every instance runs the new build, an old instance answers 202 to a delivery of an action that it does not store. GitHub counts that as delivered, so [redelivery](redelivery.md) never asks for it again, and the event is never stored. An old instance also answers `InvalidParams` to a field filter, and its `/cron/deliver` can send a filtered subscription events that its filters drop.
+- **Migration `000009_subscription_event_types`.** A subscription now stores the exact types that its name matched. The migration fills each row with the row's event name, the one type that a name of an earlier build matches, so a subscription keeps its events and its key, and a trigger does the same for rows that an old instance inserts. The old build does not know families. Until a deploy has replaced every old instance, and again after a rollback to that build:
+  - it answers `NotFound` to a family name;
+  - its `/cron/deliver` and `/cron/purge` read a family subscription as one that matches no event, so a family subscription gets nothing from it;
+  - its purge can move a family subscription past events that the same purge deletes unread, and then no gap envelope goes out;
+  - it sends a family subscription's event under its exact type, with no `event` and no `action` in `data`.
+
+  Subscriptions to the five exact types are not affected.
+
+## To the redelivery position (migration `000008_redelivery_clear`)
+
+- **Old instances fail their runs.** Until a deploy has replaced every instance of the build before the migration, their `/cron/redeliver` runs fail with `column "top_at" does not exist` and write no position. Their other routes keep working, and the runs of the new build read the list in their place.
+- **The first run after the migration is a first run.** It reads its lookback of the list again and logs one more `before tracking began` gap. A delivery that a run tracked before keeps its row and its ask count. A position that an old build took from a `Date` far ahead of GitHub's list carries the first risk in [known limits](redelivery.md#known-limits).
+- **A `redelivery.Store` of your own** must move the position it holds into `Clear` once, as the migration does. Until then every run fails with `the store returned a top without a clear` and asks for nothing. `storetest.RunRedelivery` checks it.
+
+## To a stricter `CRON_SECRET`
+
+The server now stops at start, and names the variable, when `CRON_SECRET` holds a space, a control character such as a newline, a byte outside printable ASCII, or more bytes than the bearer limit in the [settings table](../README.md#configuration). Before, it started and answered 401 to every cron call. A value from `openssl rand -hex 32` passes. A secret that you read from a file can end in a newline that you must remove.

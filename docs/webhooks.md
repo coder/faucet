@@ -94,7 +94,7 @@ Any `2xx` answer ends the delivery. `410 Gone` and `413` end that delivery but n
 
 Delivery is **at least once**. An attempt whose result faucet could not record is sent again with the same `webhook-id`.
 
-A delivery that doesn't succeed ends with one of these reasons, which `/cron/deliver` counts in `gave_up` and logs:
+A delivery that a run takes and that doesn't succeed ends with one of these reasons, which `/cron/deliver` counts in `gave_up` and logs:
 
 <!-- BEGIN generated:give-up-reasons -->
 | Reason | Meaning |
@@ -111,6 +111,8 @@ A delivery that doesn't succeed ends with one of these reasons, which `/cron/del
 | `subscription_expired` | The subscription expired before the delivery ended. |
 | `arguments_undecodable` | The subscription's stored arguments do not decode, so faucet deleted the subscription with its deliveries. |
 <!-- END generated:give-up-reasons -->
+
+A delivery can also end with its subscription and no reason: `events/unsubscribe` and a renewal that finds access revoked delete the subscription with the deliveries it still holds, and `/cron/purge` counts the deliveries of the expired subscriptions that it deletes in `ended_deliveries`.
 
 A subscription that holds 100 unsent deliveries reads no new events until some of them end.
 
