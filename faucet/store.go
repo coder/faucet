@@ -72,6 +72,8 @@ type PollQuery struct {
 	// PR limits the result to events that mention this pull request number.
 	// Zero means no limit.
 	PR int32
+	// Fields limits the result to events that pass every filter.
+	Fields []FieldFilter
 	// After is the cursor: only events with ID > After are returned.
 	After int64
 	// Limit is the page size. It must be positive.
@@ -89,8 +91,24 @@ func (q PollQuery) Validate() error {
 		return xerrors.New("after must not be negative")
 	case q.PR < 0:
 		return xerrors.New("pr must not be negative")
+	case slices.ContainsFunc(q.Fields, func(f FieldFilter) bool { return f.Field == "" }):
+		return xerrors.New("a field filter must name a field")
 	}
 	return nil
+}
+
+// FieldFilter narrows the events of some types by one member of their data.
+type FieldFilter struct {
+	// Field names a string or boolean member of the data, for example
+	// "head_branch".
+	Field string
+	// Values are the texts that pass: a string member passes when its value is
+	// one of them, and a boolean member when "true" or "false" is. An event
+	// without the member does not pass.
+	Values []string
+	// Types are the event types that the filter narrows. An event of another
+	// type passes it.
+	Types []string
 }
 
 // PollPage is the result of Store.PollEvents.

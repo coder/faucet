@@ -31,6 +31,7 @@ func Run(t *testing.T, newStore func(t *testing.T) faucet.Store) {
 		{"EventsAfterReturnsIDOrderAndLimit", eventsAfterReturnsIDOrderAndLimit},
 		{"ConcurrentInsertsCommitInIDOrder", concurrentInsertsCommitInIDOrder},
 		{"PollEventsAppliesFiltersBeforeLimit", pollEventsAppliesFiltersBeforeLimit},
+		{"PollEventsAppliesFieldFilters", pollEventsAppliesFieldFilters},
 		{"PollEventsReturnsHeadCursorWhenNothingMatches", pollEventsReturnsHeadCursorWhenNothingMatches},
 		{"PollEventsReturnsLastIDWhenPageIsFull", pollEventsReturnsLastIDWhenPageIsFull},
 		{"PollEventsValidatesQuery", pollEventsValidatesQuery},
@@ -380,6 +381,69 @@ func pollEventsAppliesFiltersBeforeLimit(t *testing.T, s faucet.Store) {
 	requirePollIDs(t, s, q, e[3])
 }
 
+func pollEventsAppliesFieldFilters(t *testing.T, s faucet.Store) {
+	const (
+		run = "ci.run_completed"
+		pr  = "pr.opened"
+	)
+	var e []faucet.Event
+	for i, sp := range []struct{ typ, data string }{
+		{run, `{"head_branch":"main","conclusion":"failure","from_fork":false}`},
+		{run, `{"head_branch":"main","conclusion":"success","from_fork":false}`},
+		{run, `{"head_branch":"dev","conclusion":"failure","from_fork":false}`},
+		{pr, `{"base_branch":"main","head_branch":"dev"}`},
+		{run, `{"head_branch":"main","conclusion":"timed_out","from_fork":true}`},
+		{run, `{"head_branch":"main","conclusion":null}`},
+	} {
+		ev := newEvent(fmt.Sprintf("field-%d", i))
+		ev.Type, ev.Data = sp.typ, json.RawMessage(sp.data)
+		stored, inserted, err := s.InsertEvent(context.Background(), ev)
+		require.NoError(t, err)
+		require.True(t, inserted)
+		e = append(e, stored)
+	}
+	runs := []string{run}
+	conclusion := func(values ...string) faucet.FieldFilter {
+		return faucet.FieldFilter{Field: "conclusion", Values: values, Types: runs}
+	}
+
+	for _, tt := range []struct {
+		name   string
+		types  []string
+		fields []faucet.FieldFilter
+		want   []faucet.Event
+	}{
+		{"one value", runs, []faucet.FieldFilter{conclusion("failure")}, []faucet.Event{e[0], e[2]}},
+		{"any of the values", runs, []faucet.FieldFilter{conclusion("failure", "timed_out")}, []faucet.Event{e[0], e[2], e[4]}},
+		{"every filter", runs, []faucet.FieldFilter{
+			conclusion("failure", "timed_out"),
+			{Field: "head_branch", Values: []string{"main"}, Types: runs},
+		}, []faucet.Event{e[0], e[4]}},
+		{"a boolean by its text", runs, []faucet.FieldFilter{{Field: "from_fork", Values: []string{"false"}, Types: runs}}, []faucet.Event{e[0], e[1], e[2]}},
+		{"a null member passes no value", runs, []faucet.FieldFilter{conclusion("failure", "success", "timed_out", "null", "")}, []faucet.Event{e[0], e[1], e[2], e[4]}},
+		{"a missing member passes no value", runs, []faucet.FieldFilter{{Field: "from_fork", Values: []string{"true", "false", ""}, Types: runs}}, []faucet.Event{e[0], e[1], e[2], e[4]}},
+		{"an event of another type passes", nil, []faucet.FieldFilter{conclusion("failure")}, []faucet.Event{e[0], e[2], e[3]}},
+		{"each filter narrows its own types", nil, []faucet.FieldFilter{
+			conclusion("failure"),
+			{Field: "base_branch", Values: []string{"release"}, Types: []string{pr}},
+		}, []faucet.Event{e[0], e[2]}},
+		{"no values pass nothing", runs, []faucet.FieldFilter{conclusion()}, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			requirePollIDs(t, s, faucet.PollQuery{RepoID: 42, Types: tt.types, Fields: tt.fields, Limit: 100}, tt.want...)
+		})
+	}
+
+	q := faucet.PollQuery{RepoID: 42, Types: runs, Fields: []faucet.FieldFilter{conclusion("failure", "timed_out")}, Limit: 1}
+	for _, want := range []faucet.Event{e[0], e[2], e[4]} {
+		page := requirePollIDs(t, s, q, want)
+		require.Equal(t, want.ID, page.Next, "the field filters apply before the limit")
+		q.After = page.Next
+	}
+	page := requirePollIDs(t, s, q)
+	require.Equal(t, e[5].ID, page.Next)
+}
+
 func pollEventsReturnsHeadCursorWhenNothingMatches(t *testing.T, s faucet.Store) {
 	empty, err := s.PollEvents(context.Background(), faucet.PollQuery{RepoID: 42, Limit: 10})
 	require.NoError(t, err)
@@ -441,6 +505,7 @@ func pollEventsValidatesQuery(t *testing.T, s faucet.Store) {
 		"negative limit":   func(q *faucet.PollQuery) { q.Limit = -1 },
 		"negative after":   func(q *faucet.PollQuery) { q.After = -1 },
 		"negative pr":      func(q *faucet.PollQuery) { q.PR = -1 },
+		"unnamed field":    func(q *faucet.PollQuery) { q.Fields = []faucet.FieldFilter{{Values: []string{"main"}}} },
 	} {
 		q := good
 		mutate(&q)

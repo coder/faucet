@@ -4,6 +4,7 @@ package pgstore
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -124,12 +125,21 @@ func (s *Store) PollEvents(ctx context.Context, q faucet.PollQuery) (_ faucet.Po
 	if types == nil {
 		types = []string{}
 	}
+	filters := make([]fieldFilter, len(q.Fields))
+	for i, f := range q.Fields {
+		filters[i] = fieldFilter(f)
+	}
+	fields, err := json.Marshal(filters)
+	if err != nil {
+		return faucet.PollPage{}, xerrors.Errorf("encode field filters: %w", err)
+	}
 	rows, err := s.q.PollEvents(ctx, database.PollEventsParams{
 		RepoID:   q.RepoID,
 		AfterID:  q.After,
 		Types:    types,
 		HeadSha:  q.HeadSHA,
 		Pr:       q.PR,
+		Fields:   string(fields),
 		RowLimit: q.Limit,
 	})
 	if err != nil {
@@ -149,6 +159,14 @@ func (s *Store) PollEvents(ctx context.Context, q faucet.PollQuery) (_ faucet.Po
 		page.Next = page.Events[len(page.Events)-1].ID
 	}
 	return page, nil
+}
+
+// fieldFilter is the JSON of a faucet.FieldFilter that PollEvents reads with
+// jsonb_to_recordset. A null list there matches nothing, as an empty one does.
+type fieldFilter struct {
+	Field  string   `json:"field"`
+	Values []string `json:"matches"`
+	Types  []string `json:"types"`
 }
 
 func (s *Store) CursorAt(ctx context.Context, t time.Time) (_ int64, err error) {

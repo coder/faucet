@@ -38,6 +38,10 @@ WITH mark AS (
     AND (cardinality(sqlc.arg(types)::text[]) = 0 OR e.type = ANY(sqlc.arg(types)::text[]))
     AND (sqlc.arg(head_sha)::text = '' OR e.head_sha = sqlc.arg(head_sha)::text)
     AND (sqlc.arg(pr)::int = 0 OR sqlc.arg(pr)::int = ANY(e.prs))
+    AND NOT EXISTS (
+      SELECT 1 FROM jsonb_to_recordset(sqlc.arg(fields)::text::jsonb) AS f(field text, matches text[], types text[])
+      WHERE e.type = ANY(f.types) AND NOT COALESCE(e.data ->> f.field = ANY(f.matches), false)
+    )
   ORDER BY e.id
   LIMIT sqlc.arg(row_limit)
 )
