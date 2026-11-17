@@ -180,7 +180,8 @@ type RawRead struct {
 	RepoID int64
 	// After is the cursor position: the poller has every event at or below it.
 	After int64
-	// Limit is the most events of a page. It must be positive.
+	// Limit is the most events of a page. It must be positive. An unread
+	// event that the page passes over does not count.
 	Limit int32
 	// MaxBytes ends a page after the event that takes the bodies read to this
 	// size or more. It must be positive. The first event always fits.
@@ -211,12 +212,14 @@ func (q RawRead) Validate() error {
 type RawPage struct {
 	// Events are the unread events above RawRead.After in ID order.
 	Events []RawEvent
-	// Next is the position to poll with next. With More set it is the highest
-	// raw ID that the page returned or passed over. Otherwise it is the highest
-	// of RawRead.After, that ID and the highest raw ID stored, read in the same
-	// snapshot as the page, so that a later read with it skips no event.
+	// Next is the position to poll with next. With More set it is the ID of
+	// the last event. Otherwise it is the highest of RawRead.After, the last
+	// unread event that the page returned or passed over, and the highest raw
+	// ID stored, read in the same snapshot as the page, so that a later read
+	// with it skips no event.
 	Next int64
-	// More says that unread events lie beyond the page.
+	// More says that unread events lie beyond the page. A page ends early only
+	// after an event, so a page with More holds at least one.
 	More bool
 	// Skipped is the number of unread events that the page passed over: the
 	// lease missed them (RawPlan.Lost), their row is gone, their body is
