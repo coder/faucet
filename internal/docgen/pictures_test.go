@@ -18,7 +18,8 @@ const (
 	pictureSource = "docs/diagrams/source.html"
 	pictureHash   = "docs/images/SOURCE_SHA256"
 	pictureDir    = "docs/images"
-	refreshImages = "run `cd verify && npm ci && npm run docs:images` and commit docs/images"
+	refreshImages = "run `cd verify && npm ci && npx playwright-core install chromium && npm run docs:images` and commit docs/images"
+	readme        = "README.md"
 )
 
 var (
@@ -26,6 +27,12 @@ var (
 	// hashLineRE is one line that sha256sum writes in text mode.
 	hashLineRE = regexp.MustCompile(`^([0-9a-f]{64})  (\S+)\n$`)
 	colorModes = []string{"light", "dark"}
+
+	pictureBlockRE = regexp.MustCompile(`(?s)<picture>(.*?)</picture>`)
+	sourceRE       = regexp.MustCompile(`<source media="\(prefers-color-scheme: (dark|light)\)" srcset="([^"]*)">`)
+	imgRE          = regexp.MustCompile(`<img [^>]*>`)
+	altRE          = regexp.MustCompile(` alt="([^"]*)"`)
+	srcRE          = regexp.MustCompile(` src="([^"]*)"`)
 )
 
 // checkPictures fails unless SOURCE_SHA256 lists, each with its current hash,
@@ -43,7 +50,9 @@ func checkPictures(fsys fs.FS) ([]string, error) {
 	}
 
 	want := map[string]bool{pictureSource: true}
+	var names []string
 	for _, m := range pictureRE.FindAllSubmatch(src, -1) {
+		names = append(names, string(m[1]))
 		for _, mode := range colorModes {
 			want[fmt.Sprintf("%s/%s-%s.png", pictureDir, m[1], mode)] = true
 		}
@@ -51,6 +60,11 @@ func checkPictures(fsys fs.FS) ([]string, error) {
 	if len(want) == 1 {
 		report("%s has no data-picture element", pictureSource)
 	}
+	readmeText, err := fs.ReadFile(fsys, readme)
+	if err != nil {
+		return nil, err
+	}
+	problems = append(problems, checkPictureMarkup(string(readmeText), names)...)
 
 	sums, err := fs.ReadFile(fsys, pictureHash)
 	if err != nil {
@@ -101,6 +115,44 @@ func checkPictures(fsys fs.FS) ([]string, error) {
 	return problems, nil
 }
 
+// checkPictureMarkup fails unless the README shows each picture once, in a
+// <picture> whose dark source is its dark PNG and whose light source and
+// fallback <img> are its light PNG, with alt text, and shows no other.
+func checkPictureMarkup(text string, names []string) []string {
+	var problems []string
+	shown := map[string]int{}
+	for i, block := range pictureBlockRE.FindAllStringSubmatch(text, -1) {
+		srcsets := map[string]string{}
+		for _, m := range sourceRE.FindAllStringSubmatch(block[1], -1) {
+			srcsets[m[1]] = m[2]
+		}
+		img := imgRE.FindString(block[1])
+		var alt, fallback string
+		if m := altRE.FindStringSubmatch(img); m != nil {
+			alt = m[1]
+		}
+		if m := srcRE.FindStringSubmatch(img); m != nil {
+			fallback = m[1]
+		}
+		name := strings.TrimSuffix(strings.TrimPrefix(srcsets["light"], pictureDir+"/"), "-light.png")
+		if !slices.Contains(names, name) {
+			problems = append(problems, fmt.Sprintf("%s <picture> %d shows %q, which is no picture of %s", readme, i+1, srcsets["light"], pictureSource))
+			continue
+		}
+		shown[name]++
+		image := func(mode string) string { return fmt.Sprintf("%s/%s-%s.png", pictureDir, name, mode) }
+		if srcsets["dark"] != image("dark") || fallback != image("light") || strings.TrimSpace(alt) == "" {
+			problems = append(problems, fmt.Sprintf("%s <picture> %d of %s must have a dark source %s, a light source and an <img src> %s, and alt text", readme, i+1, name, image("dark"), image("light")))
+		}
+	}
+	for _, name := range names {
+		if shown[name] != 1 {
+			problems = append(problems, fmt.Sprintf("%s shows the picture %s %d times, not once", readme, name, shown[name]))
+		}
+	}
+	return problems
+}
+
 func TestPicturesMatchTheirSource(t *testing.T) {
 	t.Parallel()
 	problems, err := checkPictures(os.DirFS(repoRoot(t)))
@@ -126,7 +178,15 @@ func TestCheckPictures(t *testing.T) {
 		return hex.EncodeToString(sum[:]) + "  " + name + "\n"
 	}
 	sums := line(pictureSource, page) + line(darkPNG, dark) + line(lightPNG, light)
+	markup := func(dark, light, img, alt string) string {
+		return "<picture>\n" +
+			`  <source media="(prefers-color-scheme: dark)" srcset="` + dark + `">` + "\n" +
+			`  <source media="(prefers-color-scheme: light)" srcset="` + light + `">` + "\n" +
+			`  <img alt="` + alt + `" src="` + img + `">` + "\n</picture>\n"
+	}
+	shown := markup(darkPNG, lightPNG, lightPNG, "a map")
 	good := map[string]string{
+		readme:        shown,
 		pictureSource: page,
 		pictureHash:   sums,
 		lightPNG:      light,
@@ -151,6 +211,12 @@ func TestCheckPictures(t *testing.T) {
 		{name: "a page without a line", change: map[string]string{pictureHash: line(darkPNG, dark) + line(lightPNG, light)}, want: pictureSource + " has no line"},
 		{name: "an unlisted image of no picture", change: map[string]string{pictureDir + "/old-light.png": light}, want: pictureDir + "/old-light.png is not listed"},
 		{name: "a page without pictures", change: map[string]string{pictureSource: "<p></p>", pictureHash: line(pictureSource, "<p></p>")}, want: "has no data-picture element"},
+		{name: "a README with the dark and light sources swapped", change: map[string]string{readme: markup(lightPNG, darkPNG, lightPNG, "a map")}, want: "which is no picture"},
+		{name: "a README whose dark source is the light image", change: map[string]string{readme: markup(lightPNG, lightPNG, lightPNG, "a map")}, want: "must have a dark source"},
+		{name: "a README whose fallback is the dark image", change: map[string]string{readme: markup(darkPNG, lightPNG, darkPNG, "a map")}, want: "must have a dark source"},
+		{name: "a README picture without alt text", change: map[string]string{readme: markup(darkPNG, lightPNG, lightPNG, " ")}, want: "and alt text"},
+		{name: "a README without the picture", change: map[string]string{readme: "no pictures"}, want: "shows the picture map 0 times"},
+		{name: "a README with the picture twice", change: map[string]string{readme: shown + shown}, want: "shows the picture map 2 times"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

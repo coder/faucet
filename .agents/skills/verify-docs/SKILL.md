@@ -11,7 +11,7 @@ Four checks keep the docs current. CI runs the first three in the `test` job (`g
 | --- | --- | --- | --- |
 | Tables and names | `go test -count=1 -run 'TestGeneratedTablesAreCurrent\|TestDocsNameWhatExists' ./internal/docgen/` | a `generated:NAME` block differs from what the code gives, a table has no block, or README.md, docs/*.md or source.html name an environment variable that no non-test file reads, a route (also inside a `https://<host>/...` URL) or a relative link (with its `#anchor`) that does not exist | `go run ./internal/docgen` |
 | Numbers | `go test -count=1 -run 'DocsState\|RedeliveryDoc\|CallbackReason' ./faucet/... ./cmd/faucet/` | a number that the docs or the pictures repeat (timeouts, limits, the retry schedule, the handshake buckets, redelivery's budget) differs from its constant | change the prose; each failure names the phrase it wants |
-| Pictures | `go test -count=1 -run TestPicturesMatchTheirSource ./internal/docgen/`, or `sha256sum -c docs/images/SOURCE_SHA256` | a hash in `docs/images/SOURCE_SHA256` does not match `docs/diagrams/source.html` or a PNG (so a changed page, a swapped or a truncated image fails), or a picture lacks its light or dark PNG, or a PNG is unlisted | `cd verify && npm ci && npm run docs:images` |
+| Pictures | `go test -count=1 -run TestPicturesMatchTheirSource ./internal/docgen/`, or `sha256sum -c docs/images/SOURCE_SHA256` | a hash in `docs/images/SOURCE_SHA256` does not match `docs/diagrams/source.html` or a PNG (so a changed page, a swapped or a truncated image fails), or a picture lacks its light or dark PNG, or a PNG is unlisted, or the README's `<picture>` for a picture does not use its dark PNG as the dark source and its light PNG as the light source and the `<img>` | `cd verify && npm ci && npx playwright-core install chromium && npm run docs:images` |
 | Mermaid | `cd verify && npm ci && unset Path && npx e2e run tests/docs-mermaid.e2e.ts` | a ```` ```mermaid ```` block in README.md or docs/*.md does not parse or render (mermaid from `verify/node_modules`, no CDN) | fix the block it names |
 
 The Mermaid run starts the whole verify stack (Postgres, two faucets), so it needs what the `verify-faucet` skill lists. Set `PG_BIN` when `initdb` is not on `PATH`.
@@ -36,7 +36,7 @@ The PNG bytes depend on the fonts of the host, so another host can give differen
 
 ## Look at them
 
-The checks prove the pictures are current, not that they read well. Before you commit a change to the page:
+The checks prove that the PNGs match `SOURCE_SHA256`, not that they read well. Before you commit a change to the page:
 
 1. Open all four PNGs (`docs/images/*-light.png`, `*-dark.png`) and check that nothing is clipped, overlaps or is too small at about 830 px wide, GitHub's README width.
 2. To compare light and dark while you edit, open `docs/diagrams/source.html` in Chrome and switch DevTools, Rendering, "Emulate CSS media feature prefers-color-scheme".
