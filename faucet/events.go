@@ -16,6 +16,7 @@ import (
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog/v3"
+	"github.com/coder/faucet/faucet/internal/githubapi"
 )
 
 const (
@@ -199,7 +200,7 @@ func parsePollArguments(input *jsonschema.Resolved, raw json.RawMessage) (pollAr
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return pollArguments{}, invalidParams("arguments do not match the inputSchema: %v", err)
 	}
-	if _, _, err := parseRepo(args.Repo); err != nil {
+	if _, _, err := githubapi.ParseRepo(args.Repo); err != nil {
 		return pollArguments{}, invalidParams("%v", err)
 	}
 	return args, nil

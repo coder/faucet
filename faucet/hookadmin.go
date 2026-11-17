@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"golang.org/x/xerrors"
+
+	"github.com/coder/faucet/faucet/internal/githubapi"
 )
 
 const (
@@ -105,7 +107,7 @@ var _ HookAdmin = GitHubHookAdmin{}
 // tokens are. client defaults to http.DefaultClient and is never modified. No
 // error carries the token or the base URL.
 func NewGitHubHookAdmin(baseURL, token string, target HookTarget, client *http.Client) (GitHubHookAdmin, error) {
-	base, err := parseBaseURL(baseURL)
+	base, err := githubapi.ParseBaseURL(baseURL)
 	if err != nil {
 		return GitHubHookAdmin{}, err
 	}
@@ -120,12 +122,12 @@ func NewGitHubHookAdmin(baseURL, token string, target HookTarget, client *http.C
 	case target.Org != "" && target.Repo != "":
 		return GitHubHookAdmin{}, xerrors.New("set the hook's org or its repo, not both")
 	case target.Org != "":
-		if !ownerPattern.MatchString(target.Org) {
+		if !githubapi.ValidOwner(target.Org) {
 			return GitHubHookAdmin{}, xerrors.New("hook org is not a valid organization name")
 		}
 		scope = "/orgs/" + url.PathEscape(target.Org)
 	case target.Repo != "":
-		owner, name, err := parseRepo(target.Repo)
+		owner, name, err := githubapi.ParseRepo(target.Repo)
 		if err != nil {
 			return GitHubHookAdmin{}, xerrors.New("hook repo must be written owner/name")
 		}
@@ -175,7 +177,7 @@ func (a GitHubHookAdmin) ListDeliveries(ctx context.Context, cursor string) (Del
 	if cursor != "" {
 		query.Set("cursor", cursor)
 	}
-	resp, err := callGitHub(ctx, a.client, a.base, a.token, http.MethodGet, a.hookPath+"/deliveries", query.Encode())
+	resp, err := githubapi.Call(ctx, a.client, a.base, a.token, http.MethodGet, a.hookPath+"/deliveries", query.Encode())
 	if err != nil {
 		return DeliveryPage{}, err
 	}
@@ -184,7 +186,7 @@ func (a GitHubHookAdmin) ListDeliveries(ctx context.Context, cursor string) (Del
 		return DeliveryPage{}, statusError(resp, "the delivery list")
 	}
 	var raw []deliveryJSON
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAPIResponseBytes)).Decode(&raw); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, githubapi.MaxResponseBytes)).Decode(&raw); err != nil {
 		return DeliveryPage{}, xerrors.Errorf("decode GitHub deliveries: %w", err)
 	}
 	next, err := nextCursor(resp.Header.Get("Link"))
@@ -208,7 +210,7 @@ func (a GitHubHookAdmin) Redeliver(ctx context.Context, attemptID int64) error {
 		return xerrors.New("attempt ID must be positive")
 	}
 	path := a.hookPath + "/deliveries/" + strconv.FormatInt(attemptID, 10) + "/attempts"
-	resp, err := callGitHub(ctx, a.client, a.base, a.token, http.MethodPost, path, "")
+	resp, err := githubapi.Call(ctx, a.client, a.base, a.token, http.MethodPost, path, "")
 	if err != nil {
 		return err
 	}
@@ -216,19 +218,19 @@ func (a GitHubHookAdmin) Redeliver(ctx context.Context, attemptID int64) error {
 	if resp.StatusCode != http.StatusAccepted {
 		return statusError(resp, "the redelivery request")
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxAPIResponseBytes))
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, githubapi.MaxResponseBytes))
 	return nil
 }
 
 // statusError is the error for an answer that is not the one that was needed.
 // It names the status and never the body. A rate limit is told from a denial
-// and wraps errRateLimited, so the log names it. A later run repeats the call
+// and wraps githubapi.ErrRateLimited, so the log names it. A later run repeats the call
 // for either error: no answer from GitHub ends a delivery, and only the ask
 // limit and GitHub's retention do.
 func statusError(resp *http.Response, what string) error {
-	answer, _ := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseBytes))
-	if rateLimited(resp.StatusCode, resp.Header, answer) {
-		return xerrors.Errorf("GitHub answered %s with status %d: %w", what, resp.StatusCode, errRateLimited)
+	answer, _ := io.ReadAll(io.LimitReader(resp.Body, githubapi.MaxResponseBytes))
+	if githubapi.RateLimited(resp.StatusCode, resp.Header, answer) {
+		return xerrors.Errorf("GitHub answered %s with status %d: %w", what, resp.StatusCode, githubapi.ErrRateLimited)
 	}
 	return xerrors.Errorf("GitHub answered %s with status %d", what, resp.StatusCode)
 }

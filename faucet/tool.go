@@ -11,6 +11,7 @@ import (
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog/v3"
+	"github.com/coder/faucet/faucet/internal/githubapi"
 )
 
 const (
@@ -102,7 +103,7 @@ type waitRequest struct {
 }
 
 func (in waitInput) parse() (waitRequest, error) {
-	if _, _, err := parseRepo(in.Repo); err != nil {
+	if _, _, err := githubapi.ParseRepo(in.Repo); err != nil {
 		return waitRequest{}, err
 	}
 	known := eventTypes()
