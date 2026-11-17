@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 
@@ -21,7 +22,7 @@ type family struct {
 	// of the family has a head_sha and a sha filter could never match one.
 	noHeadSHA bool
 	// properties are the payload properties of the family's data, written as
-	// JSON object members.
+	// a JSON object.
 	properties string
 	// actions are GitHub's action words in sorted order, and types holds the
 	// stored type of each. Both are filled from rules.
@@ -63,53 +64,58 @@ var families = []*family{
 		name:        "ci.runs",
 		githubEvent: "workflow_run",
 		description: "GitHub Actions workflow runs. Each run attempt has its own events.",
-		properties: `
+		properties: `{
     "run_id": {"type": "integer"},
     "name": {"type": "string", "description": "The workflow name."},
     "conclusion": {"type": "string", "description": "For example success, failure or timed_out."},
     "head_branch": {"type": "string"},
     "html_url": {"type": "string"},
-    "run_attempt": {"type": "integer"}`,
+    "run_attempt": {"type": "integer"}
+}`,
 	},
 	{
 		name:        "ci.checks",
 		githubEvent: "check_run",
 		description: "Check runs on a commit, from GitHub Actions or another app.",
-		properties: `
+		properties: `{
     "check_run_id": {"type": "integer"},
     "name": {"type": "string", "description": "The check name."},
     "conclusion": {"type": "string", "description": "For example success, failure or timed_out."},
     "html_url": {"type": "string"},
-    "app_slug": {"type": "string", "description": "The app that ran the check."}`,
+    "app_slug": {"type": "string", "description": "The app that ran the check."}
+}`,
 	},
 	{
 		name:        "pr.activity",
 		githubEvent: "pull_request",
 		description: "Pull requests, for example one that was closed.",
-		properties: `
+		properties: `{
     "merged": {"type": "boolean"},
     "merge_commit_sha": {"type": ["string", "null"], "description": "The merge commit. Before a merge it is the test-merge commit of GitHub or null, so it does not mean the pull request merged. Read merged."},
-    "html_url": {"type": "string"}`,
+    "html_url": {"type": "string"}
+}`,
 	},
 	{
 		name:        "pr.reviews",
 		githubEvent: "pull_request_review",
 		description: "Reviews on a pull request.",
-		properties: `
+		properties: `{
     "review_id": {"type": "integer"},
     "state": {"type": "string", "description": "The review state, for example approved, changes_requested or commented."},
     "user_login": {"type": "string"},
-    "html_url": {"type": "string"}`,
+    "html_url": {"type": "string"}
+}`,
 	},
 	{
 		name:        "pr.comments",
 		githubEvent: "issue_comment",
 		description: "Comments in the conversation of a pull request. GitHub names no head commit in these events, so filter by pr and not by sha.",
 		noHeadSHA:   true,
-		properties: `
+		properties: `{
     "comment_id": {"type": "integer"},
     "user_login": {"type": "string"},
-    "html_url": {"type": "string"}`,
+    "html_url": {"type": "string"}
+}`,
 	},
 }
 
@@ -146,40 +152,38 @@ var (
 	catalog     []*catalogEntry
 )
 
-const pollArgumentsTemplate = `{
-  "type": "object",
-  "properties": {
-    "repo": {"type": "string", "description": "The repository, written owner/name."},%s
-    "pr": {"type": "integer", "minimum": 1, "maximum": 2147483647, "description": "Only events that mention this pull request number."}%s
-  },
-  "required": ["repo"],
-  "additionalProperties": false
-}`
+var (
+	repoArgument = map[string]any{"type": "string", "description": "The repository, written owner/name."}
+	prArgument   = map[string]any{"type": "integer", "minimum": 1, "maximum": math.MaxInt32, "description": "Only events that mention this pull request number."}
+	shaArgument  = map[string]any{"type": "string", "pattern": "^[0-9A-Fa-f]{40}$", "description": "Only events for this 40 character head commit SHA."}
 
-const shaArgumentProperty = `
-    "sha": {"type": "string", "pattern": "^[0-9A-Fa-f]{40}$", "description": "Only events for this 40 character head commit SHA."},`
+	prsProperty     = map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "Pull request numbers the event mentions."}
+	headSHAProperty = map[string]any{"type": "string", "description": "The head commit SHA. Absent when the event has none."}
+)
 
-const actionsArgumentTemplate = `,
-    "actions": {"type": "array", "minItems": 1, "items": {"type": "string", "enum": %s}, "description": "Only events of these GitHub actions. Without it, events of every action."}`
-
-const payloadTemplate = `{
-  "type": "object",
-  "properties": {
-    "prs": {"type": "array", "items": {"type": "integer"}, "description": "Pull request numbers the event mentions."},%s
-    "event": {"type": "string", "enum": %s, "description": "The exact event type, for example pr.closed."},
-    "action": {"type": "string", "enum": %s, "description": "The action of the GitHub webhook, for example closed."},
-    %s
-  },
-  "required": [%s]
-}`
-
-const headSHAProperty = `
-    "head_sha": {"type": "string", "description": "The head commit SHA. Absent when the event has none."},`
+// argumentsSchema is the inputSchema of an event name: repo and pr, and the
+// filters of the name. It offers sha unless the family's events carry no head
+// commit (no family means sha), and actions when it is given them.
+func argumentsSchema(f *family, actions []string) json.RawMessage {
+	properties := map[string]any{"repo": repoArgument, "pr": prArgument}
+	if f == nil || !f.noHeadSHA {
+		properties["sha"] = shaArgument
+	}
+	if len(actions) > 0 {
+		properties["actions"] = map[string]any{
+			"type":        "array",
+			"minItems":    1,
+			"items":       map[string]any{"type": "string", "enum": actions},
+			"description": "Only events of these GitHub actions. Without it, events of every action.",
+		}
+	}
+	return marshalRaw(map[string]any{"type": "object", "properties": properties, "required": []string{"repo"}, "additionalProperties": false})
+}
 
 // shaInputResolved is the arguments schema of an event type that has a sha. A
 // version before pr.comment_created lost its sha stored subscriptions with one,
 // and events/unsubscribe still reads that shape so they can be ended.
-var shaInputResolved = mustResolve(fmt.Sprintf(pollArgumentsTemplate, shaArgumentProperty, ""))
+var shaInputResolved = mustResolve(string(argumentsSchema(nil, nil)))
 
 func init() {
 	byEvent := map[string]*family{}
@@ -223,7 +227,7 @@ func init() {
 }
 
 func newFamilyEntry(f *family) *catalogEntry {
-	input := json.RawMessage(fmt.Sprintf(pollArgumentsTemplate, shaArgument(f), fmt.Sprintf(actionsArgumentTemplate, marshalRaw(f.actions))))
+	input := argumentsSchema(f, f.actions)
 	resolved := mustResolve(string(input))
 	return &catalogEntry{
 		name:          f.name,
@@ -237,7 +241,7 @@ func newFamilyEntry(f *family) *catalogEntry {
 }
 
 func newLegacyEntry(l legacyName, t storedType) *catalogEntry {
-	input := json.RawMessage(fmt.Sprintf(pollArgumentsTemplate, shaArgument(t.family), ""))
+	input := argumentsSchema(t.family, nil)
 	return &catalogEntry{
 		name:          l.name,
 		description:   l.description,
@@ -250,23 +254,23 @@ func newLegacyEntry(l legacyName, t storedType) *catalogEntry {
 	}
 }
 
-func shaArgument(f *family) string {
-	if f.noHeadSHA {
-		return ""
-	}
-	return shaArgumentProperty
-}
-
 func payloadSchemaOf(f *family, types, actions, required []string) json.RawMessage {
-	headSHA := headSHAProperty
-	if f.noHeadSHA {
-		headSHA = ""
+	var own map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(f.properties), &own); err != nil {
+		panic(fmt.Sprintf("payload properties of %s: %v", f.name, err))
 	}
-	quoted := make([]string, len(required))
-	for i, name := range required {
-		quoted[i] = fmt.Sprintf("%q", name)
+	properties := map[string]any{
+		"prs":    prsProperty,
+		"event":  map[string]any{"type": "string", "enum": types, "description": "The exact event type, for example pr.closed."},
+		"action": map[string]any{"type": "string", "enum": actions, "description": "The action of the GitHub webhook, for example closed."},
 	}
-	schema := json.RawMessage(fmt.Sprintf(payloadTemplate, headSHA, marshalRaw(types), marshalRaw(actions), f.properties, strings.Join(quoted, ", ")))
+	if !f.noHeadSHA {
+		properties["head_sha"] = headSHAProperty
+	}
+	for name, property := range own {
+		properties[name] = property
+	}
+	schema := marshalRaw(map[string]any{"type": "object", "properties": properties, "required": required})
 	mustResolve(string(schema))
 	return schema
 }
