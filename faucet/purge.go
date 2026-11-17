@@ -45,7 +45,11 @@ func (s *Service) Purge(ctx context.Context, before time.Time) (PurgeResult, err
 		return PurgeResult{}, xerrors.Errorf("purge events: %w", err)
 	}
 	res.ExpiredSubscriptions, res.EndedDeliveries = subscriptions, ended
-	s.logger.Info(ctx, "events purged",
+	logger := s.logger.Debug
+	if res.Deleted > 0 || subscriptions > 0 || ended > 0 {
+		logger = s.logger.Info
+	}
+	logger(ctx, "events purged",
 		slog.F("deleted", res.Deleted), slog.F("purged_through", res.PurgedThrough), slog.F("before", before),
 		slog.F("expired_subscriptions_deleted", subscriptions), slog.F("deliveries_ended", ended))
 	return res, nil

@@ -257,7 +257,7 @@ func (r *Runner) Run(ctx context.Context) (Result, error) {
 		return Result{}, xerrors.Errorf("acquire redelivery lease: %w", err)
 	}
 	if !ok {
-		r.logger.Info(ctx, "redelivery skipped: another run holds the lease")
+		r.logger.Debug(ctx, "redelivery skipped: another run holds the lease")
 		return Result{Busy: true}, nil
 	}
 	defer func() {
@@ -301,7 +301,11 @@ func (r *redeliveryRun) execute(ctx context.Context, scan Scan) (Result, error) 
 	errs = append(errs, r.purge(ctx))
 
 	res := r.res
-	r.logger.Info(ctx, "redelivery run done",
+	logger := r.logger.Debug
+	if res.Tracked > 0 || res.Asked > 0 || res.Recovered > 0 || res.GaveUpLimit > 0 || res.GaveUpExpired > 0 || res.Gaps > 0 {
+		logger = r.logger.Info
+	}
+	logger(ctx, "redelivery run done",
 		slog.F("pages", res.Pages), slog.F("attempts", res.Attempts), slog.F("tracked", res.Tracked), slog.F("asked", res.Asked),
 		slog.F("recovered", res.Recovered), slog.F("gave_up_limit", res.GaveUpLimit), slog.F("gave_up_expired", res.GaveUpExpired),
 		slog.F("gaps", res.Gaps), slog.F("pending", res.Pending), slog.F("open_ranges", res.Ranges))

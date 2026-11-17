@@ -107,7 +107,7 @@ func newHarness(t *testing.T) *harness {
 	store := &fakeStore{}
 	logs := &bytes.Buffer{}
 	deps := testDeps(store)
-	deps.Logger = slog.Make(sloghuman.Sink(logs))
+	deps.Logger = slog.Make(sloghuman.Sink(logs)).Leveled(slog.LevelDebug)
 	svc, err := faucet.New(deps)
 	require.NoError(t, err)
 	return &harness{t: t, store: store, logs: logs, handler: svc.WebhookHandler()}
@@ -245,6 +245,23 @@ func TestWebhookHandlerStoresEvents(t *testing.T) {
 		h := newHarness(t)
 		h.serve(newRequest(http.MethodPost, fixture(t, "workflow_run_completed"), "workflow_run", "delivery-log"))
 		require.Contains(t, h.logs.String(), "delivery-log")
+	})
+
+	t.Run("StoresWithoutALogLineAtTheDefaultLevel", func(t *testing.T) {
+		t.Parallel()
+
+		store := &fakeStore{}
+		logs := &bytes.Buffer{}
+		deps := testDeps(store)
+		deps.Logger = slog.Make(sloghuman.Sink(logs))
+		svc, err := faucet.New(deps)
+		require.NoError(t, err)
+		h := &harness{t: t, store: store, logs: logs, handler: svc.WebhookHandler()}
+
+		rec := h.serve(newRequest(http.MethodPost, fixture(t, "workflow_run_completed"), "workflow_run", "delivery-quiet"))
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Len(t, store.stored(), 1)
+		require.Empty(t, logs.String(), "a routine webhook writes no line at the level the server runs at")
 	})
 }
 
