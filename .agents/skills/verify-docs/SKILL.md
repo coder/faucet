@@ -5,11 +5,12 @@ description: Check and refresh faucet's docs (README.md and docs/*.md) - the tab
 
 # Verify the docs
 
-Three checks keep the docs current. CI runs all three: the first two in the `test` job (`go test ./...`), the third in the `verify` job (`npx e2e run`).
+Four checks keep the docs current. CI runs the first three in the `test` job (`go test ./...`) and the Mermaid check in the `verify` job (`npx e2e run`).
 
 | Check | Run it | It fails when | Refresh |
 | --- | --- | --- | --- |
-| Tables and names | `go test -count=1 -run 'TestGeneratedTablesAreCurrent\|TestDocsNameWhatExists' ./internal/docgen/` | a `generated:NAME` block differs from what the code gives, or README.md, docs/*.md or source.html name a `FAUCET_*` variable, a route or a relative link (with its `#anchor`) that does not exist | `go run ./internal/docgen` |
+| Tables and names | `go test -count=1 -run 'TestGeneratedTablesAreCurrent\|TestDocsNameWhatExists' ./internal/docgen/` | a `generated:NAME` block differs from what the code gives, a table has no block, or README.md, docs/*.md or source.html name an environment variable that no non-test file reads, a route (also inside a `https://<host>/...` URL) or a relative link (with its `#anchor`) that does not exist | `go run ./internal/docgen` |
+| Numbers | `go test -count=1 -run 'DocsState\|RedeliveryDoc\|CallbackReason' ./faucet/... ./cmd/faucet/` | a number that the docs or the pictures repeat (timeouts, limits, the retry schedule, the handshake buckets, redelivery's budget) differs from its constant | change the prose; each failure names the phrase it wants |
 | Pictures | `go test -count=1 -run TestPicturesMatchTheirSource ./internal/docgen/`, or `sha256sum -c docs/images/SOURCE_SHA256` | a hash in `docs/images/SOURCE_SHA256` does not match `docs/diagrams/source.html` or a PNG (so a changed page, a swapped or a truncated image fails), or a picture lacks its light or dark PNG, or a PNG is unlisted | `cd verify && npm ci && npm run docs:images` |
 | Mermaid | `cd verify && npm ci && unset Path && npx e2e run tests/docs-mermaid.e2e.ts` | a ```` ```mermaid ```` block in README.md or docs/*.md does not parse or render (mermaid from `verify/node_modules`, no CDN) | fix the block it names |
 
@@ -20,9 +21,12 @@ The Mermaid run starts the whole verify stack (Postgres, two faucets), so it nee
 `go run ./internal/docgen` rewrites every block between `<!-- BEGIN generated:NAME -->` and `<!-- END generated:NAME -->`. Never edit inside a block by hand.
 
 - `events` (README) and `event-actions` (docs/events.md) come from `faucet.EventNames()`.
-- `settings` (README) comes from the `settings` registry in `internal/docgen/tables.go`. The generator fails until that registry lists exactly the `env*` constants of cmd/faucet, so a new variable needs a row there. A number or default in a purpose is a `{constName}` or `{faucet.constName}` placeholder, never typed in.
+- `settings` (README) comes from the `settings` registry in `internal/docgen/tables.go`. The generator fails until that registry lists exactly the variables that cmd/faucet reads, so a new variable needs a row there.
+- `give-up-reasons` and `callback-reasons` (docs/webhooks.md) come from registries in `internal/docgen/reasons.go`, which must list every `faucet.GiveUpReason` and `faucet.CallbackReason` constant. `TestWebhookDocSaysWhereEachCallbackReasonComesFrom` checks the lastError and data.reason columns against sample errors.
+- `cron-replies` (docs/deploy.md) reads each `/cron/*` handler's reply struct in cmd/faucet with go/ast, and the result type whose doc comments explain the fields.
+- A number or default in a registry text is a `{constName}` or `{faucet.constName}` placeholder, never typed in.
 
-A name check that fails on a path that faucet does not serve but a doc must name (a GitHub API path) goes in `exemptPaths` in `internal/docgen/names_test.go`, with the reason.
+A name check that fails on a path or a variable that faucet does not serve or read but a doc must name (a GitHub API path, Neon's `POSTGRES_*`) goes in `exemptPaths` or `exemptVariables` in `internal/docgen/names_test.go`, with the reason.
 
 ## Pictures
 
