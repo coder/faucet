@@ -46,9 +46,9 @@ type ScanTarget struct {
 	// Principal owns the subscription. It lets the run end a subscription that
 	// it cannot read events for.
 	Principal string
-	// EventType and Arguments are the subscription's own.
-	EventType string
-	Arguments json.RawMessage
+	// EventTypes and Arguments are the subscription's own.
+	EventTypes []string
+	Arguments  json.RawMessage
 	// RepoID is the repository the principal could read at the last subscribe.
 	RepoID int64
 	// ScannedThrough is the highest event ID the enqueue has read for it.
@@ -126,6 +126,8 @@ type DeliveryClaim struct {
 	Ref        DeliveryRef
 	MessageID  string
 	EnqueuedAt time.Time
+	// EventType is the subscription's event name, which the body names.
+	EventType string
 	// CallbackURL and SecretEnc are the subscription's. SecretEnc is the sealed
 	// secret, never the plaintext.
 	CallbackURL string

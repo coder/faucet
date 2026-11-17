@@ -777,6 +777,18 @@ func TestWaitRefusesAShaWhenNoTypeCarriesAHeadCommit(t *testing.T) {
 	require.Len(t, res.Events, 1, "a sha with a type that has a head commit is still a filter")
 }
 
+func TestWaitRefusesAPRWhenNoTypeNamesAPullRequest(t *testing.T) {
+	t.Parallel()
+	h := newWaitHarness(t)
+
+	failure := h.call(args("repo", testRepo, "types", []string{"ci.jobs"}, "pr", 7)).failure(t)
+	require.Contains(t, failure, "names no pull request")
+
+	h.insert(repoID, "ci.run_completed", testShaA, 7)
+	res := h.call(args("repo", testRepo, "types", []string{"ci.jobs", "ci.run_completed"}, "pr", 7, "cursor", 0, "timeout_s", 1)).success(t)
+	require.Len(t, res.Events, 1, "a pr with a type that names pull requests is still a filter")
+}
+
 func TestWaitRefusesAWaitBeyondTheLoginsLimitAndAdmitsOneAgainWhenOneEnds(t *testing.T) {
 	t.Parallel()
 	var login atomic.Value

@@ -29,7 +29,7 @@ func (s *Store) ScanTargets(ctx context.Context, now time.Time, maxPending, limi
 		targets[i] = faucet.ScanTarget{
 			KeyHash:        key,
 			Principal:      row.Principal,
-			EventType:      row.EventType,
+			EventTypes:     row.EventTypes,
 			Arguments:      row.Arguments,
 			RepoID:         row.RepoID,
 			ScannedThrough: row.ScannedThrough,
@@ -108,6 +108,7 @@ func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Dur
 		Ref:                 faucet.DeliveryRef{Key: key, EventID: row.EventID, MessageID: row.MessageID, Attempt: row.Attempts, Incarnation: row.Incarnation},
 		MessageID:           row.MessageID,
 		EnqueuedAt:          row.EnqueuedAt,
+		EventType:           row.EventType,
 		CallbackURL:         row.CallbackUrl,
 		SecretEnc:           row.SecretEnc,
 		PreviousSecretEnc:   row.PreviousSecretEnc,

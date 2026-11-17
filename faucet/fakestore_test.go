@@ -3,8 +3,10 @@ package faucet_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -49,7 +51,9 @@ func (s *fakeStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.Po
 		if q.PR != 0 && !slices.Contains(e.PRs, q.PR) {
 			continue
 		}
-		page.Events = append(page.Events, e)
+		if !slices.ContainsFunc(q.Fields, func(f faucet.FieldFilter) bool { return !passes(e, f) }) {
+			page.Events = append(page.Events, e)
+		}
 	}
 	head = max(head, s.purgeMark)
 	page.Next = max(head, q.After)
@@ -58,6 +62,23 @@ func (s *fakeStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.Po
 		page.Next = page.Events[len(page.Events)-1].ID
 	}
 	return page, nil
+}
+
+func passes(e faucet.Event, f faucet.FieldFilter) bool {
+	if !slices.Contains(f.Types, e.Type) {
+		return true
+	}
+	var data map[string]any
+	if json.Unmarshal(e.Data, &data) != nil {
+		return false
+	}
+	switch v := data[f.Field].(type) {
+	case string:
+		return slices.Contains(f.Values, v)
+	case bool:
+		return slices.Contains(f.Values, strconv.FormatBool(v))
+	}
+	return false
 }
 
 func (s *fakeStore) CursorAt(_ context.Context, t time.Time) (int64, error) {
@@ -106,8 +127,8 @@ func (s *fakeStore) Purge(_ context.Context, before time.Time) (faucet.PurgeResu
 
 // advanceSubscriptionsThatLoseNothingLocked moves a subscription that is not
 // below the purge mark yet to the mark that the purge will set (doomed), unless
-// an event of its repository and type above its position, still in the log,
-// lies at or below that mark.
+// an event of its repository and of one of its types above its position, still
+// in the log, lies at or below that mark.
 func (s *fakeStore) advanceSubscriptionsThatLoseNothingLocked(doomed int64) {
 	for key, sub := range s.subs {
 		pos := s.scanned[key]
@@ -115,7 +136,7 @@ func (s *fakeStore) advanceSubscriptionsThatLoseNothingLocked(doomed int64) {
 			continue
 		}
 		if !slices.ContainsFunc(s.events, func(e faucet.Event) bool {
-			return e.RepoID == sub.RepoID && e.Type == sub.EventType && e.ID > pos && e.ID <= doomed
+			return e.RepoID == sub.RepoID && slices.Contains(sub.EventTypes, e.Type) && e.ID > pos && e.ID <= doomed
 		}) {
 			s.scanned[key] = doomed
 		}

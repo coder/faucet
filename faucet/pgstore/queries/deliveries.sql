@@ -4,7 +4,7 @@ WITH head AS (
   FROM faucet_events
 )
 SELECT
-  s.key_hash, s.principal, s.event_type, s.arguments, s.repo_id, s.scanned_through,
+  s.key_hash, s.principal, s.event_types, s.arguments, s.repo_id, s.scanned_through,
   (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash)::int AS pending
 FROM faucet_subscriptions s, head
 WHERE s.expires_at > sqlc.arg(now)
@@ -13,7 +13,7 @@ WHERE s.expires_at > sqlc.arg(now)
     s.scanned_through < (SELECT purged_through FROM faucet_purge_mark)
     OR EXISTS (
       SELECT 1 FROM faucet_events e
-      WHERE e.repo_id = s.repo_id AND e.type = s.event_type AND e.id > s.scanned_through
+      WHERE e.repo_id = s.repo_id AND e.type = ANY(s.event_types) AND e.id > s.scanned_through
     )
   )
   AND (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash) < sqlc.arg(max_pending)::int
@@ -57,7 +57,7 @@ WITH due AS (
 )
 SELECT
   c.key_hash, c.event_id, c.message_id, c.attempts, c.enqueued_at,
-  s.created_at AS incarnation, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.repo_id,
+  s.created_at AS incarnation, s.event_type, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.repo_id,
   (SELECT COALESCE(MIN(p.event_id), c.event_id) - 1 FROM faucet_deliveries p WHERE p.key_hash = c.key_hash)::bigint AS watermark,
   e.id AS stored_event_id, e.source, e.delivery_id, e.type, e.repo_id AS event_repo_id, e.prs, e.head_sha, COALESCE(e.data, 'null'::jsonb)::jsonb AS data, e.received_at
 FROM claimed c

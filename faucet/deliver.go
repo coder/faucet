@@ -80,7 +80,8 @@ type webhookBody struct {
 // seconds left.
 //
 // A subscription gets only the events of the repository it was granted, of its
-// event type, that match its sha and pr arguments, and only while it is live.
+// event type, that match its sha, pr and field filter arguments, and only while
+// it is live.
 // Each event is one delivery, with one webhook-id for every attempt. A delivery
 // gets at most 5 attempts in 15 minutes, after 15 seconds, 1 minute, 3 minutes
 // and 6 minutes. A 2xx ends it. A 410 and a 413 end it too, and neither ends
@@ -276,9 +277,10 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 	}
 	page, err := s.store.PollEvents(ctx, PollQuery{
 		RepoID:  target.RepoID,
-		Types:   []string{target.EventType},
+		Types:   target.EventTypes,
 		HeadSHA: strings.ToLower(args.SHA),
 		PR:      args.PR,
+		Fields:  args.fieldFilters(func(string) []string { return target.EventTypes }),
 		After:   target.ScannedThrough,
 		Limit:   MaxPendingDeliveries - target.Pending,
 	})
@@ -584,7 +586,7 @@ func (r *deliveryRun) decide(ctx context.Context, claim DeliveryClaim) attemptOu
 }
 
 func buildBody(claim DeliveryClaim, ev Event) ([]byte, attemptOutcome, bool) {
-	occ, err := occurrenceOf(ev)
+	occ, err := occurrenceOf(claim.EventType, ev)
 	if err != nil {
 		return nil, giveUp(GiveUpEventMalformed), false
 	}

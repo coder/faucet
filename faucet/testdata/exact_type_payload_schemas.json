@@ -1,0 +1,333 @@
+{
+  "ci.check_completed": {
+    "properties": {
+      "action": {
+        "description": "The action of the GitHub webhook, for example closed.",
+        "enum": [
+          "completed"
+        ],
+        "type": "string"
+      },
+      "app_slug": {
+        "type": "string",
+        "description": "The app that ran the check."
+      },
+      "check_run_id": {
+        "type": "integer"
+      },
+      "conclusion": {
+        "type": "string",
+        "description": "For example success, failure or timed_out."
+      },
+      "event": {
+        "description": "The exact event type, for example pr.closed.",
+        "enum": [
+          "ci.check_completed"
+        ],
+        "type": "string"
+      },
+      "head_sha": {
+        "description": "The head commit SHA. Absent when the event has none.",
+        "type": "string"
+      },
+      "html_url": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string",
+        "description": "The check name."
+      },
+      "prs": {
+        "description": "Pull request numbers the event mentions.",
+        "items": {
+          "type": "integer"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "prs",
+      "check_run_id",
+      "name",
+      "conclusion",
+      "html_url",
+      "app_slug"
+    ],
+    "type": "object"
+  },
+  "ci.run_completed": {
+    "properties": {
+      "action": {
+        "description": "The action of the GitHub webhook, for example closed.",
+        "enum": [
+          "completed"
+        ],
+        "type": "string"
+      },
+      "conclusion": {
+        "type": "string",
+        "description": "For example success, failure or timed_out."
+      },
+      "event": {
+        "description": "The exact event type, for example pr.closed.",
+        "enum": [
+          "ci.run_completed"
+        ],
+        "type": "string"
+      },
+      "head_branch": {
+        "type": "string"
+      },
+      "head_sha": {
+        "description": "The head commit SHA. Absent when the event has none.",
+        "type": "string"
+      },
+      "html_url": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string",
+        "description": "The workflow name."
+      },
+      "prs": {
+        "description": "Pull request numbers the event mentions.",
+        "items": {
+          "type": "integer"
+        },
+        "type": "array"
+      },
+      "run_attempt": {
+        "type": "integer"
+      },
+      "run_id": {
+        "type": "integer"
+      }
+    },
+    "required": [
+      "prs",
+      "run_id",
+      "name",
+      "conclusion",
+      "head_branch",
+      "html_url",
+      "run_attempt"
+    ],
+    "type": "object"
+  },
+  "pr.closed": {
+    "properties": {
+      "action": {
+        "description": "The action of the GitHub webhook, for example closed.",
+        "enum": [
+          "closed"
+        ],
+        "type": "string"
+      },
+      "after": {
+        "type": "string",
+        "description": "In synchronize events, the head commit after the push."
+      },
+      "assignee_login": {
+        "type": "string",
+        "description": "In assigned and unassigned events, the account."
+      },
+      "author_login": {
+        "type": "string",
+        "description": "The account that opened the pull request."
+      },
+      "base_branch": {
+        "type": "string",
+        "description": "The branch that the pull request merges into."
+      },
+      "before": {
+        "type": "string",
+        "description": "In synchronize events, the head commit before the push."
+      },
+      "draft": {
+        "type": "boolean"
+      },
+      "event": {
+        "description": "The exact event type, for example pr.closed.",
+        "enum": [
+          "pr.closed"
+        ],
+        "type": "string"
+      },
+      "head_branch": {
+        "type": "string",
+        "description": "The branch that holds the changes."
+      },
+      "head_sha": {
+        "description": "The head commit SHA. Absent when the event has none.",
+        "type": "string"
+      },
+      "html_url": {
+        "type": "string"
+      },
+      "label_name": {
+        "type": "string",
+        "description": "In labeled and unlabeled events, the label."
+      },
+      "merge_commit_sha": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "The merge commit, in closed events only. When the pull request closed unmerged it is the test-merge commit of GitHub or null, so it does not mean the pull request merged. Read merged."
+      },
+      "merged": {
+        "type": "boolean"
+      },
+      "milestone_title": {
+        "type": "string",
+        "description": "In milestoned and demilestoned events, the milestone."
+      },
+      "prs": {
+        "description": "Pull request numbers the event mentions.",
+        "items": {
+          "type": "integer"
+        },
+        "type": "array"
+      },
+      "requested_reviewer_login": {
+        "type": "string",
+        "description": "In review_requested and review_request_removed events for a user, the user."
+      },
+      "requested_team_slug": {
+        "type": "string",
+        "description": "In review_requested and review_request_removed events for a team, the team."
+      },
+      "sender_id": {
+        "type": "integer",
+        "description": "The GitHub user ID of sender_login."
+      },
+      "sender_login": {
+        "type": "string",
+        "description": "The account that made the change."
+      },
+      "state": {
+        "type": "string",
+        "description": "open or closed."
+      },
+      "title": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "prs",
+      "merged",
+      "merge_commit_sha",
+      "html_url"
+    ],
+    "type": "object"
+  },
+  "pr.comment_created": {
+    "properties": {
+      "action": {
+        "description": "The action of the GitHub webhook, for example closed.",
+        "enum": [
+          "created"
+        ],
+        "type": "string"
+      },
+      "comment_id": {
+        "type": "integer"
+      },
+      "event": {
+        "description": "The exact event type, for example pr.closed.",
+        "enum": [
+          "pr.comment_created"
+        ],
+        "type": "string"
+      },
+      "html_url": {
+        "type": "string"
+      },
+      "prs": {
+        "description": "Pull request numbers the event mentions.",
+        "items": {
+          "type": "integer"
+        },
+        "type": "array"
+      },
+      "sender_id": {
+        "type": "integer",
+        "description": "The GitHub user ID of sender_login."
+      },
+      "sender_login": {
+        "type": "string",
+        "description": "The account that made the change."
+      },
+      "user_login": {
+        "type": "string",
+        "description": "The author of the comment."
+      }
+    },
+    "required": [
+      "prs",
+      "comment_id",
+      "user_login",
+      "html_url"
+    ],
+    "type": "object"
+  },
+  "pr.review_submitted": {
+    "properties": {
+      "action": {
+        "description": "The action of the GitHub webhook, for example closed.",
+        "enum": [
+          "submitted"
+        ],
+        "type": "string"
+      },
+      "event": {
+        "description": "The exact event type, for example pr.closed.",
+        "enum": [
+          "pr.review_submitted"
+        ],
+        "type": "string"
+      },
+      "head_sha": {
+        "description": "The head commit SHA. Absent when the event has none.",
+        "type": "string"
+      },
+      "html_url": {
+        "type": "string"
+      },
+      "prs": {
+        "description": "Pull request numbers the event mentions.",
+        "items": {
+          "type": "integer"
+        },
+        "type": "array"
+      },
+      "review_id": {
+        "type": "integer"
+      },
+      "sender_id": {
+        "type": "integer",
+        "description": "The GitHub user ID of sender_login."
+      },
+      "sender_login": {
+        "type": "string",
+        "description": "The account that made the change."
+      },
+      "state": {
+        "type": "string",
+        "description": "The review state, for example approved, changes_requested, commented or dismissed."
+      },
+      "user_login": {
+        "type": "string",
+        "description": "The author of the review."
+      }
+    },
+    "required": [
+      "prs",
+      "review_id",
+      "state",
+      "user_login",
+      "html_url"
+    ],
+    "type": "object"
+  }
+}

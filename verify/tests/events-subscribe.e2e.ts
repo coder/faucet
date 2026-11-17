@@ -24,6 +24,30 @@ import {
 } from './subscriptions';
 
 const run = samples['workflow_run.completed'];
+// PR_ACTIVITY_ACTIONS are the actions of GitHub's pull_request event in its published webhook schemas, in sorted order.
+const PR_ACTIVITY_ACTIONS = [
+  'assigned',
+  'auto_merge_disabled',
+  'auto_merge_enabled',
+  'closed',
+  'converted_to_draft',
+  'demilestoned',
+  'dequeued',
+  'edited',
+  'enqueued',
+  'labeled',
+  'locked',
+  'milestoned',
+  'opened',
+  'ready_for_review',
+  'reopened',
+  'review_request_removed',
+  'review_requested',
+  'synchronize',
+  'unassigned',
+  'unlabeled',
+  'unlocked',
+];
 const UTC_SECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 
 interface PollResult {
@@ -316,6 +340,27 @@ describe('events subscribe', () => {
     expect(await faucet.subscriptions(marker)).toHaveLength(1);
   });
 
+  test('a family subscription stores the types of its actions, and an action listed twice names the same subscription', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const marker = newMarker();
+    const repo = repoOf(repoId);
+    const url = callbackUrl(marker);
+    const family = (args: Record<string, unknown>): Params =>
+      subscribeParams(repoId, marker, { name: 'pr.activity', arguments: { repo, ...args }, delivery: delivery(marker, { url }) });
+
+    const once = await subscribed(faucet, family({ actions: ['closed'] }));
+    const twice = await subscribed(faucet, family({ actions: ['closed', 'closed'] }));
+    const every = await subscribed(faucet, family({}));
+    const rows = await faucet.subscriptions(marker);
+
+    expect(twice.id).toBe(once.id);
+    expect(every.id).not.toBe(once.id);
+    expect(rows.map((r) => [r.event_type, r.arguments, r.event_types])).toEqual([
+      ['pr.activity', { repo, actions: ['closed'] }, ['pr.closed']],
+      ['pr.activity', { repo }, PR_ACTIVITY_ACTIONS.map((action) => `pr.${action}`)],
+    ]);
+  });
+
   test('a different URL, query, event or arguments is another subscription with its own id and row', async ({ faucet }) => {
     const repoId = newRepoId();
     const marker = newMarker();
@@ -440,6 +485,8 @@ describe('events subscribe', () => {
       ['a repo that is not owner/name', { arguments: { repo: 'not a repo' } }, -32602, 'owner/name'],
       ['a short sha', { arguments: { repo, sha: 'abc' } }, -32602, 'sha'],
       ['pr 0', { arguments: { repo, pr: 0 } }, -32602, 'pr'],
+      ['actions on an exact type', { arguments: { repo, actions: ['completed'] } }, -32602, 'inputSchema'],
+      ['an action of another family', { name: 'pr.activity', arguments: { repo, actions: ['completed'] } }, -32602, 'inputSchema'],
       ['a cursor the server never returned', { cursor: 'abc' }, -32602, 'cursor'],
       ['maxAgeMs 0', { cursor: 'v1.0', maxAgeMs: 0 }, -32602, 'maxAgeMs'],
       ['ttlMs as text', { ttlMs: 'ten minutes' }, -32602, 'ttlMs'],

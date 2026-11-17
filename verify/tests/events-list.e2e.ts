@@ -2,7 +2,17 @@ import { describe, expect, newRepoId, test } from './support';
 import { newMarker, subscribe, subscribeParams, unsubscribe } from './subscriptions';
 
 const EVENTS_EXTENSION = 'io.modelcontextprotocol/events';
-const eventNames = ['ci.check_completed', 'ci.run_completed', 'pr.closed', 'pr.comment_created', 'pr.review_submitted'];
+const families = ['ci.runs', 'ci.jobs', 'ci.checks', 'ci.suites', 'ci.statuses', 'pr.activity', 'pr.reviews', 'pr.comments', 'pr.review_comments', 'pr.review_threads'];
+const eventNames = [...families, 'ci.check_completed', 'ci.run_completed', 'pr.closed', 'pr.comment_created', 'pr.review_submitted'];
+const noHeadCommit = ['pr.comments', 'pr.comment_created'];
+const noPullRequest = ['ci.jobs', 'ci.statuses'];
+const fieldFilters: Record<string, string[]> = {
+  'ci.runs': ['conclusion', 'head_branch'],
+  'ci.jobs': ['conclusion'],
+  'ci.checks': ['conclusion'],
+  'ci.suites': ['conclusion'],
+  'pr.activity': ['base_branch', 'head_branch'],
+};
 const WEBHOOK_UNSUPPORTED = {
   code: -32026,
   message: 'webhook delivery is not supported by this server',
@@ -37,7 +47,7 @@ describe('events list', () => {
     expect(reply.result?.capabilities.extensions?.[EVENTS_EXTENSION]).toEqual({ listChanged: false });
   });
 
-  test('events/list returns the five event types, each with poll and webhook delivery and two schemas', async ({ faucet }) => {
+  test('events/list returns every family and then the five exact types, each with poll and webhook delivery and two schemas', async ({ faucet }) => {
     const reply = await faucet.mcp<ListResult>('events/list');
     const events = reply.result?.events ?? [];
 
@@ -49,15 +59,28 @@ describe('events list', () => {
       expect(event.description, `${event.name} description`).not.toBe('');
       expect(event.delivery, `${event.name} delivery`).toEqual(['poll', 'webhook']);
       expect(event.inputSchema.type, `${event.name} inputSchema`).toBe('object');
-      const hasHeadCommit = event.name !== 'pr.comment_created';
-      expect(Object.keys(event.inputSchema.properties).sort(), `${event.name} inputSchema properties`).toEqual(
-        hasHeadCommit ? ['pr', 'repo', 'sha'] : ['pr', 'repo'],
+      const hasHeadCommit = !noHeadCommit.includes(event.name);
+      const properties = ['pr', 'repo', 'sha'].filter(
+        (p) => (p !== 'sha' || hasHeadCommit) && (p !== 'pr' || !noPullRequest.includes(event.name)),
       );
+      const filters = fieldFilters[event.name] ?? [];
+      expect(Object.keys(event.inputSchema.properties).sort(), `${event.name} inputSchema properties`).toEqual(
+        (families.includes(event.name) ? ['actions', ...properties, ...filters] : properties).sort(),
+      );
+      expect(Object.keys(event.payloadSchema.properties), `${event.name} filters fields of its data`).toEqual(expect.arrayContaining(filters));
       expect(event.inputSchema.required, `${event.name} inputSchema required`).toEqual(['repo']);
       expect(event.payloadSchema.type, `${event.name} payloadSchema`).toBe('object');
       expect(Object.keys(event.payloadSchema.properties).includes('head_sha'), `${event.name} payloadSchema head_sha`).toBe(hasHeadCommit);
-      expect(Object.keys(event.payloadSchema.properties), `${event.name} payloadSchema properties`).toContain('prs');
+      expect(Object.keys(event.payloadSchema.properties), `${event.name} payloadSchema properties`).toEqual(
+        expect.arrayContaining(['prs', 'event', 'action']),
+      );
       expect(event.payloadSchema.required, `${event.name} payloadSchema required`).toContain('prs');
+      if (families.includes(event.name)) {
+        expect(event.payloadSchema.required, `${event.name} requires only what every action carries`).toEqual(['prs', 'event', 'action']);
+      } else {
+        expect(event.payloadSchema.required, `${event.name} gains no required field`).not.toEqual(expect.arrayContaining(['event']));
+        expect(event.payloadSchema.required, `${event.name} gains no required field`).not.toEqual(expect.arrayContaining(['action']));
+      }
     }
   });
 

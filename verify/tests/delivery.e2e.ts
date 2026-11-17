@@ -13,7 +13,7 @@ import {
   withDeliveryFaucet,
   type DeliverReply,
 } from './delivery';
-import { samples, type Sample } from './payloads';
+import { dataOf, recorded, recordedSamples, samples } from './payloads';
 import { describe, expect, newDeliveryId, newRepoId, test } from './support';
 import { occurrences, subscribed } from './subscriptions';
 
@@ -28,13 +28,47 @@ const NARROWED: [string, Record<string, unknown>, number][] = [
   ['another pr', { pr: workflow.expected.prs[0]! + 1 }, 0],
 ];
 
-// dataOf is the data of an event of the sample, which events/poll returns too.
-function dataOf(sample: Sample): Record<string, unknown> {
-  const { prs, headSha, data } = sample.expected;
-  return headSha === null ? { ...data, prs } : { ...data, prs, head_sha: headSha };
-}
 
 describe('webhook delivery', () => {
+  test('a subscription to a family gets its events under the family name with the exact type in data', async ({ faucet, receiver }) => {
+    await withDeliveryFaucet(faucet, async (started) => {
+      const repoId = newRepoId();
+      const at = await endpoint(receiver, 'ok');
+      const { id } = await subscribed(started, paramsFor(repoId, at, {}, 'pr.activity'));
+      const merged = await started.deliver({ event: 'pull_request', delivery: newDeliveryId(), body: JSON.stringify(recorded('pull_request_merged', repoId)) });
+      const other = await started.deliver({ event: 'workflow_run', delivery: newDeliveryId(), body: JSON.stringify(samples['workflow_run.completed'].payload(repoId)) });
+      expect([merged.body, other.body]).toEqual(['stored\n', 'stored\n']);
+
+      expect(await deliverDue(started)).toEqual(counts({ enqueued: 1, claimed: 1, sent: 1, delivered: 1 }));
+      const requests = await eventRequests(receiver, at);
+      expect(requests).toHaveLength(1);
+      const body = expectSigned(requests[0]!, id);
+      expect(body.name).toBe('pr.activity');
+      expect(body.data).toMatchObject({ event: 'pr.closed', action: 'closed', merged: true, prs: [2] });
+    });
+  });
+
+  test('a ci.runs subscription with actions completed is woken by a completed run and not by a requested one', async ({ faucet, receiver }) => {
+    await withDeliveryFaucet(faucet, async (started) => {
+      const repoId = newRepoId();
+      const at = await endpoint(receiver, 'ok');
+      const { id } = await subscribed(started, paramsFor(repoId, at, { actions: ['completed'] }, 'ci.runs'));
+      const requested = recordedSamples['workflow_run.requested']!;
+      const sent = [
+        await started.deliver({ event: requested.event, delivery: newDeliveryId(), body: JSON.stringify(requested.payload(repoId)) }),
+        await started.deliver({ event: workflow.event, delivery: newDeliveryId(), body: JSON.stringify(workflow.payload(repoId)) }),
+      ];
+      expect(sent.map((reply) => reply.body)).toEqual(['stored\n', 'stored\n']);
+
+      expect(await deliverDue(started)).toEqual(counts({ enqueued: 1, claimed: 1, sent: 1, delivered: 1 }));
+      const requests = await eventRequests(receiver, at);
+      expect(requests).toHaveLength(1);
+      const body = expectSigned(requests[0]!, id);
+      expect(body.name).toBe('ci.runs');
+      expect(body.data).toEqual(dataOf(workflow));
+    });
+  });
+
   test('a subscription gets its matching events as signed webhooks, once each, and no other event', async ({ faucet, receiver }) => {
     await withDeliveryFaucet(faucet, async (started, output) => {
       const repoId = newRepoId();

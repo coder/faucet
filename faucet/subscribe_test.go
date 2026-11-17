@@ -892,6 +892,7 @@ func TestUnsubscribeEndsAShaSubscriptionToCommentEventsThatAnOlderVersionStored(
 		Principal:   "octocat",
 		CallbackURL: callbackURL,
 		EventType:   "pr.comment_created",
+		EventTypes:  []string{"pr.comment_created"},
 		Arguments:   arguments,
 		RepoID:      repoID,
 		SecretEnc:   []byte("sealed"),
