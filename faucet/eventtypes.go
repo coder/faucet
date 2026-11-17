@@ -521,6 +521,41 @@ func catalogNames() []string {
 	return names
 }
 
+// EventName is one name that events/list offers: a family, or an exact type
+// that a family stores.
+type EventName struct {
+	Name string
+	// Family is the family of the name, and equals Name for a family.
+	Family string
+	// GitHubEvent is the GitHub webhook event that the family reads.
+	GitHubEvent string
+	// Exact is true for a name that is one stored type.
+	Exact bool
+	// Actions are the GitHub actions whose events the name matches. For a
+	// status they are its states.
+	Actions []string
+	// Filters are the field filters that the name offers. An exact type offers
+	// none.
+	Filters []string
+}
+
+// EventNames returns every name that events/list offers, in its order: the
+// families, then the exact types. It is a copy, for hosts and generated docs.
+func EventNames() []EventName {
+	names := make([]EventName, len(catalog))
+	for i, e := range catalog {
+		name := EventName{Name: e.name, Family: e.family.name, GitHubEvent: e.family.githubEvent, Exact: e.legacy}
+		if e.legacy {
+			name.Actions = []string{storedTypes[e.name].action}
+		} else {
+			name.Actions = slices.Clone(e.family.actions)
+			name.Filters = slices.Clone(e.family.filters)
+		}
+		names[i] = name
+	}
+	return names
+}
+
 type pollArguments struct {
 	Repo    string   `json:"repo"`
 	SHA     string   `json:"sha"`

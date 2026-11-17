@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -363,4 +364,99 @@ func TestWaitWithActionsNarrowsOnlyTheFamiliesThatHaveThem(t *testing.T) {
 	} {
 		require.Contains(t, h.call(call).failure(t), `action "closed"`, name)
 	}
+}
+
+func TestEventNamesDescribeWhatEventsListOffers(t *testing.T) {
+	t.Parallel()
+
+	h := newEventsHarness(t)
+	res, err := h.call(methodList, nil)
+	require.NoError(t, err)
+	var events []struct {
+		Name        string `json:"name"`
+		InputSchema struct {
+			Properties map[string]struct {
+				Items struct {
+					Enum []string `json:"enum"`
+				} `json:"items"`
+			} `json:"properties"`
+		} `json:"inputSchema"`
+		PayloadSchema struct {
+			Properties struct {
+				Action struct {
+					Enum []string `json:"enum"`
+				} `json:"action"`
+			} `json:"properties"`
+		} `json:"payloadSchema"`
+	}
+	require.NoError(t, json.Unmarshal(res.fields["events"], &events))
+
+	names := faucet.EventNames()
+	require.Len(t, names, len(events))
+	for i, n := range names {
+		e := events[i]
+		require.Equal(t, e.Name, n.Name)
+		require.Equal(t, e.PayloadSchema.Properties.Action.Enum, n.Actions, n.Name)
+		var filters []string
+		for property := range e.InputSchema.Properties {
+			if !slices.Contains([]string{"repo", "pr", "sha", "actions"}, property) {
+				filters = append(filters, property)
+			}
+		}
+		require.ElementsMatch(t, filters, n.Filters, n.Name)
+		if n.Exact {
+			require.NotContains(t, e.InputSchema.Properties, "actions", n.Name)
+			require.True(t, slices.ContainsFunc(names, func(f faucet.EventName) bool { return !f.Exact && f.Name == n.Family }), n.Name)
+		} else {
+			require.Equal(t, n.Name, n.Family)
+			require.Equal(t, n.Actions, e.InputSchema.Properties["actions"].Items.Enum, n.Name)
+		}
+		for _, action := range n.Actions {
+			require.True(t, faucet.StoresDelivery(n.GitHubEvent, action), "%s stores %s.%s", n.Name, n.GitHubEvent, action)
+		}
+		if !n.Exact {
+			requireSamplesAreOfFamily(t, n)
+		}
+	}
+}
+
+// requireSamplesAreOfFamily normalizes each recorded sample of the family's
+// GitHub event and requires every stored one to be a type of the family, so
+// that a family that names the wrong GitHub event fails even where the two
+// events share their actions.
+func requireSamplesAreOfFamily(t *testing.T, family faucet.EventName) {
+	t.Helper()
+	samples, err := filepath.Glob(filepath.Join("testdata", family.GitHubEvent+"_*.json"))
+	require.NoError(t, err)
+	stored := 0
+	for _, sample := range samples {
+		if sampleEvent(filepath.Base(sample)) != family.GitHubEvent {
+			continue
+		}
+		payload, err := os.ReadFile(sample)
+		require.NoError(t, err)
+		ev, err := faucet.Normalize(family.GitHubEvent, payload, "guid")
+		require.NoError(t, err, sample)
+		if ev == nil {
+			continue
+		}
+		stored++
+		action, ok := strings.CutPrefix(ev.Type, typePrefix[family.Name])
+		require.True(t, ok && slices.Contains(family.Actions, action), "%s stores %s as %s, which is no type of %s", sample, family.GitHubEvent, ev.Type, family.Name)
+	}
+	require.NotZero(t, stored, "testdata holds no sample of %s that faucet stores", family.GitHubEvent)
+}
+
+// sampleEvent returns the GitHub event of a sample in testdata, which is
+// named <event>_<action>.json: the longest event of a family that the name
+// starts with, so pull_request_review_comment_created.json is not a
+// pull_request.
+func sampleEvent(name string) string {
+	event := ""
+	for _, n := range faucet.EventNames() {
+		if strings.HasPrefix(name, n.GitHubEvent+"_") && len(n.GitHubEvent) > len(event) {
+			event = n.GitHubEvent
+		}
+	}
+	return event
 }
