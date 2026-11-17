@@ -128,9 +128,14 @@ func TestTheExactTypeOfAnActionFollowsTheNamingRule(t *testing.T) {
 // an event of repository repoID.
 func storeDelivery(ctx context.Context, t *testing.T, store faucet.Store, event, fixtureName, guid string) faucet.Event {
 	t.Helper()
-	ev, err := faucet.Normalize(event, fixture(t, fixtureName), guid)
+	return storePayload(ctx, t, store, event, fixture(t, fixtureName), guid)
+}
+
+func storePayload(ctx context.Context, t *testing.T, store faucet.Store, event string, payload []byte, guid string) faucet.Event {
+	t.Helper()
+	ev, err := faucet.Normalize(event, payload, guid)
 	require.NoError(t, err)
-	require.NotNil(t, ev, fixtureName)
+	require.NotNil(t, ev, guid)
 	ev.RepoID = repoID
 	stored, inserted, err := store.InsertEvent(ctx, *ev)
 	require.NoError(t, err)

@@ -23,6 +23,9 @@ type family struct {
 	// of the family has a head_sha and a sha filter could never match one.
 	noHeadSHA bool
 	noPRs     bool
+	// filters are the names of the field filters that the family offers. Each
+	// is a field of its data.
+	filters []string
 	// properties are the payload properties of the family's data, written as
 	// a JSON object.
 	properties string
@@ -67,6 +70,7 @@ var families = []*family{
 		name:        "ci.runs",
 		githubEvent: "workflow_run",
 		description: "GitHub Actions workflow runs. Each run attempt has its own events.",
+		filters:     []string{"head_branch", "conclusion"},
 		properties: `{
     "run_id": {"type": "integer"},
     "name": {"type": "string", "description": "The workflow name."},
@@ -107,6 +111,7 @@ var families = []*family{
 		name:        "ci.checks",
 		githubEvent: "check_run",
 		description: "Check runs on a commit, from GitHub Actions or another app.",
+		filters:     []string{"conclusion"},
 		properties: `{
     "check_run_id": {"type": "integer"},
     "name": {"type": "string", "description": "The check name."},
@@ -153,6 +158,7 @@ var families = []*family{
 		name:        "pr.activity",
 		githubEvent: "pull_request",
 		description: "Pull requests: every action of GitHub's pull_request event, for example opened, synchronize, labeled or closed.",
+		filters:     []string{"base_branch", "head_branch"},
 		properties: `{
     "merged": {"type": "boolean"},
     "merge_commit_sha": {"type": ["string", "null"], "description": "The merge commit, in closed events only. When the pull request closed unmerged it is the test-merge commit of GitHub or null, so it does not mean the pull request merged. Read merged."},
@@ -229,6 +235,67 @@ var families = []*family{
 	},
 }
 
+// fieldFilter is a filter argument named after the data field that it
+// matches. An event passes it when its field is one of the listed values.
+type fieldFilter struct {
+	name        string
+	description string
+	// requireFalse names a boolean data field that must be false for an event
+	// to pass, as well. An event without the field does not pass.
+	requireFalse string
+}
+
+var fieldFilters = []fieldFilter{
+	{name: "base_branch", description: "Only events whose base_branch, the branch that the pull request merges into, is one of these."},
+	{
+		name:         "head_branch",
+		description:  "Only events whose head_branch is one of these branches of this repository. A branch of a fork never matches, so main is this repository's main.",
+		requireFalse: "from_fork",
+	},
+	{name: "conclusion", description: "Only events whose conclusion is one of these, for example failure or timed_out."},
+}
+
+// fieldArguments are the field filters of the arguments, by the name of their
+// data field. A list means any of its values.
+type fieldArguments struct {
+	BaseBranch []string `json:"base_branch,omitempty"`
+	HeadBranch []string `json:"head_branch,omitempty"`
+	Conclusion []string `json:"conclusion,omitempty"`
+}
+
+func (a fieldArguments) byName() map[string][]string {
+	return map[string][]string{"base_branch": a.BaseBranch, "head_branch": a.HeadBranch, "conclusion": a.Conclusion}
+}
+
+// canonical sorts each list and lists each value once.
+func (a fieldArguments) canonical() fieldArguments {
+	return fieldArguments{BaseBranch: sortedSet(a.BaseBranch), HeadBranch: sortedSet(a.HeadBranch), Conclusion: sortedSet(a.Conclusion)}
+}
+
+// fieldFilters is the store's form of the arguments. typesOf gives the stored
+// types that the filter of a name narrows.
+func (a fieldArguments) fieldFilters(typesOf func(name string) []string) []FieldFilter {
+	var out []FieldFilter
+	values := a.byName()
+	for _, f := range fieldFilters {
+		if len(values[f.name]) == 0 {
+			continue
+		}
+		types := typesOf(f.name)
+		out = append(out, FieldFilter{Field: f.name, Values: values[f.name], Types: types})
+		if f.requireFalse != "" {
+			out = append(out, FieldFilter{Field: f.requireFalse, Values: []string{"false"}, Types: types})
+		}
+	}
+	return out
+}
+
+func sortedSet(values []string) []string {
+	sorted := slices.Clone(values)
+	slices.Sort(sorted)
+	return slices.Compact(sorted)
+}
+
 var legacyNames = []legacyName{
 	{
 		name:             "ci.check_completed",
@@ -275,9 +342,9 @@ var (
 
 // argumentsSchema is the inputSchema of an event name: repo and the filters of
 // the name. It offers pr and sha unless the family's events name no pull
-// request or no head commit (no family means both), and actions when it is
-// given them.
-func argumentsSchema(f *family, actions []string) json.RawMessage {
+// request or no head commit (no family means both), actions when it is given
+// them, and the field filters it is given.
+func argumentsSchema(f *family, actions, filters []string) json.RawMessage {
 	properties := map[string]any{"repo": repoArgument}
 	if f == nil || !f.noPRs {
 		properties["pr"] = prArgument
@@ -293,13 +360,21 @@ func argumentsSchema(f *family, actions []string) json.RawMessage {
 			"description": "Only events of these GitHub actions. Without it, events of every action.",
 		}
 	}
+	for _, name := range filters {
+		properties[name] = map[string]any{
+			"type":        "array",
+			"minItems":    1,
+			"items":       map[string]any{"type": "string"},
+			"description": lookupFieldFilter(name).description,
+		}
+	}
 	return marshalRaw(map[string]any{"type": "object", "properties": properties, "required": []string{"repo"}, "additionalProperties": false})
 }
 
 // shaInputResolved is the arguments schema of an event type that has a sha. A
 // version before pr.comment_created lost its sha stored subscriptions with one,
 // and events/unsubscribe still reads that shape so they can be ended.
-var shaInputResolved = mustResolve(string(argumentsSchema(nil, nil)))
+var shaInputResolved = mustResolve(string(argumentsSchema(nil, nil, nil)))
 
 func init() {
 	byEvent := map[string]*family{}
@@ -327,6 +402,13 @@ func init() {
 		if len(f.actions) == 0 {
 			panic(fmt.Sprintf("event family %s has no action in rules", f.name))
 		}
+		for _, name := range f.filters {
+			for _, field := range []string{name, lookupFieldFilter(name).requireFalse} {
+				if field != "" && !hasProperty(f, field) {
+					panic(fmt.Sprintf("event family %s offers the filter %s, and its data has no %s", f.name, name, field))
+				}
+			}
+		}
 		catalog = append(catalog, newFamilyEntry(f))
 	}
 	for _, l := range legacyNames {
@@ -343,7 +425,7 @@ func init() {
 }
 
 func newFamilyEntry(f *family) *catalogEntry {
-	input := argumentsSchema(f, f.actions)
+	input := argumentsSchema(f, f.actions, f.filters)
 	resolved := mustResolve(string(input))
 	return &catalogEntry{
 		name:          f.name,
@@ -357,7 +439,7 @@ func newFamilyEntry(f *family) *catalogEntry {
 }
 
 func newLegacyEntry(l legacyName, t storedType) *catalogEntry {
-	input := argumentsSchema(t.family, nil)
+	input := argumentsSchema(t.family, nil, nil)
 	return &catalogEntry{
 		name:          l.name,
 		description:   l.description,
@@ -429,6 +511,24 @@ type pollArguments struct {
 	SHA     string   `json:"sha"`
 	PR      int32    `json:"pr"`
 	Actions []string `json:"actions"`
+	fieldArguments
+}
+
+func lookupFieldFilter(name string) fieldFilter {
+	i := slices.IndexFunc(fieldFilters, func(f fieldFilter) bool { return f.name == name })
+	if i < 0 {
+		panic(fmt.Sprintf("no field filter is named %s", name))
+	}
+	return fieldFilters[i]
+}
+
+func hasProperty(f *family, name string) bool {
+	var own map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(f.properties), &own); err != nil {
+		panic(fmt.Sprintf("payload properties of %s: %v", f.name, err))
+	}
+	_, ok := own[name]
+	return ok
 }
 
 func mustResolve(schema string) *jsonschema.Resolved {

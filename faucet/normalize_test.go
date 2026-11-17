@@ -44,11 +44,13 @@ func helloWorldPR(state string, merged bool, extras map[string]any) string {
 	return string(b)
 }
 
-func mutate(t *testing.T, name string, edit func(doc map[string]any)) []byte {
+func mutate(t *testing.T, name string, edits ...func(doc map[string]any)) []byte {
 	t.Helper()
 	var doc map[string]any
 	require.NoError(t, json.Unmarshal(fixture(t, name), &doc))
-	edit(doc)
+	for _, edit := range edits {
+		edit(doc)
+	}
 	b, err := json.Marshal(doc)
 	require.NoError(t, err)
 	return b
@@ -369,25 +371,36 @@ func TestNormalizeReadsTheDocumentedFieldsThatNoSampleRecords(t *testing.T) {
 	}
 }
 
-// octokit/webhooks records no payload whose head is in a fork, so editedToFork
+// member returns the object at path in a decoded payload.
+func member(t *testing.T, doc map[string]any, path ...string) map[string]any {
+	t.Helper()
+	for _, name := range path {
+		next, ok := doc[name].(map[string]any)
+		require.True(t, ok, "payload has no object %s", name)
+		doc = next
+	}
+	return doc
+}
+
+// octokit/webhooks records no payload whose head is in a fork, so headIn
 // edits a recorded one: its head repository becomes another repository, or
 // null, which GitHub sends for a pull request whose fork was deleted (head.repo
 // in payload-schemas/api.github.com/common/pull-request.schema.json is a
 // repository or null).
-func editedToFork(t *testing.T, event, fixtureName string, headRepo any) []byte {
-	t.Helper()
-	return mutate(t, fixtureName, func(doc map[string]any) {
-		object, ok := doc[event].(map[string]any)
-		require.True(t, ok)
+func headIn(t *testing.T, event string, headRepo any) func(doc map[string]any) {
+	return func(doc map[string]any) {
 		switch event {
 		case "workflow_run":
-			object["head_repository"] = headRepo
+			member(t, doc, "workflow_run")["head_repository"] = headRepo
 		case "pull_request":
-			head, ok := object["head"].(map[string]any)
-			require.True(t, ok)
-			head["repo"] = headRepo
+			member(t, doc, "pull_request", "head")["repo"] = headRepo
 		}
-	})
+	}
+}
+
+func editedToFork(t *testing.T, event, fixtureName string, headRepo any) []byte {
+	t.Helper()
+	return mutate(t, fixtureName, headIn(t, event, headRepo))
 }
 
 var forkRepo = map[string]any{"id": 999999, "name": "Hello-World", "full_name": "forker/Hello-World", "fork": true}
