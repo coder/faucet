@@ -143,7 +143,7 @@ func newTestServer(t *testing.T, configure ...func(*httptest.Server)) *testServe
 	}}}
 	clock := quartz.NewMock(t)
 	logs := &syncBuffer{}
-	logger := slog.Make(sloghuman.Sink(logs))
+	logger := slog.Make(sloghuman.Sink(logs)).Leveled(slog.LevelDebug)
 
 	authz := faucet.TokenAuthorizer{BaseURL: github.URL, Client: github.Client()}
 	svc, err := faucet.New(faucet.Deps{

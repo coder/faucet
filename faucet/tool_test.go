@@ -103,7 +103,7 @@ func newWaitHarness(t *testing.T, mutate ...func(*faucet.Deps)) *waitHarness {
 	deps := testDeps(store)
 	deps.Authorizer = authz
 	deps.Clock = clock
-	deps.Logger = slog.Make(sloghuman.Sink(logs))
+	deps.Logger = slog.Make(sloghuman.Sink(logs)).Leveled(slog.LevelDebug)
 	for _, m := range mutate {
 		m(&deps)
 	}

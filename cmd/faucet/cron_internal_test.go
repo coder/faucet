@@ -194,7 +194,7 @@ func newCronServer(t *testing.T, opts cronOptions) *cronServer {
 	clock := quartz.NewMock(t)
 	store := &cronStore{}
 	logs := &syncBuffer{}
-	logger := slog.Make(sloghuman.Sink(logs))
+	logger := slog.Make(sloghuman.Sink(logs)).Leveled(slog.LevelDebug)
 	retention := opts.retention
 	if retention == 0 {
 		retention = 30 * 24 * time.Hour
