@@ -87,7 +87,13 @@ func (s *Store) IngestRaw(ctx context.Context, d faucet.RawDelivery, now time.Ti
 
 func writeRawPlan(ctx context.Context, q *database.Queries, id int64, now time.Time, p faucet.RawPlan) error {
 	if len(p.Deliveries) > 0 {
-		params := database.InsertRawDeliveriesParams{RawEventID: id, Now: now}
+		params := database.InsertRawDeliveriesParams{
+			RawEventID:   id,
+			Now:          now,
+			KeyHashes:    make([][]byte, 0, len(p.Deliveries)),
+			Incarnations: make([]time.Time, 0, len(p.Deliveries)),
+			GiveUps:      make([]string, 0, len(p.Deliveries)),
+		}
 		for _, o := range p.Deliveries {
 			params.KeyHashes = append(params.KeyHashes, o.Key[:])
 			params.Incarnations = append(params.Incarnations, o.Incarnation)
@@ -103,7 +109,11 @@ func writeRawPlan(ctx context.Context, q *database.Queries, id int64, now time.T
 		}
 	}
 	if len(p.Gaps) > 0 {
-		params := database.RaiseRawGapsParams{Through: id}
+		params := database.RaiseRawGapsParams{
+			Through:      id,
+			KeyHashes:    make([][]byte, 0, len(p.Gaps)),
+			Incarnations: make([]time.Time, 0, len(p.Gaps)),
+		}
 		for _, g := range p.Gaps {
 			params.KeyHashes = append(params.KeyHashes, g.Key[:])
 			params.Incarnations = append(params.Incarnations, g.Incarnation)
