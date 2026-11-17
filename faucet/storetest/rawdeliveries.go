@@ -22,6 +22,10 @@ var rawDeliverySubtests = []rawSubtest{
 	{"ClaimRawDeliveryNeedsALiveSubscription", claimRawDeliveryNeedsALiveSubscription},
 	{"ClaimRawDeliveryGivesASubscriptionMadeAgainOnlyItsOwnDeliveries", claimRawDeliveryGivesASubscriptionMadeAgainOnlyItsOwnDeliveries},
 	{"ClaimRawDeliveryReturnsNoEventAfterAPurge", claimRawDeliveryReturnsNoEventAfterAPurge},
+	{"ClaimRawGapHandsOutAPlannedGapOncePerLeaseUntilItIsFinished", claimRawGapHandsOutAPlannedGapOncePerLeaseUntilItIsFinished},
+	{"FinishRawGapKeepsAGapThatGrewWhileItWasClaimed", finishRawGapKeepsAGapThatGrewWhileItWasClaimed},
+	{"ClaimRawGapNeedsTheLiveIncarnation", claimRawGapNeedsTheLiveIncarnation},
+	{"ExpireRawDeliveriesDeletesWhatNoLiveSubscriptionHolds", expireRawDeliveriesDeletesWhatNoLiveSubscriptionHolds},
 }
 
 // deliveryOf returns the claim of the subscription's delivery of the raw ID.
@@ -370,4 +374,161 @@ func claimRawDeliveryReturnsNoEventAfterAPurge(t *testing.T, s RawStore) {
 	claims = r.claimAll(r.now.Add(2 * testLease))
 	require.Equal(t, []int64{cleared, deleted}, deliveryRefIDs(claims))
 	require.Nil(t, claims[1].Event, "the claim of a deleted event carries no event")
+}
+
+// deliveryGapAll plans a gap for every subscription and a mark for every
+// lease: no interest gets the event.
+func deliveryGapAll(interests []faucet.RawInterest) faucet.RawPlan {
+	var plan faucet.RawPlan
+	for _, in := range interests {
+		if in.IsLease {
+			plan.Lost = append(plan.Lost, in.Lease)
+			continue
+		}
+		plan.Gaps = append(plan.Gaps, faucet.RawGap{Key: in.Subscription, Incarnation: in.Incarnation})
+	}
+	return plan
+}
+
+// deliveryMiss stores a new push that every interest misses.
+func (r *rawRig) deliveryMiss() int64 {
+	r.t.Helper()
+	return r.store(r.newDelivery(), deliveryGapAll)
+}
+
+func (r *rawRig) deliveryGapSkipping(now time.Time, skip []string) (faucet.GapClaim, bool) {
+	r.t.Helper()
+	claim, ok, err := r.s.ClaimRawGap(r.ctx, now, testLease, skip)
+	require.NoError(r.t, err)
+	return claim, ok
+}
+
+func (r *rawRig) deliveryMustClaimGap(now time.Time) faucet.GapClaim {
+	r.t.Helper()
+	claim, ok := r.claimGap(now)
+	require.True(r.t, ok, "a gap is owed at %s", now)
+	return claim
+}
+
+func claimRawGapHandsOutAPlannedGapOncePerLeaseUntilItIsFinished(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	sub := r.subscribe(1, rawSpec{})
+	rotated := newRawSubscription(1, rawSpec{}, r.now.Add(time.Hour))
+	rotated.SecretEnc = []byte("sealed-2")
+	rotated.RotationGrace = 5 * time.Minute
+	_, err := s.UpsertSubscription(r.ctx, rotated, r.now, rawMaxLive)
+	require.NoError(t, err)
+	r.push()
+	_, ok := r.claimGap(r.now)
+	require.False(t, ok, "a served subscription is owed no gap")
+
+	r.deliveryMiss()
+	through := r.deliveryMiss()
+	r.push()
+	claim := r.deliveryMustClaimGap(r.now)
+	require.Equal(t, sub.KeyHash, claim.Ref.Key)
+	require.True(t, sub.CreatedAt.Equal(claim.Ref.Incarnation), "got %s", claim.Ref.Incarnation)
+	require.Equal(t, through, claim.Ref.Through, "the gap runs through the highest raw ID that the subscription missed")
+	require.Equal(t, sub.CallbackURL, claim.CallbackURL, "the claim carries where the envelope goes")
+	require.Equal(t, []byte("sealed-2"), claim.SecretEnc, "and the sealed secret that signs it, as of the claim")
+	require.Equal(t, []byte("sealed-1"), claim.PreviousSecretEnc, "and the secret that also signs it")
+	require.True(t, r.now.Add(5*time.Minute).Equal(claim.PreviousSecretUntil), "got %s", claim.PreviousSecretUntil)
+
+	_, ok = r.claimGap(r.now.Add(testLease - time.Second))
+	require.False(t, ok, "a claimed gap is held for its lease")
+	later := r.now.Add(testLease)
+	_, ok = r.deliveryGapSkipping(later, []string{faucet.CallbackOrigin(sub.CallbackURL)})
+	require.False(t, ok, "a skipped origin gets no gap")
+	again := r.deliveryMustClaimGap(later)
+	require.Equal(t, claim.Ref.Through, again.Ref.Through, "a run that died leaves the gap to the next run after the lease")
+
+	require.NoError(t, s.FinishRawGap(r.ctx, again.Ref))
+	_, ok = r.claimGap(later.Add(10 * testLease))
+	require.False(t, ok, "a finished gap is not owed any more")
+}
+
+func finishRawGapKeepsAGapThatGrewWhileItWasClaimed(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	r.subscribe(1, rawSpec{})
+	first := r.deliveryMiss()
+	claim := r.deliveryMustClaimGap(r.now)
+	require.Equal(t, first, claim.Ref.Through)
+
+	second := r.deliveryMiss()
+	require.NoError(t, s.FinishRawGap(r.ctx, claim.Ref))
+	grown := r.deliveryMustClaimGap(r.now)
+	require.Equal(t, second, grown.Ref.Through, "a gap that grew while it was claimed stays owed, at its new mark, with no lease")
+
+	require.NoError(t, s.FinishRawGap(r.ctx, grown.Ref))
+	_, ok := r.claimGap(r.now.Add(10 * testLease))
+	require.False(t, ok, "the finish of the current claim ends the gap")
+}
+
+func claimRawGapNeedsTheLiveIncarnation(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	sub := r.subscribe(1, rawSpec{})
+	r.deliveryMiss()
+	_, ok := r.claimGap(sub.ExpiresAt)
+	require.False(t, ok, "a subscription that expired at now is owed no gap")
+
+	remade := r.deliveryRemake(1, rawSpec{})
+	_, ok = r.claimGap(r.now)
+	require.False(t, ok, "a subscription made again is not owed the old incarnation's gap")
+
+	through := r.deliveryMiss()
+	old := faucet.GapRef{Key: sub.KeyHash, Incarnation: sub.CreatedAt, Through: through}
+	require.NoError(t, s.FinishRawGap(r.ctx, old))
+	claim := r.deliveryMustClaimGap(r.now)
+	require.True(t, remade.CreatedAt.Equal(claim.Ref.Incarnation), "the end of the old incarnation's gap leaves the new one's owed, got %s", claim.Ref.Incarnation)
+	require.Equal(t, through, claim.Ref.Through)
+
+	deleted, err := s.DeleteSubscription(r.ctx, remade.Principal, remade.KeyHash)
+	require.NoError(t, err)
+	require.True(t, deleted)
+	_, ok = r.claimGap(r.now.Add(testLease))
+	require.False(t, ok, "a deleted subscription is owed no gap")
+}
+
+func expireRawDeliveriesDeletesWhatNoLiveSubscriptionHolds(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	held := r.subscribe(1, rawSpec{})
+	heldID := r.push()
+	live := r.subscribe(2, rawSpec{})
+	expiresAt := r.now.Add(20 * time.Second)
+	_, err := s.UpsertSubscription(r.ctx, newRawSubscription(3, rawSpec{}, expiresAt), r.now, rawMaxLive)
+	require.NoError(t, err)
+	gone := r.subscribe(4, rawSpec{})
+	r.subscribe(5, rawSpec{})
+	r.push()
+	r.deliveryMiss()
+	claim := r.mustClaim(r.now)
+	require.Equal(t, held.KeyHash, claim.Ref.Key)
+	require.Equal(t, heldID, claim.Ref.EventID)
+
+	for _, sub := range []faucet.Subscription{held, gone} {
+		deleted, err := s.DeleteSubscription(r.ctx, sub.Principal, sub.KeyHash)
+		require.NoError(t, err)
+		require.True(t, deleted)
+	}
+	start := r.now
+	r.deliveryRemake(5, rawSpec{})
+	expire := func(now time.Time) int64 {
+		t.Helper()
+		n, err := s.ExpireRawDeliveries(r.ctx, now)
+		require.NoError(t, err)
+		return n
+	}
+	require.EqualValues(t, 3, expire(expiresAt.Add(-time.Second)),
+		"the unclaimed deliveries of the deleted subscriptions and of the old incarnation, and not the one a claim holds")
+	require.EqualValues(t, 1, expire(expiresAt), "the delivery of the subscription that expired at now")
+	require.EqualValues(t, 1, expire(start.Add(testLease)), "the delivery whose claim ran out")
+	require.Zero(t, expire(start.Add(testLease)))
+
+	claims := r.claimAll(start.Add(testLease))
+	require.Len(t, claims, 1, "the live subscription keeps its delivery")
+	require.Equal(t, live.KeyHash, claims[0].Ref.Key)
+	gap := r.deliveryMustClaimGap(start.Add(testLease))
+	require.Equal(t, live.KeyHash, gap.Ref.Key, "the live subscription keeps its gap")
+	_, ok := r.claimGap(start.Add(testLease))
+	require.False(t, ok, "the subscription made again is owed no old gap")
 }
