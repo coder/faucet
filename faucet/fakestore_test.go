@@ -24,6 +24,43 @@ func (s *fakeStore) nowLocked() time.Time {
 	return time.Now()
 }
 
+type fakeRepo struct {
+	repo   faucet.Repository
+	seenAt time.Time
+}
+
+func (s *fakeStore) UpsertRepository(_ context.Context, repo faucet.Repository, seenAt time.Time) error {
+	if err := repo.Validate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.repoErr != nil {
+		return s.repoErr
+	}
+	s.repos = slices.DeleteFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID })
+	s.repos = append(s.repos, fakeRepo{repo: repo, seenAt: seenAt})
+	return nil
+}
+
+func (s *fakeStore) RepositoryByName(_ context.Context, fullName string) (faucet.Repository, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.repoErr != nil {
+		return faucet.Repository{}, s.repoErr
+	}
+	var found *fakeRepo
+	for i, r := range s.repos {
+		if strings.EqualFold(r.repo.FullName, fullName) && (found == nil || !r.seenAt.Before(found.seenAt)) {
+			found = &s.repos[i]
+		}
+	}
+	if found == nil {
+		return faucet.Repository{}, faucet.ErrUnknownRepository
+	}
+	return found.repo, nil
+}
+
 func (s *fakeStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.PollPage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

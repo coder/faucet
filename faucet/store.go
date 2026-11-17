@@ -223,6 +223,15 @@ type Store interface {
 	// subscription whose PreviousSecretUntil is at or before now, and returns
 	// how many rows it cleared.
 	ClearExpiredPreviousSecrets(ctx context.Context, now time.Time) (int64, error)
+	// UpsertRepository records that a signed delivery named repo at seenAt,
+	// the time of record. It keeps one row per repository ID, with the names
+	// of its latest call. It calls repo.Validate.
+	UpsertRepository(ctx context.Context, repo Repository, seenAt time.Time) error
+	// RepositoryByName returns the repository whose FullName equals fullName,
+	// ignoring case as GitHub does. When renames left the name on more than
+	// one row, it returns the one recorded latest. It returns
+	// ErrUnknownRepository when no row holds the name.
+	RepositoryByName(ctx context.Context, fullName string) (Repository, error)
 
 	// The rest of the interface is the delivery queue. A subscription's
 	// deliveries end with it: deleting a subscription deletes the deliveries it
