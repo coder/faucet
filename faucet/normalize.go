@@ -21,8 +21,11 @@ type rule struct {
 }
 
 var rules = map[string]rule{
-	"workflow_run.completed": {eventType: "ci.run_completed", extract: decode(workflowRunCompleted)},
-	"check_run.completed":    {eventType: "ci.check_completed", extract: decode(checkRunCompleted)},
+	"workflow_run.requested":   {eventType: "ci.run_requested", extract: decode(workflowRun)},
+	"workflow_run.in_progress": {eventType: "ci.run_in_progress", extract: decode(workflowRun)},
+	"workflow_run.completed":   {eventType: "ci.run_completed", extract: decode(workflowRun)},
+
+	"check_run.completed": {eventType: "ci.check_completed", extract: decode(checkRunCompleted)},
 
 	"pull_request.assigned":               {eventType: "pr.assigned", extract: decode(pullRequest(withAssignee))},
 	"pull_request.auto_merge_disabled":    {eventType: "pr.auto_merge_disabled", extract: decode(pullRequest())},
@@ -184,30 +187,39 @@ func prNumbers(repoID int64, refs []prRef) []int32 {
 
 type workflowRunPayload struct {
 	Repository  repoRef `json:"repository"`
+	Sender      user    `json:"sender"`
 	WorkflowRun struct {
 		ID           int64   `json:"id"`
 		Name         string  `json:"name"`
-		Conclusion   string  `json:"conclusion"`
+		Status       string  `json:"status"`
+		Conclusion   *string `json:"conclusion"`
 		HeadBranch   string  `json:"head_branch"`
 		HeadSHA      string  `json:"head_sha"`
+		Event        string  `json:"event"`
 		HTMLURL      string  `json:"html_url"`
 		RunAttempt   int32   `json:"run_attempt"`
+		WorkflowID   int64   `json:"workflow_id"`
 		PullRequests []prRef `json:"pull_requests"`
 	} `json:"workflow_run"`
 }
 
-func workflowRunCompleted(p workflowRunPayload) (fields, bool) {
+func workflowRun(p workflowRunPayload) (fields, bool) {
 	r := p.WorkflowRun
 	return fields{
 		prs:     prNumbers(p.Repository.ID, r.PullRequests),
 		headSHA: r.HeadSHA,
 		data: map[string]any{
-			"run_id":      r.ID,
-			"name":        r.Name,
-			"conclusion":  r.Conclusion,
-			"head_branch": r.HeadBranch,
-			"html_url":    r.HTMLURL,
-			"run_attempt": r.RunAttempt,
+			"run_id":        r.ID,
+			"name":          r.Name,
+			"status":        r.Status,
+			"conclusion":    r.Conclusion,
+			"head_branch":   r.HeadBranch,
+			"trigger_event": r.Event,
+			"html_url":      r.HTMLURL,
+			"run_attempt":   r.RunAttempt,
+			"workflow_id":   r.WorkflowID,
+			"sender_login":  p.Sender.Login,
+			"sender_id":     p.Sender.ID,
 		},
 	}, true
 }

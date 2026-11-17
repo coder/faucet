@@ -396,6 +396,7 @@ func TestPolledDataMatchesThePayloadSchema(t *testing.T) {
 	deliveries := []struct{ event, fixture string }{
 		{"workflow_run", "workflow_run_completed"},
 		{"workflow_run", "workflow_run_completed_two_prs"},
+		{"workflow_run", "workflow_run_requested"},
 		{"check_run", "check_run_completed"},
 		{"pull_request_review", "pull_request_review_submitted"},
 		{"pull_request_review", "pull_request_review_dismissed"},

@@ -74,7 +74,7 @@ func TestNormalize(t *testing.T) {
 			wantRepo: 300029405,
 			wantPRs:  []int32{},
 			wantSHA:  "3484a3fb816e0859fd6e1cea078d76385ff50625",
-			wantData: `{"run_id":289782451,"name":"CI","conclusion":"success","head_branch":"master","html_url":"https://github.com/octo-org/octo-repo/actions/runs/289782451","run_attempt":1}`,
+			wantData: `{"run_id":289782451,"name":"CI","status":"completed","conclusion":"success","head_branch":"master","trigger_event":"repository_dispatch","html_url":"https://github.com/octo-org/octo-repo/actions/runs/289782451","run_attempt":1,"workflow_id":2823525,"sender_login":"Codertocat","sender_id":15669918}`,
 		},
 		{
 			name:     "WorkflowRunWithTwoPRs",
@@ -84,7 +84,17 @@ func TestNormalize(t *testing.T) {
 			wantRepo: 300029405,
 			wantPRs:  []int32{2, 3},
 			wantSHA:  "3484a3fb816e0859fd6e1cea078d76385ff50625",
-			wantData: `{"run_id":289782451,"name":"CI","conclusion":"success","head_branch":"master","html_url":"https://github.com/octo-org/octo-repo/actions/runs/289782451","run_attempt":1}`,
+			wantData: `{"run_id":289782451,"name":"CI","status":"completed","conclusion":"success","head_branch":"master","trigger_event":"repository_dispatch","html_url":"https://github.com/octo-org/octo-repo/actions/runs/289782451","run_attempt":1,"workflow_id":2823525,"sender_login":"Codertocat","sender_id":15669918}`,
+		},
+		{
+			name:     "WorkflowRunRequested",
+			event:    "workflow_run",
+			fixture:  "workflow_run_requested",
+			wantType: "ci.run_requested",
+			wantRepo: 300029405,
+			wantPRs:  []int32{},
+			wantSHA:  "3484a3fb816e0859fd6e1cea078d76385ff50625",
+			wantData: `{"run_id":289782451,"name":"","status":"queued","conclusion":null,"head_branch":"master","trigger_event":"repository_dispatch","html_url":"https://github.com/octo-org/octo-repo/actions/runs/289782451","run_attempt":1,"workflow_id":2823525,"sender_login":"Codertocat","sender_id":15669918}`,
 		},
 		{
 			name:     "CheckRun",
@@ -363,12 +373,6 @@ func TestNormalizeIgnores(t *testing.T) {
 		event   string
 		payload func(t *testing.T) []byte
 	}{
-		{"WorkflowRunRequested", "workflow_run", func(t *testing.T) []byte {
-			return mutate(t, "workflow_run_completed", withAction("requested"))
-		}},
-		{"WorkflowRunInProgress", "workflow_run", func(t *testing.T) []byte {
-			return mutate(t, "workflow_run_completed", withAction("in_progress"))
-		}},
 		{"CheckRunCreated", "check_run", func(t *testing.T) []byte {
 			return mutate(t, "check_run_completed", withAction("created"))
 		}},

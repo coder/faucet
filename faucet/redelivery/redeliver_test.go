@@ -105,6 +105,7 @@ func TestRedeliverTracksOnlyWhatNormalizeStores(t *testing.T) {
 	var webhooks []webhook
 	for _, c := range []struct{ event, fixture string }{
 		{"workflow_run", "workflow_run_completed"},
+		{"workflow_run", "workflow_run_requested"},
 		{"check_run", "check_run_completed"},
 		{"pull_request_review", "pull_request_review_submitted"},
 		{"pull_request", "pull_request_closed"},
@@ -146,7 +147,7 @@ func TestRedeliverTracksOnlyWhatNormalizeStores(t *testing.T) {
 			stored++
 		}
 	}
-	require.Equal(t, 13, stored, "the table covers every event that faucet stores")
+	require.Equal(t, 14, stored, "the table covers every event that faucet stores")
 }
 
 func TestRedeliverAsksAgainForAFailedPullRequestOpened(t *testing.T) {

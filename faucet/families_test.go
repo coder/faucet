@@ -28,13 +28,14 @@ var (
 		"pr.review_comments": "pr.review_comment_",
 		"pr.review_threads":  "pr.review_thread_",
 	}
-	// documentedActions are the actions of each pull request event in GitHub's
-	// published webhook schemas, which octokit/webhooks keeps in
+	// documentedActions are the actions of each event in GitHub's published
+	// webhook schemas, which octokit/webhooks keeps in
 	// payload-schemas/api.github.com/<event>/<action>.schema.json.
 	documentedActions = map[string]struct {
 		event   string
 		actions []string
 	}{
+		"ci.runs": {"workflow_run", []string{"completed", "in_progress", "requested"}},
 		"pr.activity": {"pull_request", []string{
 			"assigned", "auto_merge_disabled", "auto_merge_enabled", "closed", "converted_to_draft", "demilestoned", "dequeued",
 			"edited", "enqueued", "labeled", "locked", "milestoned", "opened", "ready_for_review", "reopened",
@@ -86,7 +87,7 @@ func listFamilies(t *testing.T, h *eventsHarness) map[string]familyDescriptor {
 	return families
 }
 
-func TestEachPullRequestFamilyStoresEveryActionThatGitHubDocuments(t *testing.T) {
+func TestEachFamilyStoresEveryActionThatGitHubDocuments(t *testing.T) {
 	t.Parallel()
 
 	families := listFamilies(t, newEventsHarness(t))

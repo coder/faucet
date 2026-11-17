@@ -290,8 +290,8 @@ func TestWebhookHandlerAcceptsWithoutStoring(t *testing.T) {
 	}{
 		{"Ping", "ping", func(*testing.T) []byte { return []byte(`{"zen":"Keep it logically awesome.","hook_id":1}`) }, http.StatusOK},
 		{"UnhandledEvent", "push", func(*testing.T) []byte { return []byte(`{"ref":"refs/heads/main"}`) }, http.StatusAccepted},
-		{"UnhandledAction", "workflow_run", func(t *testing.T) []byte {
-			return mutate(t, "workflow_run_completed", func(doc map[string]any) { doc["action"] = "requested" })
+		{"UnhandledAction", "check_run", func(t *testing.T) []byte {
+			return mutate(t, "check_run_completed", func(doc map[string]any) { doc["action"] = "rerequested" })
 		}, http.StatusAccepted},
 		{"CommentOnPlainIssue", "issue_comment", func(t *testing.T) []byte { return fixture(t, "issue_comment_created") }, http.StatusAccepted},
 	}

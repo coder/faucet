@@ -1,6 +1,7 @@
 package faucet
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -37,6 +38,10 @@ type legacyName struct {
 	name        string
 	description string
 	required    []string
+	// pinned are payload properties, written as a JSON object, that the name
+	// keeps as they were while its family's property grew wider for other
+	// actions.
+	pinned string
 }
 
 // catalogEntry is one name that events/list offers.
@@ -67,10 +72,15 @@ var families = []*family{
 		properties: `{
     "run_id": {"type": "integer"},
     "name": {"type": "string", "description": "The workflow name."},
-    "conclusion": {"type": "string", "description": "For example success, failure or timed_out."},
+    "status": {"type": "string", "description": "For example queued, in_progress or completed."},
+    "conclusion": {"type": ["string", "null"], "description": "For example success, failure or timed_out. Null until the run completes."},
     "head_branch": {"type": "string"},
+    "trigger_event": {"type": "string", "description": "The GitHub event that started the run, for example push or pull_request."},
     "html_url": {"type": "string"},
-    "run_attempt": {"type": "integer"}
+    "run_attempt": {"type": "integer"},
+    "workflow_id": {"type": "integer"},
+    "sender_login": {"type": "string"},
+    "sender_id": {"type": "integer"}
 }`,
 	},
 	{
@@ -174,6 +184,7 @@ var legacyNames = []legacyName{
 		name:        "ci.run_completed",
 		description: "A GitHub Actions workflow run finished. It fires once per run attempt.",
 		required:    []string{"run_id", "name", "conclusion", "head_branch", "html_url", "run_attempt"},
+		pinned:      `{"conclusion": {"type": "string", "description": "For example success, failure or timed_out."}}`,
 	},
 	{
 		name:        "pr.closed",
@@ -279,7 +290,7 @@ func newFamilyEntry(f *family) *catalogEntry {
 		description:   f.description,
 		family:        f,
 		inputSchema:   input,
-		payloadSchema: payloadSchemaOf(f, f.types, f.actions, []string{"prs", "event", "action"}),
+		payloadSchema: payloadSchemaOf(f, f.types, f.actions, []string{"prs", "event", "action"}, ""),
 		input:         resolved,
 		endInput:      resolved,
 	}
@@ -293,17 +304,15 @@ func newLegacyEntry(l legacyName, t storedType) *catalogEntry {
 		family:        t.family,
 		legacy:        true,
 		inputSchema:   input,
-		payloadSchema: payloadSchemaOf(t.family, []string{l.name}, []string{t.action}, append([]string{"prs"}, l.required...)),
+		payloadSchema: payloadSchemaOf(t.family, []string{l.name}, []string{t.action}, append([]string{"prs"}, l.required...), l.pinned),
 		input:         mustResolve(string(input)),
 		endInput:      shaInputResolved,
 	}
 }
 
-func payloadSchemaOf(f *family, types, actions, required []string) json.RawMessage {
-	var own map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(f.properties), &own); err != nil {
-		panic(fmt.Sprintf("payload properties of %s: %v", f.name, err))
-	}
+// payloadSchemaOf is the payloadSchema of the given types of family f. The
+// properties in pinned, a JSON object or empty, replace the family's own.
+func payloadSchemaOf(f *family, types, actions, required []string, pinned string) json.RawMessage {
 	properties := map[string]any{
 		"prs":    prsProperty,
 		"event":  map[string]any{"type": "string", "enum": types, "description": "The exact event type, for example pr.closed."},
@@ -312,8 +321,14 @@ func payloadSchemaOf(f *family, types, actions, required []string) json.RawMessa
 	if !f.noHeadSHA {
 		properties["head_sha"] = headSHAProperty
 	}
-	for name, property := range own {
-		properties[name] = property
+	for _, own := range []string{f.properties, cmp.Or(pinned, "{}")} {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(own), &object); err != nil {
+			panic(fmt.Sprintf("payload properties of %s: %v", f.name, err))
+		}
+		for name, property := range object {
+			properties[name] = property
+		}
 	}
 	schema := marshalRaw(map[string]any{"type": "object", "properties": properties, "required": required})
 	mustResolve(string(schema))

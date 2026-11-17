@@ -5,6 +5,7 @@ const MERGE_SHA = 'fedcba9876543210fedcba9876543210fedcba98';
 const BASE_SHA = '00112233445566778899aabbccddeeff00112233';
 const PR = 7;
 const FORK_PR = 99;
+const SENDER = { login: 'octocat', id: 583231 };
 
 function pullRequestRef(number: number, repoId: number, baseRepoId: number = repoId): object {
   return {
@@ -53,14 +54,18 @@ export const samples: Record<string, Sample> = {
     payload: (repoId) => ({
       action: 'completed',
       repository: { id: repoId },
+      sender: SENDER,
       workflow_run: {
         id: 9001,
         name: 'ci',
+        status: 'completed',
         conclusion: 'success',
         head_branch: 'feat/example',
         head_sha: HEAD_SHA,
+        event: 'pull_request',
         html_url: 'https://github.com/example/repo/actions/runs/9001',
         run_attempt: 2,
+        workflow_id: 9100,
         pull_requests: [pullRequestRef(PR, repoId), pullRequestRef(FORK_PR, repoId, repoId + 1)],
       },
     }),
@@ -73,10 +78,15 @@ export const samples: Record<string, Sample> = {
       data: {
         run_id: 9001,
         name: 'ci',
+        status: 'completed',
         conclusion: 'success',
         head_branch: 'feat/example',
+        trigger_event: 'pull_request',
         html_url: 'https://github.com/example/repo/actions/runs/9001',
         run_attempt: 2,
+        workflow_id: 9100,
+        sender_login: SENDER.login,
+        sender_id: SENDER.id,
       },
     },
   },

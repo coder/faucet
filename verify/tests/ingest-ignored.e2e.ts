@@ -6,7 +6,7 @@ describe('ingest ignored', () => {
     ['an event name faucet has no rule for', 'push', (repoId) => ({ ref: 'refs/heads/main', repository: { id: repoId } })],
     ['a pull_request action that GitHub does not document', 'pull_request', (repoId) => ({ action: 'exploded', number: 7, repository: { id: repoId } })],
     ['a check_run created action', 'check_run', (repoId) => ({ action: 'created', repository: { id: repoId } })],
-    ['a workflow_run requested action', 'workflow_run', (repoId) => ({ action: 'requested', repository: { id: repoId } })],
+    ['a check_suite requested action', 'check_suite', (repoId) => ({ action: 'requested', repository: { id: repoId } })],
     [
       'a comment on a plain issue',
       'issue_comment',
