@@ -6,6 +6,12 @@ const families = ['ci.runs', 'ci.jobs', 'ci.checks', 'ci.suites', 'ci.statuses',
 const eventNames = [...families, 'ci.check_completed', 'ci.run_completed', 'pr.closed', 'pr.comment_created', 'pr.review_submitted'];
 const noHeadCommit = ['pr.comments', 'pr.comment_created'];
 const noPullRequest = ['ci.jobs', 'ci.statuses'];
+// fieldFilters are the field filters that each family offers, each named after a field of its data.
+const fieldFilters: Record<string, string[]> = {
+  'ci.runs': ['conclusion', 'head_branch'],
+  'ci.checks': ['conclusion'],
+  'pr.activity': ['base_branch', 'head_branch'],
+};
 const WEBHOOK_UNSUPPORTED = {
   code: -32026,
   message: 'webhook delivery is not supported by this server',
@@ -56,9 +62,11 @@ describe('events list', () => {
       const properties = ['pr', 'repo', 'sha'].filter(
         (p) => (p !== 'sha' || hasHeadCommit) && (p !== 'pr' || !noPullRequest.includes(event.name)),
       );
+      const filters = fieldFilters[event.name] ?? [];
       expect(Object.keys(event.inputSchema.properties).sort(), `${event.name} inputSchema properties`).toEqual(
-        families.includes(event.name) ? ['actions', ...properties] : properties,
+        (families.includes(event.name) ? ['actions', ...properties, ...filters] : properties).sort(),
       );
+      expect(Object.keys(event.payloadSchema.properties), `${event.name} filters fields of its data`).toEqual(expect.arrayContaining(filters));
       expect(event.inputSchema.required, `${event.name} inputSchema required`).toEqual(['repo']);
       expect(event.payloadSchema.type, `${event.name} payloadSchema`).toBe('object');
       expect(Object.keys(event.payloadSchema.properties).includes('head_sha'), `${event.name} payloadSchema head_sha`).toBe(hasHeadCommit);
