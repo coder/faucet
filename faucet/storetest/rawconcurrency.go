@@ -18,6 +18,7 @@ import (
 var rawConcurrencySubtests = []rawSubtest{
 	{"IngestRawSeesASubscriptionAsSoonAsItsUpsertReturns", ingestRawSeesASubscriptionAsSoonAsItsUpsertReturns},
 	{"ReadRawLeaseCursorMissesNoConcurrentIngest", readRawLeaseCursorMissesNoConcurrentIngest},
+	{"ClaimRawDeliveryTakesOnlyTheLiveIncarnationUnderChurn", claimRawDeliveryTakesOnlyTheLiveIncarnationUnderChurn},
 	{"OpenRawLeaseKeepsTheLimitUnderConcurrentOpens", openRawLeaseKeepsTheLimitUnderConcurrentOpens},
 }
 
@@ -172,4 +173,140 @@ func openRawLeaseKeepsTheLimitUnderConcurrentOpens(t *testing.T, s RawStore) {
 	for _, in := range interests {
 		require.True(t, in.IsLease && opened[in.Lease], "only the opened leases are interests")
 	}
+}
+
+// concurrentIngester ingests pushes and records, per stored raw ID, the
+// incarnations that its plan served. When stall is set, a plan waits until
+// remade moves, so that the subscription it plans for is made again before
+// the store writes the plan.
+type concurrentIngester struct {
+	r      *rawRig
+	now    time.Time
+	remade *atomic.Int64
+	mu     sync.Mutex
+	served map[int64][]time.Time
+}
+
+func (c *concurrentIngester) ingest(stall bool) error {
+	var incarnations []time.Time
+	res, err := c.r.s.IngestRaw(c.r.ctx, c.r.newDelivery(), c.now, func(interests []faucet.RawInterest) faucet.RawPlan {
+		for _, in := range interests {
+			if !in.IsLease {
+				incarnations = append(incarnations, in.Incarnation)
+			}
+		}
+		if stall {
+			seen, deadline := c.remade.Load(), time.Now().Add(20*time.Millisecond)
+			for c.remade.Load() == seen && time.Now().Before(deadline) {
+				time.Sleep(50 * time.Microsecond)
+			}
+		}
+		return serveAll(rawBody)(interests)
+	})
+	switch {
+	case err != nil:
+		return xerrors.Errorf("ingest: %w", err)
+	case len(incarnations) > 1:
+		return xerrors.Errorf("the plan got one key as %d interests", len(incarnations))
+	case !res.Matched || res.Duplicate || len(incarnations) == 0:
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.served[res.ID] = incarnations
+	return nil
+}
+
+func claimRawDeliveryTakesOnlyTheLiveIncarnationUnderChurn(t *testing.T, s RawStore) {
+	const (
+		ingests  = 200
+		remakes  = 2000
+		pollsPer = 3
+	)
+	r := newRawRig(t, s)
+	ingestNow := r.now.Add(time.Minute)
+	var remade atomic.Int64
+	ing := &concurrentIngester{r: r, now: ingestNow, remade: &remade, served: map[int64][]time.Time{}}
+	live := r.subscribe(1, rawSpec{})
+	remake := func() error {
+		deleted, err := s.DeleteSubscription(r.ctx, live.Principal, live.KeyHash)
+		switch {
+		case err != nil:
+			return xerrors.Errorf("delete subscription: %w", err)
+		case !deleted:
+			return xerrors.New("the subscription was gone before its delete")
+		}
+		n := remade.Load() + 1
+		at := r.now.Add(time.Duration(n) * time.Millisecond)
+		row, err := s.UpsertSubscription(r.ctx, newRawSubscription(1, rawSpec{}, at.Add(time.Hour)), at, rawMaxLive)
+		if err != nil {
+			return xerrors.Errorf("make the subscription again: %w", err)
+		}
+		live = row
+		remade.Store(n)
+		return nil
+	}
+	var ingesting atomic.Bool
+	ingesting.Store(true)
+	err := concurrentRun(func() error {
+		defer ingesting.Store(false)
+		for n := range ingests {
+			if err := ing.ingest(n%2 == 1); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, func() error {
+		for i := 1; i <= remakes && ingesting.Load(); i++ {
+			if err := remake(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, func() error {
+		for ingesting.Load() {
+			lease := newRawLease(r.leases.Add(1), rawSpec{}, ingestNow.Add(time.Hour))
+			head, err := s.OpenRawLease(r.ctx, lease, ingestNow, rawMaxLive)
+			if err != nil {
+				return xerrors.Errorf("open lease: %w", err)
+			}
+			q := r.query(lease, head)
+			q.Now, q.ExpiresAt = ingestNow, ingestNow.Add(time.Hour)
+			for range pollsPer {
+				page, found, err := s.ReadRawLease(r.ctx, q)
+				switch {
+				case err != nil:
+					return xerrors.Errorf("read lease: %w", err)
+				case !found:
+					return xerrors.New("a lease that its principal holds below the limit ended")
+				}
+				q.After = page.Next
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err, "ingests, remakes and polls of one repository run side by side")
+	stale := r.ingestAt(r.newDelivery(), ingestNow, func(interests []faucet.RawInterest) faucet.RawPlan {
+		require.NoError(t, remake())
+		return serveAll(rawBody)(interests)
+	})
+	require.True(t, stale.Matched)
+	require.NoError(t, ing.ingest(false))
+
+	var want []int64
+	for id, incarnations := range ing.served {
+		if incarnations[0].Equal(live.CreatedAt) {
+			want = append(want, id)
+		}
+	}
+	slices.Sort(want)
+	require.NotEmpty(t, want, "the ingest after the churn serves the live subscription")
+	var claimed []int64
+	for _, claim := range r.claimAll(ingestNow.Add(time.Minute)) {
+		require.Equal(t, live.KeyHash, claim.Ref.Key)
+		require.True(t, claim.Ref.Incarnation.Equal(live.CreatedAt), "a claim names the incarnation that is live, not %s", claim.Ref.Incarnation)
+		claimed = append(claimed, claim.Ref.EventID)
+	}
+	slices.Sort(claimed)
+	require.Equal(t, want, claimed, "only the deliveries planned for the live incarnation are claimed, each once")
 }
