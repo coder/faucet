@@ -130,11 +130,16 @@ func compartmentViolations(pkgs []goPackage, coreUses map[string][]string) []str
 	if len(features) == 0 {
 		add("self-check: the walk found no feature under faucet/")
 	}
-	for kind, list := range map[string][]string{"helper": internals, "adapter": adapters} {
+	for kind, list := range map[string][]string{"helper": internals, "adapter": adapters, "test helper": testHelpers} {
 		for _, dir := range list {
 			if !dirs[dir] {
 				add("self-check: the %s %s does not exist", kind, dir)
 			}
+		}
+	}
+	for _, dir := range testHelpers {
+		if !slices.Contains(internals, dir) {
+			add("self-check: the test helper %s is not in internals", dir)
 		}
 	}
 
@@ -195,19 +200,19 @@ func compartmentViolations(pkgs []goPackage, coreUses map[string][]string) []str
 				}
 			}
 			if r == roleCore {
-				base := strings.TrimSuffix(strings.TrimSuffix(f.name, ".go"), "_test")
-				parts := strings.Split(base, "_")
+				parts := strings.Split(strings.TrimSuffix(strings.TrimSuffix(f.name, ".go"), "_test"), "_")
 				for feature := range features {
 					// The feature's name less a trailing y or s is its stem, so
 					// that the verb (redeliver) counts as well as the noun
-					// (redelivery). A part of the file name that is the name or
-					// the stem matches, and so does a file name that starts with
-					// a stem of 4 or more letters, because this repo runs words
-					// together (redeliverystore.go). The length keeps a short
-					// feature name from matching every core file.
+					// (redelivery). A part of the file name matches when it is
+					// the name or the stem, or starts with a stem of 4 or more
+					// letters, because this repo runs words together
+					// (redeliverystore.go). The length keeps a short feature
+					// name from matching every core file.
 					stem := strings.TrimSuffix(strings.TrimSuffix(feature, "y"), "s")
-					if slices.ContainsFunc(parts, func(p string) bool { return p == feature || p == stem }) ||
-						(len(stem) >= 4 && strings.HasPrefix(base, stem)) {
+					if slices.ContainsFunc(parts, func(p string) bool {
+						return p == feature || p == stem || (len(stem) >= 4 && strings.HasPrefix(p, stem))
+					}) {
 						add("R6: %s is named like the feature %s: its code belongs in faucet/%s", where, feature, feature)
 					}
 				}
@@ -412,6 +417,7 @@ func TestCompartmentRulesRejectEachBreach(t *testing.T) {
 		{"a core test named like a feature", addFile("faucet", fileOf("redelivery_test.go")), "R6: faucet/redelivery_test.go is named like the feature redelivery"},
 		{"a core file that runs a feature's name into another word", addFile("faucet", fileOf("redeliverystore.go")), "R6: faucet/redeliverystore.go is named like the feature redelivery"},
 		{"a core test that runs a feature's verb into another word", addFile("faucet", fileOf("redeliverharness_test.go")), "R6: faucet/redeliverharness_test.go is named like the feature redelivery"},
+		{"a core file with a part that runs a feature's verb into another word", addFile("faucet", fileOf("hook_redeliverretry.go")), "R6: faucet/hook_redeliverretry.go is named like the feature redelivery"},
 		{"code imports a test helper", addFile("faucet/redelivery", fileOf("x.go", use(pgtest, "NewDB"))), "R9: faucet/redelivery/x.go imports " + pgtest},
 		{"core code imports a test helper", addFile("faucet", fileOf("x.go", use(pgtest, "NewDB"))), "R9: faucet/x.go imports " + pgtest},
 		{"a core file whose last part is a feature's verb", addFile("faucet", fileOf("hook_redeliver.go")), "R6: faucet/hook_redeliver.go is named like the feature redelivery"},
