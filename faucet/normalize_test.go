@@ -2,6 +2,7 @@ package faucet_test
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,6 +18,29 @@ func fixture(t *testing.T, name string) []byte {
 	b, err := os.ReadFile(filepath.Join("testdata", name+".json"))
 	require.NoError(t, err)
 	return b
+}
+
+// helloWorldPR is the data of a pull_request fixture: the pull request that
+// every octokit sample of the event shows, and the extras of its action.
+func helloWorldPR(state string, merged bool, extras map[string]any) string {
+	data := map[string]any{
+		"html_url":     "https://github.com/Codertocat/Hello-World/pull/2",
+		"title":        "Update the README with new information.",
+		"state":        state,
+		"draft":        false,
+		"merged":       merged,
+		"base_branch":  "master",
+		"head_branch":  "changes",
+		"author_login": "Codertocat",
+		"sender_login": "Codertocat",
+		"sender_id":    21031067,
+	}
+	maps.Copy(data, extras)
+	b, err := json.Marshal(data)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }
 
 func mutate(t *testing.T, name string, edit func(doc map[string]any)) []byte {
@@ -90,7 +114,7 @@ func TestNormalize(t *testing.T) {
 			wantRepo: 186853002,
 			wantPRs:  []int32{2},
 			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
-			wantData: `{"merged":false,"merge_commit_sha":"c4295bd74fb0f4fda03689c3df3f2803b658fd85","html_url":"https://github.com/Codertocat/Hello-World/pull/2"}`,
+			wantData: helloWorldPR("closed", false, map[string]any{"merge_commit_sha": "c4295bd74fb0f4fda03689c3df3f2803b658fd85"}),
 		},
 		{
 			name:     "PullRequestMerged",
@@ -100,7 +124,70 @@ func TestNormalize(t *testing.T) {
 			wantRepo: 186853002,
 			wantPRs:  []int32{2},
 			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
-			wantData: `{"merged":true,"merge_commit_sha":"e0e8f3b7c8b2d6a9f5c3a1b7d4e2f6a8c0b9d1e3","html_url":"https://github.com/Codertocat/Hello-World/pull/2"}`,
+			wantData: helloWorldPR("closed", true, map[string]any{"merge_commit_sha": "e0e8f3b7c8b2d6a9f5c3a1b7d4e2f6a8c0b9d1e3"}),
+		},
+		{
+			name:     "PullRequestOpened",
+			event:    "pull_request",
+			fixture:  "pull_request_opened",
+			wantType: "pr.opened",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: helloWorldPR("open", false, nil),
+		},
+		{
+			name:     "PullRequestSynchronize",
+			event:    "pull_request",
+			fixture:  "pull_request_synchronize",
+			wantType: "pr.synchronize",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: helloWorldPR("open", false, map[string]any{
+				"before": "f95f852bd8fca8fcc58a9a2d6c842781e32a215e",
+				"after":  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			}),
+		},
+		{
+			name:     "PullRequestLabeledWithoutItsMergeCommit",
+			event:    "pull_request",
+			fixture:  "pull_request_labeled",
+			wantType: "pr.labeled",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: helloWorldPR("open", false, map[string]any{"label_name": "bug"}),
+		},
+		{
+			name:     "PullRequestReviewRequested",
+			event:    "pull_request",
+			fixture:  "pull_request_review_requested",
+			wantType: "pr.review_requested",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: helloWorldPR("open", false, map[string]any{"requested_reviewer_login": "octocat"}),
+		},
+		{
+			name:     "PullRequestAssigned",
+			event:    "pull_request",
+			fixture:  "pull_request_assigned",
+			wantType: "pr.assigned",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: helloWorldPR("open", false, map[string]any{"assignee_login": "Codertocat"}),
+		},
+		{
+			name:     "PullRequestReadyForReview",
+			event:    "pull_request",
+			fixture:  "pull_request_ready_for_review",
+			wantType: "pr.ready_for_review",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: helloWorldPR("open", false, nil),
 		},
 		{
 			name:     "CommentOnPullRequest",
@@ -129,6 +216,44 @@ func TestNormalize(t *testing.T) {
 			require.Equal(t, tt.wantSHA, ev.HeadSHA)
 			require.JSONEq(t, tt.wantData, string(ev.Data))
 			require.NoError(t, ev.Validate())
+		})
+	}
+}
+
+// octokit/webhooks records no milestoned event and no review request for a
+// team, so these cases add the field that GitHub's schema documents to a
+// recorded payload: a milestone in milestoned.schema.json, and a team in
+// review_requested.schema.json.
+func TestNormalizeReadsTheDocumentedFieldsThatNoSampleRecords(t *testing.T) {
+	t.Parallel()
+
+	milestoned := mutate(t, "pull_request_labeled", func(doc map[string]any) {
+		pr, ok := doc["pull_request"].(map[string]any)
+		require.True(t, ok)
+		doc["action"] = "milestoned"
+		doc["milestone"] = pr["milestone"]
+		delete(doc, "label")
+	})
+	teamRequested := mutate(t, "pull_request_review_requested", func(doc map[string]any) {
+		delete(doc, "requested_reviewer")
+		doc["requested_team"] = map[string]any{"name": "Justice League", "id": 1, "slug": "justice-league", "privacy": "closed", "permission": "admin"}
+	})
+	for name, tc := range map[string]struct {
+		payload  []byte
+		wantType string
+		want     map[string]any
+	}{
+		"Milestoned":    {milestoned, "pr.milestoned", map[string]any{"milestone_title": "v1.0"}},
+		"TeamRequested": {teamRequested, "pr.review_requested", map[string]any{"requested_team_slug": "justice-league"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ev, err := faucet.Normalize("pull_request", tc.payload, "delivery-1")
+			require.NoError(t, err)
+			require.NotNil(t, ev)
+			require.Equal(t, tc.wantType, ev.Type)
+			require.JSONEq(t, helloWorldPR("open", false, tc.want), string(ev.Data))
 		})
 	}
 }
@@ -210,8 +335,8 @@ func TestNormalizeIgnores(t *testing.T) {
 		{"ReviewDismissed", "pull_request_review", func(t *testing.T) []byte {
 			return mutate(t, "pull_request_review_submitted", withAction("dismissed"))
 		}},
-		{"PullRequestOpened", "pull_request", func(t *testing.T) []byte {
-			return mutate(t, "pull_request_closed", withAction("opened"))
+		{"PullRequestActionThatGitHubDoesNotDocument", "pull_request", func(t *testing.T) []byte {
+			return mutate(t, "pull_request_opened", withAction("exploded"))
 		}},
 		{"CommentEdited", "issue_comment", func(t *testing.T) []byte {
 			return mutate(t, "issue_comment_created_on_pr", withAction("edited"))

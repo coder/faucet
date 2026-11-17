@@ -33,11 +33,17 @@ export function closedPullRequest(repoId: number): object {
     number: PR,
     repository: { id: repoId },
     pull_request: {
+      html_url: `https://github.com/example/repo/pull/${PR}`,
+      title: 'Add an example',
+      state: 'closed',
+      draft: false,
       merged: true,
       merge_commit_sha: MERGE_SHA,
-      html_url: `https://github.com/example/repo/pull/${PR}`,
-      head: { sha: HEAD_SHA },
+      user: { login: 'author', id: 3 },
+      head: { ref: 'feat/example', sha: HEAD_SHA },
+      base: { ref: 'main', sha: BASE_SHA },
     },
+    sender: { login: 'octocat', id: 1 },
   };
 }
 
@@ -148,6 +154,14 @@ export const samples: Record<string, Sample> = {
         merged: true,
         merge_commit_sha: MERGE_SHA,
         html_url: `https://github.com/example/repo/pull/${PR}`,
+        title: 'Add an example',
+        state: 'closed',
+        draft: false,
+        base_branch: 'main',
+        head_branch: 'feat/example',
+        author_login: 'author',
+        sender_login: 'octocat',
+        sender_id: 1,
       },
     },
   },
@@ -174,6 +188,43 @@ export const samples: Record<string, Sample> = {
         user_login: 'octocat',
         html_url: `https://github.com/example/repo/pull/${PR}#issuecomment-9005`,
       },
+    },
+  },
+};
+
+const RECORDED_SHA = 'ec26c3e57ca3a959ca5aad62de7213c562f8c821';
+const RECORDED_PR = {
+  html_url: 'https://github.com/Codertocat/Hello-World/pull/2',
+  title: 'Update the README with new information.',
+  state: 'open',
+  draft: false,
+  merged: false,
+  base_branch: 'master',
+  head_branch: 'changes',
+  author_login: 'Codertocat',
+  sender_login: 'Codertocat',
+  sender_id: 21031067,
+};
+
+// recordedSamples are webhooks of actions that no exact type of events/list
+// names. They are recorded payloads from faucet/testdata, so they are polled
+// by their family.
+export const recordedSamples: Record<string, Sample> = {
+  'pull_request.opened': {
+    event: 'pull_request',
+    payload: (repoId) => recorded('pull_request_opened', repoId),
+    expected: { type: 'pr.opened', family: 'pr.activity', action: 'opened', prs: [2], headSha: RECORDED_SHA, data: RECORDED_PR },
+  },
+  'pull_request.synchronize': {
+    event: 'pull_request',
+    payload: (repoId) => recorded('pull_request_synchronize', repoId),
+    expected: {
+      type: 'pr.synchronize',
+      family: 'pr.activity',
+      action: 'synchronize',
+      prs: [2],
+      headSha: RECORDED_SHA,
+      data: { ...RECORDED_PR, before: 'f95f852bd8fca8fcc58a9a2d6c842781e32a215e', after: RECORDED_SHA },
     },
   },
 };

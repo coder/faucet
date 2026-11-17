@@ -88,11 +88,26 @@ var families = []*family{
 	{
 		name:        "pr.activity",
 		githubEvent: "pull_request",
-		description: "Pull requests, for example one that was closed.",
+		description: "Pull requests: every action of GitHub's pull_request event, for example opened, synchronize, labeled or closed.",
 		properties: `{
     "merged": {"type": "boolean"},
-    "merge_commit_sha": {"type": ["string", "null"], "description": "The merge commit. Before a merge it is the test-merge commit of GitHub or null, so it does not mean the pull request merged. Read merged."},
-    "html_url": {"type": "string"}
+    "merge_commit_sha": {"type": ["string", "null"], "description": "The merge commit, in closed events only. When the pull request closed unmerged it is the test-merge commit of GitHub or null, so it does not mean the pull request merged. Read merged."},
+    "html_url": {"type": "string"},
+    "title": {"type": "string"},
+    "state": {"type": "string", "description": "open or closed."},
+    "draft": {"type": "boolean"},
+    "base_branch": {"type": "string", "description": "The branch that the pull request merges into."},
+    "head_branch": {"type": "string", "description": "The branch that holds the changes."},
+    "author_login": {"type": "string", "description": "The account that opened the pull request."},
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."},
+    "before": {"type": "string", "description": "In synchronize events, the head commit before the push."},
+    "after": {"type": "string", "description": "In synchronize events, the head commit after the push."},
+    "label_name": {"type": "string", "description": "In labeled and unlabeled events, the label."},
+    "assignee_login": {"type": "string", "description": "In assigned and unassigned events, the account."},
+    "requested_reviewer_login": {"type": "string", "description": "In review_requested and review_request_removed events for a user, the user."},
+    "requested_team_slug": {"type": "string", "description": "In review_requested and review_request_removed events for a team, the team."},
+    "milestone_title": {"type": "string", "description": "In milestoned and demilestoned events, the milestone."}
 }`,
 	},
 	{

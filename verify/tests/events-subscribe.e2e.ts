@@ -24,6 +24,30 @@ import {
 } from './subscriptions';
 
 const run = samples['workflow_run.completed'];
+// PR_ACTIVITY_ACTIONS are the actions of GitHub's pull_request event in its published webhook schemas, in sorted order.
+const PR_ACTIVITY_ACTIONS = [
+  'assigned',
+  'auto_merge_disabled',
+  'auto_merge_enabled',
+  'closed',
+  'converted_to_draft',
+  'demilestoned',
+  'dequeued',
+  'edited',
+  'enqueued',
+  'labeled',
+  'locked',
+  'milestoned',
+  'opened',
+  'ready_for_review',
+  'reopened',
+  'review_request_removed',
+  'review_requested',
+  'synchronize',
+  'unassigned',
+  'unlabeled',
+  'unlocked',
+];
 const UTC_SECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 
 interface PollResult {
@@ -333,7 +357,7 @@ describe('events subscribe', () => {
     expect(every.id).not.toBe(once.id);
     expect(rows.map((r) => [r.event_type, r.arguments, r.event_types])).toEqual([
       ['pr.activity', { repo, actions: ['closed'] }, ['pr.closed']],
-      ['pr.activity', { repo }, ['pr.closed']],
+      ['pr.activity', { repo }, PR_ACTIVITY_ACTIONS.map((action) => `pr.${action}`)],
     ]);
   });
 
