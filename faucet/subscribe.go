@@ -246,6 +246,7 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 		Principal:   principal.Login,
 		CallbackURL: req.callbackURL,
 		EventType:   req.entry.name,
+		EventTypes:  req.entry.types(nil),
 		Arguments:   req.canonical,
 		RepoID:      repoID,
 		SecretEnc:   sealed,

@@ -254,7 +254,7 @@ func (s *Service) readEvents(ctx context.Context, req pollRequest) (*eventsPollR
 	}
 	occurrences := make([]eventOccurrence, len(events))
 	for i, ev := range events {
-		if occurrences[i], err = occurrenceOf(ev); err != nil {
+		if occurrences[i], err = occurrenceOf(req.entry.name, ev); err != nil {
 			return nil, err
 		}
 	}
@@ -289,9 +289,10 @@ func newPollResult(events []eventOccurrence, cursor int64, truncated, hasMore bo
 	}
 }
 
-// occurrenceOf adds the pull request numbers and the head SHA to the data,
-// because the store keeps them in columns and the payload schemas list them.
-func occurrenceOf(ev Event) (eventOccurrence, error) {
+// occurrenceOf names the event by the name it was asked for, and adds the pull
+// request numbers and the head SHA to the data, because the store keeps them
+// in columns and the payload schemas list them.
+func occurrenceOf(name string, ev Event) (eventOccurrence, error) {
 	var data map[string]json.RawMessage
 	if err := json.Unmarshal(ev.Data, &data); err != nil || data == nil {
 		return eventOccurrence{}, xerrors.Errorf("data of event %d is not a JSON object", ev.ID)
@@ -306,7 +307,7 @@ func occurrenceOf(ev Event) (eventOccurrence, error) {
 	}
 	return eventOccurrence{
 		EventID:   ev.DeliveryID,
-		Name:      ev.Type,
+		Name:      name,
 		Timestamp: ev.ReceivedAt.UTC(),
 		Data:      marshalRaw(data),
 	}, nil

@@ -88,7 +88,7 @@ func (s *fakeStore) ScanTargets(ctx context.Context, now time.Time, maxPending, 
 			continue
 		}
 		targets = append(targets, faucet.ScanTarget{
-			KeyHash: key, Principal: sub.Principal, EventType: sub.EventType, Arguments: slices.Clone(sub.Arguments), RepoID: sub.RepoID,
+			KeyHash: key, Principal: sub.Principal, EventTypes: slices.Clone(sub.EventTypes), Arguments: slices.Clone(sub.Arguments), RepoID: sub.RepoID,
 			ScannedThrough: s.scanned[key], Pending: pending,
 		})
 	}
@@ -177,6 +177,7 @@ func (s *fakeStore) ClaimDelivery(ctx context.Context, now time.Time, lease time
 		Ref:                 faucet.DeliveryRef{Key: best.key, EventID: best.eventID, MessageID: bestRow.messageID, Attempt: bestRow.attempts, Incarnation: sub.CreatedAt},
 		MessageID:           bestRow.messageID,
 		EnqueuedAt:          bestRow.enqueuedAt,
+		EventType:           sub.EventType,
 		CallbackURL:         sub.CallbackURL,
 		SecretEnc:           slices.Clone(sub.SecretEnc),
 		PreviousSecretEnc:   slices.Clone(sub.PreviousSecretEnc),
@@ -326,7 +327,7 @@ func (s *fakeStore) hasSomethingToReadLocked(key faucet.SubscriptionKeyHash, sub
 		return true
 	}
 	return slices.ContainsFunc(s.events, func(e faucet.Event) bool {
-		return e.RepoID == sub.RepoID && e.Type == sub.EventType && e.ID > s.scanned[key]
+		return e.RepoID == sub.RepoID && slices.Contains(sub.EventTypes, e.Type) && e.ID > s.scanned[key]
 	})
 }
 
