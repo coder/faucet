@@ -134,7 +134,27 @@ func TestNormalize(t *testing.T) {
 			wantRepo: 186853002,
 			wantPRs:  []int32{2},
 			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
-			wantData: `{"check_run_id":128620228,"name":"Octocoders-linter","conclusion":"success","html_url":"https://github.com/Codertocat/Hello-World/runs/128620228","app_slug":"octoapp"}`,
+			wantData: `{"check_run_id":128620228,"name":"Octocoders-linter","status":"completed","conclusion":"success","html_url":"https://github.com/Codertocat/Hello-World/runs/128620228","app_slug":"octoapp","check_suite_id":118578147,"head_branch":"changes","sender_login":"Codertocat","sender_id":21031067}`,
+		},
+		{
+			name:     "CheckRunCreated",
+			event:    "check_run",
+			fixture:  "check_run_created",
+			wantType: "ci.check_created",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: `{"check_run_id":128620228,"name":"Octocoders-linter","status":"queued","conclusion":null,"html_url":"https://github.com/Codertocat/Hello-World/runs/128620228","app_slug":"","check_suite_id":118578147,"head_branch":"changes","sender_login":"Codertocat","sender_id":21031067}`,
+		},
+		{
+			name:     "CheckSuiteCompleted",
+			event:    "check_suite",
+			fixture:  "check_suite_completed",
+			wantType: "ci.suite_completed",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: `{"check_suite_id":118578147,"status":"completed","conclusion":"success","head_branch":"changes","app_slug":"","sender_login":"Codertocat","sender_id":21031067}`,
 		},
 		{
 			name:     "ReviewSubmitted",
@@ -355,6 +375,7 @@ func TestNormalizeKeepsOnlyPullRequestsOfTheRepository(t *testing.T) {
 	}{
 		{"workflow_run", "workflow_run_completed"},
 		{"check_run", "check_run_completed"},
+		{"check_suite", "check_suite_completed"},
 	}
 	cases := []struct {
 		name string
@@ -403,8 +424,11 @@ func TestNormalizeIgnores(t *testing.T) {
 		event   string
 		payload func(t *testing.T) []byte
 	}{
-		{"CheckRunCreated", "check_run", func(t *testing.T) []byte {
-			return mutate(t, "check_run_completed", withAction("created"))
+		{"CheckRunRerequested", "check_run", func(t *testing.T) []byte {
+			return mutate(t, "check_run_completed", withAction("rerequested"))
+		}},
+		{"CheckSuiteRequested", "check_suite", func(t *testing.T) []byte {
+			return mutate(t, "check_suite_completed", withAction("requested"))
 		}},
 		{"PullRequestActionThatGitHubDoesNotDocument", "pull_request", func(t *testing.T) []byte {
 			return mutate(t, "pull_request_opened", withAction("exploded"))
@@ -447,6 +471,7 @@ func TestNormalizeRejects(t *testing.T) {
 		{"workflow_run", "workflow_run_completed"},
 		{"check_run", "check_run_completed"},
 		{"workflow_job", "workflow_job_queued"},
+		{"check_suite", "check_suite_completed"},
 		{"pull_request_review", "pull_request_review_submitted"},
 		{"pull_request", "pull_request_closed"},
 		{"issue_comment", "issue_comment_created_on_pr"},

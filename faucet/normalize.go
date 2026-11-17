@@ -20,6 +20,10 @@ type rule struct {
 	extract   func(payload []byte) (f fields, ok bool, err error)
 }
 
+// rules are the webhooks that faucet stores, keyed by GitHub event and action
+// word. Repository and organization webhooks receive only the created and
+// completed check_run actions and the completed check_suite action, so faucet
+// has no rule for the others.
 var rules = map[string]rule{
 	"workflow_run.requested":   {eventType: "ci.run_requested", extract: decode(workflowRun)},
 	"workflow_run.in_progress": {eventType: "ci.run_in_progress", extract: decode(workflowRun)},
@@ -30,7 +34,9 @@ var rules = map[string]rule{
 	"workflow_job.in_progress": {eventType: "ci.job_in_progress", extract: decode(workflowJob)},
 	"workflow_job.completed":   {eventType: "ci.job_completed", extract: decode(workflowJob)},
 
-	"check_run.completed": {eventType: "ci.check_completed", extract: decode(checkRunCompleted)},
+	"check_run.created":     {eventType: "ci.check_created", extract: decode(checkRun)},
+	"check_run.completed":   {eventType: "ci.check_completed", extract: decode(checkRun)},
+	"check_suite.completed": {eventType: "ci.suite_completed", extract: decode(checkSuite)},
 
 	"pull_request.assigned":               {eventType: "pr.assigned", extract: decode(pullRequest(withAssignee))},
 	"pull_request.auto_merge_disabled":    {eventType: "pr.auto_merge_disabled", extract: decode(pullRequest())},
@@ -275,32 +281,77 @@ func workflowJob(p workflowJobPayload) (fields, bool) {
 	}, true
 }
 
+type appRef struct {
+	Slug string `json:"slug"`
+}
+
 type checkRunPayload struct {
 	Repository repoRef `json:"repository"`
+	Sender     user    `json:"sender"`
 	CheckRun   struct {
 		ID           int64   `json:"id"`
 		Name         string  `json:"name"`
-		Conclusion   string  `json:"conclusion"`
+		Status       string  `json:"status"`
+		Conclusion   *string `json:"conclusion"`
 		HeadSHA      string  `json:"head_sha"`
 		HTMLURL      string  `json:"html_url"`
 		PullRequests []prRef `json:"pull_requests"`
-		App          struct {
-			Slug string `json:"slug"`
-		} `json:"app"`
+		App          appRef  `json:"app"`
+		CheckSuite   struct {
+			ID         int64   `json:"id"`
+			HeadBranch *string `json:"head_branch"`
+		} `json:"check_suite"`
 	} `json:"check_run"`
 }
 
-func checkRunCompleted(p checkRunPayload) (fields, bool) {
+func checkRun(p checkRunPayload) (fields, bool) {
 	c := p.CheckRun
 	return fields{
 		prs:     prNumbers(p.Repository.ID, c.PullRequests),
 		headSHA: c.HeadSHA,
 		data: map[string]any{
-			"check_run_id": c.ID,
-			"name":         c.Name,
-			"conclusion":   c.Conclusion,
-			"html_url":     c.HTMLURL,
-			"app_slug":     c.App.Slug,
+			"check_run_id":   c.ID,
+			"name":           c.Name,
+			"status":         c.Status,
+			"conclusion":     c.Conclusion,
+			"html_url":       c.HTMLURL,
+			"app_slug":       c.App.Slug,
+			"check_suite_id": c.CheckSuite.ID,
+			"head_branch":    c.CheckSuite.HeadBranch,
+			"sender_login":   p.Sender.Login,
+			"sender_id":      p.Sender.ID,
+		},
+	}, true
+}
+
+// GitHub gives a check suite no html_url.
+type checkSuitePayload struct {
+	Repository repoRef `json:"repository"`
+	Sender     user    `json:"sender"`
+	CheckSuite struct {
+		ID           int64   `json:"id"`
+		HeadBranch   *string `json:"head_branch"`
+		HeadSHA      string  `json:"head_sha"`
+		Status       *string `json:"status"`
+		Conclusion   *string `json:"conclusion"`
+		PullRequests []prRef `json:"pull_requests"`
+		App          appRef  `json:"app"`
+	} `json:"check_suite"`
+}
+
+func checkSuite(p checkSuitePayload) (fields, bool) {
+	c := p.CheckSuite
+	return fields{
+		prs:     prNumbers(p.Repository.ID, c.PullRequests),
+		headSHA: c.HeadSHA,
+		data: map[string]any{
+			"check_suite_id": c.ID,
+			"status":         c.Status,
+			"conclusion":     c.Conclusion,
+			"head_branch":    c.HeadBranch,
+			"app_slug":       c.App.Slug,
+			"sender_login":   p.Sender.Login,
+			"sender_id":      p.Sender.ID,
 		},
 	}, true
 }

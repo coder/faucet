@@ -114,9 +114,28 @@ var families = []*family{
 		properties: `{
     "check_run_id": {"type": "integer"},
     "name": {"type": "string", "description": "The check name."},
-    "conclusion": {"type": "string", "description": "For example success, failure or timed_out."},
+    "status": {"type": "string", "description": "For example queued, in_progress or completed."},
+    "conclusion": {"type": ["string", "null"], "description": "For example success, failure or timed_out. Null until the check completes."},
     "html_url": {"type": "string"},
-    "app_slug": {"type": "string", "description": "The app that ran the check."}
+    "app_slug": {"type": "string", "description": "The app that ran the check."},
+    "check_suite_id": {"type": "integer"},
+    "head_branch": {"type": ["string", "null"], "description": "The branch of the check suite. Null for a push to a fork."},
+    "sender_login": {"type": "string"},
+    "sender_id": {"type": "integer"}
+}`,
+	},
+	{
+		name:        "ci.suites",
+		githubEvent: "check_suite",
+		description: "Check suites on a commit. A suite holds the check runs of one app, and it completes when they all have.",
+		properties: `{
+    "check_suite_id": {"type": "integer"},
+    "status": {"type": ["string", "null"]},
+    "conclusion": {"type": ["string", "null"], "description": "For example success, failure or timed_out."},
+    "head_branch": {"type": ["string", "null"], "description": "Null for a push to a fork."},
+    "app_slug": {"type": "string", "description": "The app whose check runs the suite holds."},
+    "sender_login": {"type": "string"},
+    "sender_id": {"type": "integer"}
 }`,
 	},
 	{
@@ -203,6 +222,7 @@ var legacyNames = []legacyName{
 		name:        "ci.check_completed",
 		description: "A check run finished on a commit, from GitHub Actions or another app.",
 		required:    []string{"check_run_id", "name", "conclusion", "html_url", "app_slug"},
+		pinned:      `{"conclusion": {"type": "string", "description": "For example success, failure or timed_out."}}`,
 	},
 	{
 		name:        "ci.run_completed",

@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	allFamilies = []string{"ci.runs", "ci.jobs", "ci.checks", "pr.activity", "pr.reviews", "pr.comments", "pr.review_comments", "pr.review_threads"}
+	allFamilies = []string{"ci.runs", "ci.jobs", "ci.checks", "ci.suites", "pr.activity", "pr.reviews", "pr.comments", "pr.review_comments", "pr.review_threads"}
 	allNames    = append(slices.Clone(allFamilies), allTypes...)
 	// typePrefix is the naming rule of the exact types: the exact type of
 	// action X of a family is its prefix followed by X.
@@ -23,6 +23,7 @@ var (
 		"ci.runs":            "ci.run_",
 		"ci.jobs":            "ci.job_",
 		"ci.checks":          "ci.check_",
+		"ci.suites":          "ci.suite_",
 		"pr.activity":        "pr.",
 		"pr.reviews":         "pr.review_",
 		"pr.comments":        "pr.comment_",
@@ -31,13 +32,17 @@ var (
 	}
 	// documentedActions are the actions of each event in GitHub's published
 	// webhook schemas, which octokit/webhooks keeps in
-	// payload-schemas/api.github.com/<event>/<action>.schema.json.
+	// payload-schemas/api.github.com/<event>/<action>.schema.json. Of
+	// check_run and check_suite they are the actions that GitHub's docs say a
+	// repository or organization webhook receives.
 	documentedActions = map[string]struct {
 		event   string
 		actions []string
 	}{
-		"ci.runs": {"workflow_run", []string{"completed", "in_progress", "requested"}},
-		"ci.jobs": {"workflow_job", []string{"completed", "in_progress", "queued", "waiting"}},
+		"ci.runs":   {"workflow_run", []string{"completed", "in_progress", "requested"}},
+		"ci.jobs":   {"workflow_job", []string{"completed", "in_progress", "queued", "waiting"}},
+		"ci.checks": {"check_run", []string{"completed", "created"}},
+		"ci.suites": {"check_suite", []string{"completed"}},
 		"pr.activity": {"pull_request", []string{
 			"assigned", "auto_merge_disabled", "auto_merge_enabled", "closed", "converted_to_draft", "demilestoned", "dequeued",
 			"edited", "enqueued", "labeled", "locked", "milestoned", "opened", "ready_for_review", "reopened",

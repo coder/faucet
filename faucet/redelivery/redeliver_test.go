@@ -109,6 +109,8 @@ func TestRedeliverTracksOnlyWhatNormalizeStores(t *testing.T) {
 		{"workflow_job", "workflow_job_queued"},
 		{"workflow_job", "workflow_job_completed"},
 		{"check_run", "check_run_completed"},
+		{"check_run", "check_run_created"},
+		{"check_suite", "check_suite_completed"},
 		{"pull_request_review", "pull_request_review_submitted"},
 		{"pull_request", "pull_request_closed"},
 		{"pull_request", "pull_request_opened"},
@@ -149,7 +151,7 @@ func TestRedeliverTracksOnlyWhatNormalizeStores(t *testing.T) {
 			stored++
 		}
 	}
-	require.Equal(t, 16, stored, "the table covers every event that faucet stores")
+	require.Equal(t, 18, stored, "the table covers every event that faucet stores")
 }
 
 func TestRedeliverAsksAgainForAFailedPullRequestOpened(t *testing.T) {

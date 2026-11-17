@@ -424,6 +424,8 @@ func TestPolledDataMatchesThePayloadSchema(t *testing.T) {
 		{"workflow_job", "workflow_job_waiting"},
 		{"workflow_job", "workflow_job_completed"},
 		{"check_run", "check_run_completed"},
+		{"check_run", "check_run_created"},
+		{"check_suite", "check_suite_completed"},
 		{"pull_request_review", "pull_request_review_submitted"},
 		{"pull_request_review", "pull_request_review_dismissed"},
 		{"pull_request", "pull_request_closed"},

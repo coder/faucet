@@ -95,9 +95,11 @@ export const samples: Record<string, Sample> = {
     payload: (repoId) => ({
       action: 'completed',
       repository: { id: repoId },
+      sender: SENDER,
       check_run: {
         id: 9002,
         name: 'lint',
+        status: 'completed',
         conclusion: 'failure',
         head_sha: HEAD_SHA,
         html_url: 'https://github.com/example/repo/runs/9002',
@@ -107,6 +109,7 @@ export const samples: Record<string, Sample> = {
           pullRequestRef(FORK_PR, repoId, repoId + 1),
         ],
         app: { slug: 'github-actions' },
+        check_suite: { id: 9200, head_branch: 'feat/example' },
       },
     }),
     expected: {
@@ -118,9 +121,14 @@ export const samples: Record<string, Sample> = {
       data: {
         check_run_id: 9002,
         name: 'lint',
+        status: 'completed',
         conclusion: 'failure',
         html_url: 'https://github.com/example/repo/runs/9002',
         app_slug: 'github-actions',
+        check_suite_id: 9200,
+        head_branch: 'feat/example',
+        sender_login: SENDER.login,
+        sender_id: SENDER.id,
       },
     },
   },
