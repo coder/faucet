@@ -1,4 +1,4 @@
-package faucet_test
+package redelivery_test
 
 import (
 	"context"
@@ -11,9 +11,9 @@ import (
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
 	"github.com/coder/faucet/faucet/internal/pgtest"
 	"github.com/coder/faucet/faucet/pgstore"
+	"github.com/coder/faucet/faucet/redelivery"
 	"github.com/coder/quartz"
 )
 
@@ -67,7 +67,7 @@ func (b buildBefore000008) raiseTop(ctx context.Context, epoch int64, top time.T
 		return err
 	}
 	if locked != epoch {
-		return faucet.ErrRedeliveryLeaseLost
+		return redelivery.ErrLeaseLost
 	}
 	if _, err := tx.ExecContext(ctx, before000008RaiseRedeliveryTop, top); err != nil {
 		return err
@@ -97,7 +97,7 @@ func (b buildBefore000008) release(ctx context.Context, epoch int64) error {
 
 func migrate000008(t *testing.T, db *sql.DB, direction string) {
 	t.Helper()
-	statements, err := os.ReadFile("pgstore/migrations/000008_redelivery_clear." + direction + ".sql")
+	statements, err := os.ReadFile("../pgstore/migrations/000008_redelivery_clear." + direction + ".sql")
 	require.NoError(t, err)
 	_, err = db.ExecContext(context.Background(), string(statements))
 	require.NoError(t, err)

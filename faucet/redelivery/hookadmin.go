@@ -1,4 +1,4 @@
-package faucet
+package redelivery
 
 import (
 	"context"
@@ -49,19 +49,19 @@ type DeliveryPage struct {
 	// Next is the cursor of the next, older page. It is empty on the last page.
 	Next string
 	// At is GitHub's own clock when it answered, which GitHub's Date header
-	// carries. It is zero when GitHub sent none. Redeliver needs At on the
+	// carries. It is zero when GitHub sent none. Runner.Run needs At on the
 	// first page and on a page that ends the list. There it fails the read
-	// when At is zero, or more than RedeliveryDateSlack before the newest
-	// attempt that it knows.
+	// when At is zero, or more than DateSlack before the newest attempt that
+	// it knows.
 	At time.Time
 }
 
-// HookAdmin is the part of GitHub's webhook API that Service.Redeliver needs.
+// HookAdmin is the part of GitHub's webhook API that Runner.Run needs.
 // A token that can call these two methods can usually also edit or delete the
 // webhook, so an implementation must call nothing else.
 type HookAdmin interface {
-	// Hook names the webhook, for example /orgs/acme/hooks/7. Redeliver keeps
-	// its scan position per name, so a name must not be reused for another
+	// Hook names the webhook, for example /orgs/acme/hooks/7. A run keeps its
+	// scan position per name, so a name must not be reused for another
 	// webhook.
 	Hook() string
 	// ListDeliveries returns one page of delivery attempts, newest first.
@@ -69,7 +69,7 @@ type HookAdmin interface {
 	// GitHub's cursor is opaque. A cursor that an earlier call returned must
 	// still continue the same list after newer attempts have arrived. The
 	// call must not fail a page for its Date: it sets DeliveryPage.At, or
-	// leaves it zero, and Redeliver decides whether it needs it.
+	// leaves it zero, and the run decides whether it needs it.
 	ListDeliveries(ctx context.Context, cursor string) (DeliveryPage, error)
 	// Redeliver asks GitHub to send the attempt with this ID again.
 	Redeliver(ctx context.Context, attemptID int64) error
@@ -103,7 +103,7 @@ type GitHubHookAdmin struct {
 var _ HookAdmin = GitHubHookAdmin{}
 
 // NewGitHubHookAdmin returns a GitHubHookAdmin. baseURL follows the rules of
-// TokenAuthorizer.BaseURL. token must be a valid header value, which GitHub
+// faucet.TokenAuthorizer.BaseURL. token must be a valid header value, which GitHub
 // tokens are. client defaults to http.DefaultClient and is never modified. No
 // error carries the token or the base URL.
 func NewGitHubHookAdmin(baseURL, token string, target HookTarget, client *http.Client) (GitHubHookAdmin, error) {

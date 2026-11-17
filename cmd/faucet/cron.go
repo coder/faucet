@@ -12,6 +12,7 @@ import (
 
 	"cdr.dev/slog/v3"
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/redelivery"
 	"github.com/coder/quartz"
 )
 
@@ -25,12 +26,12 @@ type cronRoutes struct {
 	secret    []byte
 	svc       *faucet.Service
 	retention time.Duration
-	// delivers and redelivers say whether the service has webhook delivery and
-	// redelivery.
-	delivers   bool
-	redelivers bool
-	clock      quartz.Clock
-	logger     slog.Logger
+	// delivers says whether the service has webhook delivery.
+	delivers bool
+	// redeliverer is nil when redelivery is off.
+	redeliverer *redelivery.Runner
+	clock       quartz.Clock
+	logger      slog.Logger
 }
 
 func (c cronRoutes) mount(r chi.Router) {
@@ -109,11 +110,11 @@ func (c cronRoutes) deliver(w http.ResponseWriter, r *http.Request) {
 // A failed run is a 500 with an error member that names nothing, because the
 // error can carry a host or a cursor. The log has it.
 func (c cronRoutes) redeliver(w http.ResponseWriter, r *http.Request) {
-	if !c.redelivers {
+	if c.redeliverer == nil {
 		http.Error(w, "redelivery is not configured", http.StatusServiceUnavailable)
 		return
 	}
-	res, err := c.svc.Redeliver(r.Context())
+	res, err := c.redeliverer.Run(r.Context())
 	status, failure := http.StatusOK, ""
 	if err != nil {
 		c.logger.Error(r.Context(), "cron redelivery failed", slog.Error(err))

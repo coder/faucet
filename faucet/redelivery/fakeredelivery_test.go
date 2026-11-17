@@ -1,4 +1,4 @@
-package faucet_test
+package redelivery_test
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"golang.org/x/xerrors"
 
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/redelivery"
 	"github.com/coder/faucet/faucet/storetest"
 )
 
@@ -33,12 +34,12 @@ type fakeRedeliveryRow struct {
 }
 
 type fakeRange struct {
-	faucet.RedeliveryRange
+	redelivery.Range
 	gap      bool
 	closedAt time.Time
 }
 
-// fakeRedeliveryStore is an in-memory RedeliveryStore that also stores
+// fakeRedeliveryStore is an in-memory redelivery.Store that also stores
 // events, as pgstore does. TestFakeRedeliveryStoreMatchesContract keeps it
 // honest.
 type fakeRedeliveryStore struct {
@@ -59,7 +60,7 @@ type fakeRedeliveryStore struct {
 	nextRangeID int64
 }
 
-var _ faucet.RedeliveryStore = (*fakeRedeliveryStore)(nil)
+var _ redelivery.Store = (*fakeRedeliveryStore)(nil)
 
 func newFakeRedeliveryStore() *fakeRedeliveryStore {
 	return &fakeRedeliveryStore{
@@ -84,16 +85,16 @@ func (s *fakeRedeliveryStore) InsertEvent(_ context.Context, ev faucet.Event) (f
 	return ev, true, nil
 }
 
-func (s *fakeRedeliveryStore) AcquireRedeliveryLease(_ context.Context, hook string, now time.Time, ttl time.Duration) (faucet.RedeliveryScan, bool, error) {
+func (s *fakeRedeliveryStore) AcquireRedeliveryLease(_ context.Context, hook string, now time.Time, ttl time.Duration) (redelivery.Scan, bool, error) {
 	if hook == "" || ttl <= 0 || now.IsZero() {
-		return faucet.RedeliveryScan{}, false, xerrors.New("a lease needs a hook, a time and a ttl")
+		return redelivery.Scan{}, false, xerrors.New("a lease needs a hook, a time and a ttl")
 	}
 	s.rmu.Lock()
 	defer s.rmu.Unlock()
 	if s.epoch > 0 && s.leaseUntil.After(now) {
-		return faucet.RedeliveryScan{}, false, nil
+		return redelivery.Scan{}, false, nil
 	}
-	scan := faucet.RedeliveryScan{}
+	scan := redelivery.Scan{}
 	if s.epoch > 0 && s.hook != hook {
 		scan.HookChanged = true
 		open := s.openRangesLocked()
@@ -120,14 +121,14 @@ func laterOf(a, b time.Time) time.Time {
 	return b
 }
 
-func (s *fakeRedeliveryStore) openRangesLocked() []faucet.RedeliveryRange {
-	var open []faucet.RedeliveryRange
+func (s *fakeRedeliveryStore) openRangesLocked() []redelivery.Range {
+	var open []redelivery.Range
 	for _, r := range s.ranges {
 		if !r.gap {
-			open = append(open, r.RedeliveryRange)
+			open = append(open, r.Range)
 		}
 	}
-	slices.SortStableFunc(open, func(a, b faucet.RedeliveryRange) int {
+	slices.SortStableFunc(open, func(a, b redelivery.Range) int {
 		if c := b.NewerAt.Compare(a.NewerAt); c != 0 {
 			return c
 		}
@@ -145,27 +146,27 @@ func (s *fakeRedeliveryStore) ReleaseRedeliveryLease(_ context.Context, epoch in
 	return nil
 }
 
-func (s *fakeRedeliveryStore) ApplyRedeliveryScan(_ context.Context, step faucet.ScanStep) (faucet.ScanResult, error) {
+func (s *fakeRedeliveryStore) ApplyRedeliveryScan(_ context.Context, step redelivery.ScanStep) (redelivery.ScanResult, error) {
 	if err := step.Validate(); err != nil {
-		return faucet.ScanResult{}, err
+		return redelivery.ScanResult{}, err
 	}
 	s.rmu.Lock()
 	defer s.rmu.Unlock()
 	if step.Epoch != s.epoch {
-		return faucet.ScanResult{}, faucet.ErrRedeliveryLeaseLost
+		return redelivery.ScanResult{}, redelivery.ErrLeaseLost
 	}
 	switch {
 	case step.Advance != nil:
 		if r := s.openRangeLocked(step.Advance.ID); r == nil {
-			return faucet.ScanResult{}, xerrors.Errorf("range %d is not open", step.Advance.ID)
+			return redelivery.ScanResult{}, xerrors.Errorf("range %d is not open", step.Advance.ID)
 		}
 	case step.CloseID != 0:
 		if r := s.openRangeLocked(step.CloseID); r == nil {
-			return faucet.ScanResult{}, xerrors.Errorf("range %d is not open", step.CloseID)
+			return redelivery.ScanResult{}, xerrors.Errorf("range %d is not open", step.CloseID)
 		}
 	}
 
-	var res faucet.ScanResult
+	var res redelivery.ScanResult
 	for _, f := range step.Failed {
 		row, ok := s.rows[f.GUID]
 		switch {
@@ -200,7 +201,7 @@ func (s *fakeRedeliveryStore) ApplyRedeliveryScan(_ context.Context, step faucet
 		s.nextRangeID++
 		r := *step.Open
 		r.ID = s.nextRangeID
-		s.ranges = append(s.ranges, &fakeRange{RedeliveryRange: r})
+		s.ranges = append(s.ranges, &fakeRange{Range: r})
 		res.OpenedID = r.ID
 	case step.Advance != nil:
 		r := s.openRangeLocked(step.Advance.ID)
@@ -215,11 +216,11 @@ func (s *fakeRedeliveryStore) ApplyRedeliveryScan(_ context.Context, step faucet
 	return res, nil
 }
 
-func (s *fakeRedeliveryStore) recordGapLocked(gap faucet.RedeliveryGap, now time.Time) {
+func (s *fakeRedeliveryStore) recordGapLocked(gap redelivery.Gap, now time.Time) {
 	s.nextRangeID++
 	s.ranges = append(s.ranges, &fakeRange{
-		RedeliveryRange: faucet.RedeliveryRange{ID: s.nextRangeID, NewerAt: gap.To, OlderAt: gap.From},
-		gap:             true, closedAt: now,
+		Range: redelivery.Range{ID: s.nextRangeID, NewerAt: gap.To, OlderAt: gap.From},
+		gap:   true, closedAt: now,
 	})
 }
 
@@ -232,13 +233,13 @@ func (s *fakeRedeliveryStore) openRangeLocked(id int64) *fakeRange {
 	return nil
 }
 
-func (s *fakeRedeliveryStore) SettleRedeliveries(_ context.Context, req faucet.SettleRequest) (faucet.SettleResult, error) {
+func (s *fakeRedeliveryStore) SettleRedeliveries(_ context.Context, req redelivery.SettleRequest) (redelivery.SettleResult, error) {
 	if err := req.Validate(); err != nil {
-		return faucet.SettleResult{}, err
+		return redelivery.SettleResult{}, err
 	}
 	s.rmu.Lock()
 	defer s.rmu.Unlock()
-	var res faucet.SettleResult
+	var res redelivery.SettleResult
 	for _, guid := range s.sortedGUIDsLocked() {
 		row := s.rows[guid]
 		if row.state != fakePending {
@@ -249,9 +250,9 @@ func (s *fakeRedeliveryStore) SettleRedeliveries(_ context.Context, req faucet.S
 			row.state, row.settledAt = fakeRecovered, req.Now
 			res.Recovered = append(res.Recovered, guid)
 		case !row.firstAt.Add(req.Retention).After(req.Now):
-			giveUp(&res, guid, row, faucet.GiveUpExpired, req.Now)
+			giveUp(&res, guid, row, redelivery.GiveUpExpired, req.Now)
 		case row.asks >= req.MaxAsks && !row.nextAskAt.After(req.Now):
-			giveUp(&res, guid, row, faucet.GiveUpLimit, req.Now)
+			giveUp(&res, guid, row, redelivery.GiveUpLimit, req.Now)
 		default:
 			res.Pending++
 		}
@@ -259,9 +260,9 @@ func (s *fakeRedeliveryStore) SettleRedeliveries(_ context.Context, req faucet.S
 	return res, nil
 }
 
-func giveUp(res *faucet.SettleResult, guid string, row *fakeRedeliveryRow, reason faucet.RedeliveryGiveUpReason, now time.Time) {
+func giveUp(res *redelivery.SettleResult, guid string, row *fakeRedeliveryRow, reason redelivery.GiveUpReason, now time.Time) {
 	row.state, row.settledAt = fakeGaveUp, now
-	res.GaveUp = append(res.GaveUp, faucet.GaveUp{GUID: guid, Reason: reason, Asks: row.asks, FirstDeliveredAt: row.firstAt})
+	res.GaveUp = append(res.GaveUp, redelivery.GaveUp{GUID: guid, Reason: reason, Asks: row.asks, FirstDeliveredAt: row.firstAt})
 }
 
 func (s *fakeRedeliveryStore) sortedGUIDsLocked() []string {
@@ -273,9 +274,9 @@ func (s *fakeRedeliveryStore) sortedGUIDsLocked() []string {
 	return guids
 }
 
-func (s *fakeRedeliveryStore) ClaimRedelivery(_ context.Context, req faucet.ClaimRequest) (faucet.RedeliveryClaim, bool, error) {
+func (s *fakeRedeliveryStore) ClaimRedelivery(_ context.Context, req redelivery.ClaimRequest) (redelivery.Claim, bool, error) {
 	if err := req.Validate(); err != nil {
-		return faucet.RedeliveryClaim{}, false, err
+		return redelivery.Claim{}, false, err
 	}
 	s.rmu.Lock()
 	defer s.rmu.Unlock()
@@ -295,11 +296,11 @@ func (s *fakeRedeliveryStore) ClaimRedelivery(_ context.Context, req faucet.Clai
 		}
 	}
 	if pick == nil {
-		return faucet.RedeliveryClaim{}, false, nil
+		return redelivery.Claim{}, false, nil
 	}
 	pick.nextAskAt = req.Now.Add(req.Schedule[pick.asks])
 	pick.asks++
-	return faucet.RedeliveryClaim{GUID: pickGUID, AttemptID: pick.lastID, Ask: pick.asks}, true, nil
+	return redelivery.Claim{GUID: pickGUID, AttemptID: pick.lastID, Ask: pick.asks}, true, nil
 }
 
 func (s *fakeRedeliveryStore) PurgeRedeliveries(_ context.Context, before time.Time) (int64, error) {
@@ -330,13 +331,13 @@ func TestFakeRedeliveryStoreMatchesContract(t *testing.T) {
 
 var _ storetest.GapRecords = (*fakeRedeliveryStore)(nil)
 
-func (s *fakeRedeliveryStore) RecordedRedeliveryGaps(context.Context) ([]faucet.RedeliveryGap, error) {
+func (s *fakeRedeliveryStore) RecordedRedeliveryGaps(context.Context) ([]redelivery.Gap, error) {
 	s.rmu.Lock()
 	defer s.rmu.Unlock()
-	var gaps []faucet.RedeliveryGap
+	var gaps []redelivery.Gap
 	for _, r := range s.ranges {
 		if r.gap {
-			gaps = append(gaps, faucet.RedeliveryGap{From: r.OlderAt, To: r.NewerAt})
+			gaps = append(gaps, redelivery.Gap{From: r.OlderAt, To: r.NewerAt})
 		}
 	}
 	return gaps, nil

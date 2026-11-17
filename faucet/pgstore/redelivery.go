@@ -8,55 +8,55 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/faucet"
 	"github.com/coder/faucet/faucet/pgstore/database"
+	"github.com/coder/faucet/faucet/redelivery"
 )
 
-var _ faucet.RedeliveryStore = (*Store)(nil)
+var _ redelivery.Store = (*Store)(nil)
 
 // AcquireRedeliveryLease locks the scan row, so two runs that start together
 // are decided one after the other, and the second sees the first one's lease.
-func (s *Store) AcquireRedeliveryLease(ctx context.Context, hook string, now time.Time, ttl time.Duration) (_ faucet.RedeliveryScan, _ bool, err error) {
+func (s *Store) AcquireRedeliveryLease(ctx context.Context, hook string, now time.Time, ttl time.Duration) (_ redelivery.Scan, _ bool, err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if hook == "" || now.IsZero() || ttl <= 0 {
-		return faucet.RedeliveryScan{}, false, xerrors.New("a lease needs a hook, a time and a ttl")
+		return redelivery.Scan{}, false, xerrors.New("a lease needs a hook, a time and a ttl")
 	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
-		return faucet.RedeliveryScan{}, false, xerrors.Errorf("begin transaction: %w", err)
+		return redelivery.Scan{}, false, xerrors.Errorf("begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	q := s.q.WithTx(tx)
 
 	if err := q.EnsureRedeliveryScan(ctx, hook); err != nil {
-		return faucet.RedeliveryScan{}, false, xerrors.Errorf("create scan row: %w", err)
+		return redelivery.Scan{}, false, xerrors.Errorf("create scan row: %w", err)
 	}
 	row, err := q.LockRedeliveryScan(ctx)
 	if err != nil {
-		return faucet.RedeliveryScan{}, false, xerrors.Errorf("lock scan row: %w", err)
+		return redelivery.Scan{}, false, xerrors.Errorf("lock scan row: %w", err)
 	}
 	if row.LeaseUntil.Valid && row.LeaseUntil.Time.After(now) {
-		return faucet.RedeliveryScan{}, false, nil
+		return redelivery.Scan{}, false, nil
 	}
 
-	var scan faucet.RedeliveryScan
+	var scan redelivery.Scan
 	scan.HookChanged = row.Epoch > 0 && row.Hook != hook
 	if scan.HookChanged {
 		closed, err := q.DeleteOpenRedeliveryRanges(ctx)
 		if err != nil {
-			return faucet.RedeliveryScan{}, false, xerrors.Errorf("close ranges of the old hook: %w", err)
+			return redelivery.Scan{}, false, xerrors.Errorf("close ranges of the old hook: %w", err)
 		}
 		for _, r := range closed {
-			gap := faucet.RedeliveryRange{NewerAt: r.NewerAt.UTC(), OlderAt: r.OlderAt.UTC()}.UnreadGap()
+			gap := redelivery.Range{NewerAt: r.NewerAt.UTC(), OlderAt: r.OlderAt.UTC()}.UnreadGap()
 			if err := q.InsertRedeliveryGap(ctx, database.InsertRedeliveryGapParams{FromAt: gap.From, ToAt: gap.To, Now: now}); err != nil {
-				return faucet.RedeliveryScan{}, false, xerrors.Errorf("record gap of the old hook: %w", err)
+				return redelivery.Scan{}, false, xerrors.Errorf("record gap of the old hook: %w", err)
 			}
 			scan.ClosedGaps = append(scan.ClosedGaps, gap)
 		}
 	}
 	taken, err := q.TakeRedeliveryLease(ctx, database.TakeRedeliveryLeaseParams{Hook: hook, LeaseUntil: now.Add(ttl), HookChanged: scan.HookChanged})
 	if err != nil {
-		return faucet.RedeliveryScan{}, false, xerrors.Errorf("take lease: %w", err)
+		return redelivery.Scan{}, false, xerrors.Errorf("take lease: %w", err)
 	}
 	scan.Epoch = taken.Epoch
 	if taken.TopAttemptAt.Valid {
@@ -67,13 +67,13 @@ func (s *Store) AcquireRedeliveryLease(ctx context.Context, hook string, now tim
 	}
 	ranges, err := q.ListOpenRedeliveryRanges(ctx)
 	if err != nil {
-		return faucet.RedeliveryScan{}, false, xerrors.Errorf("list ranges: %w", err)
+		return redelivery.Scan{}, false, xerrors.Errorf("list ranges: %w", err)
 	}
 	for _, r := range ranges {
-		scan.Ranges = append(scan.Ranges, faucet.RedeliveryRange{ID: r.ID, NewerAt: r.NewerAt.UTC(), OlderAt: r.OlderAt.UTC(), Cursor: r.Cursor})
+		scan.Ranges = append(scan.Ranges, redelivery.Range{ID: r.ID, NewerAt: r.NewerAt.UTC(), OlderAt: r.OlderAt.UTC(), Cursor: r.Cursor})
 	}
 	if err := tx.Commit(); err != nil {
-		return faucet.RedeliveryScan{}, false, xerrors.Errorf("commit: %w", err)
+		return redelivery.Scan{}, false, xerrors.Errorf("commit: %w", err)
 	}
 	return scan, true, nil
 }
@@ -89,27 +89,27 @@ func (s *Store) ReleaseRedeliveryLease(ctx context.Context, epoch int64) (err er
 // ApplyRedeliveryScan writes a step's attempts and its position move in one
 // transaction, after it has locked the scan row and checked the epoch. A run
 // whose lease was replaced therefore writes nothing.
-func (s *Store) ApplyRedeliveryScan(ctx context.Context, step faucet.ScanStep) (_ faucet.ScanResult, err error) {
+func (s *Store) ApplyRedeliveryScan(ctx context.Context, step redelivery.ScanStep) (_ redelivery.ScanResult, err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if err := step.Validate(); err != nil {
-		return faucet.ScanResult{}, xerrors.Errorf("validate scan step: %w", err)
+		return redelivery.ScanResult{}, xerrors.Errorf("validate scan step: %w", err)
 	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
-		return faucet.ScanResult{}, xerrors.Errorf("begin transaction: %w", err)
+		return redelivery.ScanResult{}, xerrors.Errorf("begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	q := s.q.WithTx(tx)
 
 	row, err := q.LockRedeliveryScan(ctx)
 	if err != nil {
-		return faucet.ScanResult{}, xerrors.Errorf("lock scan row: %w", err)
+		return redelivery.ScanResult{}, xerrors.Errorf("lock scan row: %w", err)
 	}
 	if row.Epoch != step.Epoch {
-		return faucet.ScanResult{}, faucet.ErrRedeliveryLeaseLost
+		return redelivery.ScanResult{}, redelivery.ErrLeaseLost
 	}
 
-	var res faucet.ScanResult
+	var res redelivery.ScanResult
 	if len(step.Failed) > 0 {
 		guids := make([]string, len(step.Failed))
 		attemptIDs := make([]int64, len(step.Failed))
@@ -121,45 +121,45 @@ func (s *Store) ApplyRedeliveryScan(ctx context.Context, step faucet.ScanStep) (
 			Guids: guids, AttemptIds: attemptIDs, DeliveredAts: deliveredAts, Now: step.Now,
 		})
 		if err != nil {
-			return faucet.ScanResult{}, xerrors.Errorf("track failed attempts: %w", err)
+			return redelivery.ScanResult{}, xerrors.Errorf("track failed attempts: %w", err)
 		}
 		res.Tracked = int(tracked)
 	}
 	if len(step.Succeeded) > 0 {
 		res.Recovered, err = q.RecoverSucceededDeliveries(ctx, database.RecoverSucceededDeliveriesParams{Now: step.Now, Guids: step.Succeeded})
 		if err != nil {
-			return faucet.ScanResult{}, xerrors.Errorf("recover deliveries: %w", err)
+			return redelivery.ScanResult{}, xerrors.Errorf("recover deliveries: %w", err)
 		}
 		slices.Sort(res.Recovered)
 	}
 	if !step.Top.IsZero() {
 		if err := q.RaiseRedeliveryTop(ctx, step.Top); err != nil {
-			return faucet.ScanResult{}, xerrors.Errorf("raise top: %w", err)
+			return redelivery.ScanResult{}, xerrors.Errorf("raise top: %w", err)
 		}
 	}
 	if !step.Clear.IsZero() {
 		if err := q.SetRedeliveryClear(ctx, step.Clear); err != nil {
-			return faucet.ScanResult{}, xerrors.Errorf("set clear: %w", err)
+			return redelivery.ScanResult{}, xerrors.Errorf("set clear: %w", err)
 		}
 	}
 	if res.OpenedID, err = moveRange(ctx, q, step); err != nil {
-		return faucet.ScanResult{}, err
+		return redelivery.ScanResult{}, err
 	}
 	if step.Gap != nil {
 		err := q.InsertRedeliveryGap(ctx, database.InsertRedeliveryGapParams{FromAt: step.Gap.From, ToAt: step.Gap.To, Now: step.Now})
 		if err != nil {
-			return faucet.ScanResult{}, xerrors.Errorf("record gap: %w", err)
+			return redelivery.ScanResult{}, xerrors.Errorf("record gap: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return faucet.ScanResult{}, xerrors.Errorf("commit: %w", err)
+		return redelivery.ScanResult{}, xerrors.Errorf("commit: %w", err)
 	}
 	return res, nil
 }
 
 // moveRange applies the step's one range move. It returns the ID of a range
 // that the move created.
-func moveRange(ctx context.Context, q *database.Queries, step faucet.ScanStep) (int64, error) {
+func moveRange(ctx context.Context, q *database.Queries, step redelivery.ScanStep) (int64, error) {
 	var (
 		rows int64
 		err  error
@@ -198,45 +198,45 @@ func wrapRange(err error, what string) error {
 	return nil
 }
 
-func (s *Store) SettleRedeliveries(ctx context.Context, req faucet.SettleRequest) (_ faucet.SettleResult, err error) {
+func (s *Store) SettleRedeliveries(ctx context.Context, req redelivery.SettleRequest) (_ redelivery.SettleResult, err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if err := req.Validate(); err != nil {
-		return faucet.SettleResult{}, xerrors.Errorf("validate settle request: %w", err)
+		return redelivery.SettleResult{}, xerrors.Errorf("validate settle request: %w", err)
 	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
-		return faucet.SettleResult{}, xerrors.Errorf("begin transaction: %w", err)
+		return redelivery.SettleResult{}, xerrors.Errorf("begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	q := s.q.WithTx(tx)
 
-	var res faucet.SettleResult
+	var res redelivery.SettleResult
 	if res.Recovered, err = q.SettleRecoveredRedeliveries(ctx, req.Now); err != nil {
-		return faucet.SettleResult{}, xerrors.Errorf("settle recovered: %w", err)
+		return redelivery.SettleResult{}, xerrors.Errorf("settle recovered: %w", err)
 	}
 	slices.Sort(res.Recovered)
 	expired, err := q.SettleExpiredRedeliveries(ctx, database.SettleExpiredRedeliveriesParams{Now: req.Now, ExpiredBefore: req.Now.Add(-req.Retention)})
 	if err != nil {
-		return faucet.SettleResult{}, xerrors.Errorf("settle expired: %w", err)
+		return redelivery.SettleResult{}, xerrors.Errorf("settle expired: %w", err)
 	}
 	for _, r := range expired {
-		res.GaveUp = append(res.GaveUp, faucet.GaveUp{GUID: r.Guid, Reason: faucet.GiveUpExpired, Asks: int(r.Asks), FirstDeliveredAt: r.FirstAttemptAt.UTC()})
+		res.GaveUp = append(res.GaveUp, redelivery.GaveUp{GUID: r.Guid, Reason: redelivery.GiveUpExpired, Asks: int(r.Asks), FirstDeliveredAt: r.FirstAttemptAt.UTC()})
 	}
 	limited, err := q.SettleLimitedRedeliveries(ctx, database.SettleLimitedRedeliveriesParams{Now: req.Now, MaxAsks: int32(req.MaxAsks)}) //nolint:gosec // Validate bounds MaxAsks.
 	if err != nil {
-		return faucet.SettleResult{}, xerrors.Errorf("settle limited: %w", err)
+		return redelivery.SettleResult{}, xerrors.Errorf("settle limited: %w", err)
 	}
 	for _, r := range limited {
-		res.GaveUp = append(res.GaveUp, faucet.GaveUp{GUID: r.Guid, Reason: faucet.GiveUpLimit, Asks: int(r.Asks), FirstDeliveredAt: r.FirstAttemptAt.UTC()})
+		res.GaveUp = append(res.GaveUp, redelivery.GaveUp{GUID: r.Guid, Reason: redelivery.GiveUpLimit, Asks: int(r.Asks), FirstDeliveredAt: r.FirstAttemptAt.UTC()})
 	}
-	slices.SortFunc(res.GaveUp, func(a, b faucet.GaveUp) int { return compareStrings(a.GUID, b.GUID) })
+	slices.SortFunc(res.GaveUp, func(a, b redelivery.GaveUp) int { return compareStrings(a.GUID, b.GUID) })
 	pending, err := q.CountPendingRedeliveries(ctx)
 	if err != nil {
-		return faucet.SettleResult{}, xerrors.Errorf("count pending: %w", err)
+		return redelivery.SettleResult{}, xerrors.Errorf("count pending: %w", err)
 	}
 	res.Pending = int(pending)
 	if err := tx.Commit(); err != nil {
-		return faucet.SettleResult{}, xerrors.Errorf("commit: %w", err)
+		return redelivery.SettleResult{}, xerrors.Errorf("commit: %w", err)
 	}
 	return res, nil
 }
@@ -255,10 +255,10 @@ func compareStrings(a, b string) int {
 // so a run that crashes right after it has spent an ask and no two runs share
 // one. SKIP LOCKED lets a second claim take the next delivery instead of
 // waiting.
-func (s *Store) ClaimRedelivery(ctx context.Context, req faucet.ClaimRequest) (_ faucet.RedeliveryClaim, _ bool, err error) {
+func (s *Store) ClaimRedelivery(ctx context.Context, req redelivery.ClaimRequest) (_ redelivery.Claim, _ bool, err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if err := req.Validate(); err != nil {
-		return faucet.RedeliveryClaim{}, false, xerrors.Errorf("validate claim request: %w", err)
+		return redelivery.Claim{}, false, xerrors.Errorf("validate claim request: %w", err)
 	}
 	schedule := make([]float64, len(req.Schedule))
 	for i, wait := range req.Schedule {
@@ -268,12 +268,12 @@ func (s *Store) ClaimRedelivery(ctx context.Context, req faucet.ClaimRequest) (_
 		Now: req.Now, NotBefore: req.Now.Add(-req.Retention), MaxAsks: int32(req.MaxAsks), ScheduleSecs: schedule, //nolint:gosec // Validate bounds MaxAsks.
 	})
 	if xerrors.Is(err, sql.ErrNoRows) {
-		return faucet.RedeliveryClaim{}, false, nil
+		return redelivery.Claim{}, false, nil
 	}
 	if err != nil {
-		return faucet.RedeliveryClaim{}, false, xerrors.Errorf("claim redelivery: %w", err)
+		return redelivery.Claim{}, false, xerrors.Errorf("claim redelivery: %w", err)
 	}
-	return faucet.RedeliveryClaim{GUID: row.Guid, AttemptID: row.LastAttemptID, Ask: int(row.Asks)}, true, nil
+	return redelivery.Claim{GUID: row.Guid, AttemptID: row.LastAttemptID, Ask: int(row.Asks)}, true, nil
 }
 
 func (s *Store) PurgeRedeliveries(ctx context.Context, before time.Time) (_ int64, err error) {

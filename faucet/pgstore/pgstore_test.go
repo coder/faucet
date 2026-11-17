@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/faucet/faucet"
 	"github.com/coder/faucet/faucet/pgstore"
+	"github.com/coder/faucet/faucet/redelivery"
 	"github.com/coder/faucet/faucet/storetest"
 )
 
@@ -53,15 +54,15 @@ func newGapRecordingStore(db *sql.DB) gapRecordingStore {
 	return gapRecordingStore{Store: pgstore.New(db), db: db}
 }
 
-func (s gapRecordingStore) RecordedRedeliveryGaps(ctx context.Context) ([]faucet.RedeliveryGap, error) {
+func (s gapRecordingStore) RecordedRedeliveryGaps(ctx context.Context) ([]redelivery.Gap, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT older_at, newer_at FROM faucet_redelivery_ranges WHERE state = 'gap'`)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var gaps []faucet.RedeliveryGap
+	var gaps []redelivery.Gap
 	for rows.Next() {
-		var gap faucet.RedeliveryGap
+		var gap redelivery.Gap
 		if err := rows.Scan(&gap.From, &gap.To); err != nil {
 			return nil, err
 		}
@@ -174,9 +175,9 @@ func TestTheClearMigrationMovesTheOldTopToTheClearAndBack(t *testing.T) {
 	lease, ok, err := store.AcquireRedeliveryLease(ctx, hook, now, time.Minute)
 	require.NoError(t, err)
 	require.True(t, ok)
-	_, err = store.ApplyRedeliveryScan(ctx, faucet.ScanStep{
+	_, err = store.ApplyRedeliveryScan(ctx, redelivery.ScanStep{
 		Epoch: lease.Epoch, Now: now, Top: oldTop,
-		Open: &faucet.RedeliveryRange{NewerAt: now.Add(-time.Hour), OlderAt: now.Add(-48 * time.Hour), Cursor: "cursor-1"},
+		Open: &redelivery.Range{NewerAt: now.Add(-time.Hour), OlderAt: now.Add(-48 * time.Hour), Cursor: "cursor-1"},
 	})
 	require.NoError(t, err)
 	require.NoError(t, store.ReleaseRedeliveryLease(ctx, lease.Epoch))
@@ -197,12 +198,12 @@ func TestTheClearMigrationMovesTheOldTopToTheClearAndBack(t *testing.T) {
 
 	migrate("up")
 	emptyListDate := now.Add(30 * time.Minute)
-	_, err = store.ApplyRedeliveryScan(ctx, faucet.ScanStep{Epoch: migrated.Epoch, Now: now.Add(30 * time.Minute), Clear: emptyListDate})
-	require.ErrorIs(t, err, faucet.ErrRedeliveryLeaseLost, "the migration ends a lease that a run took before it")
+	_, err = store.ApplyRedeliveryScan(ctx, redelivery.ScanStep{Epoch: migrated.Epoch, Now: now.Add(30 * time.Minute), Clear: emptyListDate})
+	require.ErrorIs(t, err, redelivery.ErrLeaseLost, "the migration ends a lease that a run took before it")
 	emptyList, ok, err := store.AcquireRedeliveryLease(ctx, hook, now.Add(30*time.Minute), time.Minute)
 	require.NoError(t, err)
 	require.True(t, ok)
-	_, err = store.ApplyRedeliveryScan(ctx, faucet.ScanStep{Epoch: emptyList.Epoch, Now: now.Add(30 * time.Minute), Clear: emptyListDate})
+	_, err = store.ApplyRedeliveryScan(ctx, redelivery.ScanStep{Epoch: emptyList.Epoch, Now: now.Add(30 * time.Minute), Clear: emptyListDate})
 	require.NoError(t, err)
 	migrate("down")
 	require.True(t, emptyListDate.Equal(storedTop().Time), "a scan whose runs read only an empty list since the migration gets the Date of the last one")
@@ -212,7 +213,7 @@ func TestTheClearMigrationMovesTheOldTopToTheClearAndBack(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	attempt, date := now.Add(time.Hour), now.Add(time.Hour+time.Second)
-	_, err = store.ApplyRedeliveryScan(ctx, faucet.ScanStep{Epoch: read.Epoch, Now: now.Add(time.Hour), Top: attempt, Clear: date})
+	_, err = store.ApplyRedeliveryScan(ctx, redelivery.ScanStep{Epoch: read.Epoch, Now: now.Add(time.Hour), Top: attempt, Clear: date})
 	require.NoError(t, err)
 	migrate("down")
 	require.True(t, attempt.Equal(storedTop().Time), "a scan that has read an attempt keeps that attempt's time, not the Date")
@@ -444,15 +445,15 @@ func TestRedeliveryStoreCallThatItsContextCutShortWrapsTheContextError(t *testin
 			return store.ReleaseRedeliveryLease(ctx, 1)
 		},
 		"ApplyRedeliveryScan": func(ctx context.Context) error {
-			_, err := store.ApplyRedeliveryScan(ctx, faucet.ScanStep{Epoch: 1, Now: now})
+			_, err := store.ApplyRedeliveryScan(ctx, redelivery.ScanStep{Epoch: 1, Now: now})
 			return err
 		},
 		"SettleRedeliveries": func(ctx context.Context) error {
-			_, err := store.SettleRedeliveries(ctx, faucet.SettleRequest{Now: now, Retention: time.Hour, MaxAsks: 3})
+			_, err := store.SettleRedeliveries(ctx, redelivery.SettleRequest{Now: now, Retention: time.Hour, MaxAsks: 3})
 			return err
 		},
 		"ClaimRedelivery": func(ctx context.Context) error {
-			_, _, err := store.ClaimRedelivery(ctx, faucet.ClaimRequest{Now: now, Retention: time.Hour, MaxAsks: 1, Schedule: []time.Duration{time.Minute}})
+			_, _, err := store.ClaimRedelivery(ctx, redelivery.ClaimRequest{Now: now, Retention: time.Hour, MaxAsks: 1, Schedule: []time.Duration{time.Minute}})
 			return err
 		},
 		"PurgeRedeliveries": func(ctx context.Context) error {

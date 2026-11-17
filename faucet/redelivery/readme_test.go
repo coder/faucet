@@ -1,4 +1,4 @@
-package faucet_test
+package redelivery_test
 
 import (
 	"fmt"
@@ -9,7 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/redelivery"
 )
 
 // The README promises numbers about redelivery. They come from the constants
@@ -23,35 +23,35 @@ func TestReadmeStatesTheRedeliveryCapacityThatTheConstantsGive(t *testing.T) {
 		perPage     = 100
 		asksPerHour = int(time.Hour / schedule)
 	)
-	pages := faucet.DefaultMaxPagesPerRun
+	pages := redelivery.DefaultMaxPagesPerRun
 	perRun := pages * perPage
-	covered := schedule + faucet.RedeliveryReadOverlap
+	covered := schedule + redelivery.ReadOverlap
 	// The README rounds the sweep's capacity down to a hundred, for a run that starts late.
 	keepsUpWith := steadyCapacity(perRun, covered) / 100 * 100
-	requestsPerHour := faucet.DefaultMaxAsksPerRun * asksPerHour
+	requestsPerHour := redelivery.DefaultMaxAsksPerRun * asksPerHour
 
-	offsets := faucet.AskOffsets()
+	offsets := redelivery.AskOffsets()
 	minutes := make([]string, len(offsets))
 	for i, offset := range offsets {
 		minutes[i] = fmt.Sprint(int(offset / time.Minute))
 	}
 	askList := strings.Join(minutes[:len(minutes)-1], ", ") + " and " + minutes[len(minutes)-1] + " minutes"
 
-	readme, err := os.ReadFile("../README.md")
+	readme, err := os.ReadFile("../../README.md")
 	require.NoError(t, err)
 	text := string(readme)
 
 	for _, want := range []string{
 		fmt.Sprintf("at most %d pages of %d attempts, which is %s attempts", pages, perPage, thousands(perRun)),
-		fmt.Sprintf("sends at most %d requests", faucet.DefaultMaxAsksPerRun),
+		fmt.Sprintf("sends at most %d requests", redelivery.DefaultMaxAsksPerRun),
 		fmt.Sprintf("a run holds at most %s attempts of its window", thousands(perRun-2)),
 		fmt.Sprintf("That is %s attempts an hour at best", thousands(steadyCapacity(perRun, covered))),
 		fmt.Sprintf("keeps up with %s attempts an hour", thousands(keepsUpWith)),
 		fmt.Sprintf("sends at most %d requests an hour", requestsPerHour),
-		fmt.Sprintf("A delivery is asked for %d times, at %s after", faucet.MaxAsksPerDelivery, askList),
-		fmt.Sprintf("%d minute overlap", int(faucet.RedeliveryReadOverlap/time.Minute)),
-		fmt.Sprintf("GitHub keeps a delivery for %d hours", int(faucet.GitHubDeliveryRetention/time.Hour)),
-		fmt.Sprintf("lookback of %d hours", int(faucet.RedeliveryStartLookback/time.Hour)),
+		fmt.Sprintf("A delivery is asked for %d times, at %s after", redelivery.MaxAsksPerDelivery, askList),
+		fmt.Sprintf("%d minute overlap", int(redelivery.ReadOverlap/time.Minute)),
+		fmt.Sprintf("GitHub keeps a delivery for %d hours", int(redelivery.GitHubDeliveryRetention/time.Hour)),
+		fmt.Sprintf("lookback of %d hours", int(redelivery.StartLookback/time.Hour)),
 		fmt.Sprintf("ends within %d minutes of the first run", int(offsets[len(offsets)-1]/time.Minute)),
 		"*/10 * * * *",
 	} {
@@ -63,11 +63,11 @@ func TestReadmeStatesTheRedeliveryCapacityThatTheConstantsGive(t *testing.T) {
 func TestReadmeStatesTheDateWindowThatTheConstantsGive(t *testing.T) {
 	t.Parallel()
 
-	slack, margin := faucet.RedeliveryDateSlack, faucet.RedeliveryDateMargin
-	marginAndOverlap := hoursAndMinutes(margin + faucet.RedeliveryReadOverlap)
-	quietFor := hoursAndMinutes(faucet.GitHubDeliveryRetention - slack - margin - faucet.RedeliveryReadOverlap)
+	slack, margin := redelivery.DateSlack, redelivery.DateMargin
+	marginAndOverlap := hoursAndMinutes(margin + redelivery.ReadOverlap)
+	quietFor := hoursAndMinutes(redelivery.GitHubDeliveryRetention - slack - margin - redelivery.ReadOverlap)
 
-	readme, err := os.ReadFile("../README.md")
+	readme, err := os.ReadFile("../../README.md")
 	require.NoError(t, err)
 	text := string(readme)
 
