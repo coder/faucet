@@ -95,14 +95,14 @@ type eventsPollResult struct {
 }
 
 func describeEvents(delivery []string) []eventDescriptor {
-	descriptors := make([]eventDescriptor, len(eventCatalog))
-	for i, t := range eventCatalog {
+	descriptors := make([]eventDescriptor, len(catalog))
+	for i, e := range catalog {
 		descriptors[i] = eventDescriptor{
-			Name:          t.name,
-			Description:   t.description,
+			Name:          e.name,
+			Description:   e.description,
 			Delivery:      delivery,
-			InputSchema:   t.inputSchema(),
-			PayloadSchema: t.payloadSchema,
+			InputSchema:   e.inputSchema,
+			PayloadSchema: e.payloadSchema,
 		}
 	}
 	return descriptors
@@ -128,31 +128,31 @@ func (s *Service) listEvents(_ context.Context, _ *mcp.ServerSession, p *eventsL
 }
 
 type pollRequest struct {
-	eventType eventType
-	repo      string
-	query     PollQuery
-	cursor    *int64
-	maxAge    time.Duration
-	limit     int32
+	entry  *catalogEntry
+	repo   string
+	query  PollQuery
+	cursor *int64
+	maxAge time.Duration
+	limit  int32
 }
 
 func parsePoll(p *eventsPollParams) (pollRequest, error) {
 	if p == nil || p.Name == "" {
 		return pollRequest{}, invalidParams("name is required")
 	}
-	t, err := eventByName(p.Name)
+	entry, err := eventByName(p.Name)
 	if err != nil {
 		return pollRequest{}, err
 	}
-	args, err := parsePollArguments(t.resolvedInput, p.Arguments)
+	args, err := parsePollArguments(entry.input, p.Arguments)
 	if err != nil {
 		return pollRequest{}, err
 	}
 	req := pollRequest{
-		eventType: t,
-		repo:      args.Repo,
-		query:     PollQuery{Types: []string{t.name}, HeadSHA: strings.ToLower(args.SHA), PR: args.PR},
-		limit:     pageLimit,
+		entry: entry,
+		repo:  args.Repo,
+		query: PollQuery{Types: entry.types(nil), HeadSHA: strings.ToLower(args.SHA), PR: args.PR},
+		limit: pageLimit,
 	}
 	if p.Cursor != nil {
 		id, ok := decodeCursor(*p.Cursor)
@@ -176,14 +176,14 @@ func parsePoll(p *eventsPollParams) (pollRequest, error) {
 	return req, nil
 }
 
-func eventByName(name string) (eventType, error) {
-	t, ok := lookupEventType(name)
+func eventByName(name string) (*catalogEntry, error) {
+	entry, ok := lookupEntry(name)
 	if !ok {
-		return eventType{}, rpcError(codeNotFound,
-			fmt.Sprintf("unknown event type %q, the types are: %s", name, strings.Join(eventTypes(), ", ")),
+		return nil, rpcError(codeNotFound,
+			fmt.Sprintf("unknown event type %q, the types are: %s", name, strings.Join(catalogNames(), ", ")),
 			map[string]string{"kind": "event"})
 	}
-	return t, nil
+	return entry, nil
 }
 
 func parsePollArguments(input *jsonschema.Resolved, raw json.RawMessage) (pollArguments, error) {
@@ -211,7 +211,7 @@ func (s *Service) pollEventsMethod(ctx context.Context, _ *mcp.ServerSession, p 
 	if err != nil {
 		return nil, err
 	}
-	logger := s.logger.With(slog.F("repo", req.repo), slog.F("event", req.eventType.name))
+	logger := s.logger.With(slog.F("repo", req.repo), slog.F("event", req.entry.name))
 
 	repoID, err := s.authorize(ctx, logger, "poll", req.repo)
 	if err != nil {

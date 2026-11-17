@@ -3,22 +3,148 @@ package faucet
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
-// eventType describes one event type. noHeadSHA is set for a type whose GitHub
-// payload names no head commit, so no event of it has a head_sha and a sha
-// filter could never match one.
-type eventType struct {
-	name          string
-	description   string
-	payloadSchema json.RawMessage
-	noHeadSHA     bool
-	resolvedInput *jsonschema.Resolved
+// family is the events of one GitHub webhook event. Its actions, and the
+// stored type of each, come from the keys of rules that start with its GitHub
+// event, so rules stays the one list of what faucet stores.
+type family struct {
+	name        string
+	githubEvent string
+	description string
+	// noHeadSHA is set when GitHub's payload names no head commit, so no event
+	// of the family has a head_sha and a sha filter could never match one.
+	noHeadSHA bool
+	// properties are the payload properties of the family's data, written as
+	// JSON object members.
+	properties string
+	// actions are GitHub's action words in sorted order, and types holds the
+	// stored type of each. Both are filled from rules.
+	actions []string
+	types   []string
 }
+
+// legacyName is a stored type that events/list offers under its own name, as
+// it did before families. SEP-3415 asks that the schemas of a name change only
+// by addition, so it keeps the fields it always required.
+type legacyName struct {
+	name        string
+	description string
+	required    []string
+}
+
+// catalogEntry is one name that events/list offers.
+type catalogEntry struct {
+	name        string
+	description string
+	family      *family
+	// legacy is set for a name that is one stored type.
+	legacy        bool
+	inputSchema   json.RawMessage
+	payloadSchema json.RawMessage
+	input         *jsonschema.Resolved
+	// endInput is the arguments schema that events/unsubscribe reads.
+	endInput *jsonschema.Resolved
+}
+
+// storedType is what the registry knows of one value of Event.Type.
+type storedType struct {
+	family *family
+	action string
+}
+
+var families = []*family{
+	{
+		name:        "ci.runs",
+		githubEvent: "workflow_run",
+		description: "GitHub Actions workflow runs. A run fires once per run attempt.",
+		properties: `
+    "run_id": {"type": "integer"},
+    "name": {"type": "string", "description": "The workflow name."},
+    "conclusion": {"type": "string", "description": "For example success, failure or timed_out."},
+    "head_branch": {"type": "string"},
+    "html_url": {"type": "string"},
+    "run_attempt": {"type": "integer"}`,
+	},
+	{
+		name:        "ci.checks",
+		githubEvent: "check_run",
+		description: "Check runs on a commit, from GitHub Actions or another app.",
+		properties: `
+    "check_run_id": {"type": "integer"},
+    "name": {"type": "string", "description": "The check name."},
+    "conclusion": {"type": "string", "description": "For example success, failure or timed_out."},
+    "html_url": {"type": "string"},
+    "app_slug": {"type": "string", "description": "The app that ran the check."}`,
+	},
+	{
+		name:        "pr.activity",
+		githubEvent: "pull_request",
+		description: "Changes to a pull request.",
+		properties: `
+    "merged": {"type": "boolean"},
+    "merge_commit_sha": {"type": ["string", "null"], "description": "The merge commit. Before a merge it is the test-merge commit of GitHub or null, so it does not mean the pull request merged. Read merged."},
+    "html_url": {"type": "string"}`,
+	},
+	{
+		name:        "pr.reviews",
+		githubEvent: "pull_request_review",
+		description: "Reviews of a pull request.",
+		properties: `
+    "review_id": {"type": "integer"},
+    "state": {"type": "string", "description": "The review state, for example approved, changes_requested or commented."},
+    "user_login": {"type": "string"},
+    "html_url": {"type": "string"}`,
+	},
+	{
+		name:        "pr.comments",
+		githubEvent: "issue_comment",
+		description: "Comments in the conversation of a pull request. GitHub names no head commit in these events, so filter by pr and not by sha.",
+		noHeadSHA:   true,
+		properties: `
+    "comment_id": {"type": "integer"},
+    "user_login": {"type": "string"},
+    "html_url": {"type": "string"}`,
+	},
+}
+
+var legacyNames = []legacyName{
+	{
+		name:        "ci.check_completed",
+		description: "A check run finished on a commit, from GitHub Actions or another app.",
+		required:    []string{"check_run_id", "name", "conclusion", "html_url", "app_slug"},
+	},
+	{
+		name:        "ci.run_completed",
+		description: "A GitHub Actions workflow run finished. It fires once per run attempt.",
+		required:    []string{"run_id", "name", "conclusion", "head_branch", "html_url", "run_attempt"},
+	},
+	{
+		name:        "pr.closed",
+		description: "A pull request was closed, merged or not.",
+		required:    []string{"merged", "merge_commit_sha", "html_url"},
+	},
+	{
+		name:        "pr.comment_created",
+		description: "A comment was posted in the conversation of a pull request. GitHub names no head commit in this event, so filter by pr and not by sha.",
+		required:    []string{"comment_id", "user_login", "html_url"},
+	},
+	{
+		name:        "pr.review_submitted",
+		description: "A review was submitted on a pull request.",
+		required:    []string{"review_id", "state", "user_login", "html_url"},
+	},
+}
+
+var (
+	storedTypes = map[string]storedType{}
+	catalog     []*catalogEntry
+)
 
 const pollArgumentsTemplate = `{
   "type": "object",
@@ -39,107 +165,112 @@ const payloadTemplate = `{
     "prs": {"type": "array", "items": {"type": "integer"}, "description": "Pull request numbers the event mentions."},%s
     %s
   },
-  "required": ["prs", %s]
+  "required": [%s]
 }`
 
 const headSHAProperty = `
     "head_sha": {"type": "string", "description": "The head commit SHA. Absent when the event has none."},`
-
-func payloadSchema(properties string, required ...string) json.RawMessage {
-	return payloadSchemaOf(headSHAProperty, properties, required...)
-}
-
-func payloadSchemaOf(headSHA, properties string, required ...string) json.RawMessage {
-	quoted := make([]string, len(required))
-	for i, name := range required {
-		quoted[i] = fmt.Sprintf("%q", name)
-	}
-	return json.RawMessage(fmt.Sprintf(payloadTemplate, headSHA, properties, strings.Join(quoted, ", ")))
-}
 
 // shaInputResolved is the arguments schema of an event type that has a sha. A
 // version before pr.comment_created lost its sha stored subscriptions with one,
 // and events/unsubscribe still reads that shape so they can be ended.
 var shaInputResolved = mustResolve(fmt.Sprintf(pollArgumentsTemplate, shaArgumentProperty))
 
-func (t eventType) inputSchema() json.RawMessage {
-	if t.noHeadSHA {
-		return json.RawMessage(fmt.Sprintf(pollArgumentsTemplate, ""))
+func init() {
+	byEvent := map[string]*family{}
+	for _, f := range families {
+		byEvent[f.githubEvent] = f
 	}
-	return json.RawMessage(fmt.Sprintf(pollArgumentsTemplate, shaArgumentProperty))
+	for _, key := range slices.Sorted(maps.Keys(rules)) {
+		event, action, _ := strings.Cut(key, ".")
+		f, ok := byEvent[event]
+		if !ok {
+			panic(fmt.Sprintf("rule %s belongs to no event family", key))
+		}
+		t := rules[key].eventType
+		if _, dup := storedTypes[t]; dup {
+			panic(fmt.Sprintf("two rules store the type %s", t))
+		}
+		storedTypes[t] = storedType{family: f, action: action}
+		f.actions = append(f.actions, action)
+		f.types = append(f.types, t)
+	}
+	for _, l := range legacyNames {
+		t, ok := storedTypes[l.name]
+		if !ok {
+			panic(fmt.Sprintf("legacy event name %s is not a stored type", l.name))
+		}
+		catalog = append(catalog, newLegacyEntry(l, t.family))
+	}
 }
 
-var eventCatalog = []eventType{
-	{
-		name:        "ci.check_completed",
-		description: "A check run finished on a commit, from GitHub Actions or another app.",
-		payloadSchema: payloadSchema(`
-    "check_run_id": {"type": "integer"},
-    "name": {"type": "string", "description": "The check name."},
-    "conclusion": {"type": "string", "description": "For example success, failure or timed_out."},
-    "html_url": {"type": "string"},
-    "app_slug": {"type": "string", "description": "The app that ran the check."}`,
-			"check_run_id", "name", "conclusion", "html_url", "app_slug"),
-	},
-	{
-		name:        "ci.run_completed",
-		description: "A GitHub Actions workflow run finished. It fires once per run attempt.",
-		payloadSchema: payloadSchema(`
-    "run_id": {"type": "integer"},
-    "name": {"type": "string", "description": "The workflow name."},
-    "conclusion": {"type": "string", "description": "For example success, failure or timed_out."},
-    "head_branch": {"type": "string"},
-    "html_url": {"type": "string"},
-    "run_attempt": {"type": "integer"}`,
-			"run_id", "name", "conclusion", "head_branch", "html_url", "run_attempt"),
-	},
-	{
-		name:        "pr.closed",
-		description: "A pull request was closed, merged or not.",
-		payloadSchema: payloadSchema(`
-    "merged": {"type": "boolean"},
-    "merge_commit_sha": {"type": ["string", "null"], "description": "The merge commit. Before a merge it is the test-merge commit of GitHub or null, so it does not mean the pull request merged. Read merged."},
-    "html_url": {"type": "string"}`,
-			"merged", "merge_commit_sha", "html_url"),
-	},
-	{
-		name:        "pr.comment_created",
-		description: "A comment was posted in the conversation of a pull request. GitHub names no head commit in this event, so filter by pr and not by sha.",
-		payloadSchema: payloadSchemaOf("", `
-    "comment_id": {"type": "integer"},
-    "user_login": {"type": "string"},
-    "html_url": {"type": "string"}`,
-			"comment_id", "user_login", "html_url"),
-		noHeadSHA: true,
-	},
-	{
-		name:        "pr.review_submitted",
-		description: "A review was submitted on a pull request.",
-		payloadSchema: payloadSchema(`
-    "review_id": {"type": "integer"},
-    "state": {"type": "string", "description": "The review state, for example approved, changes_requested or commented."},
-    "user_login": {"type": "string"},
-    "html_url": {"type": "string"}`,
-			"review_id", "state", "user_login", "html_url"),
-	},
+func newLegacyEntry(l legacyName, f *family) *catalogEntry {
+	input := json.RawMessage(fmt.Sprintf(pollArgumentsTemplate, shaArgument(f)))
+	required := append([]string{"prs"}, l.required...)
+	return &catalogEntry{
+		name:          l.name,
+		description:   l.description,
+		family:        f,
+		legacy:        true,
+		inputSchema:   input,
+		payloadSchema: payloadSchemaOf(f, required),
+		input:         mustResolve(string(input)),
+		endInput:      shaInputResolved,
+	}
+}
+
+func shaArgument(f *family) string {
+	if f.noHeadSHA {
+		return ""
+	}
+	return shaArgumentProperty
+}
+
+func payloadSchemaOf(f *family, required []string) json.RawMessage {
+	headSHA := headSHAProperty
+	if f.noHeadSHA {
+		headSHA = ""
+	}
+	quoted := make([]string, len(required))
+	for i, name := range required {
+		quoted[i] = fmt.Sprintf("%q", name)
+	}
+	schema := json.RawMessage(fmt.Sprintf(payloadTemplate, headSHA, f.properties, strings.Join(quoted, ", ")))
+	mustResolve(string(schema))
+	return schema
+}
+
+// types returns the stored types that the entry matches. A legacy name matches
+// its own type. A family matches the types of the given actions that are its
+// own, and every type of it when actions is empty.
+func (e *catalogEntry) types(actions []string) []string {
+	if e.legacy {
+		return []string{e.name}
+	}
+	if len(actions) == 0 {
+		return slices.Clone(e.family.types)
+	}
+	var types []string
+	for i, action := range e.family.actions {
+		if slices.Contains(actions, action) {
+			types = append(types, e.family.types[i])
+		}
+	}
+	return types
+}
+
+func catalogNames() []string {
+	names := make([]string, len(catalog))
+	for i, e := range catalog {
+		names[i] = e.name
+	}
+	return names
 }
 
 type pollArguments struct {
 	Repo string `json:"repo"`
 	SHA  string `json:"sha"`
 	PR   int32  `json:"pr"`
-}
-
-func init() {
-	names := make([]string, len(eventCatalog))
-	for i, t := range eventCatalog {
-		names[i] = t.name
-		mustResolve(string(t.payloadSchema))
-		eventCatalog[i].resolvedInput = mustResolve(string(t.inputSchema()))
-	}
-	if !slices.Equal(names, eventTypes()) {
-		panic(fmt.Sprintf("event catalog %v does not match the normalized event types %v", names, eventTypes()))
-	}
 }
 
 func mustResolve(schema string) *jsonschema.Resolved {
@@ -154,10 +285,10 @@ func mustResolve(schema string) *jsonschema.Resolved {
 	return resolved
 }
 
-func lookupEventType(name string) (eventType, bool) {
-	i := slices.IndexFunc(eventCatalog, func(t eventType) bool { return t.name == name })
+func lookupEntry(name string) (*catalogEntry, bool) {
+	i := slices.IndexFunc(catalog, func(e *catalogEntry) bool { return e.name == name })
 	if i < 0 {
-		return eventType{}, false
+		return nil, false
 	}
-	return eventCatalog[i], true
+	return catalog[i], true
 }

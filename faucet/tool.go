@@ -75,7 +75,7 @@ type waitOutput struct {
 // matches only a new filter is never returned. Without a cursor it starts at
 // the present, or ten minutes back when sha is set.
 func (s *Service) Register(srv *mcp.Server) {
-	types := eventTypes()
+	types := catalogNames()
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: toolName,
 		Description: "Wait for GitHub events on a repository, such as a CI run finishing or a pull request review, " +
@@ -85,15 +85,6 @@ func (s *Service) Register(srv *mcp.Server) {
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, Title: "Wait for GitHub events"},
 	}, s.waitForEvents)
 	s.registerEvents(srv)
-}
-
-func eventTypes() []string {
-	types := make([]string, 0, len(rules))
-	for _, r := range rules {
-		types = append(types, r.eventType)
-	}
-	slices.Sort(types)
-	return slices.Compact(types)
 }
 
 type waitRequest struct {
@@ -106,7 +97,7 @@ func (in waitInput) parse() (waitRequest, error) {
 	if _, _, err := githubapi.ParseRepo(in.Repo); err != nil {
 		return waitRequest{}, err
 	}
-	known := eventTypes()
+	known := catalogNames()
 	if len(in.Types) == 0 {
 		return waitRequest{}, xerrors.Errorf("types must name at least one of: %s", strings.Join(known, ", "))
 	}
@@ -118,7 +109,7 @@ func (in waitInput) parse() (waitRequest, error) {
 	if in.SHA != "" && !shaPattern.MatchString(in.SHA) {
 		return waitRequest{}, xerrors.New("sha must be 40 hexadecimal characters")
 	}
-	if in.SHA != "" && !slices.ContainsFunc(in.Types, func(name string) bool { t, _ := lookupEventType(name); return !t.noHeadSHA }) {
+	if in.SHA != "" && !slices.ContainsFunc(in.Types, func(name string) bool { e, _ := lookupEntry(name); return !e.family.noHeadSHA }) {
 		return waitRequest{}, xerrors.New("sha matches none of these types, because they carry no head commit; filter by pr")
 	}
 	if in.PR < 0 {
