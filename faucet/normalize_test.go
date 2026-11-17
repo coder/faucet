@@ -480,8 +480,7 @@ func TestNormalizeRejects(t *testing.T) {
 	handled := []struct {
 		event   string
 		fixture string
-		// word is the member that holds the action word.
-		word string
+		word    string
 	}{
 		{"workflow_run", "workflow_run_completed", "action"},
 		{"check_run", "check_run_completed", "action"},

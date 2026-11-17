@@ -21,10 +21,8 @@ type rule struct {
 	extract   func(payload []byte) (f fields, ok bool, err error)
 }
 
-// rules are the webhooks that faucet stores, keyed by GitHub event and action
-// word. Repository and organization webhooks receive only the created and
-// completed check_run actions and the completed check_suite action, so faucet
-// has no rule for the others.
+// Repository and organization webhooks receive only the created and completed
+// check_run actions and the completed check_suite action.
 var rules = map[string]rule{
 	"workflow_run.requested":   {eventType: "ci.run_requested", extract: decode(workflowRun)},
 	"workflow_run.in_progress": {eventType: "ci.run_in_progress", extract: decode(workflowRun)},
@@ -82,13 +80,8 @@ var rules = map[string]rule{
 	"pull_request_review_thread.unresolved": {eventType: "pr.review_thread_unresolved", extract: decode(reviewThread)},
 }
 
-// actionMembers names the payload member that holds the action word of a
-// GitHub event that has no action member. A status has none, and its state
-// (pending, success, failure or error) plays that part.
 var actionMembers = map[string]string{"status": "state"}
 
-// envelope is what faucet reads of every webhook before its rule: the
-// repository and the action word.
 type envelope struct {
 	repoID int64
 	word   string
@@ -393,8 +386,7 @@ func checkSuite(p checkSuitePayload) (fields, bool) {
 	}, true
 }
 
-// GitHub names no pull request in a status payload. Its description is free
-// text from whoever set the status, so faucet leaves it out.
+// GitHub names no pull request in a status payload.
 type statusPayload struct {
 	Sender    user    `json:"sender"`
 	SHA       string  `json:"sha"`

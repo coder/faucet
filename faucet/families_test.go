@@ -138,10 +138,7 @@ func storeDelivery(ctx context.Context, t *testing.T, store faucet.Store, event,
 	return stored
 }
 
-// SEP-3415 lets the payloadSchema of a name change only by addition. The
-// golden file holds the payload schemas of the exact types as families
-// introduced them, and each exact type must keep every property and the
-// required fields it lists.
+// SEP-3415 lets the payloadSchema of a name change only by addition.
 func TestAnExactTypeOnlyGainsOptionalPayloadProperties(t *testing.T) {
 	t.Parallel()
 

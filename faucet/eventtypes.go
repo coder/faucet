@@ -22,9 +22,7 @@ type family struct {
 	// noHeadSHA is set when GitHub's payload names no head commit, so no event
 	// of the family has a head_sha and a sha filter could never match one.
 	noHeadSHA bool
-	// noPRs is set when GitHub's payload names no pull request, so every
-	// event of the family has empty prs and a pr filter could never match.
-	noPRs bool
+	noPRs     bool
 	// properties are the payload properties of the family's data, written as
 	// a JSON object.
 	properties string
@@ -41,10 +39,7 @@ type legacyName struct {
 	name        string
 	description string
 	required    []string
-	// pinned are payload properties, written as a JSON object, that the name
-	// keeps as they were while its family's property grew wider for other
-	// actions.
-	pinned string
+	pinned      string
 }
 
 // catalogEntry is one name that events/list offers.
@@ -276,10 +271,6 @@ var (
 	headSHAProperty = map[string]any{"type": "string", "description": "The head commit SHA. Absent when the event has none."}
 )
 
-// argumentsSchema is the inputSchema of an event name: repo and the filters of
-// the name. It offers pr and sha unless the family's events name no pull
-// request or no head commit (no family means both), and actions when it is
-// given them.
 func argumentsSchema(f *family, actions []string) json.RawMessage {
 	properties := map[string]any{"repo": repoArgument}
 	if f == nil || !f.noPRs {
@@ -373,8 +364,6 @@ func newLegacyEntry(l legacyName, t storedType) *catalogEntry {
 	}
 }
 
-// payloadSchemaOf is the payloadSchema of the given types of family f. The
-// properties in pinned, a JSON object or empty, replace the family's own.
 func payloadSchemaOf(f *family, types, actions, required []string, pinned string) json.RawMessage {
 	properties := map[string]any{
 		"prs":    prsProperty,
