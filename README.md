@@ -41,7 +41,7 @@ An agent asks for events of one `repo` by name, optionally narrowed by `sha`, `p
 | `pr.review_threads` | `pull_request_review_thread` | none |
 <!-- END generated:events -->
 
-Every `/mcp` request carries `Authorization: Bearer <GitHub token>`. Faucet holds no GitHub token of its own: it only returns events for repositories that the caller's token can read. See [docs/security.md](docs/security.md).
+Every `/mcp` request carries `Authorization: Bearer <GitHub token>`. Faucet reads with the caller's token: it only returns events for repositories that the token can read. The one GitHub token it holds, for redelivery, is optional. See [docs/security.md](docs/security.md).
 
 Faucet also deletes events after a retention period, and it can ask GitHub to [redeliver webhooks that failed](docs/redelivery.md) while it was down.
 
@@ -109,7 +109,7 @@ Faucet runs anywhere that runs a Go binary next to Postgres. This repository dep
 
 The packages:
 
-- [`faucet`](faucet): the core. `faucet.New` builds a `Service`. Mount `Service.WebhookHandler()` on your router and call `Service.Register` on your `*mcp.Server`. Bring your own `Authorizer` and principal lookup, or use `TokenAuthorizer`.
+- [`faucet`](faucet): the core. `faucet.New` builds a `Service`. Mount `Service.WebhookHandler()` on your router. Build your `*mcp.Server` with `mcp.ServerOptions{Capabilities: faucet.ServerCapabilities()}`, call `Service.Register` on it, and wrap its HTTP handler in `faucet.RequireEventName`, which checks the `Mcp-Name` header. Bring your own `Authorizer` and principal lookup, or use `TokenAuthorizer`.
 - [`faucet/redelivery`](faucet/redelivery): the failed-webhook sweep, built with `redelivery.New`.
 - [`faucet/pgstore`](faucet/pgstore): the Postgres store, with embedded migrations.
 - [`faucet/storetest`](faucet/storetest): the contract tests that every `Store` must pass.
@@ -122,7 +122,8 @@ The packages:
 - [docs/webhooks.md](docs/webhooks.md): the contract for a callback receiver (signatures, retries, cursors, control messages, secret rotation).
 - [docs/redelivery.md](docs/redelivery.md): how failed GitHub deliveries are recovered, with the sweep's guarantees, capacity and known limits.
 - [docs/security.md](docs/security.md): the access checks, the callback URL guard and secret handling.
-- [docs/deploy.md](docs/deploy.md): deploying and operating faucet.
+- [docs/deploy.md](docs/deploy.md): deploying and operating faucet, and what each scheduled route answers.
+- [docs/upgrading.md](docs/upgrading.md): what to change on the GitHub hook and during a rolling deploy when you upgrade.
 
 ## Development
 

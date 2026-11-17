@@ -41,6 +41,13 @@ A preview runs any branch's code, and the Neon integration gives previews the pr
 
 4. **Point the GitHub webhook** at `https://<production domain>/webhook/github`. Don't put Vercel Deployment Protection on that domain, because GitHub and MCP clients can't pass it.
 
+## Scheduled routes
+
+Each `/cron/*` route answers 200 with a JSON object of counts. The result type in the table documents each field. A failed `/cron/redeliver` run answers 500 with the counts it made and an `error` that names nothing, and the log has the cause. A failed `/cron/deliver` or `/cron/purge` answers 500 with no counts.
+
+<!-- BEGIN generated:cron-replies -->
+<!-- END generated:cron-replies -->
+
 ## Runbooks
 
 ### Rolling back
@@ -48,7 +55,7 @@ A preview runs any branch's code, and the Neon integration gives previews the pr
 **Don't roll back past the newest migration.** A build that doesn't embed the migration that production is at can't start (`no migration found for version N`), so Vercel Instant Rollback to it serves nothing. Recover in one of two ways:
 
 - Redeploy a build that embeds the migration.
-- Apply the migration's `.down.sql` from `faucet/pgstore/migrations/` with golang-migrate against the `faucet_schema_migrations` table, then roll back. Read the down file first: some drop state. For example, `000007_gap_pending` drops gaps that are owed but not yet sent.
+- Roll back, then at once apply the migration's `.down.sql` from `faucet/pgstore/migrations/` with golang-migrate against the `faucet_schema_migrations` table. In that order, because production migrates at start: an instance of the newer build that starts after the down migration applies it again. Between the two steps the older build cannot start, so faucet serves nothing. Read the down file first: some drop state. For example, `000007_gap_pending` drops gaps that are owed but not yet sent.
 
 ### Rotate the database credentials
 
@@ -63,6 +70,8 @@ After a rotation, no deployment built before it can reach the database, so don't
 ### Rotating `FAUCET_WEBHOOK_KEY`
 
 Rows sealed under the old key can't be opened. Each subscription's deliveries end with `secret_unreadable` and the subscription is deleted until its subscriber renews, which a live subscriber does within 10 minutes. A renewal that also rotates the secret signs with the new secret only, because the old one can't be opened, so give receivers the new secret first.
+
+`webhook-id` is an HMAC under the key, so after the change a replay of an event that a receiver already has, such as a subscribe after a lapse that sends an old cursor, arrives with a new ID, and a receiver that deduplicates on the ID gets it twice. Warn receivers to expect those duplicates once.
 
 ### Restoring from a backup
 

@@ -8,7 +8,7 @@ sequenceDiagram
     participant F as faucet
     participant R as Receiver
     A->>F: events/subscribe with url and secret
-    opt handshake mode, first time for this login and url
+    opt handshake mode, url not verified here in the last 10 minutes
         F->>R: POST signed challenge
         R-->>F: 2xx with the challenge
     end
@@ -33,7 +33,7 @@ sequenceDiagram
 Webhook mode is off until the operator sets `FAUCET_WEBHOOK_KEY` (`openssl rand -base64 32`; it seals subscriber secrets at rest) and chooses how faucet checks callback URLs:
 
 - **`allowlist`** (default): set `FAUCET_WEBHOOK_ALLOWED_ORIGINS` to the `https://host[:port]` origins that may receive events. Faucet makes no request to a callback URL until it has an event to send.
-- **`handshake`**: set `FAUCET_WEBHOOK_CALLBACK_VERIFICATION=handshake` and leave the allowlist unset. A first subscribe for a login and URL makes faucet send a signed challenge, which the endpoint must echo back (see [Handshake](#handshake)).
+- **`handshake`**: set `FAUCET_WEBHOOK_CALLBACK_VERIFICATION=handshake` and leave the allowlist unset. A subscribe or a renewal makes faucet send a signed challenge, which the endpoint must echo back, unless the same faucet instance verified that login and URL in the last 10 minutes (see [Handshake](#handshake)).
 
 While webhook mode is off, `events/list` offers `poll` only, `events/subscribe` and `events/unsubscribe` answer `Unsupported`, and `/cron/deliver` answers 503.
 
@@ -41,16 +41,19 @@ Keep `FAUCET_WEBHOOK_KEY` stable. Rows sealed under another key can't be read. T
 
 ## Subscribe
 
-`events/subscribe` takes `name` (an [event name](events.md)), `arguments` (`repo`, optionally `sha` and `pr`, and for a family `actions` and the field filters it offers), `delivery` (`url` and `secret`) and optionally `cursor`, `maxAgeMs` and `ttlMs`. Like `events/poll`, the HTTP request must carry an `Mcp-Name` header with the event name.
+`events/subscribe` takes `name` (an [event name](events.md)), `arguments` (`repo`, optionally `sha` and `pr`, and for a family `actions` and the field filters it offers), `delivery` (`url` and `secret`) and optionally `cursor`, `maxAgeMs` and `ttlMs`. The HTTP request must carry an `Mcp-Name` header with the event name (see [the header rule](events.md#the-mcp-name-header)).
 
 - The token must be able to read the repository. Faucet checks again on every renewal, because it stores no token.
 - `delivery.secret` is `whsec_` followed by base64 of 24 to 64 random bytes. The client makes it. Faucet never returns or logs it.
 - `delivery.url` must be `https` with a public host, and it must pass the server's callback check.
 - A subscription is the tuple (login, URL, event name, arguments). Arguments that differ only in key order, or in the order or repeats of the values of `actions` or a field filter, are the same, and a family with `actions` and the same family without them are two subscriptions. Subscribing again with the same tuple renews it: same `id`, new expiry, and the secret is replaced (see [Secret rotation](#secret-rotation)).
 - A subscription lives for `ttlMs`, clamped to between 30 seconds and 10 minutes (default 10 minutes). Renew before `refreshBefore`.
-- A login can hold 100 live subscriptions.
+- A login can hold 100 live subscriptions. The next subscribe gets `ResourceExhausted` with `data.limit` `subscriptions`.
 
-A renewal keeps the subscription's read position and ignores any `cursor` it carries. A subscribe after the subscription lapsed (it expired or was unsubscribed) starts after the `cursor` you send. A renewal also reports `deliveryStatus`: `lastDeliveryAt`, `lastError` and `failedSince`.
+A renewal keeps the subscription's read position and ignores any `cursor` it carries. A subscribe after the subscription lapsed (it expired or was unsubscribed) starts after the `cursor` you send. A renewal also reports `deliveryStatus`: `lastDeliveryAt`, `lastError` and `failedSince`. `lastError`, and the `data.reason` of a `CallbackEndpointError`, take these values:
+
+<!-- BEGIN generated:callback-reasons -->
+<!-- END generated:callback-reasons -->
 
 `events/unsubscribe` takes `name`, `arguments` (read as `events/subscribe` reads them) and `delivery.url`, and deletes the caller's own live subscription.
 
@@ -73,7 +76,7 @@ webhook-signature: v1,<base64 HMAC-SHA256>
 
 - The signature is the Standard Webhooks HMAC over `<webhook-id>.<webhook-timestamp>.<body>`, keyed with the subscriber's secret. Verify it with any Standard Webhooks library.
 - `name` is the subscribed name, and `name` and `data` match what `events/poll` of that name returns. `timestamp` is when faucet received the event.
-- `webhook-id` (and `eventId`, which equals it) is stable for one event to one subscription, across every retry and replay. **Deduplicate on it.** It differs from the GitHub delivery ID that `events/poll` reports.
+- `webhook-id` (and `eventId`, which equals it) is stable for one event to one subscription, across every retry and replay, while `FAUCET_WEBHOOK_KEY` stays the same: it is an HMAC under that key. **Deduplicate on it.** After a key change, a replay of an event that the receiver already has arrives with a new ID, once (see [deploy.md](deploy.md#rotating-faucet_webhook_key)). It differs from the GitHub delivery ID that `events/poll` reports.
 - `cursor` is a safe watermark: every event of the subscription at or below it has been delivered or given up. Persist it, and pass it to `events/subscribe` if the subscription lapses.
 - The request carries no `Authorization` header and no cookies. Nothing the endpoint sends back reaches faucet's replies, logs or tables.
 
@@ -83,9 +86,14 @@ Any `2xx` answer ends the delivery. `410 Gone` and `413` end that delivery but n
 
 Delivery is **at least once**. An attempt whose result faucet could not record is sent again with the same `webhook-id`.
 
-A delivery that doesn't succeed ends with a reason, which `/cron/deliver` counts in its reply and logs. The reasons include `attempts_exhausted`, `window_expired`, `event_too_large` (bodies over 256 KiB aren't sent), `event_purged` and `subscription_expired`. A subscription that holds 100 unsent deliveries reads no new events until some of them end.
+A delivery that doesn't succeed ends with one of these reasons, which `/cron/deliver` counts in `gave_up` and logs:
 
-Faucet holds no GitHub token, so it only sees revoked access **when the subscriber renews**. A subscription that is never renewed simply expires.
+<!-- BEGIN generated:give-up-reasons -->
+<!-- END generated:give-up-reasons -->
+
+A subscription that holds 100 unsent deliveries reads no new events until some of them end.
+
+Faucet keeps no subscriber's token, so it only sees revoked access **when the subscriber renews**. A subscription that is never renewed simply expires.
 
 ## Control messages
 
@@ -102,12 +110,12 @@ Give your receiver the new secret before you rotate: a handshake that the rotati
 
 ## Handshake
 
-In `handshake` mode, the first `events/subscribe` for a login and URL makes faucet send one signed `POST` before the call returns:
+In `handshake` mode, an `events/subscribe`, a renewal included, makes faucet send one signed `POST` before the call returns, unless the same faucet instance verified that login and URL in the last 10 minutes:
 
 ```json
 {"type": "verification", "challenge": "<nonce>"}
 ```
 
-The endpoint must verify the signature and answer `2xx` within 5 seconds, with `{"challenge": "<nonce>"}`. Any other answer fails the subscribe with `CallbackEndpointError` and stores nothing. A success is remembered for that login and URL for 10 minutes.
+The endpoint must verify the signature and answer `2xx` within 5 seconds, with `{"challenge": "<nonce>"}`. Any other answer fails the subscribe with `CallbackEndpointError` and stores nothing. Each instance remembers a success for that login and URL for 10 minutes, in its memory. A renewal that reaches another instance, or one that started since, sends the challenge again, so on many short-lived instances, as on Vercel, expect a handshake on most renewals.
 
-Handshakes are rate limited per login and per destination, and a call over the limit gets `ResourceExhausted`. If a public endpoint can front an internal service, prefer `allowlist` mode. See [security.md](security.md#callback-urls) for how faucet guards callback URLs.
+Each instance limits handshakes with two token buckets. Each login has one per destination: 5 at once, then one every 12 seconds. Each destination has one for all logins: 60 at once, then one a second. An endpoint that answers correctly gives the tokens back. The buckets are per instance, so N instances allow N times as many. A call over a limit gets `ResourceExhausted` with `data.limit` `callbackVerifications` and stores nothing. If a public endpoint can front an internal service, prefer `allowlist` mode. See [security.md](security.md#callback-urls) for how faucet guards callback URLs.

@@ -32,6 +32,10 @@ flowchart LR
 - `events/poll` and the webhook body name each event by the name that was polled or subscribed.
 - Later versions add actions to the families. A family subscription without `actions` picks up a new action at its next renewal, and one with `actions` keeps to the actions it named.
 
+## The Mcp-Name header
+
+Every `events/poll`, `events/subscribe` and `events/unsubscribe` request over HTTP must carry the header `Mcp-Name` with the event name of its `params.name`, or faucet answers 400 with `HeaderMismatch`. The go-sdk client does not set it for `events/*` yet. A host that embeds faucet gets the check from `faucet.RequireEventName`.
+
 ## Field filters
 
 A family also takes filters named after a field of its data, so an agent wakes only for what it asked. The table above lists which family offers which. Each takes a list of strings, and an event passes when its field is one of them. Different filters, and `actions`, must all match.
@@ -44,7 +48,7 @@ A family also takes filters named after a field of its data, so an agent wakes o
 
 ## What an event carries
 
-An event carries enough to route it and to fetch the rest from GitHub, and no text: no pull request, comment or review body, no `changes`, no log, step output or commit message, and no status description. Each `payloadSchema` lists every field. `pr.comments` events carry no head SHA, because GitHub names no head commit in a comment. `ci.jobs` and `ci.statuses` events name no pull request, so their `prs` is empty and they take no `pr` argument.
+An event carries enough to route it and to fetch the rest from GitHub, and no free text: no pull request, comment or review body, no `changes`, no log, step output or commit message, and no status description. A `pr.activity` event does carry short names: the title, the branches, a label or a milestone. Each `payloadSchema` lists every field. `pr.comments` events carry no head SHA, because GitHub names no head commit in a comment. `ci.jobs` and `ci.statuses` events name no pull request, so their `prs` is empty and they take no `pr` argument.
 
 ## The GitHub webhook
 
@@ -52,4 +56,4 @@ Under "Which events would you like to trigger this webhook?", choose "Let me sel
 
 Faucet stores every action of the five pull request events (comments on plain issues excepted), every action of workflow runs and workflow jobs, the `created` and `completed` actions of check runs, the `completed` action of check suites, and every commit status. Repository and organization webhooks receive no other check run or check suite action. Faucet answers every other delivery with 202 and stores nothing.
 
-Mind the volume. Every push to a pull request's branch is a `pr.synchronize` event, and every label, review request or edit is one more. A workflow run with N jobs stores about 3N job events and 2N check events, besides its 3 run events and 1 suite event. An event's data is a few hundred bytes (167 to 384 in the samples in `faucet/testdata`), but each delivery is also an attempt in the hook's delivery list, which [redelivery](redelivery.md#capacity) reads. Leave an event off when no agent needs it.
+Mind the volume. Every push to a pull request's branch is a `pr.synchronize` event, and every label, review request or edit is one more. A workflow run with N jobs stores about 3N job events and 2N check events, besides its 3 run events and 1 suite event. An event's data is a few hundred bytes, but each delivery is also an attempt in the hook's delivery list, which [redelivery](redelivery.md#capacity) reads. Leave an event off when no agent needs it.

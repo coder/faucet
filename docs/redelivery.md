@@ -38,7 +38,7 @@ stateDiagram-v2
     [*] --> gap: GitHub deleted attempts that no run read
 ```
 
-Every failed delivery ends exactly once, in one of these states. The run that ends it counts it in the reply and logs it:
+Every failed delivery ends exactly once, in one of these states, except in the cases that [Known limits](#known-limits) lists. The run that ends it counts it in the reply and logs it:
 
 - **`recovered`**: faucet stored the event, or a later attempt succeeded.
 - **`gave_up` / `limit`**: every ask was spent. A delivery is asked for 7 times, at 0, 10, 30, 70, 150, 310 and 630 minutes after the run that first read it. The count goes up before the request is sent, so a crash costs an ask, and two runs never send the same one.
