@@ -2,33 +2,34 @@
 
 GitHub events for AI agents, over MCP.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/map-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/map-light.png">
+  <img alt="GitHub sends webhooks to faucet, which stores them in Postgres. Agents read the events over MCP by waiting, polling or subscribing, and a scheduler calls the cron routes that deliver, redeliver and purge." src="docs/images/map-light.png">
+</picture>
+
 An agent that opened a PR usually has to keep polling GitHub to find out whether CI passed or a reviewer answered. With faucet, it asks once and waits. Faucet receives GitHub webhooks, stores them as typed events in Postgres, and hands them to agents over [MCP](https://modelcontextprotocol.io).
 
 Faucet is a Go library first, with a thin HTTP server on top, so [coder/coder](https://github.com/coder/coder) can embed it in `coderd`.
 
-```text
-GitHub ── webhook ──▶ POST /webhook/github ──▶ Postgres ──▶ POST /mcp ◀── agent (wait / poll / subscribe)
-                                                  │
-                                                  └──▶ GET /cron/deliver ── signed POST ──▶ your callback URL
-```
-
 ## What an agent gets
 
-Three ways to consume events, all on `/mcp`:
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/ways-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/ways-light.png">
+  <img alt="Three ways to consume events: wait with one tool call that returns on the first match, poll with a cursor, or subscribe and receive signed webhooks." src="docs/images/ways-light.png">
+</picture>
 
 - **Wait.** The `wait_for_github_events` tool long-polls (up to 50 seconds) and returns as soon as a matching event exists. Pass back the returned `cursor` to continue with no gaps or repeats.
 - **Poll.** `events/list` and `events/poll` from the draft MCP Events extension (SEP-3415).
 - **Subscribe.** `events/subscribe` registers a callback URL. Faucet sends each matching event to it as a signed [Standard Webhooks](https://www.standardwebhooks.com) request. See [docs/webhooks.md](docs/webhooks.md).
 
-Event types, filterable by `repo` and optionally `sha` and `pr`:
+An agent asks for events of one `repo` by name, optionally narrowed by `sha`, `pr`, GitHub's `actions` and field filters such as `head_branch` or `conclusion`. A name is a family or one of its exact types (see [docs/events.md](docs/events.md)):
 
-| Type | GitHub webhook |
-| --- | --- |
-| `ci.run_completed` | `workflow_run.completed` |
-| `ci.check_completed` | `check_run.completed` |
-| `pr.review_submitted` | `pull_request_review.submitted` |
-| `pr.closed` | `pull_request.closed` (merged or not) |
-| `pr.comment_created` | `issue_comment.created` on a pull request |
+<!-- BEGIN generated:events -->
+| Family | GitHub event | Exact types |
+| --- | --- | --- |
+<!-- END generated:events -->
 
 Every `/mcp` request carries `Authorization: Bearer <GitHub token>`. Faucet holds no GitHub token of its own: it only returns events for repositories that the caller's token can read. See [docs/security.md](docs/security.md).
 
@@ -49,12 +50,13 @@ The server listens on `PORT` (default 8080) and applies migrations at startup. T
 - **Payload URL:** `https://<your host>/webhook/github`
 - **Content type:** `application/json`
 - **Secret:** the value of `GITHUB_WEBHOOK_SECRET`
-- **Events:** workflow runs, check runs, pull requests, pull request reviews and issue comments
+- **Events:** "Let me select individual events", then Pull requests, Pull request reviews, Pull request review comments, Pull request review threads, Issue comments, Workflow runs, Workflow jobs, Check runs, Check suites and Statuses (see [docs/events.md](docs/events.md#the-github-webhook))
 
 Point any MCP client at `https://<your host>/mcp` with a GitHub token as the bearer token.
 
 ## Configuration
 
+<!-- BEGIN generated:settings -->
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | yes | Postgres connection for requests. A transaction-mode pooler works. |
@@ -68,6 +70,7 @@ Point any MCP client at `https://<your host>/mcp` with a GitHub token as the bea
 | `FAUCET_WEBHOOK_CALLBACK_VERIFICATION` | for webhooks | `allowlist` (default) or `handshake`. |
 | `FAUCET_WEBHOOK_ALLOWED_ORIGINS` | in `allowlist` mode | Comma-separated `https://host[:port]` origins that may receive webhooks. |
 | `FAUCET_HOOK_TOKEN`, `FAUCET_HOOK_ID`, `FAUCET_HOOK_ORG` or `FAUCET_HOOK_REPO` | for redelivery | The GitHub webhook to watch for failed deliveries. |
+<!-- END generated:settings -->
 
 The server refuses to start on an invalid or incomplete feature configuration, and it names the variable but never the value. A feature whose variables are unset stays off, and its routes answer 503.
 
@@ -100,6 +103,7 @@ The packages:
 
 ## Docs
 
+- [docs/events.md](docs/events.md): the event names, their actions and filters, and the GitHub webhook to set up.
 - [docs/webhooks.md](docs/webhooks.md): the contract for a callback receiver (signatures, retries, cursors, control messages, secret rotation).
 - [docs/redelivery.md](docs/redelivery.md): how failed GitHub deliveries are recovered, with the sweep's guarantees, capacity and known limits.
 - [docs/security.md](docs/security.md): the access checks, the callback URL guard and secret handling.
