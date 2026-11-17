@@ -254,7 +254,7 @@ func run() error {
 	cron := cronRoutes{
 		secret: []byte(cfg.cronSecret), svc: svc, retention: cfg.retention, delivers: cfg.webhook != nil, redeliverer: redeliverer, clock: clock, logger: logger,
 	}
-	return serve(ctx, logger, cfg.port, newRouter(svc, github, cron, logger))
+	return serve(ctx, logger, cfg.port, newRouter(svc, bearers{github: github}, cron, logger))
 }
 
 // migrateSchema runs prepareSchema with a connection to cfg.migrateURL, which
@@ -321,11 +321,11 @@ func prepareSchema(ctx context.Context, db, migrateDB *sql.DB, dep deployment) e
 	return nil
 }
 
-func newRouter(svc *faucet.Service, authn authenticator, cron cronRoutes, logger slog.Logger) http.Handler {
+func newRouter(svc *faucet.Service, tokens bearers, cron cronRoutes, logger slog.Logger) http.Handler {
 	r := chi.NewRouter()
 	cron.mount(r)
 	r.Method(http.MethodPost, "/webhook/github", svc.WebhookHandler())
-	r.Handle("/mcp", longResponse(requireBearer(authn, logger, newMCPHandler(svc))))
+	r.Handle("/mcp", longResponse(requireBearer(tokens, tokens.origin+"/mcp", logger, newMCPHandler(svc))))
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok\n")
 	})
