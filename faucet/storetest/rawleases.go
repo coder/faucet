@@ -42,7 +42,7 @@ func (r *rawRig) leasePending(lease faucet.RawLease) int32 {
 
 // leaseSpaced pushes n events for every interest that matches them, with
 // time between their receive times, and returns them as lease reads them.
-func (r *rawRig) leaseSpaced(lease faucet.RawLease, n int) []faucet.RawEvent {
+func (r *rawRig) leaseSpaced(lease faucet.RawLease, n int32) []faucet.RawEvent {
 	r.t.Helper()
 	ids := make([]int64, 0, n)
 	for range n {
@@ -50,7 +50,7 @@ func (r *rawRig) leaseSpaced(lease faucet.RawLease, n int) []faucet.RawEvent {
 		time.Sleep(2 * time.Millisecond)
 	}
 	q := r.query(lease, 0)
-	q.Limit = int32(n)
+	q.Limit = n
 	events := r.read(q).Events
 	require.Equal(r.t, ids, rawIDs(events))
 	return events
