@@ -24,7 +24,8 @@ These came in [#44](https://github.com/coder/faucet/pull/44), [#45](https://gith
 - **A rolling deploy drops some events.** Until every instance runs the new build, an old instance answers 202 to a delivery of an action that it does not store. GitHub counts that as delivered, so [redelivery](redelivery.md) never asks for it again, and the event is never stored. An old instance also answers `InvalidParams` to a field filter, and its `/cron/deliver` can send a filtered subscription events that its filters drop.
 - **Migration `000009_subscription_event_types`.** A subscription now stores the exact types that its name matched. The migration fills each row with the row's event name, the one type that a name of an earlier build matches, so a subscription keeps its events and its key, and a trigger does the same for rows that an old instance inserts. The old build does not know families. Until a deploy has replaced every old instance, and again after a rollback to that build:
   - it answers `NotFound` to a family name;
-  - its `/cron/deliver` and `/cron/purge` read a family subscription as one that matches no event, so a family subscription gets nothing from it;
+  - its `/cron/deliver` and `/cron/purge` read a family subscription as one that matches no event, so its delivery run leaves the subscription's events to the runs of the new build;
+  - when a purge has overtaken a family subscription, its delivery run moves the subscription to the head, past events it never sent, and records the gap, so the subscriber gets a gap envelope;
   - its purge can move a family subscription past events that the same purge deletes unread, and then no gap envelope goes out;
   - it sends a family subscription's event under its exact type, with no `event` and no `action` in `data`.
 
@@ -32,8 +33,8 @@ These came in [#44](https://github.com/coder/faucet/pull/44), [#45](https://gith
 
 ## To the redelivery position (migration `000008_redelivery_clear`)
 
-- **Old instances fail their runs.** Until a deploy has replaced every instance of the build before the migration, their `/cron/redeliver` runs fail with `column "top_at" does not exist` and write no position. Their other routes keep working, and the runs of the new build read the list in their place.
-- **The first run after the migration is a first run.** It reads its lookback of the list again and logs one more `before tracking began` gap. A delivery that a run tracked before keeps its row and its ask count. A position that an old build took from a `Date` far ahead of GitHub's list carries the first risk in [known limits](redelivery.md#known-limits).
+- **Old instances fail their runs.** Until a deploy has replaced every instance of the build before the migration, their `/cron/redeliver` runs fail with `column "top_at" does not exist` and write no position, and so does a run that was in flight during the migration. Their other routes keep working, and the runs of the new build read the list in their place.
+- **The first run after the migration is a first run.** It reads its lookback of the list again and logs one more `before tracking began` gap. On a hook near the [capacity](redelivery.md#capacity), the sweep cannot read that stretch again before GitHub deletes it, and the unread part ends as `expired unread` gaps. A delivery that a run tracked before keeps its row and its ask count. A position that an old build took from a `Date` far ahead of GitHub's list carries the first risk in [known limits](redelivery.md#known-limits).
 - **A `redelivery.Store` of your own** must move the position it holds into `Clear` once, as the migration does. Until then every run fails with `the store returned a top without a clear` and asks for nothing. `storetest.RunRedelivery` checks it.
 
 ## To a stricter `CRON_SECRET`
