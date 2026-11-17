@@ -1,8 +1,8 @@
 // Renders each [data-picture] element of docs/diagrams/source.html to
-// docs/images/<name>-light.png and <name>-dark.png, then records the hash of
-// the source in docs/images/SOURCE_SHA256, in sha256sum format. The hash is
-// written last, so a run that fails leaves the old hash and the images read
-// as stale.
+// docs/images/<name>-light.png and <name>-dark.png, then lists the hash of the
+// source and of each image in docs/images/SOURCE_SHA256, in sha256sum format.
+// The list is written last, so a run that fails leaves the old one, which no
+// longer matches.
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
@@ -31,8 +31,11 @@ function checkNames(names) {
   }
 }
 
+const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
 async function render() {
   const html = await readFile(source);
+  const written = [];
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage({
@@ -49,15 +52,19 @@ async function render() {
         await page.emulateMedia({ colorScheme });
         const file = join(images, `${name}-${colorScheme}.png`);
         await pictures.nth(i).screenshot({ path: file, animations: "disabled" });
+        written.push(`${name}-${colorScheme}.png`);
         console.log(relative(root, file));
       }
     }
   } finally {
     await browser.close();
   }
+  const lines = [`${sha256(html)}  ${sourceName}\n`];
+  for (const png of written.sort()) {
+    lines.push(`${sha256(await readFile(join(images, png)))}  docs/images/${png}\n`);
+  }
   const sum = join(images, "SOURCE_SHA256");
-  const hex = createHash("sha256").update(html).digest("hex");
-  await writeFile(sum, `${hex}  ${sourceName}\n`);
+  await writeFile(sum, lines.join(""));
   console.log(relative(root, sum));
 }
 
