@@ -188,3 +188,132 @@ func TestPollOfARawNameOpensANewLeaseForACursorThatIsNotItsOwn(t *testing.T) {
 	}
 	require.Equal(t, "cursor is not one this server returned", h.pollError(pollParams("github.push", repoArgs(), raw("v1.0"))).Message)
 }
+
+func TestALeaseOfARawNameLivesOneHourAfterEachPoll(t *testing.T) {
+	t.Parallel()
+
+	h := newRawPollHarness(t)
+	opened := h.open()
+	h.clock.Advance(59 * time.Minute)
+	kept := h.pollRaw("github.push", repoArgs(), opened.Cursor)
+	require.False(t, kept.Truncated, "a poll within the hour keeps the lease")
+	h.clock.Advance(59 * time.Minute)
+	h.push(nil)
+
+	h.clock.Advance(time.Hour)
+	require.Equal(t, "ignored", h.deliver("push", "after-the-lease", rawPayload(repoID, "", nil)), "an expired lease wants nothing")
+	lapsed := h.pollRaw("github.push", repoArgs(), kept.Cursor)
+	require.Empty(t, lapsed.Events)
+	require.True(t, lapsed.Truncated, "the poller was away for over an hour and lost what came")
+
+	fresh := h.push(nil)
+	page := h.pollRaw("github.push", repoArgs(), lapsed.Cursor)
+	require.Equal(t, []string{fresh}, page.eventIDs())
+	require.False(t, page.Truncated)
+}
+
+func TestTheLeasesOfOneLoginAreLimitedAndTheOnePolledLongestAgoEnds(t *testing.T) {
+	t.Parallel()
+
+	h := newRawPollHarness(t)
+	first := h.open()
+	h.clock.Advance(time.Second)
+	second := h.open("fields", []string{"ref"})
+	for range 98 {
+		h.clock.Advance(time.Second)
+		h.open()
+	}
+	h.clock.Advance(time.Second)
+	require.False(t, h.pollRaw("github.push", repoArgs(), first.Cursor).Truncated, "the login holds 100 leases, and the first is polled again")
+
+	h.clock.Advance(time.Second)
+	h.open()
+	require.False(t, h.pollRaw("github.push", repoArgs(), first.Cursor).Truncated, "a lease that was polled since is kept")
+	require.True(t, h.pollRaw("github.push", repoArgs("fields", []string{"ref"}), second.Cursor).Truncated,
+		"one lease more ended the one polled longest ago")
+
+	h.as("mallory")
+	require.False(t, h.open().Truncated, "another login has leases of its own")
+}
+
+func TestPollOfARawNameSaysTruncatedForWhatTheLeaseMissed(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an event older than maxAgeMs", func(t *testing.T) {
+		t.Parallel()
+		h := newRawPollHarness(t)
+		opened := h.open()
+		h.push(nil)
+		h.clock.Advance(10 * time.Minute)
+		fresh := h.push(nil)
+
+		params := pollParams("github.push", repoArgs(), raw(opened.Cursor))
+		params.MaxAgeMs = raw(60_000)
+		page := h.poll(params)
+		require.Equal(t, []string{fresh}, page.eventIDs())
+		require.True(t, page.Truncated)
+	})
+
+	t.Run("a payload that is too large for a lease without fields", func(t *testing.T) {
+		t.Parallel()
+		h := newRawPollHarness(t)
+		opened := h.open()
+		h.push(map[string]any{"blob": strings.Repeat("x", 300<<10)})
+		small := h.push(nil)
+
+		page := h.pollRaw("github.push", repoArgs(), opened.Cursor)
+		require.Equal(t, []string{small}, page.eventIDs())
+		require.True(t, page.Truncated)
+		require.False(t, h.pollRaw("github.push", repoArgs(), page.Cursor).Truncated, "a loss is reported once")
+	})
+
+	t.Run("a payload that fits once the lease asks for fields", func(t *testing.T) {
+		t.Parallel()
+		h := newRawPollHarness(t)
+		opened := h.open("fields", []string{"ref"})
+		big := h.push(map[string]any{"ref": "refs/heads/main", "blob": strings.Repeat("x", 300<<10)})
+
+		page := h.pollRaw("github.push", repoArgs("fields", []string{"ref"}), opened.Cursor)
+		require.Equal(t, []string{big}, page.eventIDs())
+		require.Equal(t, map[string]any{"ref": "refs/heads/main"}, page.Events[0].Data)
+		require.False(t, page.Truncated)
+	})
+
+	t.Run("a stored body that does not hold what the lease reads", func(t *testing.T) {
+		t.Parallel()
+		h := newRawPollHarness(t)
+		opened := h.open()
+		for i, plan := range []faucet.RawPlan{
+			{Body: []byte(`{"ref":"refs/heads/main"}`), Fields: []string{"ref"}},
+			{Body: []byte(`{"blob":"` + strings.Repeat("x", 300<<10) + `"}`)},
+		} {
+			_, err := h.store.IngestRaw(h.ctx, faucet.RawDelivery{DeliveryID: fmt.Sprintf("odd-%d", i), Event: "push", RepoID: repoID}, h.clock.Now(),
+				func(interests []faucet.RawInterest) faucet.RawPlan {
+					require.Len(t, interests, 1)
+					plan.Unread = []faucet.RawLeaseID{interests[0].Lease}
+					return plan
+				})
+			require.NoError(t, err)
+		}
+		good := h.push(nil)
+
+		page := h.pollRaw("github.push", repoArgs(), opened.Cursor)
+		require.Equal(t, []string{good}, page.eventIDs(), "an event that cannot be served whole is left out, never served in part")
+		require.True(t, page.Truncated)
+		require.Equal(t, 2, strings.Count(h.logs.String(), "skip raw event"), "each is logged as an error")
+	})
+}
+
+func TestPollOfARawNameChecksTheCallerAndTheRepository(t *testing.T) {
+	t.Parallel()
+
+	h := newRawPollHarness(t)
+	denied := h.pollError(pollParams("github.push", args("repo", deniedRepo), nil))
+	require.EqualValues(t, codeForbidden, denied.Code)
+	require.NotContains(t, denied.Message, deniedRepo)
+	require.Equal(t, "ignored", h.deliver("push", "denied", rawPayload(deniedRepoID, "", nil)), "a refused poll opens no lease")
+
+	anonymous := newRawPollHarness(t, func(d *faucet.Deps) { d.PrincipalFrom = failingPrincipal })
+	rpcErr := anonymous.pollError(pollParams("github.push", repoArgs(), nil))
+	require.Equal(t, "authentication required", rpcErr.Message)
+}
