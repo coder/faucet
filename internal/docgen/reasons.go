@@ -44,8 +44,8 @@ var callbackReasons = map[string]callbackReason{
 	"timeout":            {true, true, "No answer within {faucet.callbackRequestTimeout}."},
 	"tls_error":          {true, true, "The TLS handshake or the certificate check failed."},
 	"http_4xx":           {true, true, "A 4xx answer. For a delivery, also any other answer that is not 2xx, 5xx, `410` or `413`, such as a redirect."},
-	"http_5xx":           {true, true, "A 5xx answer. For a delivery, also a response whose body is over {faucet.maxCallbackResponseBytes:KiB} or whose headers are over {faucet.maxCallbackHeaderBytes:KiB}."},
-	"challenge_failed":   {false, true, "The callback URL's origin is not on the allowlist, or the handshake got no 2xx answer that echoes the challenge."},
+	"http_5xx":           {true, true, "A 5xx answer. For a delivery, also a response that declares a body over {faucet.maxCallbackResponseBytes:KiB} or has headers over {faucet.maxCallbackHeaderBytes:KiB}. A delivery closes the body unread, so only a declared length counts."},
+	"challenge_failed":   {false, true, "The callback URL's origin is not on the allowlist, or the handshake got no 2xx answer of at most {faucet.maxHandshakeAnswer:KiB} that echoes the challenge."},
 }
 
 func giveUpTable(s source) ([]string, error) {
