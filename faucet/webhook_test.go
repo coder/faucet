@@ -44,6 +44,13 @@ type fakeStore struct {
 	scanned       map[faucet.SubscriptionKeyHash]int64
 	deliveries    map[fakeDeliveryKey]*fakeDelivery
 	gaps          map[faucet.SubscriptionKeyHash]*fakeGap
+
+	rawEvents     []faucet.RawEvent
+	rawLastID     int64
+	rawReceivedAt time.Time
+	rawOutbox     map[fakeRawOutboxKey]*fakeRawOutbox
+	rawGaps       map[fakeRawGapKey]*fakeGap
+	rawLeases     map[faucet.RawLeaseID]*fakeRawLease
 }
 
 func (s *fakeStore) InsertEvent(_ context.Context, ev faucet.Event) (faucet.Event, bool, error) {
