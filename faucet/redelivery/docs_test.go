@@ -71,6 +71,7 @@ func TestRedeliveryDocStatesTheDateWindowThatTheConstantsGive(t *testing.T) {
 	slack, margin := redelivery.DateSlack, redelivery.DateMargin
 	marginAndOverlap := hoursAndMinutes(margin + redelivery.ReadOverlap)
 	quietFor := hoursAndMinutes(redelivery.GitHubDeliveryRetention - slack - margin - redelivery.ReadOverlap)
+	retention := int(redelivery.GitHubDeliveryRetention / time.Hour)
 
 	doc, err := os.ReadFile("../../docs/redelivery.md")
 	require.NoError(t, err)
@@ -85,6 +86,9 @@ func TestRedeliveryDocStatesTheDateWindowThatTheConstantsGive(t *testing.T) {
 		{"When a `Date` is more than %d hour behind the clock that deletes", []any{int(slack / time.Hour)}},
 		{"when it runs the margin of %d hours ahead, up to about %d hours", []any{int(margin / time.Hour), int((margin + slack) / time.Hour)}},
 		{"the last run that read the list was about %s before it", []any{quietFor}},
+		{"Redelivery trusts a `Date` up to %d hours ahead of GitHub's list (the margin) and up to %d hour behind the clock that deletes", []any{int(margin / time.Hour), int(slack / time.Hour)}},
+		{"for the part of GitHub's %d hours before its lookback", []any{retention}},
+		{"says where GitHub's %d hours end", []any{retention}},
 	} {
 		requireDocSays(t, text, p)
 	}
