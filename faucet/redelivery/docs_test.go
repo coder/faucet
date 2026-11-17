@@ -41,26 +41,26 @@ func TestRedeliveryDocStatesTheRedeliveryCapacityThatTheConstantsGive(t *testing
 	require.NoError(t, err)
 	text := string(doc)
 
-	for _, want := range []string{
-		fmt.Sprintf("at most %d pages of %d attempts, which is %s attempts", pages, perPage, thousands(perRun)),
-		fmt.Sprintf("sends at most %d requests", redelivery.DefaultMaxAsksPerRun),
-		fmt.Sprintf("a run holds at most %s attempts of its window", thousands(perRun-2)),
-		fmt.Sprintf("That is %s attempts an hour at best", thousands(steadyCapacity(perRun, covered))),
-		fmt.Sprintf("keeps up with %s attempts an hour", thousands(keepsUpWith)),
-		fmt.Sprintf("sends at most %d requests an hour", requestsPerHour),
-		fmt.Sprintf("A delivery is asked for %d times, at %s after", redelivery.MaxAsksPerDelivery, askList),
-		fmt.Sprintf("%d minute overlap", int(redelivery.ReadOverlap/time.Minute)),
-		fmt.Sprintf("GitHub keeps a delivery for %d hours", int(redelivery.GitHubDeliveryRetention/time.Hour)),
-		fmt.Sprintf("lookback of %d hours", int(redelivery.StartLookback/time.Hour)),
-		fmt.Sprintf("ends within %d minutes of the first run", int(offsets[len(offsets)-1]/time.Minute)),
-		fmt.Sprintf("a run covers %d minutes of the list (%d new minutes plus the %d minute overlap)",
-			int(covered/time.Minute), int(schedule/time.Minute), int(redelivery.ReadOverlap/time.Minute)),
-		fmt.Sprintf("because a run spends %s of its", shareText(redelivery.ScanShare)),
-		fmt.Sprintf("A run reads the list for %s of that", shareText(redelivery.ScanShare)),
-		fmt.Sprintf("asks until %s of the time has passed", shareText(redelivery.AskStartShare)),
-		"*/10 * * * *",
+	overlap := int(redelivery.ReadOverlap / time.Minute)
+	for _, p := range []pin{
+		{"A run reads at most %d pages of %d attempts, which is %s attempts, and sends at most %d requests", []any{pages, perPage, thousands(perRun), redelivery.DefaultMaxAsksPerRun}},
+		{"a run holds at most %s attempts of its window", []any{thousands(perRun - 2)}},
+		{"That is %s attempts an hour at best", []any{thousands(steadyCapacity(perRun, covered))}},
+		{"that starts late, the sweep keeps up with %s attempts an hour, and sends at most %d requests an hour", []any{thousands(keepsUpWith), requestsPerHour}},
+		{"A delivery is asked for %d times, at %s after", []any{redelivery.MaxAsksPerDelivery, askList}},
+		{"the previous run stopped, less a %d minute overlap", []any{overlap}},
+		{"and less the %d minute overlap", []any{overlap}},
+		{"holds more attempts in the %d minute overlap", []any{overlap}},
+		{"GitHub keeps a delivery for %d hours", []any{int(redelivery.GitHubDeliveryRetention / time.Hour)}},
+		{"its lookback of %d hours", []any{int(redelivery.StartLookback / time.Hour)}},
+		{"ends within %d minutes of the first run", []any{int(offsets[len(offsets)-1] / time.Minute)}},
+		{"a run covers %d minutes of the list (%d new minutes plus the %d minute overlap)", []any{int(covered / time.Minute), int(schedule / time.Minute), overlap}},
+		{"because a run spends %s of its", []any{shareText(redelivery.ScanShare)}},
+		{"A run reads the list for %s of that", []any{shareText(redelivery.ScanShare)}},
+		{"asks until %s of the time has passed", []any{shareText(redelivery.AskStartShare)}},
+		{"Schedule it every %d minutes (`*/%d * * * *`)", []any{int(schedule / time.Minute), int(schedule / time.Minute)}},
 	} {
-		require.Contains(t, text, want)
+		requireDocSays(t, text, p)
 	}
 	require.Greater(t, keepsUpWith, 4200, "the capacity must cover the busiest hook that the simulations model")
 }
@@ -76,18 +76,36 @@ func TestRedeliveryDocStatesTheDateWindowThatTheConstantsGive(t *testing.T) {
 	require.NoError(t, err)
 	text := string(doc)
 
-	for _, want := range []string{
-		fmt.Sprintf("a slack of %d hour", int(slack/time.Hour)),
-		fmt.Sprintf("a margin of %d hour", int(margin/time.Hour)),
-		fmt.Sprintf("starts %s before the `Date` of the run before it", marginAndOverlap),
-		fmt.Sprintf("two runs are about %s apart", quietFor),
-		fmt.Sprintf("more than %s ahead of GitHub's list", marginAndOverlap),
-		fmt.Sprintf("more than %d hour behind the clock that deletes", int(slack/time.Hour)),
-		fmt.Sprintf("when it runs the margin of %d hours ahead, up to about %d hours", int(margin/time.Hour), int((margin+slack)/time.Hour)),
-		fmt.Sprintf("the last run that read the list was about %s before it", quietFor),
+	for _, p := range []pin{
+		{"plus a slack of %d hour", []any{int(slack / time.Hour)}},
+		{"a gap starts there, less a margin of %d hours", []any{int(margin / time.Hour)}},
+		{"After a silence a gap starts %s before the `Date` of the run before it", []any{marginAndOverlap}},
+		{"two runs are about %s apart", []any{quietFor}},
+		{"When a `Date` runs more than %s ahead of GitHub's list", []any{marginAndOverlap}},
+		{"When a `Date` is more than %d hour behind the clock that deletes", []any{int(slack / time.Hour)}},
+		{"when it runs the margin of %d hours ahead, up to about %d hours", []any{int(margin / time.Hour), int((margin + slack) / time.Hour)}},
+		{"the last run that read the list was about %s before it", []any{quietFor}},
 	} {
-		require.Contains(t, text, want)
+		requireDocSays(t, text, p)
 	}
+}
+
+// pin is a phrase of docs/redelivery.md built from the constants.
+type pin struct {
+	format string
+	args   []any
+}
+
+// requireDocSays fails unless the doc says the phrase, and says it wherever
+// it says the words before the first number, so that a second copy of the
+// phrase cannot keep an old number.
+func requireDocSays(t *testing.T, doc string, p pin) {
+	t.Helper()
+	phrase := fmt.Sprintf(p.format, p.args...)
+	lead, _, _ := strings.Cut(p.format, "%")
+	require.NotEmpty(t, lead, "a pin starts with words")
+	require.True(t, strings.Contains(doc, phrase), "docs/redelivery.md does not say %q", phrase)
+	require.Equal(t, strings.Count(doc, lead), strings.Count(doc, phrase), "docs/redelivery.md: every %q must go on as %q", lead, phrase)
 }
 
 // shareText writes a share of a run's time as docs/redelivery.md does.

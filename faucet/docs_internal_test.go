@@ -42,7 +42,7 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/security.md", "can run for up to %d more seconds", []any{maxWaitSeconds}},
 		{"docs/security.md", "One login can hold %d waits open at once", []any{defaultMaxWaitsPerLogin}},
 		{"docs/security.md", "and times out after %d seconds", []any{seconds(callbackRequestTimeout)}},
-		{"docs/security.md", "whose body is over %d KiB or whose headers are over %d KiB", []any{kib(maxCallbackResponseBytes), kib(maxCallbackHeaderBytes)}},
+		{"docs/security.md", "declares a body over %d KiB or that has headers over %d KiB", []any{kib(maxCallbackResponseBytes), kib(maxCallbackHeaderBytes)}},
 		{"docs/events.md", "the cursor and the %d deliveries that a subscription may hold", []any{MaxPendingDeliveries}},
 		{"docs/webhooks.md", "url not verified here in the last %d minutes", []any{minutes(callbackVerificationTTL)}},
 		{"docs/webhooks.md", "verified that login and URL in the last %d minutes", []any{minutes(callbackVerificationTTL)}},
