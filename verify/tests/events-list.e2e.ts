@@ -2,7 +2,7 @@ import { describe, expect, newRepoId, test } from './support';
 import { newMarker, subscribe, subscribeParams, unsubscribe } from './subscriptions';
 
 const EVENTS_EXTENSION = 'io.modelcontextprotocol/events';
-const families = ['ci.runs', 'ci.checks', 'pr.activity', 'pr.reviews', 'pr.comments'];
+const families = ['ci.runs', 'ci.checks', 'pr.activity', 'pr.reviews', 'pr.comments', 'pr.review_comments', 'pr.review_threads'];
 const eventNames = [...families, 'ci.check_completed', 'ci.run_completed', 'pr.closed', 'pr.comment_created', 'pr.review_submitted'];
 const noHeadCommit = ['pr.comments', 'pr.comment_created'];
 const WEBHOOK_UNSUPPORTED = {
@@ -39,7 +39,7 @@ describe('events list', () => {
     expect(reply.result?.capabilities.extensions?.[EVENTS_EXTENSION]).toEqual({ listChanged: false });
   });
 
-  test('events/list returns the five families and the five exact types, each with poll and webhook delivery and two schemas', async ({ faucet }) => {
+  test('events/list returns the seven families and the five exact types, each with poll and webhook delivery and two schemas', async ({ faucet }) => {
     const reply = await faucet.mcp<ListResult>('events/list');
     const events = reply.result?.events ?? [];
 

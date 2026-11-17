@@ -13,16 +13,18 @@ import (
 )
 
 var (
-	allFamilies = []string{"ci.runs", "ci.checks", "pr.activity", "pr.reviews", "pr.comments"}
+	allFamilies = []string{"ci.runs", "ci.checks", "pr.activity", "pr.reviews", "pr.comments", "pr.review_comments", "pr.review_threads"}
 	allNames    = append(slices.Clone(allFamilies), allTypes...)
 	// typePrefix is the naming rule of the exact types: the exact type of
 	// action X of a family is its prefix followed by X.
 	typePrefix = map[string]string{
-		"ci.runs":     "ci.run_",
-		"ci.checks":   "ci.check_",
-		"pr.activity": "pr.",
-		"pr.reviews":  "pr.review_",
-		"pr.comments": "pr.comment_",
+		"ci.runs":            "ci.run_",
+		"ci.checks":          "ci.check_",
+		"pr.activity":        "pr.",
+		"pr.reviews":         "pr.review_",
+		"pr.comments":        "pr.comment_",
+		"pr.review_comments": "pr.review_comment_",
+		"pr.review_threads":  "pr.review_thread_",
 	}
 	// documentedActions are the actions of each pull request event in GitHub's
 	// published webhook schemas, which octokit/webhooks keeps in
@@ -36,8 +38,10 @@ var (
 			"edited", "enqueued", "labeled", "locked", "milestoned", "opened", "ready_for_review", "reopened",
 			"review_request_removed", "review_requested", "synchronize", "unassigned", "unlabeled", "unlocked",
 		}},
-		"pr.reviews":  {"pull_request_review", []string{"dismissed", "edited", "submitted"}},
-		"pr.comments": {"issue_comment", []string{"created", "deleted", "edited"}},
+		"pr.reviews":         {"pull_request_review", []string{"dismissed", "edited", "submitted"}},
+		"pr.comments":        {"issue_comment", []string{"created", "deleted", "edited"}},
+		"pr.review_comments": {"pull_request_review_comment", []string{"created", "deleted", "edited"}},
+		"pr.review_threads":  {"pull_request_review_thread", []string{"resolved", "unresolved"}},
 	}
 )
 

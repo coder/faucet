@@ -136,6 +136,32 @@ var families = []*family{
     "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
 }`,
 	},
+	{
+		name:        "pr.review_comments",
+		githubEvent: "pull_request_review_comment",
+		description: "Comments on the diff of a pull request that were created, edited or deleted. Each belongs to a review.",
+		properties: `{
+    "comment_id": {"type": "integer"},
+    "review_id": {"type": "integer", "description": "The review that the comment belongs to."},
+    "user_login": {"type": "string", "description": "The author of the comment."},
+    "html_url": {"type": "string"},
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
+}`,
+	},
+	{
+		name:        "pr.review_threads",
+		githubEvent: "pull_request_review_thread",
+		description: "Threads of review comments on a pull request that were resolved or unresolved.",
+		properties: `{
+    "thread_node_id": {"type": "string", "description": "The GraphQL node ID of the thread, its only ID in the payload."},
+    "comment_ids": {"type": "array", "items": {"type": "integer"}, "description": "The review comments in the thread."},
+    "user_login": {"type": "string", "description": "The author of the comment that started the thread."},
+    "html_url": {"type": "string", "description": "The comment that started the thread."},
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
+}`,
+	},
 }
 
 var legacyNames = []legacyName{

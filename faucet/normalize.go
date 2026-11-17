@@ -53,6 +53,13 @@ var rules = map[string]rule{
 	"issue_comment.created": {eventType: "pr.comment_created", extract: decode(issueComment)},
 	"issue_comment.deleted": {eventType: "pr.comment_deleted", extract: decode(issueComment)},
 	"issue_comment.edited":  {eventType: "pr.comment_edited", extract: decode(issueComment)},
+
+	"pull_request_review_comment.created": {eventType: "pr.review_comment_created", extract: decode(reviewComment)},
+	"pull_request_review_comment.deleted": {eventType: "pr.review_comment_deleted", extract: decode(reviewComment)},
+	"pull_request_review_comment.edited":  {eventType: "pr.review_comment_edited", extract: decode(reviewComment)},
+
+	"pull_request_review_thread.resolved":   {eventType: "pr.review_thread_resolved", extract: decode(reviewThread)},
+	"pull_request_review_thread.unresolved": {eventType: "pr.review_thread_unresolved", extract: decode(reviewThread)},
 }
 
 type envelope struct {
@@ -240,7 +247,8 @@ type user struct {
 	ID    int64  `json:"id"`
 }
 
-// pullRequestHead is the pull request that a review names.
+// pullRequestHead is the pull request of a review, a review comment or a
+// review thread.
 type pullRequestHead struct {
 	Number int32 `json:"number"`
 	Head   struct {
@@ -400,4 +408,60 @@ func issueComment(p issueCommentPayload) (fields, bool) {
 			"html_url":   p.Comment.HTMLURL,
 		}, p.Sender),
 	}, true
+}
+
+type reviewCommentPayload struct {
+	Comment struct {
+		ID       int64  `json:"id"`
+		ReviewID int64  `json:"pull_request_review_id"`
+		User     user   `json:"user"`
+		HTMLURL  string `json:"html_url"`
+	} `json:"comment"`
+	PullRequest pullRequestHead `json:"pull_request"`
+	Sender      user            `json:"sender"`
+}
+
+func reviewComment(p reviewCommentPayload) (fields, bool) {
+	return p.PullRequest.fields(withSender(map[string]any{
+		"comment_id": p.Comment.ID,
+		"review_id":  p.Comment.ReviewID,
+		"user_login": p.Comment.User.Login,
+		"html_url":   p.Comment.HTMLURL,
+	}, p.Sender)), true
+}
+
+type reviewThreadPayload struct {
+	Thread struct {
+		NodeID   string `json:"node_id"`
+		Comments []struct {
+			ID          int64  `json:"id"`
+			InReplyToID *int64 `json:"in_reply_to_id"`
+			User        user   `json:"user"`
+			HTMLURL     string `json:"html_url"`
+		} `json:"comments"`
+	} `json:"thread"`
+	PullRequest pullRequestHead `json:"pull_request"`
+	Sender      user            `json:"sender"`
+}
+
+// reviewThread names the thread by the comment that started it, the one that
+// replies to no other.
+func reviewThread(p reviewThreadPayload) (fields, bool) {
+	comments := p.Thread.Comments
+	ids := make([]int64, len(comments))
+	for i, c := range comments {
+		ids[i] = c.ID
+	}
+	data := withSender(map[string]any{
+		"thread_node_id": p.Thread.NodeID,
+		"comment_ids":    ids,
+	}, p.Sender)
+	for _, c := range comments {
+		if c.InReplyToID == nil {
+			data["user_login"] = c.User.Login
+			data["html_url"] = c.HTMLURL
+			break
+		}
+	}
+	return p.PullRequest.fields(data), true
 }

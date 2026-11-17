@@ -110,6 +110,8 @@ func TestRedeliverTracksOnlyWhatNormalizeStores(t *testing.T) {
 		{"pull_request", "pull_request_closed"},
 		{"pull_request", "pull_request_opened"},
 		{"issue_comment", "issue_comment_created_on_pr"},
+		{"pull_request_review_comment", "pull_request_review_comment_created"},
+		{"pull_request_review_thread", "pull_request_review_thread_resolved"},
 	} {
 		webhooks = append(webhooks,
 			webhook{c.fixture, c.event, readFixture(t, c.fixture)},
@@ -144,7 +146,7 @@ func TestRedeliverTracksOnlyWhatNormalizeStores(t *testing.T) {
 			stored++
 		}
 	}
-	require.Equal(t, 10, stored, "the table covers every event that faucet stores")
+	require.Equal(t, 13, stored, "the table covers every event that faucet stores")
 }
 
 func TestRedeliverAsksAgainForAFailedPullRequestOpened(t *testing.T) {

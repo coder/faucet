@@ -409,6 +409,8 @@ func TestPolledDataMatchesThePayloadSchema(t *testing.T) {
 		{"pull_request", "pull_request_ready_for_review"},
 		{"issue_comment", "issue_comment_created_on_pr"},
 		{"issue_comment", "issue_comment_deleted_on_pr"},
+		{"pull_request_review_comment", "pull_request_review_comment_created"},
+		{"pull_request_review_thread", "pull_request_review_thread_resolved"},
 	}
 	want := map[string]int{}
 	for i, d := range deliveries {

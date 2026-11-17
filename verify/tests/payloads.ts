@@ -270,6 +270,44 @@ export const recordedSamples: Record<string, Sample> = {
       },
     },
   },
+  'pull_request_review_comment.created': {
+    event: 'pull_request_review_comment',
+    payload: (repoId) => recorded('pull_request_review_comment_created', repoId),
+    expected: {
+      type: 'pr.review_comment_created',
+      family: 'pr.review_comments',
+      action: 'created',
+      prs: [2],
+      headSha: RECORDED_SHA,
+      data: {
+        comment_id: 284312630,
+        review_id: 237895671,
+        user_login: 'Codertocat',
+        html_url: 'https://github.com/Codertocat/Hello-World/pull/2#discussion_r284312630',
+        sender_login: 'Codertocat',
+        sender_id: 21031067,
+      },
+    },
+  },
+  'pull_request_review_thread.resolved': {
+    event: 'pull_request_review_thread',
+    payload: (repoId) => recorded('pull_request_review_thread_resolved', repoId),
+    expected: {
+      type: 'pr.review_thread_resolved',
+      family: 'pr.review_threads',
+      action: 'resolved',
+      prs: [2],
+      headSha: RECORDED_SHA,
+      data: {
+        thread_node_id: 'PRRT_kwDOFd42Pc4rQOUv',
+        comment_ids: [284312630],
+        user_login: 'Codertocat',
+        html_url: 'https://github.com/Codertocat/Hello-World/pull/2#discussion_r284312630',
+        sender_login: 'Codertocat',
+        sender_id: 21031067,
+      },
+    },
+  },
 };
 
 // dataOf is the data of an event of the sample, as events/poll and webhook delivery send it.

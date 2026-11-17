@@ -219,6 +219,26 @@ func TestNormalize(t *testing.T) {
 			wantSHA:  "",
 			wantData: `{"comment_id":492700400,"user_login":"Codertocat","html_url":"https://github.com/Codertocat/Hello-World/issues/1#issuecomment-492700400","sender_login":"Codertocat","sender_id":21031067}`,
 		},
+		{
+			name:     "ReviewCommentCreated",
+			event:    "pull_request_review_comment",
+			fixture:  "pull_request_review_comment_created",
+			wantType: "pr.review_comment_created",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: `{"comment_id":284312630,"review_id":237895671,"user_login":"Codertocat","html_url":"https://github.com/Codertocat/Hello-World/pull/2#discussion_r284312630","sender_login":"Codertocat","sender_id":21031067}`,
+		},
+		{
+			name:     "ReviewThreadResolved",
+			event:    "pull_request_review_thread",
+			fixture:  "pull_request_review_thread_resolved",
+			wantType: "pr.review_thread_resolved",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: `{"thread_node_id":"PRRT_kwDOFd42Pc4rQOUv","comment_ids":[284312630],"user_login":"Codertocat","html_url":"https://github.com/Codertocat/Hello-World/pull/2#discussion_r284312630","sender_login":"Codertocat","sender_id":21031067}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -395,6 +415,8 @@ func TestNormalizeRejects(t *testing.T) {
 		{"pull_request_review", "pull_request_review_submitted"},
 		{"pull_request", "pull_request_closed"},
 		{"issue_comment", "issue_comment_created_on_pr"},
+		{"pull_request_review_comment", "pull_request_review_comment_created"},
+		{"pull_request_review_thread", "pull_request_review_thread_resolved"},
 	}
 	for _, h := range handled {
 		t.Run(h.event, func(t *testing.T) {
