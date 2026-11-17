@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
+	"strings"
 
 	"golang.org/x/xerrors"
 
@@ -20,20 +22,202 @@ var (
 	ErrInvalidToken = xerrors.New("GitHub rejected the token")
 )
 
-// Principal is an authenticated caller. The token is never exposed: every
-// fmt verb prints the login only.
-type Principal struct {
-	Login string
-	token string
+// Scope is a permission that a principal holds. Each MCP method needs one.
+type Scope string
+
+const (
+	// ScopeEventsRead lets a caller wait for events and poll them.
+	ScopeEventsRead Scope = "events:read"
+	// ScopeEventsSubscribe lets a caller subscribe to events and unsubscribe.
+	ScopeEventsSubscribe Scope = "events:subscribe"
+)
+
+// knownScopes holds every scope, each at its bit in a scopeSet.
+var knownScopes = []Scope{ScopeEventsRead, ScopeEventsSubscribe}
+
+// ParseScope returns the scope named s, or an error when faucet knows no
+// such scope.
+func ParseScope(s string) (Scope, error) {
+	for _, known := range knownScopes {
+		if string(known) == s {
+			return known, nil
+		}
+	}
+	return "", xerrors.Errorf("unknown scope %q", s)
 }
 
-// NewPrincipal returns a Principal. The token is what TokenAuthorizer sends to
-// GitHub. An Authorizer that does not call GitHub can take an empty token.
-func NewPrincipal(login, token string) (Principal, error) {
-	if login == "" {
-		return Principal{}, xerrors.New("login is required")
+type scopeSet uint8
+
+func newScopeSet(scopes []Scope) (scopeSet, error) {
+	var set scopeSet
+	for _, s := range scopes {
+		i := slices.Index(knownScopes, s)
+		if i < 0 {
+			return 0, xerrors.Errorf("unknown scope %q", s)
+		}
+		set |= 1 << i
 	}
-	return Principal{Login: login, token: token}, nil
+	if set == 0 {
+		return 0, xerrors.New("at least one scope is required")
+	}
+	return set, nil
+}
+
+// principalKind says how a caller authenticated, and so how its repository
+// access is checked.
+type principalKind int
+
+const (
+	// kindGitHubToken sent a GitHub token, such as a pasted personal access
+	// token. GitHub answers for its access.
+	kindGitHubToken principalKind = iota + 1
+	// kindOAuthUser logged in through faucet's OAuth server.
+	kindOAuthUser
+	// kindService is a client that an operator made, with preset grants.
+	kindService
+)
+
+// OAuthSession names the faucet login session of an OAuth user and the
+// GitHub connection that the session uses. An access check that one session
+// made is not fresh for another session of the same connection.
+type OAuthSession struct {
+	SessionID    string
+	ConnectionID string
+}
+
+// ServiceClient is a client that an operator made, and the repositories its
+// grants name. No grant is empty or holds a NUL byte.
+type ServiceClient struct {
+	ClientID string
+	Grants   []string
+}
+
+// grantSeparator joins the grants of a service into one string, which keeps
+// Principal comparable and its grants out of a caller's reach.
+const grantSeparator = "\x00"
+
+// Principal is an authenticated caller: a login, the scopes it holds, and the
+// kind of caller it is. Build one with NewPrincipal, NewOAuthUser or
+// NewService. The zero value holds no scope, so every method that needs one
+// denies it. A GitHub token is never exposed: every fmt verb prints the login
+// only.
+type Principal struct {
+	Login  string
+	kind   principalKind
+	scopes scopeSet
+	// token is the GitHub token of a kindGitHubToken caller.
+	token   string
+	session OAuthSession
+	// clientID and grants are those of a kindService caller, the grants
+	// joined by grantSeparator.
+	clientID string
+	grants   string
+}
+
+// githubLogin rejects a login that GitHub cannot give, so that only a service
+// has a login with a colon.
+func githubLogin(login string) error {
+	switch {
+	case login == "":
+		return xerrors.New("login is required")
+	case strings.Contains(login, ":"):
+		return xerrors.New("a GitHub login holds no colon")
+	}
+	return nil
+}
+
+// NewPrincipal returns a caller who sent a GitHub token, such as a pasted
+// personal access token. It holds every scope. The token is what
+// TokenAuthorizer sends to GitHub. An Authorizer that does not call GitHub
+// can take an empty token.
+func NewPrincipal(login, token string) (Principal, error) {
+	if err := githubLogin(login); err != nil {
+		return Principal{}, err
+	}
+	return Principal{Login: login, kind: kindGitHubToken, scopes: 1<<len(knownScopes) - 1, token: token}, nil
+}
+
+// NewOAuthUser returns a caller who logged in through faucet's OAuth server.
+// login is the bare GitHub login, so the wait limit and the subscriptions of
+// a person are the same whichever way they authenticate.
+func NewOAuthUser(login string, session OAuthSession, scopes []Scope) (Principal, error) {
+	if err := githubLogin(login); err != nil {
+		return Principal{}, err
+	}
+	if session.SessionID == "" || session.ConnectionID == "" {
+		return Principal{}, xerrors.New("an OAuth user needs a session ID and a connection ID")
+	}
+	set, err := newScopeSet(scopes)
+	if err != nil {
+		return Principal{}, err
+	}
+	return Principal{Login: login, kind: kindOAuthUser, scopes: set, session: session}, nil
+}
+
+// NewService returns a service client. Its login is "svc:" and the client
+// ID. A GitHub login cannot hold a colon, so it never equals a person's.
+func NewService(client ServiceClient, scopes []Scope) (Principal, error) {
+	if client.ClientID == "" {
+		return Principal{}, xerrors.New("a service needs a client ID")
+	}
+	for _, grant := range client.Grants {
+		if grant == "" || strings.Contains(grant, grantSeparator) {
+			return Principal{}, xerrors.New("a grant is not empty and holds no NUL byte")
+		}
+	}
+	set, err := newScopeSet(scopes)
+	if err != nil {
+		return Principal{}, err
+	}
+	return Principal{
+		Login: "svc:" + client.ClientID, kind: kindService, scopes: set,
+		clientID: client.ClientID, grants: strings.Join(client.Grants, grantSeparator),
+	}, nil
+}
+
+// HasScope reports whether p holds scope.
+func (p Principal) HasScope(scope Scope) bool {
+	i := slices.Index(knownScopes, scope)
+	return i >= 0 && p.scopes&(1<<i) != 0
+}
+
+// Scopes returns the scopes that p holds, in a fixed order.
+func (p Principal) Scopes() []Scope {
+	return slices.DeleteFunc(slices.Clone(knownScopes), func(s Scope) bool { return !p.HasScope(s) })
+}
+
+// Authenticated reports whether p came from one of the constructors and
+// still has the login that it gave: a GitHub login for a caller with a GitHub
+// token or an OAuth user, and "svc:" and the client ID for a service. A
+// Principal built by hand, or one whose Login was changed, is no kind of
+// caller.
+func (p Principal) Authenticated() bool {
+	switch p.kind {
+	case kindGitHubToken, kindOAuthUser:
+		return githubLogin(p.Login) == nil
+	case kindService:
+		return p.Login == "svc:"+p.clientID
+	}
+	return false
+}
+
+// OAuthSession returns the session of an OAuth user, and false for any other
+// kind of caller.
+func (p Principal) OAuthSession() (OAuthSession, bool) {
+	return p.session, p.kind == kindOAuthUser
+}
+
+// ServiceClient returns the client of a service, and false for any other kind
+// of caller.
+func (p Principal) ServiceClient() (ServiceClient, bool) {
+	if p.kind != kindService {
+		return ServiceClient{}, false
+	}
+	client := ServiceClient{ClientID: p.clientID}
+	if p.grants != "" {
+		client.Grants = strings.Split(p.grants, grantSeparator)
+	}
+	return client, true
 }
 
 // Format implements fmt.Formatter so that no verb can print the token.
@@ -41,10 +225,18 @@ func (p Principal) Format(f fmt.State, _ rune) {
 	_, _ = fmt.Fprintf(f, "Principal{Login:%q}", p.Login)
 }
 
+// Authorizer decides which repositories a principal may read. It answers for
+// every kind of principal that its host authenticates, and an Authorizer
+// that sends each kind to another Authorizer must send both calls on.
 type Authorizer interface {
 	// RepoID returns the numeric ID of repo, written owner/name, when p can
-	// read it. It returns ErrNoAccess when p cannot.
+	// read it. It returns ErrNoAccess when p cannot. It may answer from what
+	// it remembers.
 	RepoID(ctx context.Context, p Principal, repo string) (int64, error)
+	// RepoIDFresh is RepoID that never answers from what it remembers: it
+	// asks the source of the answer again. events/subscribe calls it, because
+	// every renewal must check access again.
+	RepoIDFresh(ctx context.Context, p Principal, repo string) (int64, error)
 }
 
 // TokenAuthorizer asks the GitHub API whether the principal's own token can
@@ -65,12 +257,22 @@ func (a TokenAuthorizer) Validate() error {
 	return err
 }
 
+// RepoIDFresh implements Authorizer. TokenAuthorizer remembers nothing, so
+// it is RepoID.
+func (a TokenAuthorizer) RepoIDFresh(ctx context.Context, p Principal, repo string) (int64, error) {
+	return a.RepoID(ctx, p, repo)
+}
+
 // RepoID implements Authorizer with GET {BaseURL}/repos/{owner}/{name}.
-// 403 and 404 both give ErrNoAccess.
+// 403 and 404 both give ErrNoAccess, and so does a caller without a GitHub
+// token, for whom GitHub cannot answer.
 func (a TokenAuthorizer) RepoID(ctx context.Context, p Principal, repo string) (int64, error) {
 	owner, name, err := githubapi.ParseRepo(repo)
 	if err != nil {
 		return 0, err
+	}
+	if p.token == "" {
+		return 0, ErrNoAccess
 	}
 	var body struct {
 		ID int64 `json:"id"`

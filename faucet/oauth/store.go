@@ -1,0 +1,86 @@
+package oauth
+
+import (
+	"context"
+	"time"
+
+	"golang.org/x/xerrors"
+
+	"github.com/coder/faucet/faucet"
+)
+
+// SubjectKind says what an access token was issued to.
+type SubjectKind string
+
+const (
+	// SubjectService is a service client. The subject is its client ID.
+	SubjectService SubjectKind = "service"
+	// SubjectUser is a user's login session. The subject is the session ID.
+	SubjectUser SubjectKind = "user"
+)
+
+// subjectOf holds every subject kind. It returns the subject that a principal
+// of that kind is, and false for a principal of another kind.
+var subjectOf = map[SubjectKind]func(faucet.Principal) (string, bool){
+	SubjectService: func(p faucet.Principal) (string, bool) {
+		client, ok := p.ServiceClient()
+		return client.ClientID, ok
+	},
+	SubjectUser: func(p faucet.Principal) (string, bool) {
+		session, ok := p.OAuthSession()
+		return session.SessionID, ok
+	},
+}
+
+// ErrUnknownToken means the store holds no access token with that hash.
+var ErrUnknownToken = xerrors.New("unknown access token")
+
+// AccessToken is an access token as a store keeps it: its hash, never the
+// token.
+type AccessToken struct {
+	Hash      TokenHash
+	ExpiresAt time.Time
+	Scopes    []faucet.Scope
+	// Resource is the one endpoint that the token was issued for, such as
+	// https://faucet.example.com/github/mcp.
+	Resource    string
+	SubjectKind SubjectKind
+	// Subject is the client ID of a service or the session ID of a user.
+	Subject string
+}
+
+// Validate reports whether a store may keep t.
+func (t AccessToken) Validate() error {
+	switch {
+	case t.Hash == TokenHash{}:
+		return xerrors.New("an access token needs its hash")
+	case t.ExpiresAt.IsZero():
+		return xerrors.New("an access token needs an expiry")
+	case len(t.Scopes) == 0:
+		return xerrors.New("an access token needs at least one scope")
+	case t.Resource == "":
+		return xerrors.New("an access token needs a resource")
+	case subjectOf[t.SubjectKind] == nil:
+		return xerrors.Errorf("unknown subject kind %q", t.SubjectKind)
+	case t.Subject == "":
+		return xerrors.New("an access token needs a subject")
+	}
+	for _, s := range t.Scopes {
+		if _, err := faucet.ParseScope(string(s)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Store keeps faucet's access tokens. storetest.RunOAuth checks an
+// implementation.
+type Store interface {
+	// InsertAccessToken stores t. It fails when t is not valid, or when the
+	// store holds a token with the same hash.
+	InsertAccessToken(ctx context.Context, t AccessToken) error
+	// AccessToken returns the token whose hash is hash as it is stored,
+	// expired or not, or ErrUnknownToken. A stored token need not pass
+	// Validate: a later build can write a scope that this one does not know.
+	AccessToken(ctx context.Context, hash TokenHash) (AccessToken, error)
+}
