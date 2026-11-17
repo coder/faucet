@@ -22,6 +22,6 @@ func TestTheMetadataFollowsTheGrantTable(t *testing.T) {
 	require.Equal(t, []string{"client_secret_basic", "none"}, m.TokenEndpointAuthMethodsSupported)
 
 	m = metadataOf("https://faucet.example.com", grants)
-	require.Empty(t, m.AuthorizationEndpoint, "no grant in this build uses the authorization endpoint")
+	require.Equal(t, "https://faucet.example.com/oauth/authorize", m.AuthorizationEndpoint, "listed though no grant in this build uses it")
 	require.Equal(t, []string{}, m.ResponseTypesSupported)
 }

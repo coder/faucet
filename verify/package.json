@@ -8,6 +8,7 @@
   },
   "devDependencies": {
     "@e2e-dev/web": "0.16.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@types/node": "22.20.5",
     "e2e": "0.23.1",
     "typescript": "7.0.2"

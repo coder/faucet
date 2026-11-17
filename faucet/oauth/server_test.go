@@ -48,6 +48,7 @@ func newTokenHarness(t *testing.T) *tokenHarness {
 	mux := http.NewServeMux()
 	mux.Handle("GET "+oauth.MetadataPath, server.MetadataHandler())
 	mux.Handle("POST "+oauth.TokenPath, server.TokenHandler())
+	mux.Handle(oauth.AuthorizePath, server.AuthorizeHandler())
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return &tokenHarness{t: t, store: store, clock: clock, srv: srv, secret: secret}
@@ -114,6 +115,7 @@ func TestTheMetadataNamesTheGrantTable(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
 	require.Equal(t, map[string]any{
 		"issuer":                                issuer,
+		"authorization_endpoint":                issuer + "/oauth/authorize",
 		"token_endpoint":                        issuer + "/oauth/token",
 		"scopes_supported":                      []any{"events:read", "events:subscribe"},
 		"response_types_supported":              []any{},
@@ -339,5 +341,27 @@ func TestNewServerNeedsABareIssuer(t *testing.T) {
 	} {
 		_, err := oauth.NewServer(d)
 		require.Error(t, err)
+	}
+}
+
+// No grant uses the authorization endpoint yet. It refuses every request in
+// place and never redirects, since it knows no client's redirect URI.
+func TestTheAuthorizationEndpointTakesNoResponseTypeYet(t *testing.T) {
+	t.Parallel()
+	h := newTokenHarness(t)
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		query := url.Values{"response_type": {"code"}, "client_id": {"https://agent.example.com/client.json"}, "redirect_uri": {"http://127.0.0.1:5555/cb"}, "state": {"s"}}
+		req, err := http.NewRequestWithContext(context.Background(), method, h.srv.URL+oauth.AuthorizePath+"?"+query.Encode(), nil)
+		require.NoError(t, err)
+		client := h.srv.Client()
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+		_ = resp.Body.Close()
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, method)
+		require.Empty(t, resp.Header.Get("Location"))
+		require.Equal(t, "unsupported_response_type", body["error"], method)
 	}
 }

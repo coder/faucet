@@ -26,9 +26,8 @@ const (
 	MetadataPath = "/.well-known/oauth-authorization-server"
 	// TokenPath is the token endpoint under the issuer.
 	TokenPath = "/oauth/token" //nolint:gosec // A URL path, not a credential.
-	// authorizePath is the authorization endpoint under the issuer, for a
-	// grant with a response type.
-	authorizePath = "/oauth/authorize"
+	// AuthorizePath is the authorization endpoint under the issuer.
+	AuthorizePath = "/oauth/authorize"
 
 	accessTokenLifetime  = 15 * time.Minute
 	maxTokenRequestBytes = 16 << 10
@@ -84,8 +83,11 @@ func NewServer(d ServerDeps) (*Server, error) {
 }
 
 type authServerMetadata struct {
-	Issuer                            string   `json:"issuer"`
-	AuthorizationEndpoint             string   `json:"authorization_endpoint,omitempty"`
+	Issuer string `json:"issuer"`
+	// AuthorizationEndpoint is listed even when no grant uses it: the
+	// TypeScript MCP SDK refuses metadata without it, whatever grant it asks
+	// for.
+	AuthorizationEndpoint             string   `json:"authorization_endpoint"`
 	TokenEndpoint                     string   `json:"token_endpoint"`
 	ScopesSupported                   []string `json:"scopes_supported"`
 	ResponseTypesSupported            []string `json:"response_types_supported"`
@@ -102,6 +104,7 @@ type authServerMetadata struct {
 func metadataOf(issuer string, table map[string]grant) authServerMetadata {
 	m := authServerMetadata{
 		Issuer:                        issuer,
+		AuthorizationEndpoint:         issuer + AuthorizePath,
 		TokenEndpoint:                 issuer + TokenPath,
 		ResponseTypesSupported:        []string{},
 		GrantTypesSupported:           slices.Sorted(maps.Keys(table)),
@@ -119,9 +122,6 @@ func metadataOf(issuer string, table map[string]grant) authServerMetadata {
 	slices.Sort(m.TokenEndpointAuthMethodsSupported)
 	m.TokenEndpointAuthMethodsSupported = slices.Compact(m.TokenEndpointAuthMethodsSupported)
 	slices.Sort(m.ResponseTypesSupported)
-	if len(m.ResponseTypesSupported) > 0 {
-		m.AuthorizationEndpoint = issuer + authorizePath
-	}
 	return m
 }
 
@@ -136,6 +136,20 @@ func (s *Server) MetadataHandler() http.Handler {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(body)
+	})
+}
+
+// AuthorizeHandler serves the authorization endpoint at AuthorizePath. No
+// grant of the grant table uses it yet, so it answers every request with
+// unsupported_response_type, and never redirects, because it knows no
+// client's redirect URI.
+func (s *Server) AuthorizeHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		s.logger.Info(r.Context(), "authorization request refused, no grant uses the endpoint")
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "unsupported_response_type", "error_description": "faucet takes no grant through the authorization endpoint yet",
+		})
 	})
 }
 

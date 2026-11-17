@@ -6,7 +6,7 @@ A service agent, such as one that analyzes GitHub events, logs in to faucet with
 
 - `faucet clients create -resource <url> [-scope <scopes>] -grant repo:<owner>/<name> <client-id>` prints the client ID and a `fcs_` secret once; `faucet clients list` shows every client without a secret; `faucet clients disable <client-id>` ends one. The commands read `DATABASE_URL`. An ID is never given to a second client.
 - Every 401 from `/github/mcp` and `/mcp` carries `WWW-Authenticate: Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource<path>", scope="events:read events:subscribe"`, and each path serves its own metadata document, whose `resource` is the path's URL.
-- `/.well-known/oauth-authorization-server` names `POST /oauth/token`, which takes `client_credentials` with HTTP Basic client authentication. A token request without `resource` gets the client's endpoint, and the token holds the scopes asked for that the client holds. The token lasts 15 minutes and works only on the client's endpoint.
+- `/.well-known/oauth-authorization-server` names `/oauth/authorize`, which answers 400 `unsupported_response_type` until a grant uses it (the TypeScript MCP SDK needs the field), and `POST /oauth/token`, which takes `client_credentials` with HTTP Basic client authentication. A token request without `resource` gets the client's endpoint, and the token holds the scopes asked for that the client holds. The token lasts 15 minutes and works only on the client's endpoint.
 - A service may wait on a repository that a grant names, matched by name, once a signed delivery named it: every signed delivery records the repository it names, stored or ignored. Before that the wait tool says faucet has received no delivery from it yet. A repository no grant names is refused with that reason.
 - A disabled client gets no new token, and its token fails on its next request.
 - Without `FAUCET_PUBLIC_URL`, none of these routes exist (404) and the 401 is the bare `Bearer` of [MCP paths](mcp-paths.md).
@@ -17,7 +17,7 @@ An operator runs `faucet clients create` against the production database and giv
 
 ## Driving it with e2e
 
-`tests/service-accounts.e2e.ts` starts a faucet with `FAUCET_PUBLIC_URL` set to its own URL (`withFaucet(..., { publicUrl: true })`), makes clients with the real `faucet clients` command (`Faucet.clients`), delivers a workflow_run whose payload names the repository in full, and runs `cmd/faucet/internal/serviceagent`, a go-sdk client built by `app.mjs`, with the URL, the client ID and the secret (`Faucet.serviceAgent`). The last test checks that the main faucet, which has no `FAUCET_PUBLIC_URL`, serves none of the routes. Live: not reachable from a browser, use `run_tests {files: ["tests/service-accounts.e2e.ts"]}`.
+`tests/service-accounts.e2e.ts` starts a faucet with `FAUCET_PUBLIC_URL` set to its own URL (`withFaucet(..., { publicUrl: true })`), makes clients with the real `faucet clients` command (`Faucet.clients`), delivers a workflow_run whose payload names the repository in full, and runs `cmd/faucet/internal/serviceagent`, a go-sdk client built by `app.mjs`, with the URL, the client ID and the secret (`Faucet.serviceAgent`). A second test logs in with the TypeScript MCP SDK's `ClientCredentialsProvider` (`@modelcontextprotocol/sdk`, pinned in `package.json`). The last test checks that the main faucet, which has no `FAUCET_PUBLIC_URL`, serves none of the routes. Live: not reachable from a browser, use `run_tests {files: ["tests/service-accounts.e2e.ts"]}`.
 
 ## Proof
 

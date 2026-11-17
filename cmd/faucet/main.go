@@ -438,6 +438,7 @@ func newRouter(svc *faucet.Service, tokens bearers, login *oauth.Server, cron cr
 	}
 	if login != nil {
 		r.Method(http.MethodGet, oauth.MetadataPath, login.MetadataHandler())
+		r.Handle(oauth.AuthorizePath, login.AuthorizeHandler())
 		r.Method(http.MethodPost, oauth.TokenPath, login.TokenHandler())
 	}
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {

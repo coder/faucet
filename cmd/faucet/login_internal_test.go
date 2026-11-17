@@ -188,6 +188,10 @@ func TestTheMCPAliasHasItsOwnDiscovery(t *testing.T) {
 	require.NoError(t, json.Unmarshal(body, &meta))
 	require.Equal(t, srv.URL, meta["issuer"])
 	require.Equal(t, srv.URL+"/oauth/token", meta["token_endpoint"])
+	require.Equal(t, srv.URL+"/oauth/authorize", meta["authorization_endpoint"])
+	status, _, body = srv.get(t, "/oauth/authorize?response_type=code")
+	require.Equal(t, http.StatusBadRequest, status)
+	require.Contains(t, string(body), "unsupported_response_type")
 
 	secret := srv.client(t, "old-agent", "/mcp", bothScopes, "repo:octo-org/octo-repo")
 	srv.deliver(t, "d-1")
@@ -281,7 +285,7 @@ func TestAGitHubTokenWorksBesideTheLoginServer(t *testing.T) {
 func TestTheLoginRoutesAreOffWithoutAPublicURL(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
-	for _, path := range []string{"/.well-known/oauth-protected-resource/github/mcp", "/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-authorization-server"} {
+	for _, path := range []string{"/.well-known/oauth-protected-resource/github/mcp", "/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-authorization-server", "/oauth/authorize"} {
 		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+path, nil)
 		require.NoError(t, err)
 		resp, err := srv.Client().Do(req)

@@ -1,3 +1,6 @@
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { ClientCredentialsProvider } from '@modelcontextprotocol/sdk/client/auth-extensions.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { samples } from './payloads';
 import { describe, expect, newDeliveryId, newRepoId, test, type Faucet, type McpPath } from './support';
 
@@ -59,6 +62,33 @@ describe('service accounts', () => {
     }, { publicUrl: true });
   });
 
+  // The TypeScript SDK's discovery parses the metadata with a schema that needs authorization_endpoint, even for a client that
+  // only uses client credentials.
+  test('a TypeScript SDK client logs in with client credentials alone and waits for an event', async ({ faucet }) => {
+    await faucet.withFaucet({}, async (started) => {
+      const repoId = newRepoId();
+      const repo = `verify/r${repoId}`;
+      const secret = await createClient(started, 'ts-agent', '/github/mcp', [`repo:${repo}`]);
+      await deliverRun(started, repoId);
+
+      const provider = new ClientCredentialsProvider({ clientId: 'ts-agent', clientSecret: secret, expectedIssuer: started.baseUrl });
+      const transport = new StreamableHTTPClientTransport(new URL(`${started.baseUrl}/github/mcp`), { authProvider: provider });
+      const client = new Client({ name: 'ts-service-agent', version: '0' });
+      await client.connect(transport);
+      try {
+        const result = (await client.callTool({
+          name: 'wait_for_github_events',
+          arguments: { repo, types: ['ci.run_completed'], cursor: 0, timeout_s: 1 },
+        })) as WaitResult;
+        expect(result.isError, JSON.stringify(result)).not.toBe(true);
+        expect(result.structuredContent?.events).toEqual([expect.objectContaining({ type: 'ci.run_completed', repo_id: repoId })]);
+        expect(provider.tokens()?.access_token).toMatch(/^fct_[A-Za-z0-9_-]{43}$/);
+      } finally {
+        await client.close();
+      }
+    }, { publicUrl: true });
+  });
+
   test('every 401 names the metadata of its path, and /mcp has its own', async ({ faucet }) => {
     await faucet.withFaucet({}, async (started) => {
       for (const path of ['/github/mcp', '/mcp'] as const) {
@@ -80,7 +110,9 @@ describe('service accounts', () => {
       expect(meta.status).toBe(200);
       expect(JSON.parse(meta.body)).toMatchObject({
         issuer: started.baseUrl,
+        authorization_endpoint: `${started.baseUrl}/oauth/authorize`,
         token_endpoint: `${started.baseUrl}/oauth/token`,
+        response_types_supported: [],
         grant_types_supported: ['client_credentials'],
         token_endpoint_auth_methods_supported: ['client_secret_basic'],
       });
@@ -122,7 +154,7 @@ describe('service accounts', () => {
   });
 
   test('without FAUCET_PUBLIC_URL there is no login server', async ({ faucet }) => {
-    for (const path of ['/.well-known/oauth-authorization-server', '/.well-known/oauth-protected-resource/github/mcp', '/.well-known/oauth-protected-resource/mcp']) {
+    for (const path of ['/.well-known/oauth-authorization-server', '/.well-known/oauth-protected-resource/github/mcp', '/.well-known/oauth-protected-resource/mcp', '/oauth/authorize']) {
       expect((await faucet.request(path)).status, path).toBe(404);
     }
     const token = await faucet.request('/oauth/token', {
