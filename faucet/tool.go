@@ -97,19 +97,21 @@ func (in waitInput) parse() (waitRequest, error) {
 	if _, _, err := githubapi.ParseRepo(in.Repo); err != nil {
 		return waitRequest{}, err
 	}
-	known := catalogNames()
 	if len(in.Types) == 0 {
-		return waitRequest{}, xerrors.Errorf("types must name at least one of: %s", strings.Join(known, ", "))
+		return waitRequest{}, xerrors.Errorf("types must name at least one of: %s", strings.Join(catalogNames(), ", "))
 	}
-	for _, t := range in.Types {
-		if !slices.Contains(known, t) {
-			return waitRequest{}, xerrors.Errorf("unknown type %q, the types are: %s", t, strings.Join(known, ", "))
+	var types []string
+	for _, name := range in.Types {
+		entry, ok := lookupEntry(name)
+		if !ok {
+			return waitRequest{}, xerrors.Errorf("unknown type %q, the types are: %s", name, strings.Join(catalogNames(), ", "))
 		}
+		types = append(types, entry.types(nil)...)
 	}
 	if in.SHA != "" && !shaPattern.MatchString(in.SHA) {
 		return waitRequest{}, xerrors.New("sha must be 40 hexadecimal characters")
 	}
-	if in.SHA != "" && !slices.ContainsFunc(in.Types, func(name string) bool { e, _ := lookupEntry(name); return !e.family.noHeadSHA }) {
+	if in.SHA != "" && !slices.ContainsFunc(types, func(t string) bool { return !storedTypes[t].family.noHeadSHA }) {
 		return waitRequest{}, xerrors.New("sha matches none of these types, because they carry no head commit; filter by pr")
 	}
 	if in.PR < 0 {
@@ -126,7 +128,6 @@ func (in waitInput) parse() (waitRequest, error) {
 		return waitRequest{}, xerrors.Errorf("timeout_s must be from 1 to %d", maxWaitSeconds)
 	}
 
-	types := slices.Clone(in.Types)
 	slices.Sort(types)
 	return waitRequest{
 		query: PollQuery{

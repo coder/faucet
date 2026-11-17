@@ -62,7 +62,7 @@ var families = []*family{
 	{
 		name:        "ci.runs",
 		githubEvent: "workflow_run",
-		description: "GitHub Actions workflow runs. A run fires once per run attempt.",
+		description: "GitHub Actions workflow runs. Each run attempt has its own events.",
 		properties: `
     "run_id": {"type": "integer"},
     "name": {"type": "string", "description": "The workflow name."},
@@ -85,7 +85,7 @@ var families = []*family{
 	{
 		name:        "pr.activity",
 		githubEvent: "pull_request",
-		description: "Changes to a pull request.",
+		description: "Pull requests, for example one that was closed.",
 		properties: `
     "merged": {"type": "boolean"},
     "merge_commit_sha": {"type": ["string", "null"], "description": "The merge commit. Before a merge it is the test-merge commit of GitHub or null, so it does not mean the pull request merged. Read merged."},
@@ -94,7 +94,7 @@ var families = []*family{
 	{
 		name:        "pr.reviews",
 		githubEvent: "pull_request_review",
-		description: "Reviews of a pull request.",
+		description: "Reviews on a pull request.",
 		properties: `
     "review_id": {"type": "integer"},
     "state": {"type": "string", "description": "The review state, for example approved, changes_requested or commented."},
@@ -150,7 +150,7 @@ const pollArgumentsTemplate = `{
   "type": "object",
   "properties": {
     "repo": {"type": "string", "description": "The repository, written owner/name."},%s
-    "pr": {"type": "integer", "minimum": 1, "maximum": 2147483647, "description": "Only events that mention this pull request number."}
+    "pr": {"type": "integer", "minimum": 1, "maximum": 2147483647, "description": "Only events that mention this pull request number."}%s
   },
   "required": ["repo"],
   "additionalProperties": false
@@ -163,6 +163,8 @@ const payloadTemplate = `{
   "type": "object",
   "properties": {
     "prs": {"type": "array", "items": {"type": "integer"}, "description": "Pull request numbers the event mentions."},%s
+    "event": {"type": "string", "enum": %s, "description": "The exact event type, for example pr.closed."},
+    "action": {"type": "string", "enum": %s, "description": "The action of the GitHub webhook, for example closed."},
     %s
   },
   "required": [%s]
@@ -174,7 +176,7 @@ const headSHAProperty = `
 // shaInputResolved is the arguments schema of an event type that has a sha. A
 // version before pr.comment_created lost its sha stored subscriptions with one,
 // and events/unsubscribe still reads that shape so they can be ended.
-var shaInputResolved = mustResolve(fmt.Sprintf(pollArgumentsTemplate, shaArgumentProperty))
+var shaInputResolved = mustResolve(fmt.Sprintf(pollArgumentsTemplate, shaArgumentProperty, ""))
 
 func init() {
 	byEvent := map[string]*family{}
@@ -195,25 +197,48 @@ func init() {
 		f.actions = append(f.actions, action)
 		f.types = append(f.types, t)
 	}
+	for _, f := range families {
+		if len(f.actions) == 0 {
+			panic(fmt.Sprintf("event family %s has no action in rules", f.name))
+		}
+		catalog = append(catalog, newFamilyEntry(f))
+	}
 	for _, l := range legacyNames {
 		t, ok := storedTypes[l.name]
 		if !ok {
 			panic(fmt.Sprintf("legacy event name %s is not a stored type", l.name))
 		}
-		catalog = append(catalog, newLegacyEntry(l, t.family))
+		catalog = append(catalog, newLegacyEntry(l, t))
+	}
+	names := catalogNames()
+	if len(slices.Compact(slices.Sorted(slices.Values(names)))) != len(names) {
+		panic(fmt.Sprintf("the event catalog repeats a name: %v", names))
 	}
 }
 
-func newLegacyEntry(l legacyName, f *family) *catalogEntry {
-	input := json.RawMessage(fmt.Sprintf(pollArgumentsTemplate, shaArgument(f)))
-	required := append([]string{"prs"}, l.required...)
+func newFamilyEntry(f *family) *catalogEntry {
+	input := json.RawMessage(fmt.Sprintf(pollArgumentsTemplate, shaArgument(f), ""))
+	resolved := mustResolve(string(input))
+	return &catalogEntry{
+		name:          f.name,
+		description:   f.description,
+		family:        f,
+		inputSchema:   input,
+		payloadSchema: payloadSchemaOf(f, f.types, f.actions, []string{"prs", "event", "action"}),
+		input:         resolved,
+		endInput:      resolved,
+	}
+}
+
+func newLegacyEntry(l legacyName, t storedType) *catalogEntry {
+	input := json.RawMessage(fmt.Sprintf(pollArgumentsTemplate, shaArgument(t.family), ""))
 	return &catalogEntry{
 		name:          l.name,
 		description:   l.description,
-		family:        f,
+		family:        t.family,
 		legacy:        true,
 		inputSchema:   input,
-		payloadSchema: payloadSchemaOf(f, required),
+		payloadSchema: payloadSchemaOf(t.family, []string{l.name}, []string{t.action}, append([]string{"prs"}, l.required...)),
 		input:         mustResolve(string(input)),
 		endInput:      shaInputResolved,
 	}
@@ -226,7 +251,7 @@ func shaArgument(f *family) string {
 	return shaArgumentProperty
 }
 
-func payloadSchemaOf(f *family, required []string) json.RawMessage {
+func payloadSchemaOf(f *family, types, actions, required []string) json.RawMessage {
 	headSHA := headSHAProperty
 	if f.noHeadSHA {
 		headSHA = ""
@@ -235,7 +260,7 @@ func payloadSchemaOf(f *family, required []string) json.RawMessage {
 	for i, name := range required {
 		quoted[i] = fmt.Sprintf("%q", name)
 	}
-	schema := json.RawMessage(fmt.Sprintf(payloadTemplate, headSHA, f.properties, strings.Join(quoted, ", ")))
+	schema := json.RawMessage(fmt.Sprintf(payloadTemplate, headSHA, marshalRaw(types), marshalRaw(actions), f.properties, strings.Join(quoted, ", ")))
 	mustResolve(string(schema))
 	return schema
 }

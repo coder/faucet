@@ -289,9 +289,9 @@ func newPollResult(events []eventOccurrence, cursor int64, truncated, hasMore bo
 	}
 }
 
-// occurrenceOf names the event by the name it was asked for, and adds the pull
-// request numbers and the head SHA to the data, because the store keeps them
-// in columns and the payload schemas list them.
+// occurrenceOf names the event by the name it was asked for. It adds the pull
+// request numbers, the head SHA, the stored type and its action to the data,
+// because the store keeps them in columns and the payload schemas list them.
 func occurrenceOf(name string, ev Event) (eventOccurrence, error) {
 	var data map[string]json.RawMessage
 	if err := json.Unmarshal(ev.Data, &data); err != nil || data == nil {
@@ -304,6 +304,12 @@ func occurrenceOf(name string, ev Event) (eventOccurrence, error) {
 	data["prs"] = marshalRaw(prs)
 	if ev.HeadSHA != "" {
 		data["head_sha"] = marshalRaw(ev.HeadSHA)
+	}
+	data["event"] = marshalRaw(ev.Type)
+	// A type that this build does not know comes from a newer build during a
+	// rolling deploy, through the stored types of a subscription it renewed.
+	if t, ok := storedTypes[ev.Type]; ok {
+		data["action"] = marshalRaw(t.action)
 	}
 	return eventOccurrence{
 		EventID:   ev.DeliveryID,
