@@ -237,6 +237,20 @@ func TestVerifyRefusesAPrincipalThatIsNotTheTokensSubject(t *testing.T) {
 		"another kind for a user": {oauth.SubjectUser, func(_ context.Context, id string, scopes []faucet.Scope) (faucet.Principal, error) {
 			return faucet.NewService(faucet.ServiceClient{ClientID: id}, scopes)
 		}},
+		"a service renamed after a person": {oauth.SubjectService, func(_ context.Context, id string, scopes []faucet.Scope) (faucet.Principal, error) {
+			p, err := faucet.NewService(faucet.ServiceClient{ClientID: id}, scopes)
+			p.Login = "octocat"
+			return p, err
+		}},
+		"a user renamed as a service": {oauth.SubjectUser, func(_ context.Context, id string, scopes []faucet.Scope) (faucet.Principal, error) {
+			p, err := faucet.NewOAuthUser("alice", faucet.OAuthSession{SessionID: id, ConnectionID: "c"}, scopes)
+			p.Login = "svc:ci-bot"
+			return p, err
+		}},
+		"a scope widened in the slice it was given": {oauth.SubjectService, func(_ context.Context, id string, scopes []faucet.Scope) (faucet.Principal, error) {
+			scopes[0] = faucet.ScopeEventsSubscribe
+			return faucet.NewService(faucet.ServiceClient{ClientID: id}, scopes)
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -250,6 +264,7 @@ func TestVerifyRefusesAPrincipalThatIsNotTheTokensSubject(t *testing.T) {
 			}))
 			p, err := v.Verify(context.Background(), token, resource)
 			require.Error(t, err, "the resolver answered for someone the token was not issued to")
+			require.NotErrorIs(t, err, faucet.ErrInvalidToken, "a resolver that answers for another principal is a faucet bug, not a bad token")
 			require.Equal(t, faucet.Principal{}, p)
 		})
 	}

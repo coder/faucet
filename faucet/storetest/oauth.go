@@ -24,6 +24,7 @@ func RunOAuth(t *testing.T, newStore func(t *testing.T) oauth.Store) {
 		{"AccessTokenReadsBackAfterItExpires", accessTokenReadsBackAfterItExpires},
 		{"InsertAccessTokenRefusesASecondTokenWithTheSameHash", insertAccessTokenRefusesASecondTokenWithTheSameHash},
 		{"InsertAccessTokenValidatesInput", insertAccessTokenValidatesInput},
+		{"AccessTokenSharesNoSliceWithItsCaller", accessTokenSharesNoSliceWithItsCaller},
 	}
 	for _, st := range subtests {
 		t.Run(st.name, func(t *testing.T) {
@@ -122,4 +123,22 @@ func insertAccessTokenValidatesInput(t *testing.T, s oauth.Store) {
 			require.ErrorIs(t, err, oauth.ErrUnknownToken, "%s: nothing is stored", name)
 		}
 	}
+}
+
+func accessTokenSharesNoSliceWithItsCaller(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	inserted := accessTokenAt("fct_one", time.Now().Add(time.Minute))
+	inserted.Scopes = []faucet.Scope{faucet.ScopeEventsRead}
+	want := inserted
+	want.Scopes = []faucet.Scope{faucet.ScopeEventsRead}
+	require.NoError(t, s.InsertAccessToken(ctx, inserted))
+	inserted.Scopes[0] = faucet.ScopeEventsSubscribe
+
+	got, err := s.AccessToken(ctx, want.Hash)
+	require.NoError(t, err)
+	requireSameAccessToken(t, want, got)
+	got.Scopes[0] = faucet.ScopeEventsSubscribe
+	again, err := s.AccessToken(ctx, want.Hash)
+	require.NoError(t, err)
+	requireSameAccessToken(t, want, again)
 }

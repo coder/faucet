@@ -76,7 +76,9 @@ func (v *Verifier) Verify(ctx context.Context, token, resource string) (faucet.P
 	if !ok {
 		return faucet.Principal{}, rejected("no resolver for the subject kind " + string(t.SubjectKind))
 	}
-	p, err := resolve(ctx, t.Subject, t.Scopes)
+	// The resolver gets its own copy, so it cannot widen the scopes that
+	// issuedTo checks it against.
+	p, err := resolve(ctx, t.Subject, slices.Clone(t.Scopes))
 	switch {
 	case xerrors.Is(err, faucet.ErrInvalidToken):
 		return faucet.Principal{}, xerrors.Errorf("the %s subject is not live: %w", t.SubjectKind, err)
@@ -89,9 +91,12 @@ func (v *Verifier) Verify(ctx context.Context, token, resource string) (faucet.P
 	return p, nil
 }
 
-// issuedTo checks that p is the subject of t and holds no scope that t does
-// not grant.
+// issuedTo checks that p is the subject of t, under the login of its kind,
+// and holds no scope that t does not grant.
 func issuedTo(p faucet.Principal, t AccessToken) error {
+	if !p.Authenticated() {
+		return xerrors.New("it is no kind of caller, or its login is not the one its kind gives")
+	}
 	if subject, ok := subjectOf[t.SubjectKind](p); !ok || subject != t.Subject {
 		return xerrors.New("it is not the subject of the token")
 	}

@@ -518,3 +518,33 @@ func TestRedeliveryStoreCallThatItsContextCutShortWrapsTheContextError(t *testin
 		})
 	}
 }
+
+func TestOAuthStoreCallThatItsContextCutShortWrapsTheContextError(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	tx, err := db.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	_, err = tx.Exec("LOCK TABLE faucet_access_tokens IN ACCESS EXCLUSIVE MODE")
+	require.NoError(t, err)
+
+	token := oauth.AccessToken{
+		Hash: oauth.HashToken("fct_locked"), ExpiresAt: time.Now().Add(time.Minute), Scopes: []faucet.Scope{faucet.ScopeEventsRead},
+		Resource: "https://faucet.example.com/github/mcp", SubjectKind: oauth.SubjectService, Subject: "ci-bot",
+	}
+	for name, call := range map[string]func(context.Context) error{
+		"InsertAccessToken": func(ctx context.Context) error { return store.InsertAccessToken(ctx, token) },
+		"AccessToken": func(ctx context.Context) error {
+			_, err := store.AccessToken(ctx, token.Hash)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			require.ErrorIs(t, call(ctx), context.DeadlineExceeded, "the statement waits on the lock until the context ends it")
+		})
+	}
+}
