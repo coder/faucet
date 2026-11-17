@@ -29,6 +29,16 @@ An agent asks for events of one `repo` by name, optionally narrowed by `sha`, `p
 <!-- BEGIN generated:events -->
 | Family | GitHub event | Exact types |
 | --- | --- | --- |
+| `ci.runs` | `workflow_run` | `ci.run_completed` |
+| `ci.jobs` | `workflow_job` | none |
+| `ci.checks` | `check_run` | `ci.check_completed` |
+| `ci.suites` | `check_suite` | none |
+| `ci.statuses` | `status` | none |
+| `pr.activity` | `pull_request` | `pr.closed` |
+| `pr.reviews` | `pull_request_review` | `pr.review_submitted` |
+| `pr.comments` | `issue_comment` | `pr.comment_created` |
+| `pr.review_comments` | `pull_request_review_comment` | none |
+| `pr.review_threads` | `pull_request_review_thread` | none |
 <!-- END generated:events -->
 
 Every `/mcp` request carries `Authorization: Bearer <GitHub token>`. Faucet holds no GitHub token of its own: it only returns events for repositories that the caller's token can read. See [docs/security.md](docs/security.md).
@@ -64,12 +74,17 @@ Point any MCP client at `https://<your host>/mcp` with a GitHub token as the bea
 | `GITHUB_WEBHOOK_SECRET` | yes | The GitHub webhook's secret, at least 16 bytes. |
 | `PORT` | no | Listen port. Default 8080. |
 | `FAUCET_GITHUB_API_URL` | no | GitHub API base URL. Default `https://api.github.com`. |
-| `CRON_SECRET` | for cron routes | Bearer token for `/cron/*`. Unset turns the cron routes off. |
-| `FAUCET_RETENTION_DAYS` | no | How long events are kept. Default 30. |
+| `CRON_SECRET` | for cron routes | Bearer token for `/cron/*`: 16 to 1024 printable ASCII characters, no spaces. Unset turns the cron routes off. |
+| `FAUCET_RETENTION_DAYS` | no | How many days events are kept, from 1 to 3650. Default 30. |
 | `FAUCET_WEBHOOK_KEY` | for webhooks | 32 random bytes, base64. Seals subscriber secrets at rest. |
-| `FAUCET_WEBHOOK_CALLBACK_VERIFICATION` | for webhooks | `allowlist` (default) or `handshake`. |
-| `FAUCET_WEBHOOK_ALLOWED_ORIGINS` | in `allowlist` mode | Comma-separated `https://host[:port]` origins that may receive webhooks. |
-| `FAUCET_HOOK_TOKEN`, `FAUCET_HOOK_ID`, `FAUCET_HOOK_ORG` or `FAUCET_HOOK_REPO` | for redelivery | The GitHub webhook to watch for failed deliveries. |
+| `FAUCET_WEBHOOK_CALLBACK_VERIFICATION` | no | How webhook mode checks callback URLs: `allowlist` (default) or `handshake`. |
+| `FAUCET_WEBHOOK_ALLOWED_ORIGINS` | in `allowlist` mode | Comma-separated `https://host[:port]` origins that may receive webhooks. Must be unset in `handshake` mode. |
+| `FAUCET_HOOK_TOKEN` | for redelivery | GitHub token that lists and redelivers the hook's deliveries. |
+| `FAUCET_HOOK_ID` | for redelivery | Numeric ID of the GitHub webhook to watch for failed deliveries. |
+| `FAUCET_HOOK_ORG` | for an org hook | The organization that owns the hook. Set this or `FAUCET_HOOK_REPO`, not both. |
+| `FAUCET_HOOK_REPO` | for a repo hook | The repository that owns the hook, as `owner/name`. |
+| `VERCEL` | set by Vercel | Marks a Vercel deployment. There the server never migrates without `VERCEL_ENV`. |
+| `VERCEL_ENV` | set by Vercel | When set, the server migrates only if it is `production`, and otherwise starts only on a current schema. |
 <!-- END generated:settings -->
 
 The server refuses to start on an invalid or incomplete feature configuration, and it names the variable but never the value. A feature whose variables are unset stays off, and its routes answer 503.

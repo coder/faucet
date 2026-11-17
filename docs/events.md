@@ -12,6 +12,16 @@ flowchart LR
 <!-- BEGIN generated:event-actions -->
 | Family | Actions | Filters |
 | --- | --- | --- |
+| `ci.runs` | `completed`, `in_progress`, `requested` | `head_branch`, `conclusion` |
+| `ci.jobs` | `completed`, `in_progress`, `queued`, `waiting` | `conclusion` |
+| `ci.checks` | `completed`, `created` | `conclusion` |
+| `ci.suites` | `completed` | `conclusion` |
+| `ci.statuses` | `error`, `failure`, `pending`, `success` | none |
+| `pr.activity` | `assigned`, `auto_merge_disabled`, `auto_merge_enabled`, `closed`, `converted_to_draft`, `demilestoned`, `dequeued`, `edited`, `enqueued`, `labeled`, `locked`, `milestoned`, `opened`, `ready_for_review`, `reopened`, `review_request_removed`, `review_requested`, `synchronize`, `unassigned`, `unlabeled`, `unlocked` | `base_branch`, `head_branch` |
+| `pr.reviews` | `dismissed`, `edited`, `submitted` | none |
+| `pr.comments` | `created`, `deleted`, `edited` | none |
+| `pr.review_comments` | `created`, `deleted`, `edited` | none |
+| `pr.review_threads` | `resolved`, `unresolved` | none |
 <!-- END generated:event-actions -->
 
 ## Families and exact types
