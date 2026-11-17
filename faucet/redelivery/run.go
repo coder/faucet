@@ -124,7 +124,11 @@ type Deps struct {
 	// Hooks is GitHub's webhook API for the one webhook that delivers to faucet.
 	Hooks HookAdmin
 	// Clock gives each step its time of record. It is required.
-	Clock  quartz.Clock
+	Clock quartz.Clock
+	// Logger gets one line for each give-up and each gap, the only record
+	// that names them: a run's reply only counts them, and their rows are
+	// deleted later. The zero value logs nothing, so a host passes the logger
+	// that it gives faucet.Deps.
 	Logger slog.Logger
 	// MaxPagesPerRun bounds the pages one run reads. Zero means
 	// DefaultMaxPagesPerRun.
