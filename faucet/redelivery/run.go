@@ -136,7 +136,21 @@ type Deps struct {
 	// MaxAsksPerRun bounds the redelivery requests one run sends. Zero means
 	// DefaultMaxAsksPerRun.
 	MaxAsksPerRun int
+	// Wants says which deliveries a run also tracks although no typed rule
+	// of faucet stores them. A run calls it once, before it reads the first
+	// page and inside the time for reading the list. The predicate it returns
+	// says, for the interests that are live then, whether faucet would store
+	// a delivery of this GitHub event, action and repository
+	// (HookDelivery.RepositoryID). An error fails the run as a failed first
+	// page does. Nil, or a nil predicate, wants nothing.
+	Wants func(ctx context.Context) (wants func(event, action string, repoID int64) bool, err error)
 }
+
+// wanted is the predicate that Deps.Wants returns. A nil wanted wants
+// nothing.
+type wanted func(event, action string, repoID int64) bool
+
+func (w wanted) has(d HookDelivery) bool { return w != nil && w(d.Event, d.Action, d.RepositoryID) }
 
 // Runner runs redelivery. It starts no goroutines.
 type Runner struct {
@@ -146,6 +160,7 @@ type Runner struct {
 	logger   slog.Logger
 	maxPages int
 	maxAsks  int
+	wants    func(context.Context) (func(event, action string, repoID int64) bool, error)
 }
 
 // New returns a Runner for d.
@@ -160,14 +175,23 @@ func New(d Deps) (*Runner, error) {
 	case d.MaxPagesPerRun < 0 || d.MaxAsksPerRun < 0:
 		return nil, xerrors.New("run limits must not be negative")
 	}
-	r := &Runner{store: d.Store, hooks: d.Hooks, clock: d.Clock, logger: d.Logger, maxPages: d.MaxPagesPerRun, maxAsks: d.MaxAsksPerRun}
+	r := &Runner{store: d.Store, hooks: d.Hooks, clock: d.Clock, logger: d.Logger, maxPages: d.MaxPagesPerRun, maxAsks: d.MaxAsksPerRun, wants: d.Wants}
 	if r.maxPages == 0 {
 		r.maxPages = DefaultMaxPagesPerRun
 	}
 	if r.maxAsks == 0 {
 		r.maxAsks = DefaultMaxAsksPerRun
 	}
+	if r.wants == nil {
+		r.wants = wantNothing
+	}
 	return r, nil
+}
+
+// wantNothing is the Deps.Wants of a host that stores no delivery beyond the
+// typed rules.
+func wantNothing(context.Context) (func(event, action string, repoID int64) bool, error) {
+	return func(string, string, int64) bool { return false }, nil
 }
 
 // Result counts what one run did. Every outcome of a delivery is counted
@@ -198,14 +222,15 @@ type Result struct {
 	Ranges  int
 }
 
-// Run asks GitHub to deliver again each failed webhook delivery of an event
-// type that faucet stores, until faucet stores it. Every such delivery
-// ends in exactly one final state, which the run counts and logs: recovered,
-// or given up because every ask was spent (GiveUpLimit) or GitHub's retention
-// ended (GiveUpExpired). A time range of attempts that no run read is counted
-// and logged as a gap (GiveUpGap): the range that expired before a run read it,
-// the range before the first run's lookback, and the open ranges of a webhook
-// that the host replaced.
+// Run asks GitHub to deliver again each failed webhook delivery that it
+// tracks, until faucet stores it. A run tracks a delivery of an event type that
+// faucet stores, and a delivery that a live interest wants (Deps.Wants). Every
+// such delivery ends in exactly one final state, which the run counts and logs:
+// recovered, or given up because every ask was spent (GiveUpLimit) or GitHub's
+// retention ended (GiveUpExpired). A time range of attempts that no run read is
+// counted and logged as a gap (GiveUpGap): the range that expired before a run
+// read it, the range before the first run's lookback, and the open ranges of a
+// webhook that the host replaced.
 //
 // A run keeps its place in GitHub's list, which is newest first, in the store.
 // It reads the newest attempts first, up to the position of the run before it
@@ -239,7 +264,8 @@ type Result struct {
 // so a crash costs an ask and two runs never send the same one. A request that
 // fails stops the asks of the run, and a failed first page stops them as well,
 // because both mean that the token, the hook or GitHub is not working. A
-// first page without a usable Date is a failed first page.
+// first page without a usable Date is a failed first page, and so is an error
+// of Deps.Wants, which the run calls before it reads the first page.
 //
 // When ctx has a deadline, the run keeps to it by construction. It reads the
 // list for half of the time that is left at its start, and a page that is not
@@ -342,7 +368,11 @@ func (r *redeliveryRun) fetch(ctx context.Context, cursor string) (DeliveryPage,
 	return page, nil
 }
 
-func (r *redeliveryRun) classify(page DeliveryPage, bound readBound) pageRead {
+// classify sends every 2xx attempt to succeeded, whatever its event: only a
+// pending delivery changes for it, and the attempts of one GUID share one
+// event and action. So a delivery that a run tracked while an interest wanted
+// it still recovers when that interest has lapsed.
+func (r *redeliveryRun) classify(page DeliveryPage, bound readBound, want wanted) pageRead {
 	p := pageRead{next: page.Next}
 	for _, d := range page.Deliveries {
 		if bound.excludes(deliveredAt(d)) {
@@ -351,17 +381,27 @@ func (r *redeliveryRun) classify(page DeliveryPage, bound readBound) pageRead {
 		}
 		p.attempts++
 		p.oldest = p.oldest.orEarlier(deliveredAt(d))
-		if !faucet.StoresDelivery(d.Event, d.Action) {
-			continue
-		}
-		if d.StatusCode >= 200 && d.StatusCode < 300 {
+		switch {
+		case d.StatusCode >= 200 && d.StatusCode < 300:
 			p.succeeded = append(p.succeeded, d.GUID)
-			continue
+		case faucet.StoresDelivery(d.Event, d.Action) || want.has(d):
+			p.failed = append(p.failed, FailedAttempt{GUID: d.GUID, AttemptID: d.ID, DeliveredAt: d.DeliveredAt})
 		}
-		p.failed = append(p.failed, FailedAttempt{GUID: d.GUID, AttemptID: d.ID, DeliveredAt: d.DeliveredAt})
 	}
 	r.res.Attempts += p.attempts
 	return p
+}
+
+// loadWants calls Deps.Wants inside the time for reading the list, so that a
+// slow call costs the scan and never the asks or the purge.
+func (r *redeliveryRun) loadWants(ctx context.Context) (wanted, error) {
+	wantCtx, cancel := until(ctx, r.budget.scanEnd)
+	defer cancel()
+	want, err := r.runner.wants(wantCtx)
+	if err != nil {
+		return nil, xerrors.Errorf("load the wanted deliveries: %w", err)
+	}
+	return want, nil
 }
 
 func (r *redeliveryRun) step(p pageRead) ScanStep {
@@ -411,6 +451,10 @@ func (r *redeliveryRun) countGap(ctx context.Context, gap Gap, cause string) {
 // scan reads the head of the list and then the open ranges, newest first. It
 // returns whether the head read worked.
 func (r *redeliveryRun) scan(ctx context.Context, scan Scan) (bool, error) {
+	want, err := r.loadWants(ctx)
+	if err != nil {
+		return false, err
+	}
 	top, clearAt, err := topAndClearOf(scan)
 	if err != nil {
 		return false, err
@@ -431,7 +475,7 @@ func (r *redeliveryRun) scan(ctx context.Context, scan Scan) (bool, error) {
 		bound = clearAt.firstRunBound(newest)
 		olderAt = bound.stop
 	}
-	head := r.classify(page, bound)
+	head := r.classify(page, bound, want)
 	step := r.step(head)
 	step.Top, step.Clear = newest.at, date.date
 	cause := gapExpiredUnread
@@ -465,7 +509,7 @@ func (r *redeliveryRun) scan(ctx context.Context, scan Scan) (bool, error) {
 	if err != nil {
 		return true, err
 	}
-	return true, r.readRanges(ctx, live, top.orLater(newest))
+	return true, r.readRanges(ctx, live, top.orLater(newest), want)
 }
 
 func (r *redeliveryRun) closeExpired(ctx context.Context, ranges []Range, date pageDate, clearAt storedClear) ([]Range, error) {
@@ -488,9 +532,9 @@ func (r *redeliveryRun) closeExpired(ctx context.Context, ranges []Range, date p
 	return live, nil
 }
 
-func (r *redeliveryRun) readRanges(ctx context.Context, ranges []Range, newestKnown attemptTime) error {
+func (r *redeliveryRun) readRanges(ctx context.Context, ranges []Range, newestKnown attemptTime, want wanted) error {
 	for _, rg := range ranges {
-		if err := r.readRange(ctx, rg, newestKnown); err != nil {
+		if err := r.readRange(ctx, rg, newestKnown, want); err != nil {
 			return err
 		}
 	}
@@ -499,7 +543,7 @@ func (r *redeliveryRun) readRanges(ctx context.Context, ranges []Range, newestKn
 
 // GitHub deletes attempts in the order of their times, so a page that reaches
 // the bound ends the range without a gap.
-func (r *redeliveryRun) readRange(ctx context.Context, rg Range, newestKnown attemptTime) error {
+func (r *redeliveryRun) readRange(ctx context.Context, rg Range, newestKnown attemptTime, want wanted) error {
 	bound := rg.bound()
 	for r.res.Pages < r.runner.maxPages && ctx.Err() == nil && !r.budget.pastScan() {
 		page, err := r.fetch(ctx, rg.Cursor)
@@ -509,7 +553,7 @@ func (r *redeliveryRun) readRange(ctx context.Context, rg Range, newestKnown att
 		if err != nil {
 			return err
 		}
-		p := r.classify(page, bound)
+		p := r.classify(page, bound, want)
 		step := r.step(p)
 		newerEnd := rg.newerEnd().orEarlier(p.oldest)
 		switch {
