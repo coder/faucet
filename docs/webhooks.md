@@ -2,6 +2,32 @@
 
 An MCP client can call `events/subscribe` to have faucet push matching events to a callback URL, as an alternative to waiting or polling. This page is the contract for whoever writes the receiver. It follows the draft MCP Events extension (SEP-3415) and [Standard Webhooks](https://www.standardwebhooks.com).
 
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant F as faucet
+    participant R as Receiver
+    A->>F: events/subscribe with url and secret
+    opt handshake mode, first time for this login and url
+        F->>R: POST signed challenge
+        R-->>F: 2xx with the challenge
+    end
+    F-->>A: id, refreshBefore, cursor
+    loop each GET /cron/deliver
+        F->>R: POST event, signed, webhook-id
+        R-->>F: 2xx, or faucet retries
+    end
+    opt a purge deleted events not read yet
+        F->>R: POST gap with a cursor
+    end
+    A->>F: events/subscribe again before refreshBefore
+    alt the token still reads the repository
+        F-->>A: same id, deliveryStatus
+    else access revoked
+        F->>R: POST terminated
+    end
+```
+
 ## Turn it on
 
 Webhook mode is off until the operator sets `FAUCET_WEBHOOK_KEY` (`openssl rand -base64 32`; it seals subscriber secrets at rest) and chooses how faucet checks callback URLs:
