@@ -1,0 +1,342 @@
+package faucet
+
+import (
+	"context"
+	"encoding/json"
+	"slices"
+	"time"
+
+	"golang.org/x/xerrors"
+)
+
+// RawLeaseID names one poll lease. The poll cursor carries it.
+type RawLeaseID [16]byte
+
+// RawEvent is one stored GitHub delivery of an event that no typed family
+// stores.
+type RawEvent struct {
+	// ID is assigned by the store. It is the position of a raw cursor.
+	ID int64
+	// DeliveryID is the X-GitHub-Delivery header. It is unique per raw event.
+	DeliveryID string
+	// Event is GitHub's event name, for example "push".
+	Event string
+	// Action is the action member of the payload. It is empty when the
+	// payload has none.
+	Action string
+	RepoID int64
+	// Body is the payload as stored. It is nil when no interest could get the
+	// event, and once no live interest has it unread.
+	Body json.RawMessage
+	// Fields are the field paths that Body holds. Nil with a Body means the
+	// whole payload.
+	Fields []string
+	// ReceivedAt is assigned by the store.
+	ReceivedAt time.Time
+}
+
+// RawDelivery is what a webhook request tells about a delivery before any
+// interest is read.
+type RawDelivery struct {
+	DeliveryID string
+	// Event is GitHub's event name, and Action the action member of the
+	// payload, empty when it has none.
+	Event  string
+	Action string
+	RepoID int64
+}
+
+// Validate checks the fields a caller supplies to RawStore.IngestRaw.
+func (d RawDelivery) Validate() error {
+	switch {
+	case d.DeliveryID == "":
+		return xerrors.New("delivery ID is required")
+	case d.Event == "":
+		return xerrors.New("event is required")
+	case d.RepoID <= 0:
+		return xerrors.New("repo ID must be positive")
+	}
+	return nil
+}
+
+// RawInterest is one live interest that matches a delivery: a webhook
+// subscription, or a poll lease when IsLease is set.
+type RawInterest struct {
+	// Subscription and Incarnation are the key and the CreatedAt of a webhook
+	// subscription.
+	Subscription SubscriptionKeyHash
+	Incarnation  time.Time
+	// Lease is the ID of a poll lease.
+	Lease   RawLeaseID
+	IsLease bool
+	// Fields are the field paths that the interest asked for. Nil means the
+	// whole payload.
+	Fields []string
+	// Pending is the number of unsent deliveries that the subscription holds,
+	// or of unread events that the lease holds.
+	Pending int32
+}
+
+// RawOutbox is one delivery that a subscription is to get. A GiveUp ends it
+// with that reason, without a request.
+type RawOutbox struct {
+	Key         SubscriptionKeyHash
+	Incarnation time.Time
+	GiveUp      GiveUpReason
+}
+
+// RawGap names a subscription that misses the event and is owed a gap
+// envelope.
+type RawGap struct {
+	Key         SubscriptionKeyHash
+	Incarnation time.Time
+}
+
+// RawPlan is what RawStore.IngestRaw writes for one delivery. The caller of
+// IngestRaw builds it from the interests that match.
+type RawPlan struct {
+	// Body is the payload to store. Nil means that no interest is served, so
+	// the row keeps only the delivery ID.
+	Body []byte
+	// Fields are the field paths that Body holds. Nil with a Body means the
+	// whole payload.
+	Fields []string
+	// Deliveries has one entry per subscription that is served or that ends
+	// with a give-up.
+	Deliveries []RawOutbox
+	// Unread are the leases that get the event.
+	Unread []RawLeaseID
+	// Gaps are the subscriptions that miss the event.
+	Gaps []RawGap
+	// Lost are the leases that miss the event.
+	Lost []RawLeaseID
+}
+
+// Validate checks a plan before RawStore.IngestRaw writes it.
+func (p RawPlan) Validate() error {
+	switch {
+	case p.Fields != nil && p.Body == nil:
+		return xerrors.New("field paths need a body")
+	case slices.ContainsFunc(p.Deliveries, func(o RawOutbox) bool { return o.GiveUp != "" && o.GiveUp != GiveUpEventTooLarge }):
+		return xerrors.New("a raw delivery can only be planned to give up as too large")
+	case p.Body == nil && (len(p.Unread) > 0 || slices.ContainsFunc(p.Deliveries, func(o RawOutbox) bool { return o.GiveUp == "" })):
+		return xerrors.New("an interest is served, so the plan needs a body")
+	}
+	return nil
+}
+
+// RawIngest is what RawStore.IngestRaw reports.
+type RawIngest struct {
+	// Matched is false when no live interest wanted the delivery. The store
+	// then wrote nothing.
+	Matched bool
+	// Duplicate is true when the delivery ID was already stored. The store
+	// then wrote nothing.
+	Duplicate bool
+	// ID is the raw ID of the stored event.
+	ID int64
+}
+
+// RawLease is one poller's interest in a raw event name.
+type RawLease struct {
+	ID RawLeaseID
+	// Key is the hash of the login, the event name and the canonical
+	// arguments, made with NewSubscriptionKeyHash and an empty callback URL.
+	Key       SubscriptionKeyHash
+	Principal string
+	// Event is GitHub's event name. Actions empty means every action, and
+	// Fields nil the whole payload.
+	Event     string
+	Actions   []string
+	Fields    []string
+	RepoID    int64
+	ExpiresAt time.Time
+}
+
+// Validate checks the fields a caller supplies to RawStore.OpenRawLease.
+func (l RawLease) Validate(now time.Time) error {
+	switch {
+	case l.ID == (RawLeaseID{}):
+		return xerrors.New("lease ID is required")
+	case l.Principal == "":
+		return xerrors.New("principal is required")
+	case l.Event == "":
+		return xerrors.New("event is required")
+	case l.RepoID <= 0:
+		return xerrors.New("repo ID must be positive")
+	case !l.ExpiresAt.After(now):
+		return xerrors.New("expiry must be after now")
+	}
+	return nil
+}
+
+// RawRead is one poll of a lease.
+type RawRead struct {
+	Lease  RawLeaseID
+	Key    SubscriptionKeyHash
+	RepoID int64
+	// After is the cursor position: the poller has every event at or below it.
+	After int64
+	// Limit is the most events of a page. It must be positive.
+	Limit int32
+	// MaxBytes ends a page after the event that takes the bodies read to this
+	// size or more. It must be positive. The first event always fits.
+	MaxBytes int64
+	// NotBefore passes over the events received before it. Zero means no floor.
+	NotBefore time.Time
+	Now       time.Time
+	// ExpiresAt is the lease's expiry after the read.
+	ExpiresAt time.Time
+}
+
+// Validate checks the fields a caller supplies to RawStore.ReadRawLease.
+func (q RawRead) Validate() error {
+	switch {
+	case q.After < 0:
+		return xerrors.New("after must not be negative")
+	case q.Limit <= 0:
+		return xerrors.New("limit must be positive")
+	case q.MaxBytes <= 0:
+		return xerrors.New("max bytes must be positive")
+	case !q.ExpiresAt.After(q.Now):
+		return xerrors.New("expiry must be after now")
+	}
+	return nil
+}
+
+// RawPage is the result of RawStore.ReadRawLease.
+type RawPage struct {
+	// Events are the unread events above RawRead.After in ID order.
+	Events []RawEvent
+	// Next is the position to poll with next: the ID of the last event when
+	// More is set, and else the higher of RawRead.After and the highest raw ID
+	// stored.
+	Next int64
+	// More says that unread events lie beyond the page.
+	More bool
+	// Skipped is the number of unread events that the page passed over: their
+	// row is gone, their body is cleared, or they were received before
+	// RawRead.NotBefore.
+	Skipped int
+	// AckedThrough is the highest position that the poller had presented before
+	// this read, and LostThrough the highest raw ID that the lease missed.
+	AckedThrough int64
+	LostThrough  int64
+}
+
+// RawDeliveryClaim is a raw delivery that a run now owns for DeliveryLease.
+type RawDeliveryClaim struct {
+	// Ref names the attempt. Its EventID is the raw ID, and its MessageID is
+	// empty: the service derives the webhook-id.
+	Ref        DeliveryRef
+	EnqueuedAt time.Time
+	// EventType and Arguments are the subscription's event name and canonical
+	// arguments.
+	EventType string
+	Arguments json.RawMessage
+	// CallbackURL and the secrets are the subscription's as of the claim.
+	// SecretEnc is the sealed secret, never the plaintext.
+	CallbackURL         string
+	SecretEnc           []byte
+	PreviousSecretEnc   []byte
+	PreviousSecretUntil time.Time
+	// RepoID is the repository the subscription is granted now.
+	RepoID int64
+	// Watermark is the lowest unsent raw ID of the subscription, minus one.
+	Watermark int64
+	// GiveUp ends the delivery with this reason, without a request.
+	GiveUp GiveUpReason
+	// Event is nil when the event is gone or its body is cleared.
+	Event *RawEvent
+}
+
+// RawPurgeResult is what RawStore.PurgeRawEvents reports.
+type RawPurgeResult struct {
+	// ExpiredLeases is the number of poll leases that had expired.
+	ExpiredLeases int64
+	// Cleared is the number of raw events whose body the call dropped, because
+	// no live interest had them unread.
+	Cleared int64
+	// Deleted is the number of raw events that the call deleted at the
+	// retention.
+	Deleted int64
+}
+
+// RawWant is one thing that live interests want: the deliveries of an event
+// of a repository. Actions empty means every action.
+type RawWant struct {
+	RepoID int64
+	// Event is GitHub's event name.
+	Event   string
+	Actions []string
+}
+
+// RawStore persists the GitHub events that no typed family stores, for the
+// interests that want them: live webhook subscriptions of a raw event name,
+// and poll leases. It must be backed by the same database as the Store,
+// because it reads the subscriptions that Store.UpsertSubscription wrote.
+// A raw subscription is such a row with Cursor math.MaxInt64, which keeps
+// the event log's delivery queue from ever reading it.
+//
+// Matching happens once, in IngestRaw. Every other method reads what
+// IngestRaw wrote for one interest: a delivery for a subscription, an unread
+// event for a lease. No method takes a lock on a subscription that IngestRaw
+// could wait for, and a delivery or gap whose subscription is gone, expired
+// or made again is never claimed.
+//
+// Raw IDs must be visible in commit order, as event IDs are in Store.
+type RawStore interface {
+	// IngestRaw stores one delivery for the interests that are live at now and
+	// match it: a subscription or lease of d.RepoID and d.Event whose actions
+	// are empty or hold d.Action. With no such interest it writes nothing and
+	// reports Matched=false. With a delivery ID that is already stored it
+	// writes nothing and reports Duplicate. Otherwise it calls plan once with
+	// the matching interests and writes, in one transaction, the event with
+	// the plan's body and fields, one delivery per plan.Deliveries due at now,
+	// one unread event per plan.Unread, a gap owed by each of plan.Gaps
+	// through the new raw ID, and the new raw ID as the highest that each of
+	// plan.Lost missed. An interest that is acknowledged before the call
+	// starts is among the interests.
+	IngestRaw(ctx context.Context, d RawDelivery, now time.Time, plan func([]RawInterest) RawPlan) (RawIngest, error)
+	// RawHead returns the highest raw ID stored, or 0.
+	RawHead(ctx context.Context) (int64, error)
+	// OpenRawLease stores lease, which starts at the head: it holds no unread
+	// event, and its acknowledged position is the head, which the call
+	// returns. It deletes the principal's expired leases first. When the
+	// principal then holds maxLive live leases, the one polled longest ago
+	// ends, with its unread events, to make room. maxLive must be positive.
+	OpenRawLease(ctx context.Context, lease RawLease, now time.Time, maxLive int) (head int64, err error)
+	// ReadRawLease serves one poll. found is false, and nothing changes,
+	// unless a lease with q.Lease, q.Key and q.RepoID is live at q.Now. For
+	// such a lease it raises the acknowledged position to q.After, sets the
+	// expiry to q.ExpiresAt, deletes the unread events at or below q.After,
+	// and returns the unread events above it, all in one transaction.
+	ReadRawLease(ctx context.Context, q RawRead) (page RawPage, found bool, err error)
+	// ClaimRawDelivery is Store.ClaimDelivery for raw deliveries. It takes a
+	// delivery only while a subscription with its key and its incarnation is
+	// live at now.
+	ClaimRawDelivery(ctx context.Context, now time.Time, lease time.Duration, skip []string) (claim RawDeliveryClaim, ok bool, err error)
+	// FinishRawDelivery is Store.FinishDelivery for raw deliveries. A
+	// FinishDead that deletes the subscription also ends the other raw
+	// deliveries of that incarnation, and Removed counts them.
+	FinishRawDelivery(ctx context.Context, ref DeliveryRef, now time.Time, f Finish) (FinishResult, error)
+	// ClaimRawGap is Store.ClaimGap for the gaps that IngestRaw recorded. The
+	// claim's Through is the highest raw ID that the subscription missed.
+	ClaimRawGap(ctx context.Context, now time.Time, lease time.Duration, skip []string) (claim GapClaim, ok bool, err error)
+	// FinishRawGap is Store.FinishGap for the gaps that IngestRaw recorded.
+	FinishRawGap(ctx context.Context, ref GapRef) error
+	// ExpireRawDeliveries deletes the raw deliveries and gaps that no live
+	// subscription holds: the subscription expired at or before now, was
+	// deleted, or was made again. It leaves the ones that a claim holds, and
+	// returns how many deliveries it deleted.
+	ExpireRawDeliveries(ctx context.Context, now time.Time) (int64, error)
+	// PurgeRawEvents deletes the leases that expired at or before now with
+	// their unread events, drops the body of every raw event that no delivery
+	// and no unread event names any more, and deletes the raw events received
+	// before the given time. An event without a body keeps its delivery ID
+	// until then, so a delivery that GitHub sends again is a duplicate.
+	PurgeRawEvents(ctx context.Context, now, before time.Time) (RawPurgeResult, error)
+	// RawWants lists what the interests that are live at now want, without
+	// duplicates.
+	RawWants(ctx context.Context, now time.Time) ([]RawWant, error)
+}

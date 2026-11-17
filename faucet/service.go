@@ -32,6 +32,12 @@ type Deps struct {
 	// and the webhook mode in events/list. Nil leaves it off, and
 	// events/subscribe then answers Unsupported.
 	Webhook *WebhookDeps
+	// RawStore turns on the raw event names, github.<event>: the GitHub events
+	// that no typed family stores, kept only while a live webhook subscription
+	// or poll lease wants them. Nil leaves them off: events/list offers the
+	// typed names only, and the webhook handler ignores those events. It must
+	// be backed by the same database as Store.
+	RawStore RawStore
 	// MaxWaitsPerLogin caps how many wait_for_github_events calls one login
 	// holds open at once in this process, so a client that opens waits and
 	// drops its connection cannot pile them up. Zero means 10. A negative value
@@ -64,6 +70,7 @@ type WebhookDeps struct {
 // Service turns GitHub webhooks into stored events and serves them to waiters.
 type Service struct {
 	store         Store
+	raw           RawStore
 	secret        []byte
 	logger        slog.Logger
 	authorizer    Authorizer
@@ -90,6 +97,7 @@ func New(d Deps) (*Service, error) {
 	}
 	svc := &Service{
 		store:         d.Store,
+		raw:           d.RawStore,
 		secret:        bytes.Clone(d.Secret),
 		logger:        d.Logger,
 		authorizer:    d.Authorizer,
