@@ -41,7 +41,7 @@ An agent asks for events of one `repo` by name, optionally narrowed by `sha`, `p
 | `pr.review_threads` | `pull_request_review_thread` | none |
 <!-- END generated:events -->
 
-Every `/mcp` request carries `Authorization: Bearer <GitHub token>`. Faucet reads with the caller's token: it only returns events for repositories that the token can read. The one GitHub token it holds, for redelivery, is optional. See [docs/security.md](docs/security.md).
+Every `/github/mcp` request carries `Authorization: Bearer <GitHub token>`. Faucet reads with the caller's token: it only returns events for repositories that the token can read. The one GitHub token it holds, for redelivery, is optional. See [docs/security.md](docs/security.md).
 
 Faucet also deletes events after a retention period, and it can ask GitHub to [redeliver webhooks that failed](docs/redelivery.md) while it was down.
 
@@ -62,7 +62,7 @@ The server listens on `PORT` (default 8080) and applies migrations at startup. T
 - **Secret:** the value of `GITHUB_WEBHOOK_SECRET`
 - **Events:** "Let me select individual events", then Pull requests, Pull request reviews, Pull request review comments, Pull request review threads, Issue comments, Workflow runs, Workflow jobs, Check runs, Check suites and Statuses (see [docs/events.md](docs/events.md#the-github-webhook))
 
-Point any MCP client at `https://<your host>/mcp` with a GitHub token as the bearer token.
+Point any MCP client at `https://<your host>/github/mcp` with a GitHub token as the bearer token. `/mcp` serves the same endpoint as an alias for one release (see [docs/upgrading.md](docs/upgrading.md#to-githubmcp)).
 
 ## Configuration
 

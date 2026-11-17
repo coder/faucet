@@ -2,7 +2,7 @@
 
 ## Access to events
 
-Faucet reads events for a caller with the caller's own GitHub token. Its only GitHub token, `FAUCET_HOOK_TOKEN`, serves redelivery and nothing else (see [Secrets](#secrets)). Every `/mcp` request carries the caller's GitHub token as `Authorization: Bearer <token>`. Faucet checks it with `GET /user`, then checks that the same token can read the repository with `GET /repos/{owner}/{name}`. The token lives only for that request, and faucet sends it only to `FAUCET_GITHUB_API_URL`. A repository the token can't read gives the same `Forbidden` error as one that doesn't exist.
+Faucet reads events for a caller with the caller's own GitHub token. Its only GitHub token, `FAUCET_HOOK_TOKEN`, serves redelivery and nothing else (see [Secrets](#secrets)). Every `/github/mcp` request carries the caller's GitHub token as `Authorization: Bearer <token>`. Faucet checks it with `GET /user`, then checks that the same token can read the repository with `GET /repos/{owner}/{name}`. The token lives only for that request, and faucet sends it only to `FAUCET_GITHUB_API_URL`. A repository the token can't read gives the same `Forbidden` error as one that doesn't exist.
 
 To save GitHub rate limit, faucet remembers a successful check for 60 seconds per token and repository. The cache is keyed by the SHA-256 of the token, never the token itself. Failed checks aren't cached, so a new grant works at once. The flip side is that **a revocation can take up to 60 seconds to reach** `events/poll` and the start of a wait. A wait that starts in that window can run for up to 50 more seconds. `events/subscribe` always checks fresh.
 
