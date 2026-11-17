@@ -27,22 +27,15 @@ A delivery qualifies when an attempt failed (any answer outside 200 to 299, or n
 
 ```mermaid
 stateDiagram-v2
-    direction LR
+    state "failed, not stored" as owed
     state "gave_up / limit" as limit
     state "gave_up / expired" as expired
-    [*] --> failed: a run reads a failed attempt
-    failed --> asked: ask GitHub to redeliver
-    asked --> asked: next ask is due
-    failed --> recovered: stored, or a later attempt succeeded
-    asked --> recovered: stored, or a later attempt succeeded
-    asked --> limit: every ask spent
-    failed --> expired: GitHub deleted it, still not stored
-    asked --> expired: GitHub deleted it, still not stored
-    [*] --> gap: no run read the attempts before GitHub deleted them
-    recovered --> [*]
-    limit --> [*]
-    expired --> [*]
-    gap --> [*]
+    [*] --> owed: a run reads a failed attempt
+    owed --> owed: ask GitHub to redeliver
+    owed --> recovered: stored, or a later attempt succeeded
+    owed --> limit: every ask spent
+    owed --> expired: GitHub deleted it unstored
+    [*] --> gap: GitHub deleted attempts that no run read
 ```
 
 Every failed delivery ends exactly once, in one of these states. The run that ends it counts it in the reply and logs it:
