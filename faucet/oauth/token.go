@@ -20,11 +20,11 @@ const (
 var prefixes = []string{accessTokenPrefix, refreshTokenPrefix, clientSecretPrefix}
 
 // Minted reports whether token starts like a token or secret that faucet
-// mints. Such a bearer is faucet's to judge, well formed or not, and must
-// never be sent to GitHub.
+// mints, in any letter case. Such a bearer is faucet's to judge, well formed
+// or not, and must never be sent to GitHub.
 func Minted(token string) bool {
 	for _, prefix := range prefixes {
-		if strings.HasPrefix(token, prefix) {
+		if len(token) >= len(prefix) && strings.EqualFold(token[:len(prefix)], prefix) {
 			return true
 		}
 	}

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/coder/faucet/faucet/pgstore"
 	"github.com/coder/faucet/faucet/redelivery"
 	"github.com/coder/faucet/faucet/storetest"
+	"github.com/coder/quartz"
 )
 
 const (
@@ -60,6 +62,34 @@ func TestOAuthStoreOverBinaryParameters(t *testing.T) {
 	storetest.RunOAuth(t, func(t *testing.T) oauth.Store {
 		return pgstore.New(newDatabase(t, adminURL))
 	})
+}
+
+// A row that a later build wrote can hold a scope this build does not know.
+// The store returns it as it is, and the verifier rejects it like an unknown
+// token, not as a check that could not run.
+func TestAnAccessTokenWithAnUnknownScopeIsRejectedNotAFailure(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	token := "fct_" + strings.Repeat("A", 43)
+	hash := oauth.HashToken(token)
+	_, err := db.ExecContext(ctx, `INSERT INTO faucet_access_tokens (token_hash, expires_at, scopes, resource, subject_kind, subject)
+		VALUES ($1, now() + interval '1 hour', ARRAY['events:read', 'events:admin'], 'https://faucet.example.com/mcp', 'service', 'ci-bot')`, hash[:])
+	require.NoError(t, err)
+
+	got, err := store.AccessToken(ctx, hash)
+	require.NoError(t, err)
+	require.Equal(t, []faucet.Scope{faucet.ScopeEventsRead, "events:admin"}, got.Scopes)
+
+	verifier, err := oauth.NewVerifier(store, quartz.NewReal(), map[oauth.SubjectKind]oauth.SubjectResolver{
+		oauth.SubjectService: func(_ context.Context, id string, scopes []faucet.Scope) (faucet.Principal, error) {
+			return faucet.NewService(faucet.ServiceClient{ClientID: id}, scopes)
+		},
+	})
+	require.NoError(t, err)
+	_, err = verifier.Verify(ctx, token, "https://faucet.example.com/mcp")
+	require.ErrorIs(t, err, faucet.ErrInvalidToken)
 }
 
 type gapRecordingStore struct {

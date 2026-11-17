@@ -192,10 +192,10 @@ func TestVerifyReportsAStoreFailureAsNoAnswer(t *testing.T) {
 func TestMintedKnowsEveryFaucetPrefix(t *testing.T) {
 	t.Parallel()
 
-	for _, token := range []string{"fct_", "fct_x", "fcr_x", "fcs_x"} {
+	for _, token := range []string{"fct_", "fct_x", "fcr_x", "fcs_x", "FCT_x", "Fcr_x", "fcS_x"} {
 		require.True(t, oauth.Minted(token), token)
 	}
-	for _, token := range []string{"", "ghp_x", "gho_x", "github_pat_x", "FCT_x", "fct", "xfct_x"} {
+	for _, token := range []string{"", "ghp_x", "gho_x", "github_pat_x", "fct", "xfct_x", "fct-x"} {
 		require.False(t, oauth.Minted(token), token)
 	}
 }
@@ -209,4 +209,89 @@ func TestNewVerifierNeedsItsParts(t *testing.T) {
 	require.Error(t, err)
 	_, err = oauth.NewVerifier(newFakeStore(), quartz.NewMock(t), map[oauth.SubjectKind]oauth.SubjectResolver{oauth.SubjectService: nil})
 	require.Error(t, err)
+}
+
+func TestVerifyRefusesAPrincipalThatIsNotTheTokensSubject(t *testing.T) {
+	t.Parallel()
+
+	read := []faucet.Scope{faucet.ScopeEventsRead}
+	for name, c := range map[string]struct {
+		kind    oauth.SubjectKind
+		resolve oauth.SubjectResolver
+	}{
+		"a scope the token does not hold": {oauth.SubjectService, func(_ context.Context, id string, _ []faucet.Scope) (faucet.Principal, error) {
+			return faucet.NewService(faucet.ServiceClient{ClientID: id}, []faucet.Scope{faucet.ScopeEventsRead, faucet.ScopeEventsSubscribe})
+		}},
+		"another client": {oauth.SubjectService, func(_ context.Context, _ string, scopes []faucet.Scope) (faucet.Principal, error) {
+			return faucet.NewService(faucet.ServiceClient{ClientID: "other-bot"}, scopes)
+		}},
+		"another kind for a service": {oauth.SubjectService, func(_ context.Context, id string, scopes []faucet.Scope) (faucet.Principal, error) {
+			return faucet.NewOAuthUser("alice", faucet.OAuthSession{SessionID: id, ConnectionID: "c"}, scopes)
+		}},
+		"a GitHub token caller for a service": {oauth.SubjectService, func(context.Context, string, []faucet.Scope) (faucet.Principal, error) {
+			return faucet.NewPrincipal("alice", "")
+		}},
+		"another session": {oauth.SubjectUser, func(_ context.Context, _ string, scopes []faucet.Scope) (faucet.Principal, error) {
+			return faucet.NewOAuthUser("alice", faucet.OAuthSession{SessionID: "sess_other", ConnectionID: "c"}, scopes)
+		}},
+		"another kind for a user": {oauth.SubjectUser, func(_ context.Context, id string, scopes []faucet.Scope) (faucet.Principal, error) {
+			return faucet.NewService(faucet.ServiceClient{ClientID: id}, scopes)
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store, clock := newFakeStore(), quartz.NewMock(t)
+			v, err := oauth.NewVerifier(store, clock, map[oauth.SubjectKind]oauth.SubjectResolver{c.kind: c.resolve})
+			require.NoError(t, err)
+			token := newAccessToken(t)
+			require.NoError(t, store.InsertAccessToken(context.Background(), oauth.AccessToken{
+				Hash: oauth.HashToken(token), ExpiresAt: clock.Now().Add(time.Minute), Scopes: read,
+				Resource: resource, SubjectKind: c.kind, Subject: "sess_1",
+			}))
+			p, err := v.Verify(context.Background(), token, resource)
+			require.Error(t, err, "the resolver answered for someone the token was not issued to")
+			require.Equal(t, faucet.Principal{}, p)
+		})
+	}
+}
+
+func TestVerifyRejectsAStoredTokenThatThisBuildCannotRead(t *testing.T) {
+	t.Parallel()
+
+	h := newVerifierHarness(t, oauth.SubjectService)
+	unknownScope, unknownKind := newAccessToken(t), newAccessToken(t)
+	h.live["ci-bot"] = true
+	h.store.tokens[oauth.HashToken(unknownScope)] = oauth.AccessToken{
+		Hash: oauth.HashToken(unknownScope), ExpiresAt: h.clock.Now().Add(time.Minute), Scopes: []faucet.Scope{"events:admin"},
+		Resource: resource, SubjectKind: oauth.SubjectService, Subject: "ci-bot",
+	}
+	h.store.tokens[oauth.HashToken(unknownKind)] = oauth.AccessToken{
+		Hash: oauth.HashToken(unknownKind), ExpiresAt: h.clock.Now().Add(time.Minute), Scopes: []faucet.Scope{faucet.ScopeEventsRead},
+		Resource: resource, SubjectKind: "robot", Subject: "ci-bot",
+	}
+	h.requireRejected(unknownScope, "a scope that a later build wrote is a rejected token, not a failed check")
+	h.requireRejected(unknownKind, "so is a subject kind")
+}
+
+func TestVerifyNamesWhyItRejectsAndNeverTheToken(t *testing.T) {
+	t.Parallel()
+
+	h := newVerifierHarness(t, oauth.SubjectService)
+	expired, elsewhere, ended := newAccessToken(t), newAccessToken(t), newAccessToken(t)
+	h.issue(expired, func(at *oauth.AccessToken) { at.ExpiresAt = h.clock.Now() })
+	h.issue(elsewhere, func(at *oauth.AccessToken) { at.Resource = "https://faucet.example.com/mcp" })
+	h.issue(ended, func(at *oauth.AccessToken) { at.Subject = "gone-bot" })
+	h.live["gone-bot"] = false
+	for token, reason := range map[string]string{
+		expired:              "expired",
+		elsewhere:            "another resource",
+		ended:                "subject",
+		newAccessToken(t):    "unknown",
+		"fcr_" + expired[4:]: "not an access token",
+	} {
+		_, err := h.verifier.Verify(context.Background(), token, resource)
+		require.ErrorIs(t, err, faucet.ErrInvalidToken)
+		require.Contains(t, err.Error(), reason)
+		require.NotContains(t, err.Error(), token[4:20], "an error never holds the token")
+	}
 }

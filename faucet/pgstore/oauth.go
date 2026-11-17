@@ -37,7 +37,9 @@ func (s *Store) InsertAccessToken(ctx context.Context, t oauth.AccessToken) (err
 	return nil
 }
 
-// AccessToken implements oauth.Store.
+// AccessToken implements oauth.Store. It returns the row as it is stored: a
+// scope or a subject kind that this build does not know is the verifier's to
+// reject.
 func (s *Store) AccessToken(ctx context.Context, hash oauth.TokenHash) (_ oauth.AccessToken, err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	row, err := s.q.GetAccessToken(ctx, hash[:])
@@ -49,9 +51,7 @@ func (s *Store) AccessToken(ctx context.Context, hash oauth.TokenHash) (_ oauth.
 	}
 	scopes := make([]faucet.Scope, len(row.Scopes))
 	for i, raw := range row.Scopes {
-		if scopes[i], err = faucet.ParseScope(raw); err != nil {
-			return oauth.AccessToken{}, xerrors.Errorf("read access token: %w", err)
-		}
+		scopes[i] = faucet.Scope(raw)
 	}
 	return oauth.AccessToken{
 		Hash:        hash,

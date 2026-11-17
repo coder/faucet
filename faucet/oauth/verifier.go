@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"maps"
+	"slices"
 
 	"golang.org/x/xerrors"
 
@@ -39,26 +40,65 @@ func NewVerifier(store Store, clock quartz.Clock, subjects map[SubjectKind]Subje
 	return &Verifier{store: store, clock: clock, subjects: maps.Clone(subjects)}, nil
 }
 
+// rejected is faucet.ErrInvalidToken with the reason, which a debug log may
+// show. No reason holds the token.
+func rejected(reason string) error {
+	return xerrors.Errorf("%s: %w", reason, faucet.ErrInvalidToken)
+}
+
 // Verify returns the principal of token when faucet minted it as an access
 // token for resource, it has not expired, and its subject is live. A token
-// that fails any of these gives faucet.ErrInvalidToken, whatever the reason.
-// Any other error means the check could not run.
+// that fails any of these gives an error that wraps faucet.ErrInvalidToken
+// and names the reason. Any other error means the check could not run.
 func (v *Verifier) Verify(ctx context.Context, token, resource string) (faucet.Principal, error) {
 	if !wellFormedAccessToken(token) {
-		return faucet.Principal{}, faucet.ErrInvalidToken
+		return faucet.Principal{}, rejected("not an access token")
 	}
 	t, err := v.store.AccessToken(ctx, HashToken(token))
 	switch {
 	case xerrors.Is(err, ErrUnknownToken):
-		return faucet.Principal{}, faucet.ErrInvalidToken
+		return faucet.Principal{}, rejected("unknown access token")
 	case err != nil:
 		return faucet.Principal{}, xerrors.Errorf("look up the access token: %w", err)
-	case !t.ExpiresAt.After(v.clock.Now()), t.Resource != resource:
-		return faucet.Principal{}, faucet.ErrInvalidToken
+	}
+	// A row that a later build wrote can hold a scope or a subject kind that
+	// this build does not know.
+	if err := t.Validate(); err != nil {
+		return faucet.Principal{}, rejected("unreadable access token: " + err.Error())
+	}
+	switch {
+	case !t.ExpiresAt.After(v.clock.Now()):
+		return faucet.Principal{}, rejected("access token expired")
+	case t.Resource != resource:
+		return faucet.Principal{}, rejected("access token is for another resource")
 	}
 	resolve, ok := v.subjects[t.SubjectKind]
 	if !ok {
-		return faucet.Principal{}, faucet.ErrInvalidToken
+		return faucet.Principal{}, rejected("no resolver for the subject kind " + string(t.SubjectKind))
 	}
-	return resolve(ctx, t.Subject, t.Scopes)
+	p, err := resolve(ctx, t.Subject, t.Scopes)
+	switch {
+	case xerrors.Is(err, faucet.ErrInvalidToken):
+		return faucet.Principal{}, xerrors.Errorf("the %s subject is not live: %w", t.SubjectKind, err)
+	case err != nil:
+		return faucet.Principal{}, xerrors.Errorf("resolve the %s subject: %w", t.SubjectKind, err)
+	}
+	if err := issuedTo(p, t); err != nil {
+		return faucet.Principal{}, xerrors.Errorf("the %s resolver answered for another principal: %w", t.SubjectKind, err)
+	}
+	return p, nil
+}
+
+// issuedTo checks that p is the subject of t and holds no scope that t does
+// not grant.
+func issuedTo(p faucet.Principal, t AccessToken) error {
+	if subject, ok := subjectOf[t.SubjectKind](p); !ok || subject != t.Subject {
+		return xerrors.New("it is not the subject of the token")
+	}
+	for _, scope := range p.Scopes() {
+		if !slices.Contains(t.Scopes, scope) {
+			return xerrors.Errorf("it holds %s, which the token does not grant", scope)
+		}
+	}
+	return nil
 }
