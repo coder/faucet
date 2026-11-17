@@ -130,6 +130,9 @@ func compartmentViolations(pkgs []goPackage, adapters []string) []string {
 				if imp.local == "." {
 					add("R5: %s dot-imports %s", where, imp.path)
 				}
+				if slices.ContainsFunc(strings.Split(target, "/"), skipped) {
+					add("R7: %s imports %s: the walk reads no testdata, _ or . directory", where, imp.path)
+				}
 				tr, tfeature := roleOf(target, adapters)
 				switch r {
 				case roleCore:
@@ -185,6 +188,13 @@ func compartmentViolations(pkgs []goPackage, adapters []string) []string {
 	return out
 }
 
+// skipped reports whether Go leaves a file or directory of this name out of
+// ./..., as the walk does. Code can still import such a package by its path,
+// so R7 forbids that.
+func skipped(name string) bool {
+	return name == "testdata" || strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".")
+}
+
 // parseLayout reads every Go file under the faucet directory, whatever its
 // build tags, with the identifiers that each file selects on its imports.
 func parseLayout(t *testing.T) []goPackage {
@@ -194,13 +204,13 @@ func parseLayout(t *testing.T) []goPackage {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			if d.Name() == "testdata" || (path != "." && strings.HasPrefix(d.Name(), ".")) {
+		if path != "." && skipped(d.Name()) {
+			if d.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") {
+		if d.IsDir() || !strings.HasSuffix(path, ".go") {
 			return nil
 		}
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
@@ -335,6 +345,9 @@ func TestCompartmentRulesRejectEachBreach(t *testing.T) {
 		{"a feature names faucet.Service", addFile("faucet/redelivery", fileOf("x.go", use(core, "Service"))), "R4: faucet/redelivery names faucet.Service"},
 		{"a feature names faucet.Deps", addFile("faucet/other", fileOf("x.go", use(core, "Deps"))), "R4: faucet/other names faucet.Deps"},
 		{"a dot import", addFile("faucet/pgstore", fileOf("x.go", goImport{path: core, local: "."})), "R5: faucet/pgstore/x.go dot-imports " + core},
+		{"a feature test imports its testdata package", addFile("faucet/redelivery", fileOf("x_test.go", use(feature+"/testdata/x", "New"))), "R7: faucet/redelivery/x_test.go imports " + feature + "/testdata/x"},
+		{"core imports a package under an underscore directory", addFile("faucet", fileOf("x_test.go", use(module+"/faucet/_scratch", "New"))), "R7: faucet/x_test.go imports " + module + "/faucet/_scratch"},
+		{"core imports a package under a dot directory", addFile("faucet", fileOf("x.go", use(helper+"/.x", "New"))), "R7: faucet/x.go imports " + helper + "/.x"},
 		{"a core file named like a feature's verb", addFile("faucet", fileOf("redeliver_probe.go")), "R6: faucet/redeliver_probe.go is named like the feature redelivery"},
 		{"a core test named like a feature", addFile("faucet", fileOf("redelivery_test.go")), "R6: faucet/redelivery_test.go is named like the feature redelivery"},
 		{"no feature", func(pkgs []goPackage) []goPackage {
