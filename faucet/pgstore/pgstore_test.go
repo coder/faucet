@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,9 +16,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/oauth"
 	"github.com/coder/faucet/faucet/pgstore"
 	"github.com/coder/faucet/faucet/redelivery"
 	"github.com/coder/faucet/faucet/storetest"
+	"github.com/coder/quartz"
 )
 
 const (
@@ -41,6 +44,52 @@ func TestRedeliveryStore(t *testing.T) {
 	storetest.RunRedelivery(t, func(t *testing.T) storetest.RedeliveryStore {
 		return newGapRecordingStore(newDatabase(t, adminURL))
 	})
+}
+
+func TestOAuthStore(t *testing.T) {
+	t.Parallel()
+	adminURL := testDatabaseURL(t)
+
+	storetest.RunOAuth(t, func(t *testing.T) oauth.Store {
+		return pgstore.New(newDatabase(t, adminURL))
+	})
+}
+
+func TestOAuthStoreOverBinaryParameters(t *testing.T) {
+	t.Parallel()
+	adminURL := withBinaryParameters(t, testDatabaseURL(t))
+
+	storetest.RunOAuth(t, func(t *testing.T) oauth.Store {
+		return pgstore.New(newDatabase(t, adminURL))
+	})
+}
+
+// A row that a later build wrote can hold a scope this build does not know.
+// The store returns it as it is, and the verifier rejects it like an unknown
+// token, not as a check that could not run.
+func TestAnAccessTokenWithAnUnknownScopeIsRejectedNotAFailure(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	token := "fct_" + strings.Repeat("A", 43)
+	hash := oauth.HashToken(token)
+	_, err := db.ExecContext(ctx, `INSERT INTO faucet_access_tokens (token_hash, expires_at, scopes, resource, subject_kind, subject)
+		VALUES ($1, now() + interval '1 hour', ARRAY['events:read', 'events:admin'], 'https://faucet.example.com/mcp', 'service', 'ci-bot')`, hash[:])
+	require.NoError(t, err)
+
+	got, err := store.AccessToken(ctx, hash)
+	require.NoError(t, err)
+	require.Equal(t, []faucet.Scope{faucet.ScopeEventsRead, "events:admin"}, got.Scopes)
+
+	verifier, err := oauth.NewVerifier(store, quartz.NewReal(), map[oauth.SubjectKind]oauth.SubjectResolver{
+		oauth.SubjectService: func(_ context.Context, id string, scopes []faucet.Scope) (faucet.Principal, error) {
+			return faucet.NewService(faucet.ServiceClient{ClientID: id}, scopes)
+		},
+	})
+	require.NoError(t, err)
+	_, err = verifier.Verify(ctx, token, "https://faucet.example.com/mcp")
+	require.ErrorIs(t, err, faucet.ErrInvalidToken)
 }
 
 type gapRecordingStore struct {
@@ -148,7 +197,7 @@ func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {
 	require.EqualValues(t, 400, hostVersion)
 	var faucetVersion int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM `+pq.QuoteIdentifier(pgstore.MigrationsTable)).Scan(&faucetVersion))
-	require.EqualValues(t, 9, faucetVersion)
+	require.EqualValues(t, 10, faucetVersion)
 }
 
 func TestTheClearMigrationMovesTheOldTopToTheClearAndBack(t *testing.T) {
@@ -458,6 +507,36 @@ func TestRedeliveryStoreCallThatItsContextCutShortWrapsTheContextError(t *testin
 		},
 		"PurgeRedeliveries": func(ctx context.Context) error {
 			_, err := store.PurgeRedeliveries(ctx, now)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			require.ErrorIs(t, call(ctx), context.DeadlineExceeded, "the statement waits on the lock until the context ends it")
+		})
+	}
+}
+
+func TestOAuthStoreCallThatItsContextCutShortWrapsTheContextError(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	tx, err := db.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	_, err = tx.Exec("LOCK TABLE faucet_access_tokens IN ACCESS EXCLUSIVE MODE")
+	require.NoError(t, err)
+
+	token := oauth.AccessToken{
+		Hash: oauth.HashToken("fct_locked"), ExpiresAt: time.Now().Add(time.Minute), Scopes: []faucet.Scope{faucet.ScopeEventsRead},
+		Resource: "https://faucet.example.com/github/mcp", SubjectKind: oauth.SubjectService, Subject: "ci-bot",
+	}
+	for name, call := range map[string]func(context.Context) error{
+		"InsertAccessToken": func(ctx context.Context) error { return store.InsertAccessToken(ctx, token) },
+		"AccessToken": func(ctx context.Context) error {
+			_, err := store.AccessToken(ctx, token.Hash)
 			return err
 		},
 	} {

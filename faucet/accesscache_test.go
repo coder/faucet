@@ -240,7 +240,7 @@ func TestAccessCacheForgetsAGrantThatARenewalFindsWithdrawn(t *testing.T) {
 		require.NoError(t, err)
 
 		checker.revoke(testRepo)
-		_, err = cache.RepoIDUncached(ctx, principal(t), testRepo)
+		_, err = cache.RepoIDFresh(ctx, principal(t), testRepo)
 		require.ErrorIs(t, err, faucet.ErrNoAccess)
 		_, err = cache.RepoID(ctx, principal(t), testRepo)
 		require.ErrorIs(t, err, faucet.ErrNoAccess, "a poll after a renewal that lost access is refused, not answered from memory")
@@ -261,7 +261,7 @@ func TestAccessCacheForgetsAGrantThatARenewalFindsWithdrawn(t *testing.T) {
 		require.NoError(t, err)
 
 		checker.err = faucet.ErrInvalidToken
-		_, err = cache.RepoIDUncached(ctx, principal(t), testRepo)
+		_, err = cache.RepoIDFresh(ctx, principal(t), testRepo)
 		require.ErrorIs(t, err, faucet.ErrInvalidToken)
 		_, err = cache.Authenticate(ctx, testToken)
 		require.ErrorIs(t, err, faucet.ErrInvalidToken, "the remembered login of a rejected token is gone too")
@@ -281,7 +281,7 @@ func TestAccessCacheForgetsAGrantThatARenewalFindsWithdrawn(t *testing.T) {
 		require.NoError(t, err)
 
 		checker.err = errors.New("GitHub rate limit reached")
-		_, err = cache.RepoIDUncached(ctx, principal(t), testRepo)
+		_, err = cache.RepoIDFresh(ctx, principal(t), testRepo)
 		require.Error(t, err)
 		checker.err = nil
 		_, repoCallsBefore := checker.calls()
@@ -329,7 +329,7 @@ func TestAccessCacheRefusesAnEmptyRepositoryInsteadOfAnsweringFromTheLogin(t *te
 	id, err := cache.RepoID(ctx, p, "")
 	require.Error(t, err)
 	require.Zero(t, id)
-	_, err = cache.RepoIDUncached(ctx, p, "")
+	_, err = cache.RepoIDFresh(ctx, p, "")
 	require.Error(t, err, "a wrapped authorizer that would accept an empty repo is not asked")
 	again, err := cache.Authenticate(ctx, testToken)
 	require.NoError(t, err, "and nothing was stored where the remembered login lives")
@@ -349,7 +349,7 @@ func TestAccessCacheOrdersAnswersByTheStartOfTheirLookup(t *testing.T) {
 			checker.afterAnswer = func() {
 				checker.revoke(testRepo)
 				clock.Advance(delay)
-				_, err := cache.RepoIDUncached(ctx, principal(t), testRepo)
+				_, err := cache.RepoIDFresh(ctx, principal(t), testRepo)
 				require.ErrorIs(t, err, faucet.ErrNoAccess)
 			}
 
@@ -395,7 +395,7 @@ func TestAccessCacheOrdersAnswersByTheStartOfTheirLookup(t *testing.T) {
 		clock.Advance(time.Second)
 		checker.afterAnswer = parkAfterAnswer(renewalDecided, renewalRelease)
 		go func() {
-			_, err := cache.RepoIDUncached(ctx, p, testRepo)
+			_, err := cache.RepoIDFresh(ctx, p, testRepo)
 			renewalDone <- err
 		}()
 		await(renewalDecided)
@@ -417,7 +417,7 @@ func TestAccessCacheOrdersAnswersByTheStartOfTheirLookup(t *testing.T) {
 		checker.afterAnswer = func() {
 			checker.err = faucet.ErrInvalidToken
 			clock.Advance(time.Second)
-			_, err := cache.RepoIDUncached(ctx, principal(t), testRepo)
+			_, err := cache.RepoIDFresh(ctx, principal(t), testRepo)
 			require.ErrorIs(t, err, faucet.ErrInvalidToken)
 			clock.Advance(time.Second)
 		}
@@ -443,7 +443,7 @@ func TestAccessCacheOrdersAnswersByTheStartOfTheirLookup(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		_, err := cache.RepoIDUncached(ctx, principal(t), testRepo)
+		_, err := cache.RepoIDFresh(ctx, principal(t), testRepo)
 		require.ErrorIs(t, err, faucet.ErrNoAccess)
 		_, callsBefore := checker.calls()
 		_, err = cache.RepoID(ctx, principal(t), testRepo)
@@ -458,7 +458,7 @@ func TestAccessCacheOrdersAnswersByTheStartOfTheirLookup(t *testing.T) {
 		clock := quartz.NewMock(t)
 		cache := faucet.NewAccessCache(checker, clock)
 		checker.revoke(testRepo)
-		_, err := cache.RepoIDUncached(ctx, principal(t), testRepo)
+		_, err := cache.RepoIDFresh(ctx, principal(t), testRepo)
 		require.ErrorIs(t, err, faucet.ErrNoAccess)
 
 		checker.grant(testRepo, repoID)
@@ -488,7 +488,7 @@ func TestAccessCacheKeepsOneAnswerPerRepositoryWhateverTheCaseOfItsName(t *testi
 	require.Equal(t, 1, repoCalls, "GitHub is asked once about a repository, however its name is capitalized")
 
 	checker.revoke(testRepo)
-	_, err = cache.RepoIDUncached(ctx, principal(t), testRepo)
+	_, err = cache.RepoIDFresh(ctx, principal(t), testRepo)
 	require.ErrorIs(t, err, faucet.ErrNoAccess)
 	_, err = cache.RepoID(ctx, principal(t), "Octo/Repo")
 	require.ErrorIs(t, err, faucet.ErrNoAccess, "a renewal that lost access blocks the grant that was remembered under another spelling")
@@ -517,7 +517,7 @@ func TestAccessCacheHoldsMarkersToTheSameTenThousandEntriesAndDropsThemAfterAMin
 	ctx := context.Background()
 	p := principal(t)
 	deny := func(i int) {
-		_, err := cache.RepoIDUncached(ctx, p, fmt.Sprintf("octo/gone%05d", i))
+		_, err := cache.RepoIDFresh(ctx, p, fmt.Sprintf("octo/gone%05d", i))
 		require.ErrorIs(t, err, faucet.ErrNoAccess)
 	}
 

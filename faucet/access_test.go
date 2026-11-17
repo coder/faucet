@@ -157,9 +157,11 @@ func TestTokenAuthorizerNeedsAToken(t *testing.T) {
 	noToken, err := faucet.NewPrincipal("octocat", "")
 	require.NoError(t, err)
 	_, err = authz.RepoID(context.Background(), noToken, "o/r")
-	require.Error(t, err)
+	require.ErrorIs(t, err, faucet.ErrNoAccess, "GitHub cannot vouch for a caller without a GitHub token, and asking again does not change that")
+	_, err = authz.RepoIDFresh(context.Background(), noToken, "o/r")
+	require.ErrorIs(t, err, faucet.ErrNoAccess)
 	_, err = authz.RepoID(context.Background(), faucet.Principal{}, "o/r")
-	require.Error(t, err)
+	require.ErrorIs(t, err, faucet.ErrNoAccess)
 	_, err = authz.Authenticate(context.Background(), "")
 	require.Error(t, err)
 	require.Zero(t, stub.requests.Load(), "an unauthenticated request would be answered for public repositories")
@@ -382,4 +384,121 @@ func TestPrincipalNeverPrintsItsToken(t *testing.T) {
 	require.NoError(t, err)
 	requireNoToken(t, "json", string(asJSON))
 	require.Contains(t, fmt.Sprint(p), "octocat")
+}
+
+func TestAnOAuthUserKeepsItsSessionAndConnection(t *testing.T) {
+	t.Parallel()
+
+	p, err := faucet.NewOAuthUser("alice", faucet.OAuthSession{SessionID: "sess_active", ConnectionID: "conn_alice"}, []faucet.Scope{faucet.ScopeEventsRead})
+	require.NoError(t, err)
+	session, ok := p.OAuthSession()
+	require.True(t, ok)
+	require.Equal(t, "sess_active", session.SessionID)
+	require.Equal(t, "conn_alice", session.ConnectionID, "the access checks of PR 5 are kept per connection")
+	require.Equal(t, "alice", p.Login)
+	_, ok = principal(t).OAuthSession()
+	require.False(t, ok, "a caller with a GitHub token has no OAuth session")
+}
+
+func TestAServiceIsNamedAfterItsClientAndKeepsItsGrants(t *testing.T) {
+	t.Parallel()
+
+	grants := []string{"repo:octo/repo"}
+	p, err := faucet.NewService(faucet.ServiceClient{ClientID: "ci-bot", Grants: grants}, []faucet.Scope{faucet.ScopeEventsSubscribe})
+	require.NoError(t, err)
+	require.Equal(t, "svc:ci-bot", p.Login)
+	grants[0] = "all"
+
+	client, ok := p.ServiceClient()
+	require.True(t, ok)
+	require.Equal(t, faucet.ServiceClient{ClientID: "ci-bot", Grants: []string{"repo:octo/repo"}}, client, "the caller's slice does not reach the principal")
+	client.Grants[0] = "all"
+	again, _ := p.ServiceClient()
+	require.Equal(t, []string{"repo:octo/repo"}, again.Grants, "a returned slice does not reach the principal")
+	_, ok = p.OAuthSession()
+	require.False(t, ok)
+}
+
+func TestPrincipalKindsNeedTheirFields(t *testing.T) {
+	t.Parallel()
+
+	read := []faucet.Scope{faucet.ScopeEventsRead}
+	session := faucet.OAuthSession{SessionID: "s", ConnectionID: "c"}
+	for name, build := range map[string]func() (faucet.Principal, error){
+		"oauth user without a login": func() (faucet.Principal, error) { return faucet.NewOAuthUser("", session, read) },
+		"oauth user without a session": func() (faucet.Principal, error) {
+			return faucet.NewOAuthUser("a", faucet.OAuthSession{ConnectionID: "c"}, read)
+		},
+		"oauth user without a connection": func() (faucet.Principal, error) {
+			return faucet.NewOAuthUser("a", faucet.OAuthSession{SessionID: "s"}, read)
+		},
+		"oauth user without a scope":       func() (faucet.Principal, error) { return faucet.NewOAuthUser("a", session, nil) },
+		"oauth user with an unknown scope": func() (faucet.Principal, error) { return faucet.NewOAuthUser("a", session, []faucet.Scope{"repo"}) },
+		"service without a client ID":      func() (faucet.Principal, error) { return faucet.NewService(faucet.ServiceClient{}, read) },
+		"service without a scope": func() (faucet.Principal, error) {
+			return faucet.NewService(faucet.ServiceClient{ClientID: "x"}, []faucet.Scope{})
+		},
+		"service with an unknown scope": func() (faucet.Principal, error) {
+			return faucet.NewService(faucet.ServiceClient{ClientID: "x"}, []faucet.Scope{"events:*"})
+		},
+		"service with an empty grant": func() (faucet.Principal, error) {
+			return faucet.NewService(faucet.ServiceClient{ClientID: "x", Grants: []string{""}}, read)
+		},
+		"service with a NUL in a grant": func() (faucet.Principal, error) {
+			return faucet.NewService(faucet.ServiceClient{ClientID: "x", Grants: []string{"all\x00"}}, read)
+		},
+	} {
+		_, err := build()
+		require.Error(t, err, name)
+	}
+}
+
+func TestNoPrincipalKindPrintsMoreThanItsLogin(t *testing.T) {
+	t.Parallel()
+
+	user, err := faucet.NewOAuthUser("alice", faucet.OAuthSession{SessionID: "sess_secretish", ConnectionID: "conn_x"}, []faucet.Scope{faucet.ScopeEventsRead})
+	require.NoError(t, err)
+	service, err := faucet.NewService(faucet.ServiceClient{ClientID: "bot", Grants: []string{"all"}}, []faucet.Scope{faucet.ScopeEventsRead})
+	require.NoError(t, err)
+	for _, p := range []faucet.Principal{principal(t), user, service} {
+		for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+			require.Equal(t, fmt.Sprintf("Principal{Login:%q}", p.Login), fmt.Sprintf(verb, p))
+		}
+	}
+}
+
+func TestPrincipalsAreComparable(t *testing.T) {
+	t.Parallel()
+
+	build := func() (faucet.Principal, faucet.Principal, faucet.Principal) {
+		service, err := faucet.NewService(faucet.ServiceClient{ClientID: "bot", Grants: []string{"repo:o/r", "org:o"}}, []faucet.Scope{faucet.ScopeEventsRead})
+		require.NoError(t, err)
+		user, err := faucet.NewOAuthUser("alice", faucet.OAuthSession{SessionID: "s", ConnectionID: "c"}, []faucet.Scope{faucet.ScopeEventsRead})
+		require.NoError(t, err)
+		return principal(t), user, service
+	}
+	a1, b1, c1 := build()
+	a2, b2, c2 := build()
+	require.True(t, a1 == a2 && b1 == b2 && c1 == c2, "a principal is a value, as before kinds")
+	seen := map[faucet.Principal]bool{a1: true, b1: true, c1: true}
+	require.Len(t, seen, 3)
+	other, err := faucet.NewService(faucet.ServiceClient{ClientID: "bot", Grants: []string{"repo:o/r"}}, []faucet.Scope{faucet.ScopeEventsRead})
+	require.NoError(t, err)
+	require.False(t, other == c1, "other grants make another principal")
+	client, _ := c2.ServiceClient()
+	require.Equal(t, []string{"repo:o/r", "org:o"}, client.Grants)
+}
+
+func TestOnlyAServiceHasALoginWithAColon(t *testing.T) {
+	t.Parallel()
+
+	_, err := faucet.NewPrincipal("svc:bot", testToken)
+	require.Error(t, err, "a GitHub login holds no colon, so a token caller cannot pose as a service")
+	_, err = faucet.NewOAuthUser("svc:bot", faucet.OAuthSession{SessionID: "s", ConnectionID: "c"}, []faucet.Scope{faucet.ScopeEventsRead})
+	require.Error(t, err)
+	_, err = faucet.NewOAuthUser("a:b", faucet.OAuthSession{SessionID: "s", ConnectionID: "c"}, []faucet.Scope{faucet.ScopeEventsRead})
+	require.Error(t, err)
+	p, err := faucet.NewService(faucet.ServiceClient{ClientID: "bot"}, []faucet.Scope{faucet.ScopeEventsRead})
+	require.NoError(t, err)
+	require.Equal(t, "svc:bot", p.Login)
 }

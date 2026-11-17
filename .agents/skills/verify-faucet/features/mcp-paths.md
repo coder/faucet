@@ -6,6 +6,7 @@ Faucet serves its GitHub events MCP endpoint at `POST /github/mcp`. `POST /mcp` 
 
 - Both paths run the same handler behind the same bearer check and the same 75 second write deadline. A tool call, `events/list`, `events/poll`, `events/subscribe` and `events/unsubscribe` answer the same on both.
 - Without a token that GitHub accepts, both paths are 401 with the body `unauthorized` and `WWW-Authenticate: Bearer`.
+- Each path is its own resource, so a faucet access token works only on the path that it was issued for. Faucet mints none yet, so only the Go test `TestAFaucetAccessTokenWorksOnlyOnItsOwnResource` pins it.
 - Vercel's catch-all rewrite routes both paths to the `faucet` service (`TestVercelRewritesRouteTheMCPPathsToTheServer`).
 
 ## How to get to it (user POV)
