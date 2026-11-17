@@ -13,7 +13,7 @@ import {
   withDeliveryFaucet,
   type DeliverReply,
 } from './delivery';
-import { dataOf, recorded, samples } from './payloads';
+import { dataOf, recorded, recordedSamples, samples } from './payloads';
 import { describe, expect, newDeliveryId, newRepoId, test } from './support';
 import { occurrences, subscribed } from './subscriptions';
 
@@ -45,6 +45,27 @@ describe('webhook delivery', () => {
       const body = expectSigned(requests[0]!, id);
       expect(body.name).toBe('pr.activity');
       expect(body.data).toMatchObject({ event: 'pr.closed', action: 'closed', merged: true, prs: [2] });
+    });
+  });
+
+  test('a ci.runs subscription with actions completed is woken by a completed run and not by a requested one', async ({ faucet, receiver }) => {
+    await withDeliveryFaucet(faucet, async (started) => {
+      const repoId = newRepoId();
+      const at = await endpoint(receiver, 'ok');
+      const { id } = await subscribed(started, paramsFor(repoId, at, { actions: ['completed'] }, 'ci.runs'));
+      const requested = recordedSamples['workflow_run.requested']!;
+      const sent = [
+        await started.deliver({ event: requested.event, delivery: newDeliveryId(), body: JSON.stringify(requested.payload(repoId)) }),
+        await started.deliver({ event: workflow.event, delivery: newDeliveryId(), body: JSON.stringify(workflow.payload(repoId)) }),
+      ];
+      expect(sent.map((reply) => reply.body)).toEqual(['stored\n', 'stored\n']);
+
+      expect(await deliverDue(started)).toEqual(counts({ enqueued: 1, claimed: 1, sent: 1, delivered: 1 }));
+      const requests = await eventRequests(receiver, at);
+      expect(requests).toHaveLength(1);
+      const body = expectSigned(requests[0]!, id);
+      expect(body.name).toBe('ci.runs');
+      expect(body.data).toEqual(dataOf(workflow));
     });
   });
 
