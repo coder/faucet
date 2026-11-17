@@ -30,14 +30,23 @@ type fakeRepo struct {
 }
 
 func (s *fakeStore) RecordRepository(_ context.Context, repo faucet.Repository, seenAt time.Time) error {
-	return s.writeRepository(repo, seenAt, false)
+	return s.writeRepository(repo, func() {
+		if !slices.ContainsFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID }) {
+			s.repos = append(s.repos, fakeRepo{repo: repo, seenAt: seenAt})
+		}
+	})
 }
 
 func (s *fakeStore) RenameRepository(_ context.Context, repo faucet.Repository, seenAt time.Time) error {
-	return s.writeRepository(repo, seenAt, true)
+	return s.writeRepository(repo, func() {
+		s.repos = slices.DeleteFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID })
+		s.repos = append(s.repos, fakeRepo{repo: repo, seenAt: seenAt})
+	})
 }
 
-func (s *fakeStore) writeRepository(repo faucet.Repository, seenAt time.Time, rename bool) error {
+// writeRepository counts a write of repo and, unless it fails, runs write
+// under the lock.
+func (s *fakeStore) writeRepository(repo faucet.Repository, write func()) error {
 	if err := repo.Validate(); err != nil {
 		return err
 	}
@@ -47,12 +56,7 @@ func (s *fakeStore) writeRepository(repo faucet.Repository, seenAt time.Time, re
 	if s.repoErr != nil {
 		return s.repoErr
 	}
-	known := slices.ContainsFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID })
-	if known && !rename {
-		return nil
-	}
-	s.repos = slices.DeleteFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID })
-	s.repos = append(s.repos, fakeRepo{repo: repo, seenAt: seenAt})
+	write()
 	return nil
 }
 
