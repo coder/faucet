@@ -103,9 +103,9 @@ func newRawServer(t *testing.T) *rawServer {
 	}
 }
 
-func (s *rawServer) do(ctx context.Context, t *testing.T, req *http.Request) (status int, body string) {
+func (s *rawServer) do(t *testing.T, req *http.Request) (status int, body string) {
 	t.Helper()
-	resp, err := s.Client().Do(req.WithContext(ctx))
+	resp, err := s.Client().Do(req)
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(resp.Body)
@@ -118,12 +118,12 @@ func (s *rawServer) deliver(ctx context.Context, t *testing.T, delivery string) 
 	t.Helper()
 	mac := hmac.New(sha256.New, []byte(testSecret))
 	_, _ = mac.Write([]byte(rawPush))
-	req, err := http.NewRequest(http.MethodPost, s.URL+"/webhook/github", bytes.NewReader([]byte(rawPush)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.URL+"/webhook/github", bytes.NewReader([]byte(rawPush)))
 	require.NoError(t, err)
 	req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	req.Header.Set("X-GitHub-Event", "push")
 	req.Header.Set("X-GitHub-Delivery", delivery)
-	return s.do(ctx, t, req)
+	return s.do(t, req)
 }
 
 func (s *rawServer) rawEvents(ctx context.Context, t *testing.T) (count int) {
@@ -194,10 +194,10 @@ func TestTheServerStoresARawEventOnlyWhileAPollerWantsIt(t *testing.T) {
 	require.False(t, page.Truncated)
 	require.Empty(t, pollRawPush(ctx, t, session, &page.Cursor).Events, "the second poll acknowledges the event")
 
-	req, err := http.NewRequest(http.MethodGet, srv.URL+purgePath, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+purgePath, nil)
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer "+testCronSecret)
-	status, body = srv.do(ctx, t, req)
+	status, body = srv.do(t, req)
 	require.Equal(t, http.StatusOK, status, body)
 	var reply map[string]int64
 	require.NoError(t, json.Unmarshal([]byte(body), &reply), body)
