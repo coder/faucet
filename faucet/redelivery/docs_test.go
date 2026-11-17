@@ -12,10 +12,10 @@ import (
 	"github.com/coder/faucet/faucet/redelivery"
 )
 
-// The README promises numbers about redelivery. They come from the constants
-// of the package and from the schedule that the README recommends, so a change
-// to a constant fails here until the README says the new number.
-func TestReadmeStatesTheRedeliveryCapacityThatTheConstantsGive(t *testing.T) {
+// docs/redelivery.md promises numbers about redelivery. They come from the constants
+// of the package and from the schedule that the doc recommends, so a change
+// to a constant fails here until the doc says the new number.
+func TestRedeliveryDocStatesTheRedeliveryCapacityThatTheConstantsGive(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -26,7 +26,7 @@ func TestReadmeStatesTheRedeliveryCapacityThatTheConstantsGive(t *testing.T) {
 	pages := redelivery.DefaultMaxPagesPerRun
 	perRun := pages * perPage
 	covered := schedule + redelivery.ReadOverlap
-	// The README rounds the sweep's capacity down to a hundred, for a run that starts late.
+	// The doc rounds the sweep's capacity down to a hundred, for a run that starts late.
 	keepsUpWith := steadyCapacity(perRun, covered) / 100 * 100
 	requestsPerHour := redelivery.DefaultMaxAsksPerRun * asksPerHour
 
@@ -37,9 +37,9 @@ func TestReadmeStatesTheRedeliveryCapacityThatTheConstantsGive(t *testing.T) {
 	}
 	askList := strings.Join(minutes[:len(minutes)-1], ", ") + " and " + minutes[len(minutes)-1] + " minutes"
 
-	readme, err := os.ReadFile("../../README.md")
+	doc, err := os.ReadFile("../../docs/redelivery.md")
 	require.NoError(t, err)
-	text := string(readme)
+	text := string(doc)
 
 	for _, want := range []string{
 		fmt.Sprintf("at most %d pages of %d attempts, which is %s attempts", pages, perPage, thousands(perRun)),
@@ -60,16 +60,16 @@ func TestReadmeStatesTheRedeliveryCapacityThatTheConstantsGive(t *testing.T) {
 	require.Greater(t, keepsUpWith, 4200, "the capacity must cover the busiest hook that the simulations model")
 }
 
-func TestReadmeStatesTheDateWindowThatTheConstantsGive(t *testing.T) {
+func TestRedeliveryDocStatesTheDateWindowThatTheConstantsGive(t *testing.T) {
 	t.Parallel()
 
 	slack, margin := redelivery.DateSlack, redelivery.DateMargin
 	marginAndOverlap := hoursAndMinutes(margin + redelivery.ReadOverlap)
 	quietFor := hoursAndMinutes(redelivery.GitHubDeliveryRetention - slack - margin - redelivery.ReadOverlap)
 
-	readme, err := os.ReadFile("../../README.md")
+	doc, err := os.ReadFile("../../docs/redelivery.md")
 	require.NoError(t, err)
-	text := string(readme)
+	text := string(doc)
 
 	for _, want := range []string{
 		fmt.Sprintf("a slack of %d hour", int(slack/time.Hour)),

@@ -46,6 +46,6 @@ func TestVercelCronsCallTheCronRoutesThatTheServerMounts(t *testing.T) {
 	sort.Strings(paths)
 	require.Equal(t, mounted, paths)
 
-	// The README sizes the redelivery sweep for a run every 10 minutes.
+	// docs/redelivery.md sizes the redelivery sweep for a run every 10 minutes.
 	require.Equal(t, "*/10 * * * *", scheduled[redeliverPath])
 }

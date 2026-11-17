@@ -290,7 +290,7 @@ func TestSimAFailureThatNeedsASecondAskAtVolumeIsNotDropped(t *testing.T) {
 	require.Zero(t, out.silentLost)
 }
 
-// steadyCapacity is the attempts an hour that a run keeps up with, as the README
+// steadyCapacity is the attempts an hour that a run keeps up with, as docs/redelivery.md
 // states it. A run reads the attempts since the one it last saw, less the
 // overlap, and it needs one page past the last of them to learn that it is done.
 // That is two attempts less than the run holds, because it also counts the
