@@ -2,6 +2,7 @@ package faucet_test
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"testing"
 	"time"
@@ -12,16 +13,103 @@ import (
 )
 
 var (
-	allFamilies = []string{"ci.runs", "ci.checks", "pr.activity", "pr.reviews", "pr.comments"}
+	allFamilies = []string{"ci.runs", "ci.checks", "pr.activity", "pr.reviews", "pr.comments", "pr.review_comments", "pr.review_threads"}
 	allNames    = append(slices.Clone(allFamilies), allTypes...)
-	familyOf    = map[string]string{
-		"ci.check_completed":  "ci.checks",
-		"ci.run_completed":    "ci.runs",
-		"pr.closed":           "pr.activity",
-		"pr.comment_created":  "pr.comments",
-		"pr.review_submitted": "pr.reviews",
+	// typePrefix is the naming rule of the exact types: the exact type of
+	// action X of a family is its prefix followed by X.
+	typePrefix = map[string]string{
+		"ci.runs":            "ci.run_",
+		"ci.checks":          "ci.check_",
+		"pr.activity":        "pr.",
+		"pr.reviews":         "pr.review_",
+		"pr.comments":        "pr.comment_",
+		"pr.review_comments": "pr.review_comment_",
+		"pr.review_threads":  "pr.review_thread_",
+	}
+	// documentedActions are the actions of each pull request event in GitHub's
+	// published webhook schemas, which octokit/webhooks keeps in
+	// payload-schemas/api.github.com/<event>/<action>.schema.json.
+	documentedActions = map[string]struct {
+		event   string
+		actions []string
+	}{
+		"pr.activity": {"pull_request", []string{
+			"assigned", "auto_merge_disabled", "auto_merge_enabled", "closed", "converted_to_draft", "demilestoned", "dequeued",
+			"edited", "enqueued", "labeled", "locked", "milestoned", "opened", "ready_for_review", "reopened",
+			"review_request_removed", "review_requested", "synchronize", "unassigned", "unlabeled", "unlocked",
+		}},
+		"pr.reviews":         {"pull_request_review", []string{"dismissed", "edited", "submitted"}},
+		"pr.comments":        {"issue_comment", []string{"created", "deleted", "edited"}},
+		"pr.review_comments": {"pull_request_review_comment", []string{"created", "deleted", "edited"}},
+		"pr.review_threads":  {"pull_request_review_thread", []string{"resolved", "unresolved"}},
 	}
 )
+
+type familyDescriptor struct {
+	Name        string `json:"name"`
+	InputSchema struct {
+		Properties struct {
+			Actions struct {
+				Items struct {
+					Enum []string `json:"enum"`
+				} `json:"items"`
+			} `json:"actions"`
+		} `json:"properties"`
+	} `json:"inputSchema"`
+	PayloadSchema struct {
+		Properties struct {
+			Event struct {
+				Enum []string `json:"enum"`
+			} `json:"event"`
+			Action struct {
+				Enum []string `json:"enum"`
+			} `json:"action"`
+		} `json:"properties"`
+	} `json:"payloadSchema"`
+}
+
+func listFamilies(t *testing.T, h *eventsHarness) map[string]familyDescriptor {
+	t.Helper()
+	res, err := h.call(methodList, nil)
+	require.NoError(t, err)
+	var events []familyDescriptor
+	require.NoError(t, json.Unmarshal(res.fields["events"], &events))
+	families := map[string]familyDescriptor{}
+	for _, e := range events {
+		if slices.Contains(allFamilies, e.Name) {
+			families[e.Name] = e
+		}
+	}
+	require.Len(t, families, len(allFamilies))
+	return families
+}
+
+func TestEachPullRequestFamilyStoresEveryActionThatGitHubDocuments(t *testing.T) {
+	t.Parallel()
+
+	families := listFamilies(t, newEventsHarness(t))
+	for name, documented := range documentedActions {
+		require.ElementsMatch(t, documented.actions, families[name].InputSchema.Properties.Actions.Items.Enum, name)
+		for _, action := range documented.actions {
+			require.True(t, faucet.StoresDelivery(documented.event, action), "%s.%s is stored, so redelivery asks for it again", documented.event, action)
+		}
+	}
+}
+
+func TestTheExactTypeOfAnActionFollowsTheNamingRule(t *testing.T) {
+	t.Parallel()
+
+	for name, f := range listFamilies(t, newEventsHarness(t)) {
+		actions := f.InputSchema.Properties.Actions.Items.Enum
+		require.NotEmpty(t, actions, name)
+		require.ElementsMatch(t, actions, f.PayloadSchema.Properties.Action.Enum, name)
+		var want []string
+		for _, action := range actions {
+			want = append(want, typePrefix[name]+action)
+		}
+		require.ElementsMatch(t, want, f.PayloadSchema.Properties.Event.Enum, name)
+	}
+}
 
 // storeDelivery stores what Normalize makes of a recorded GitHub webhook, as
 // an event of repository repoID.

@@ -2,6 +2,7 @@ package faucet_test
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,6 +18,29 @@ func fixture(t *testing.T, name string) []byte {
 	b, err := os.ReadFile(filepath.Join("testdata", name+".json"))
 	require.NoError(t, err)
 	return b
+}
+
+// helloWorldPR is the data of a pull_request fixture: the pull request that
+// every octokit sample of the event shows, and the extras of its action.
+func helloWorldPR(state string, merged bool, extras map[string]any) string {
+	data := map[string]any{
+		"html_url":     "https://github.com/Codertocat/Hello-World/pull/2",
+		"title":        "Update the README with new information.",
+		"state":        state,
+		"draft":        false,
+		"merged":       merged,
+		"base_branch":  "master",
+		"head_branch":  "changes",
+		"author_login": "Codertocat",
+		"sender_login": "Codertocat",
+		"sender_id":    21031067,
+	}
+	maps.Copy(data, extras)
+	b, err := json.Marshal(data)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }
 
 func mutate(t *testing.T, name string, edit func(doc map[string]any)) []byte {
@@ -80,7 +104,17 @@ func TestNormalize(t *testing.T) {
 			wantRepo: 186853002,
 			wantPRs:  []int32{2},
 			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
-			wantData: `{"review_id":237895671,"state":"approved","user_login":"Codertocat","html_url":"https://github.com/Codertocat/Hello-World/pull/2#pullrequestreview-237895671"}`,
+			wantData: `{"review_id":237895671,"state":"approved","user_login":"Codertocat","html_url":"https://github.com/Codertocat/Hello-World/pull/2#pullrequestreview-237895671","sender_login":"Codertocat","sender_id":21031067}`,
+		},
+		{
+			name:     "ReviewDismissed",
+			event:    "pull_request_review",
+			fixture:  "pull_request_review_dismissed",
+			wantType: "pr.review_dismissed",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: `{"review_id":237895671,"state":"dismissed","user_login":"Codertocat","html_url":"https://github.com/Codertocat/Hello-World/pull/2#pullrequestreview-237895671","sender_login":"Codertocat","sender_id":21031067}`,
 		},
 		{
 			name:     "PullRequestClosedUnmerged",
@@ -90,7 +124,7 @@ func TestNormalize(t *testing.T) {
 			wantRepo: 186853002,
 			wantPRs:  []int32{2},
 			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
-			wantData: `{"merged":false,"merge_commit_sha":"c4295bd74fb0f4fda03689c3df3f2803b658fd85","html_url":"https://github.com/Codertocat/Hello-World/pull/2"}`,
+			wantData: helloWorldPR("closed", false, map[string]any{"merge_commit_sha": "c4295bd74fb0f4fda03689c3df3f2803b658fd85"}),
 		},
 		{
 			name:     "PullRequestMerged",
@@ -100,7 +134,70 @@ func TestNormalize(t *testing.T) {
 			wantRepo: 186853002,
 			wantPRs:  []int32{2},
 			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
-			wantData: `{"merged":true,"merge_commit_sha":"e0e8f3b7c8b2d6a9f5c3a1b7d4e2f6a8c0b9d1e3","html_url":"https://github.com/Codertocat/Hello-World/pull/2"}`,
+			wantData: helloWorldPR("closed", true, map[string]any{"merge_commit_sha": "e0e8f3b7c8b2d6a9f5c3a1b7d4e2f6a8c0b9d1e3"}),
+		},
+		{
+			name:     "PullRequestOpened",
+			event:    "pull_request",
+			fixture:  "pull_request_opened",
+			wantType: "pr.opened",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: helloWorldPR("open", false, nil),
+		},
+		{
+			name:     "PullRequestSynchronize",
+			event:    "pull_request",
+			fixture:  "pull_request_synchronize",
+			wantType: "pr.synchronize",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: helloWorldPR("open", false, map[string]any{
+				"before": "f95f852bd8fca8fcc58a9a2d6c842781e32a215e",
+				"after":  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			}),
+		},
+		{
+			name:     "PullRequestLabeledWithoutItsMergeCommit",
+			event:    "pull_request",
+			fixture:  "pull_request_labeled",
+			wantType: "pr.labeled",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: helloWorldPR("open", false, map[string]any{"label_name": "bug"}),
+		},
+		{
+			name:     "PullRequestReviewRequested",
+			event:    "pull_request",
+			fixture:  "pull_request_review_requested",
+			wantType: "pr.review_requested",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: helloWorldPR("open", false, map[string]any{"requested_reviewer_login": "octocat"}),
+		},
+		{
+			name:     "PullRequestAssigned",
+			event:    "pull_request",
+			fixture:  "pull_request_assigned",
+			wantType: "pr.assigned",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: helloWorldPR("open", false, map[string]any{"assignee_login": "Codertocat"}),
+		},
+		{
+			name:     "PullRequestReadyForReview",
+			event:    "pull_request",
+			fixture:  "pull_request_ready_for_review",
+			wantType: "pr.ready_for_review",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: helloWorldPR("open", false, nil),
 		},
 		{
 			name:     "CommentOnPullRequest",
@@ -110,7 +207,37 @@ func TestNormalize(t *testing.T) {
 			wantRepo: 186853002,
 			wantPRs:  []int32{1},
 			wantSHA:  "",
-			wantData: `{"comment_id":492700400,"user_login":"Codertocat","html_url":"https://github.com/Codertocat/Hello-World/issues/1#issuecomment-492700400"}`,
+			wantData: `{"comment_id":492700400,"user_login":"Codertocat","html_url":"https://github.com/Codertocat/Hello-World/issues/1#issuecomment-492700400","sender_login":"Codertocat","sender_id":21031067}`,
+		},
+		{
+			name:     "CommentDeletedOnPullRequest",
+			event:    "issue_comment",
+			fixture:  "issue_comment_deleted_on_pr",
+			wantType: "pr.comment_deleted",
+			wantRepo: 186853002,
+			wantPRs:  []int32{1},
+			wantSHA:  "",
+			wantData: `{"comment_id":492700400,"user_login":"Codertocat","html_url":"https://github.com/Codertocat/Hello-World/issues/1#issuecomment-492700400","sender_login":"Codertocat","sender_id":21031067}`,
+		},
+		{
+			name:     "ReviewCommentCreated",
+			event:    "pull_request_review_comment",
+			fixture:  "pull_request_review_comment_created",
+			wantType: "pr.review_comment_created",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: `{"comment_id":284312630,"review_id":237895671,"user_login":"Codertocat","html_url":"https://github.com/Codertocat/Hello-World/pull/2#discussion_r284312630","sender_login":"Codertocat","sender_id":21031067}`,
+		},
+		{
+			name:     "ReviewThreadResolved",
+			event:    "pull_request_review_thread",
+			fixture:  "pull_request_review_thread_resolved",
+			wantType: "pr.review_thread_resolved",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: `{"thread_node_id":"PRRT_kwDOFd42Pc4rQOUv","comment_ids":[284312630],"user_login":"Codertocat","html_url":"https://github.com/Codertocat/Hello-World/pull/2#discussion_r284312630","sender_login":"Codertocat","sender_id":21031067}`,
 		},
 	}
 	for _, tt := range tests {
@@ -129,6 +256,44 @@ func TestNormalize(t *testing.T) {
 			require.Equal(t, tt.wantSHA, ev.HeadSHA)
 			require.JSONEq(t, tt.wantData, string(ev.Data))
 			require.NoError(t, ev.Validate())
+		})
+	}
+}
+
+// octokit/webhooks records no milestoned event and no review request for a
+// team, so these cases add the field that GitHub's schema documents to a
+// recorded payload: a milestone in milestoned.schema.json, and a team in
+// review_requested.schema.json.
+func TestNormalizeReadsTheDocumentedFieldsThatNoSampleRecords(t *testing.T) {
+	t.Parallel()
+
+	milestoned := mutate(t, "pull_request_labeled", func(doc map[string]any) {
+		pr, ok := doc["pull_request"].(map[string]any)
+		require.True(t, ok)
+		doc["action"] = "milestoned"
+		doc["milestone"] = pr["milestone"]
+		delete(doc, "label")
+	})
+	teamRequested := mutate(t, "pull_request_review_requested", func(doc map[string]any) {
+		delete(doc, "requested_reviewer")
+		doc["requested_team"] = map[string]any{"name": "Justice League", "id": 1, "slug": "justice-league", "privacy": "closed", "permission": "admin"}
+	})
+	for name, tc := range map[string]struct {
+		payload  []byte
+		wantType string
+		want     map[string]any
+	}{
+		"Milestoned":    {milestoned, "pr.milestoned", map[string]any{"milestone_title": "v1.0"}},
+		"TeamRequested": {teamRequested, "pr.review_requested", map[string]any{"requested_team_slug": "justice-league"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ev, err := faucet.Normalize("pull_request", tc.payload, "delivery-1")
+			require.NoError(t, err)
+			require.NotNil(t, ev)
+			require.Equal(t, tc.wantType, ev.Type)
+			require.JSONEq(t, helloWorldPR("open", false, tc.want), string(ev.Data))
 		})
 	}
 }
@@ -207,17 +372,18 @@ func TestNormalizeIgnores(t *testing.T) {
 		{"CheckRunCreated", "check_run", func(t *testing.T) []byte {
 			return mutate(t, "check_run_completed", withAction("created"))
 		}},
-		{"ReviewDismissed", "pull_request_review", func(t *testing.T) []byte {
-			return mutate(t, "pull_request_review_submitted", withAction("dismissed"))
-		}},
-		{"PullRequestOpened", "pull_request", func(t *testing.T) []byte {
-			return mutate(t, "pull_request_closed", withAction("opened"))
-		}},
-		{"CommentEdited", "issue_comment", func(t *testing.T) []byte {
-			return mutate(t, "issue_comment_created_on_pr", withAction("edited"))
+		{"PullRequestActionThatGitHubDoesNotDocument", "pull_request", func(t *testing.T) []byte {
+			return mutate(t, "pull_request_opened", withAction("exploded"))
 		}},
 		{"CommentOnPlainIssue", "issue_comment", func(t *testing.T) []byte {
 			return fixture(t, "issue_comment_created")
+		}},
+		{"CommentDeletedOnPlainIssue", "issue_comment", func(t *testing.T) []byte {
+			return mutate(t, "issue_comment_deleted_on_pr", func(doc map[string]any) {
+				issue, ok := doc["issue"].(map[string]any)
+				require.True(t, ok)
+				delete(issue, "pull_request")
+			})
 		}},
 		{"UnhandledEventIsNotParsed", "push", func(*testing.T) []byte {
 			return []byte("not json")
@@ -249,6 +415,8 @@ func TestNormalizeRejects(t *testing.T) {
 		{"pull_request_review", "pull_request_review_submitted"},
 		{"pull_request", "pull_request_closed"},
 		{"issue_comment", "issue_comment_created_on_pr"},
+		{"pull_request_review_comment", "pull_request_review_comment_created"},
+		{"pull_request_review_thread", "pull_request_review_thread_resolved"},
 	}
 	for _, h := range handled {
 		t.Run(h.event, func(t *testing.T) {

@@ -88,33 +88,78 @@ var families = []*family{
 	{
 		name:        "pr.activity",
 		githubEvent: "pull_request",
-		description: "Pull requests, for example one that was closed.",
+		description: "Pull requests: every action of GitHub's pull_request event, for example opened, synchronize, labeled or closed.",
 		properties: `{
     "merged": {"type": "boolean"},
-    "merge_commit_sha": {"type": ["string", "null"], "description": "The merge commit. Before a merge it is the test-merge commit of GitHub or null, so it does not mean the pull request merged. Read merged."},
-    "html_url": {"type": "string"}
+    "merge_commit_sha": {"type": ["string", "null"], "description": "The merge commit, in closed events only. When the pull request closed unmerged it is the test-merge commit of GitHub or null, so it does not mean the pull request merged. Read merged."},
+    "html_url": {"type": "string"},
+    "title": {"type": "string"},
+    "state": {"type": "string", "description": "open or closed."},
+    "draft": {"type": "boolean"},
+    "base_branch": {"type": "string", "description": "The branch that the pull request merges into."},
+    "head_branch": {"type": "string", "description": "The branch that holds the changes."},
+    "author_login": {"type": "string", "description": "The account that opened the pull request."},
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."},
+    "before": {"type": "string", "description": "In synchronize events, the head commit before the push."},
+    "after": {"type": "string", "description": "In synchronize events, the head commit after the push."},
+    "label_name": {"type": "string", "description": "In labeled and unlabeled events, the label."},
+    "assignee_login": {"type": "string", "description": "In assigned and unassigned events, the account."},
+    "requested_reviewer_login": {"type": "string", "description": "In review_requested and review_request_removed events for a user, the user."},
+    "requested_team_slug": {"type": "string", "description": "In review_requested and review_request_removed events for a team, the team."},
+    "milestone_title": {"type": "string", "description": "In milestoned and demilestoned events, the milestone."}
 }`,
 	},
 	{
 		name:        "pr.reviews",
 		githubEvent: "pull_request_review",
-		description: "Reviews on a pull request.",
+		description: "Reviews on a pull request that were submitted, edited or dismissed.",
 		properties: `{
     "review_id": {"type": "integer"},
-    "state": {"type": "string", "description": "The review state, for example approved, changes_requested or commented."},
-    "user_login": {"type": "string"},
-    "html_url": {"type": "string"}
+    "state": {"type": "string", "description": "The review state, for example approved, changes_requested, commented or dismissed."},
+    "user_login": {"type": "string", "description": "The author of the review."},
+    "html_url": {"type": "string"},
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
 }`,
 	},
 	{
 		name:        "pr.comments",
 		githubEvent: "issue_comment",
-		description: "Comments in the conversation of a pull request. GitHub names no head commit in these events, so filter by pr and not by sha.",
+		description: "Comments in the conversation of a pull request that were created, edited or deleted. GitHub names no head commit in these events, so filter by pr and not by sha.",
 		noHeadSHA:   true,
 		properties: `{
     "comment_id": {"type": "integer"},
-    "user_login": {"type": "string"},
-    "html_url": {"type": "string"}
+    "user_login": {"type": "string", "description": "The author of the comment."},
+    "html_url": {"type": "string"},
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
+}`,
+	},
+	{
+		name:        "pr.review_comments",
+		githubEvent: "pull_request_review_comment",
+		description: "Comments on the diff of a pull request that were created, edited or deleted. Each belongs to a review.",
+		properties: `{
+    "comment_id": {"type": "integer"},
+    "review_id": {"type": "integer", "description": "The review that the comment belongs to."},
+    "user_login": {"type": "string", "description": "The author of the comment."},
+    "html_url": {"type": "string"},
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
+}`,
+	},
+	{
+		name:        "pr.review_threads",
+		githubEvent: "pull_request_review_thread",
+		description: "Threads of review comments on a pull request that were resolved or unresolved.",
+		properties: `{
+    "thread_node_id": {"type": "string", "description": "The GraphQL node ID of the thread, its only ID in the payload."},
+    "comment_ids": {"type": "array", "items": {"type": "integer"}, "description": "The review comments in the thread."},
+    "user_login": {"type": "string", "description": "The author of the comment that started the thread."},
+    "html_url": {"type": "string", "description": "The comment that started the thread."},
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
 }`,
 	},
 }

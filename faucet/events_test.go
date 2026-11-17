@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -372,11 +373,23 @@ func TestPolledDataMatchesThePayloadSchema(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(res.fields["events"], &events))
 	schemas := map[string]*jsonschema.Resolved{}
+	listed := map[string]map[string]json.RawMessage{}
 	for _, e := range events {
 		var s jsonschema.Schema
 		require.NoError(t, json.Unmarshal(e.PayloadSchema, &s))
 		schemas[e.Name], err = s.Resolve(nil)
 		require.NoError(t, err)
+		var properties struct {
+			Properties map[string]json.RawMessage `json:"properties"`
+		}
+		require.NoError(t, json.Unmarshal(e.PayloadSchema, &properties))
+		listed[e.Name] = properties.Properties
+	}
+	familyOf := map[string]string{}
+	for name, f := range listFamilies(t, h) {
+		for _, typ := range f.PayloadSchema.Properties.Event.Enum {
+			familyOf[typ] = name
+		}
 	}
 
 	start := h.headCursor(repoArgs())
@@ -385,15 +398,27 @@ func TestPolledDataMatchesThePayloadSchema(t *testing.T) {
 		{"workflow_run", "workflow_run_completed_two_prs"},
 		{"check_run", "check_run_completed"},
 		{"pull_request_review", "pull_request_review_submitted"},
+		{"pull_request_review", "pull_request_review_dismissed"},
 		{"pull_request", "pull_request_closed"},
 		{"pull_request", "pull_request_merged"},
+		{"pull_request", "pull_request_opened"},
+		{"pull_request", "pull_request_synchronize"},
+		{"pull_request", "pull_request_labeled"},
+		{"pull_request", "pull_request_assigned"},
+		{"pull_request", "pull_request_review_requested"},
+		{"pull_request", "pull_request_ready_for_review"},
 		{"issue_comment", "issue_comment_created_on_pr"},
+		{"issue_comment", "issue_comment_deleted_on_pr"},
+		{"pull_request_review_comment", "pull_request_review_comment_created"},
+		{"pull_request_review_thread", "pull_request_review_thread_resolved"},
 	}
 	want := map[string]int{}
 	for i, d := range deliveries {
 		ev := storeDelivery(h.ctx, t, h.store, d.event, d.fixture, fmt.Sprintf("guid-%d", i))
-		want[ev.Type]++
 		want[familyOf[ev.Type]]++
+		if slices.Contains(allTypes, ev.Type) {
+			want[ev.Type]++
+		}
 	}
 
 	got := map[string]int{}
@@ -402,6 +427,9 @@ func TestPolledDataMatchesThePayloadSchema(t *testing.T) {
 		for _, e := range out.Events {
 			require.Equal(t, name, e.Name)
 			require.NoError(t, schemas[name].Validate(e.Data), "%s data %v", name, e.Data)
+			for key := range e.Data {
+				require.Contains(t, listed[name], key, "the payloadSchema of %s lists every field of its data", name)
+			}
 			typ, ok := e.Data["event"].(string)
 			require.True(t, ok, "%s data names the stored type", name)
 			require.Contains(t, []string{typ, familyOf[typ]}, name)

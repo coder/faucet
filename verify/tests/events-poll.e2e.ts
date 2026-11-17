@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from 'node:timers/promises';
-import { dataOf, recorded, samples, type Sample } from './payloads';
+import { dataOf, recorded, recordedSamples, samples, type Sample } from './payloads';
 import { appLog, describe, expect, newDeliveryId, newRepoId, test, type Faucet, type McpOptions, type McpReply } from './support';
 
 const run = samples['workflow_run.completed'];
@@ -8,6 +8,14 @@ const closed = samples['pull_request.closed'];
 const comment = samples['issue_comment.created'];
 
 const RUN = run.expected.type;
+// otherAction is an action of each family that no sample in recordedSamples has.
+const otherAction: Record<string, string> = {
+  'pr.activity': 'closed',
+  'pr.reviews': 'submitted',
+  'pr.comments': 'created',
+  'pr.review_comments': 'edited',
+  'pr.review_threads': 'unresolved',
+};
 const REPO_DENIED = 'repository not found or not accessible';
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 
@@ -143,6 +151,22 @@ describe('events poll', () => {
       expect(result.events[0]?.data, `${family} data`).toEqual(dataOf(sample));
     }
   });
+
+  for (const [key, sample] of Object.entries(recordedSamples)) {
+    test(`a recorded ${key} webhook is polled under ${sample.expected.family} narrowed to its action, with its exact type`, async ({ faucet }) => {
+      const repoId = newRepoId();
+      const cursor = await startCursor(faucet, repoId);
+      const delivery = await deliverSample(faucet, sample, repoId);
+      const { family, action } = sample.expected;
+
+      const narrowed = await pollRepo(faucet, family, repoId, { cursor }, { actions: [action] });
+      const other = await pollRepo(faucet, family, repoId, { cursor }, { actions: [otherAction[family]] });
+
+      expect(narrowed.events.map((e) => [e.eventId, e.name])).toEqual([[delivery, family]]);
+      expect(narrowed.events[0]?.data).toEqual(dataOf(sample));
+      expect(other.events).toEqual([]);
+    });
+  }
 
   test('a recorded pull request webhook is polled under pr.activity and pr.closed with its exact type and action', async ({ faucet }) => {
     const repoId = newRepoId();

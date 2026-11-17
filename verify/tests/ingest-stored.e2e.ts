@@ -1,8 +1,8 @@
-import { samples } from './payloads';
+import { recordedSamples, samples } from './payloads';
 import { describe, expect, newDeliveryId, newRepoId, test } from './support';
 
 describe('ingest stored', () => {
-  for (const [key, sample] of Object.entries(samples)) {
+  for (const [key, sample] of Object.entries({ ...samples, ...recordedSamples })) {
     test(`${key} is stored as ${sample.expected.type}`, async ({ faucet }) => {
       const repoId = newRepoId();
       const delivery = newDeliveryId();

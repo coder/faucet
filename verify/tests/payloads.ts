@@ -33,11 +33,17 @@ export function closedPullRequest(repoId: number): object {
     number: PR,
     repository: { id: repoId },
     pull_request: {
+      html_url: `https://github.com/example/repo/pull/${PR}`,
+      title: 'Add an example',
+      state: 'closed',
+      draft: false,
       merged: true,
       merge_commit_sha: MERGE_SHA,
-      html_url: `https://github.com/example/repo/pull/${PR}`,
-      head: { sha: HEAD_SHA },
+      user: { login: 'author', id: 3 },
+      head: { ref: 'feat/example', sha: HEAD_SHA },
+      base: { ref: 'main', sha: BASE_SHA },
     },
+    sender: { login: 'octocat', id: 1 },
   };
 }
 
@@ -120,6 +126,7 @@ export const samples: Record<string, Sample> = {
         html_url: `https://github.com/example/repo/pull/${PR}#pullrequestreview-9003`,
       },
       pull_request: { number: PR, head: { sha: HEAD_SHA } },
+      sender: { login: 'octocat', id: 1 },
     }),
     expected: {
       type: 'pr.review_submitted',
@@ -132,6 +139,8 @@ export const samples: Record<string, Sample> = {
         state: 'approved',
         user_login: 'octocat',
         html_url: `https://github.com/example/repo/pull/${PR}#pullrequestreview-9003`,
+        sender_login: 'octocat',
+        sender_id: 1,
       },
     },
   },
@@ -148,6 +157,14 @@ export const samples: Record<string, Sample> = {
         merged: true,
         merge_commit_sha: MERGE_SHA,
         html_url: `https://github.com/example/repo/pull/${PR}`,
+        title: 'Add an example',
+        state: 'closed',
+        draft: false,
+        base_branch: 'main',
+        head_branch: 'feat/example',
+        author_login: 'author',
+        sender_login: 'octocat',
+        sender_id: 1,
       },
     },
   },
@@ -162,6 +179,7 @@ export const samples: Record<string, Sample> = {
         user: { login: 'octocat' },
         html_url: `https://github.com/example/repo/pull/${PR}#issuecomment-9005`,
       },
+      sender: { login: 'octocat', id: 1 },
     }),
     expected: {
       type: 'pr.comment_created',
@@ -173,6 +191,120 @@ export const samples: Record<string, Sample> = {
         comment_id: 9005,
         user_login: 'octocat',
         html_url: `https://github.com/example/repo/pull/${PR}#issuecomment-9005`,
+        sender_login: 'octocat',
+        sender_id: 1,
+      },
+    },
+  },
+};
+
+const RECORDED_SHA = 'ec26c3e57ca3a959ca5aad62de7213c562f8c821';
+const RECORDED_PR = {
+  html_url: 'https://github.com/Codertocat/Hello-World/pull/2',
+  title: 'Update the README with new information.',
+  state: 'open',
+  draft: false,
+  merged: false,
+  base_branch: 'master',
+  head_branch: 'changes',
+  author_login: 'Codertocat',
+  sender_login: 'Codertocat',
+  sender_id: 21031067,
+};
+
+// recordedSamples are webhooks of actions that no exact type of events/list
+// names. They are recorded payloads from faucet/testdata, so they are polled
+// by their family.
+export const recordedSamples: Record<string, Sample> = {
+  'pull_request.opened': {
+    event: 'pull_request',
+    payload: (repoId) => recorded('pull_request_opened', repoId),
+    expected: { type: 'pr.opened', family: 'pr.activity', action: 'opened', prs: [2], headSha: RECORDED_SHA, data: RECORDED_PR },
+  },
+  'pull_request.synchronize': {
+    event: 'pull_request',
+    payload: (repoId) => recorded('pull_request_synchronize', repoId),
+    expected: {
+      type: 'pr.synchronize',
+      family: 'pr.activity',
+      action: 'synchronize',
+      prs: [2],
+      headSha: RECORDED_SHA,
+      data: { ...RECORDED_PR, before: 'f95f852bd8fca8fcc58a9a2d6c842781e32a215e', after: RECORDED_SHA },
+    },
+  },
+  'pull_request_review.dismissed': {
+    event: 'pull_request_review',
+    payload: (repoId) => recorded('pull_request_review_dismissed', repoId),
+    expected: {
+      type: 'pr.review_dismissed',
+      family: 'pr.reviews',
+      action: 'dismissed',
+      prs: [2],
+      headSha: RECORDED_SHA,
+      data: {
+        review_id: 237895671,
+        state: 'dismissed',
+        user_login: 'Codertocat',
+        html_url: 'https://github.com/Codertocat/Hello-World/pull/2#pullrequestreview-237895671',
+        sender_login: 'Codertocat',
+        sender_id: 21031067,
+      },
+    },
+  },
+  'issue_comment.deleted': {
+    event: 'issue_comment',
+    payload: (repoId) => recorded('issue_comment_deleted_on_pr', repoId),
+    expected: {
+      type: 'pr.comment_deleted',
+      family: 'pr.comments',
+      action: 'deleted',
+      prs: [1],
+      headSha: null,
+      data: {
+        comment_id: 492700400,
+        user_login: 'Codertocat',
+        html_url: 'https://github.com/Codertocat/Hello-World/issues/1#issuecomment-492700400',
+        sender_login: 'Codertocat',
+        sender_id: 21031067,
+      },
+    },
+  },
+  'pull_request_review_comment.created': {
+    event: 'pull_request_review_comment',
+    payload: (repoId) => recorded('pull_request_review_comment_created', repoId),
+    expected: {
+      type: 'pr.review_comment_created',
+      family: 'pr.review_comments',
+      action: 'created',
+      prs: [2],
+      headSha: RECORDED_SHA,
+      data: {
+        comment_id: 284312630,
+        review_id: 237895671,
+        user_login: 'Codertocat',
+        html_url: 'https://github.com/Codertocat/Hello-World/pull/2#discussion_r284312630',
+        sender_login: 'Codertocat',
+        sender_id: 21031067,
+      },
+    },
+  },
+  'pull_request_review_thread.resolved': {
+    event: 'pull_request_review_thread',
+    payload: (repoId) => recorded('pull_request_review_thread_resolved', repoId),
+    expected: {
+      type: 'pr.review_thread_resolved',
+      family: 'pr.review_threads',
+      action: 'resolved',
+      prs: [2],
+      headSha: RECORDED_SHA,
+      data: {
+        thread_node_id: 'PRRT_kwDOFd42Pc4rQOUv',
+        comment_ids: [284312630],
+        user_login: 'Codertocat',
+        html_url: 'https://github.com/Codertocat/Hello-World/pull/2#discussion_r284312630',
+        sender_login: 'Codertocat',
+        sender_id: 21031067,
       },
     },
   },
