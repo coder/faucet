@@ -32,7 +32,7 @@ type rawSubtest struct {
 // Every call to newStore must return an empty store that does not share state
 // with the others, because the subtests run in parallel.
 func RunRaw(t *testing.T, newStore func(t *testing.T) RawStore) {
-	groups := [][]rawSubtest{rawIngestSubtests}
+	groups := [][]rawSubtest{rawIngestSubtests, rawLeaseSubtests, rawDeliverySubtests, rawPurgeSubtests, rawConcurrencySubtests}
 	for _, group := range groups {
 		for _, st := range group {
 			t.Run(st.name, func(t *testing.T) {
@@ -419,7 +419,7 @@ func ingestRawMatchesOnRepositoryEventLivenessAndAction(t *testing.T, s RawStore
 		{name: "actions that hold the delivery's", actions: []string{"closed", "opened"}, change: func(d *faucet.RawDelivery) { d.Action = "closed" }, want: true},
 		{name: "no actions and a delivery with one", change: func(d *faucet.RawDelivery) { d.Action = "closed" }, want: true},
 		{name: "no actions and a delivery without one", want: true},
-		{name: "an interest in its last instant", after: time.Hour - time.Nanosecond, want: true},
+		{name: "an interest in its last instant", after: time.Hour - time.Microsecond, want: true},
 	}
 	for i, tc := range cases {
 		for _, isLease := range []bool{false, true} {

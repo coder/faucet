@@ -111,7 +111,7 @@ type RawPlan struct {
 	Gaps []RawGap
 	// Lost are the leases that miss the event. Each keeps one mark, at the
 	// highest raw ID that it missed, and the read that passes the mark counts
-	// it in RawPage.Skipped.
+	// it in RawPage.Skipped. A mark is no unread event: it keeps no body.
 	Lost []RawLeaseID
 }
 
@@ -218,8 +218,9 @@ type RawPage struct {
 	// ID stored, read in the same snapshot as the page, so that a later read
 	// with it skips no event.
 	Next int64
-	// More says that unread events lie beyond the page. A page ends early only
-	// after an event, so a page with More holds at least one.
+	// More says that the page ended at its limit of events or bytes, and that
+	// the lease holds an unread event or a mark beyond it. A page ends early
+	// only after an event, so a page with More holds at least one.
 	More bool
 	// Skipped is the number of unread events that the page passed over: the
 	// lease missed them (RawPlan.Lost), their row is gone, their body is
@@ -338,7 +339,8 @@ type RawStore interface {
 	// event, and its acknowledged position is the head, which the call
 	// returns. It deletes the principal's expired leases first. When the
 	// principal then holds maxLive live leases, the one polled longest ago
-	// ends, with its unread events, to make room. maxLive must be positive.
+	// ends, with its unread events, to make room. maxLive must be positive,
+	// and a lease ID that is already stored is an error.
 	OpenRawLease(ctx context.Context, lease RawLease, now time.Time, maxLive int) (head int64, err error)
 	// ReadRawLease serves one poll. found is false, and nothing changes,
 	// unless a lease with q.Lease, q.Key and q.RepoID is live at q.Now. For
@@ -370,8 +372,9 @@ type RawStore interface {
 	// their unread events, drops the body of every raw event that no delivery
 	// and no unread event names any more or that was received before
 	// p.ClearBefore, and deletes the raw events received before
-	// p.DeleteBefore. An event without a body keeps its delivery ID until
-	// then, so a delivery that GitHub sends again is a duplicate.
+	// p.DeleteBefore. The mark of a lease that missed an event does not name
+	// it. An event without a body keeps its delivery ID until then, so a
+	// delivery that GitHub sends again is a duplicate.
 	PurgeRawEvents(ctx context.Context, p RawPurge) (RawPurgeResult, error)
 	// RawWants lists what the interests that are live at now want, without
 	// duplicates.
