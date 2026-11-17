@@ -1,6 +1,6 @@
 # Feature map
 
-One file per user-facing behavior of the faucet server at PR 8b, from the point of view of its four users: GitHub, which POSTs signed webhooks, an operator who watches `/healthz` and schedules the cron routes, a scheduler such as Vercel Cron, and an agent that waits for, lists, polls or subscribes to events through `/github/mcp` and receives the signed webhooks at its callback URL. Each file names the test that pins it, the proof, and its bug-bash charters. Paths are relative to `verify/`.
+One file per user-facing behavior of the faucet server at PR 8b, from the point of view of its four users: GitHub, which POSTs signed webhooks, an operator who watches `/healthz`, schedules the cron routes and makes clients for services, a scheduler such as Vercel Cron, and an agent that waits for, lists, polls or subscribes to events through `/github/mcp` and receives the signed webhooks at its callback URL. Each file names the test that pins it, the proof, and its bug-bash charters. Paths are relative to `verify/`.
 
 | Feature | Route | Test | Status |
 | --- | --- | --- | --- |
@@ -28,6 +28,7 @@ One file per user-facing behavior of the faucet server at PR 8b, from the point 
 | [Control envelopes](envelopes.md) | `GET /cron/deliver` after a purge, and `events/subscribe` after a revoked renewal, then the signed `POST` of a `gap` or `terminated` body to the callback URL | `tests/envelopes.e2e.ts` | tested |
 | [Secret rotation](rotation.md) | `POST /github/mcp`, `events/subscribe` with a new secret, then `GET /cron/deliver` and the signed `POST` to the callback URL | `tests/rotation.e2e.ts` | tested |
 | [Webhook delivery](delivery.md) | `GET /cron/deliver`, then the signed `POST` to the callback URL | `tests/delivery.e2e.ts`, `tests/delivery-retry.e2e.ts`, `tests/cron-auth.e2e.ts` | tested |
+| [Service accounts](service-accounts.md) | `faucet clients`, `POST /oauth/token`, `/.well-known/oauth-*`, then `POST /github/mcp` and `POST /mcp` with a faucet token | `tests/service-accounts.e2e.ts` | tested |
 | [Redelivery](redeliver.md) | `GET /cron/redeliver`, the deliveries stub, the redelivery tables and the app log | `tests/redeliver.e2e.ts`, `tests/cron-auth.e2e.ts`, `tests/startup.e2e.ts` | tested |
 
 The webhook handler checks in this order: method, signature header shape, body size, the HMAC, the event and delivery headers, `ping`, then the payload. A rejection earlier in that order wins. A test pins only the first ordering, the signature before the headers. Two more were checked once by hand at PR 2 and are not pinned: an oversize body is 413 before any HMAC, and `ping` needs both headers.

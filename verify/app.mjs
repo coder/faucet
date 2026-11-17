@@ -547,6 +547,9 @@ async function runStack({ port }, abort) {
     // start a faucet with it get that. The main faucet and the production binary above do not.
     const e2eBinary = join(dir, 'faucet-e2e');
     await execFileAsync('go', ['build', '-tags', 'faucet_e2e', '-o', e2eBinary, './cmd/faucet'], { cwd: root, env: goEnv, signal });
+    // The service agent logs in with go-sdk's client credentials handler, as a service that an operator made a client for does.
+    const agentBinary = join(dir, 'serviceagent');
+    await execFileAsync('go', ['build', '-o', agentBinary, './cmd/faucet/internal/serviceagent'], { cwd: root, env: goEnv, signal });
 
     const secret = randomBytes(32).toString('hex');
     const githubToken = `ghp_${randomBytes(20).toString('hex')}`;
@@ -570,7 +573,7 @@ async function runStack({ port }, abort) {
     writeFileSync(
       stateFile(port),
       JSON.stringify({
-        dbHost: dir, dbPort: DB_PORT, psql, secret, githubToken, otherToken, webhookKey, binary, e2eBinary,
+        dbHost: dir, dbPort: DB_PORT, psql, secret, githubToken, otherToken, webhookKey, binary, e2eBinary, agentBinary,
         cron: { ...cron, stubUrl }, receiver: receiverState,
       }),
       { mode: 0o600 },
