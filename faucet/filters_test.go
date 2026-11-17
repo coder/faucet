@@ -298,3 +298,57 @@ func TestEventsListOffersEachFieldFilterOnlyWhereTheDataHasTheField(t *testing.T
 		require.ElementsMatch(t, want[e.Name], offered, e.Name)
 	}
 }
+
+func waitIDs(t *testing.T, h *waitHarness, types []string, filters ...any) []int64 {
+	t.Helper()
+	res := h.call(args(append([]any{"repo", testRepo, "types", types, "cursor", 0}, filters...)...)).success(t)
+	ids := make([]int64, len(res.Events))
+	for i, ev := range res.Events {
+		ids[i] = ev.ID
+	}
+	return ids
+}
+
+func TestWaitWithFieldFiltersReturnsOnlyTheMatchingEvents(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		family    string
+		arguments []any
+		store     func(context.Context, *testing.T, faucet.Store) matched
+	}{
+		"CI failed on main":       {"ci.runs", ciFailedOnMain, storeRuns},
+		"pull requests into main": {"pr.activity", prsIntoMain, storePullRequests},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newWaitHarness(t)
+			want := tc.store(h.ctx, t, h.store)
+			require.Equal(t, []int64{want.first.ID, want.second.ID}, waitIDs(t, h, []string{tc.family}, tc.arguments...))
+		})
+	}
+}
+
+func TestWaitWithAFieldFilterLeavesTheNamesThatDoNotOfferItWhole(t *testing.T) {
+	t.Parallel()
+
+	h := newWaitHarness(t)
+	failed := storePayload(h.ctx, t, h.store, "workflow_run", mutate(t, "workflow_run_completed", runOn(t, "dev", "failure")), "failed")
+	storePayload(h.ctx, t, h.store, "workflow_run", mutate(t, "workflow_run_completed", runOn(t, "dev", "success")), "passed")
+	opened := storeDelivery(h.ctx, t, h.store, "pull_request", "pull_request_opened", "opened")
+	closed := storeDelivery(h.ctx, t, h.store, "pull_request", "pull_request_closed", "closed")
+
+	require.Equal(t, []int64{failed.ID, opened.ID, closed.ID}, waitIDs(t, h, []string{"ci.runs", "pr.activity"}, "conclusion", []string{"failure"}),
+		"conclusion narrows ci.runs, and pr.activity, which has no conclusion, stays whole")
+	require.Equal(t, []int64{closed.ID}, waitIDs(t, h, []string{"pr.activity", "pr.closed"}, "base_branch", []string{"release"}),
+		"base_branch narrows pr.activity, and pr.closed, an exact type, offers no field filter and stays whole")
+
+	for name, filters := range map[string][]any{
+		"a filter of another family":    {"types", []string{"ci.runs"}, "base_branch", []string{"main"}},
+		"a filter and only exact types": {"types", []string{"ci.run_completed"}, "head_branch", []string{"main"}},
+		"a filter of none of several":   {"types", []string{"pr.activity", "pr.reviews"}, "conclusion", []string{"failure"}},
+	} {
+		require.Contains(t, h.call(args(append([]any{"repo", testRepo, "cursor", 0}, filters...)...)).failure(t), "is a filter of none of the names in types", name)
+	}
+}

@@ -37,11 +37,12 @@ var (
 type waitInput struct {
 	Repo     string   `json:"repo" jsonschema:"the repository, written owner/name"`
 	Types    []string `json:"types" jsonschema:"the event names to wait for, at least one: a family such as pr.activity or an exact type such as pr.closed"`
-	Actions  []string `json:"actions,omitempty" jsonschema:"only events of these GitHub actions, such as closed, from the families in types; each must be an action of one of them, and exact types are not narrowed"`
+	Actions  []string `json:"actions,omitempty" jsonschema:"only events of these GitHub actions, such as closed; each narrows the families in types that have it, and a family that has none of them stays whole; each must be an action of one of the families"`
 	SHA      string   `json:"sha,omitempty" jsonschema:"only events for this 40 character head commit SHA"`
 	PR       int32    `json:"pr,omitempty" jsonschema:"only events that mention this pull request number"`
 	Cursor   *int64   `json:"cursor,omitempty" jsonschema:"return events after this cursor, which is the cursor of an earlier result"`
 	TimeoutS *int     `json:"timeout_s,omitempty" jsonschema:"seconds to wait for an event, from 1 to 50, default 45"`
+	fieldArguments
 }
 
 type waitEvent struct {
@@ -82,7 +83,9 @@ func (s *Service) Register(srv *mcp.Server) {
 			"and return them as soon as they arrive. Returns no events and a cursor when timeout_s runs out; " +
 			"call again with that cursor and the same repo and filters to keep waiting. When truncated is true, a retention purge deleted events after " +
 			"the cursor you passed, so some may be missing. Event names: " + strings.Join(catalogNames(), ", ") + ". " +
-			"A family such as pr.activity covers every action of one GitHub event, and actions narrows the families in types. Each event's type is its exact type, such as pr.closed.",
+			"A family such as pr.activity covers every action of one GitHub event. Each event's type is its exact type, such as pr.closed. " +
+			"actions and the field filters narrow only the families in types that offer them, and leave the other names whole; " +
+			"a filter that no name in types offers is an error. The field filters are named after the data field they match: " + fieldFiltersOffered() + ".",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, Title: "Wait for GitHub events"},
 	}, s.waitForEvents)
 	s.registerEvents(srv)
@@ -114,9 +117,17 @@ func (in waitInput) parse() (waitRequest, error) {
 			return waitRequest{}, xerrors.Errorf("action %q is not an action of any family in types", action)
 		}
 	}
+	entryTypes := make([][]string, len(entries))
 	var types []string
-	for _, entry := range entries {
-		types = append(types, entry.types(in.Actions)...)
+	for i, entry := range entries {
+		entryTypes[i] = entry.types(in.Actions)
+		types = append(types, entryTypes[i]...)
+	}
+	values := in.byName()
+	for _, f := range fieldFilters {
+		if len(values[f.name]) > 0 && !slices.ContainsFunc(entries, func(e *catalogEntry) bool { return e.offers(f.name) }) {
+			return waitRequest{}, xerrors.Errorf("%s is a filter of none of the names in types, only of %s", f.name, strings.Join(familiesOffering(f.name), ", "))
+		}
 	}
 	if in.SHA != "" && !shaPattern.MatchString(in.SHA) {
 		return waitRequest{}, xerrors.New("sha must be 40 hexadecimal characters")
@@ -147,6 +158,7 @@ func (in waitInput) parse() (waitRequest, error) {
 			Types:   slices.Compact(types),
 			HeadSHA: strings.ToLower(in.SHA),
 			PR:      in.PR,
+			Fields:  in.fieldFilters(func(name string) []string { return narrowedTypes(name, entries, entryTypes) }),
 			Limit:   pageLimit,
 		},
 		cursor:  in.Cursor,
@@ -291,6 +303,30 @@ func (s *Service) poll(ctx context.Context, req waitRequest) (PollPage, bool, er
 		case <-timer.C:
 		}
 	}
+}
+
+// narrowedTypes are the stored types that a field filter narrows: those of
+// the names in types that offer it, less those that another name matches
+// whole, such as pr.closed beside pr.activity.
+func narrowedTypes(filter string, entries []*catalogEntry, entryTypes [][]string) []string {
+	var narrowed, whole []string
+	for i, entry := range entries {
+		if entry.offers(filter) {
+			narrowed = append(narrowed, entryTypes[i]...)
+		} else {
+			whole = append(whole, entryTypes[i]...)
+		}
+	}
+	return slices.DeleteFunc(narrowed, func(t string) bool { return slices.Contains(whole, t) })
+}
+
+// fieldFiltersOffered lists each field filter with the families that offer it.
+func fieldFiltersOffered() string {
+	described := make([]string, len(fieldFilters))
+	for i, f := range fieldFilters {
+		described[i] = f.name + " (" + strings.Join(familiesOffering(f.name), ", ") + ")"
+	}
+	return strings.Join(described, ", ")
 }
 
 func storeError(ctx context.Context, logger slog.Logger, err error) error {

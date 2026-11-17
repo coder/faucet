@@ -258,9 +258,9 @@ var fieldFilters = []fieldFilter{
 // fieldArguments are the field filters of the arguments, by the name of their
 // data field. A list means any of its values.
 type fieldArguments struct {
-	BaseBranch []string `json:"base_branch,omitempty"`
-	HeadBranch []string `json:"head_branch,omitempty"`
-	Conclusion []string `json:"conclusion,omitempty"`
+	BaseBranch []string `json:"base_branch,omitempty" jsonschema:"only events whose base_branch, the branch that a pull request merges into, is one of these"`
+	HeadBranch []string `json:"head_branch,omitempty" jsonschema:"only events whose head_branch is one of these branches of the repository; a branch of a fork never matches"`
+	Conclusion []string `json:"conclusion,omitempty" jsonschema:"only events whose conclusion is one of these, such as failure or timed_out"`
 }
 
 func (a fieldArguments) byName() map[string][]string {
@@ -477,13 +477,10 @@ func payloadSchemaOf(f *family, types, actions, required []string, frozenPropert
 
 // types returns the stored types that the entry matches. A legacy name matches
 // its own type. A family matches the types of the given actions that are its
-// own, and every type of it when actions is empty.
+// own, and every type of it when none of them is.
 func (e *catalogEntry) types(actions []string) []string {
 	if e.legacy {
 		return []string{e.name}
-	}
-	if len(actions) == 0 {
-		return slices.Clone(e.family.types)
 	}
 	var types []string
 	for i, action := range e.family.actions {
@@ -491,11 +488,29 @@ func (e *catalogEntry) types(actions []string) []string {
 			types = append(types, e.family.types[i])
 		}
 	}
+	if types == nil {
+		return slices.Clone(e.family.types)
+	}
 	return types
 }
 
 func (e *catalogEntry) hasAction(action string) bool {
 	return !e.legacy && slices.Contains(e.family.actions, action)
+}
+
+func (e *catalogEntry) offers(filter string) bool {
+	return !e.legacy && slices.Contains(e.family.filters, filter)
+}
+
+// familiesOffering names the families that offer the field filter.
+func familiesOffering(filter string) []string {
+	var names []string
+	for _, f := range families {
+		if slices.Contains(f.filters, filter) {
+			names = append(names, f.name)
+		}
+	}
+	return names
 }
 
 func catalogNames() []string {
