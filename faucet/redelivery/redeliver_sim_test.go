@@ -1,4 +1,4 @@
-package faucet_test
+package redelivery_test
 
 import (
 	"fmt"
@@ -9,11 +9,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/redelivery"
 )
 
 // These tests run a webhook for hours against a GitHub that lists its
-// deliveries the way GitHub does, with a cron that calls Redeliver every ten
+// deliveries the way GitHub does, with a cron that calls Run every ten
 // minutes. A delivery that faucet answered with 503 or 400 on its first
 // attempt is a failure, and each failure must end recovered, or as a give-up
 // or a gap that the run counted and logged. silentLost counts the others.
@@ -55,7 +55,7 @@ type simSpec struct {
 type simOutcome struct {
 	failed, recovered, loggedGaveUp, inGap, silentLost int
 	sumRecovered, sumGaveUp, sumGaps                   int
-	runs                                               []faucet.RedeliverResult
+	runs                                               []redelivery.Result
 }
 
 type simDelivery struct {
@@ -303,7 +303,7 @@ func TestSimTheStatedCapacityKeepsUpAndATenthMoreDoesNot(t *testing.T) {
 	t.Parallel()
 	// The same law at a tenth of the scale: pages of 10 attempts, 20 a run.
 	const pages, pageSize = 20, 10
-	capacity := steadyCapacity(pages*pageSize, cronEvery+faucet.RedeliveryReadOverlap)
+	capacity := steadyCapacity(pages*pageSize, cronEvery+redelivery.ReadOverlap)
 
 	for _, tc := range []struct {
 		name    string
@@ -333,7 +333,7 @@ func TestSimTheStatedCapacityKeepsUpAndATenthMoreDoesNot(t *testing.T) {
 	}
 }
 
-func rangesOf(runs []faucet.RedeliverResult) []int {
+func rangesOf(runs []redelivery.Result) []int {
 	counts := make([]int, len(runs))
 	for i, res := range runs {
 		counts[i] = res.Ranges
@@ -381,7 +381,7 @@ func TestSimAnOutageLongerThanGitHubKeepsADeliveryLosesNothingSilentlyWhateverTh
 				t.Logf("RESULT 6 an hour, faucet and cron down for %s, GitHub's clock %s ahead of faucet's: %s", outage, skew, out)
 				require.Greater(t, out.failed, 400)
 				require.Zero(t, out.silentLost)
-				if outage > faucet.GitHubDeliveryRetention {
+				if outage > redelivery.GitHubDeliveryRetention {
 					require.Positive(t, out.inGap, "what GitHub deleted during the outage is inside a gap")
 				}
 			})
@@ -393,9 +393,9 @@ func TestSimTheMigrationReadsTheLastDayAgainAndLosesNothingSilently(t *testing.T
 	t.Parallel()
 	const pages, pageSize = 20, 1
 	const migratedAt = 6 * time.Hour
-	capacity := steadyCapacity(pages*pageSize, cronEvery+faucet.RedeliveryReadOverlap)
-	beforeTheFirstLookback := -faucet.RedeliveryStartLookback - 3*time.Hour
-	insideTheFirstLookback := -faucet.RedeliveryStartLookback + time.Hour
+	capacity := steadyCapacity(pages*pageSize, cronEvery+redelivery.ReadOverlap)
+	beforeTheFirstLookback := -redelivery.StartLookback - 3*time.Hour
+	insideTheFirstLookback := -redelivery.StartLookback + time.Hour
 
 	for _, tc := range []struct {
 		name      string

@@ -1,4 +1,4 @@
-package faucet_test
+package redelivery_test
 
 import (
 	"context"
@@ -19,9 +19,30 @@ import (
 
 	"cdr.dev/slog/v3"
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/redelivery"
+	"github.com/coder/quartz"
 )
 
 const cronEvery = 10 * time.Minute
+
+// readFixture reads a webhook payload from the samples that the Normalize
+// tests use.
+func readFixture(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "testdata", name+".json"))
+	require.NoError(t, err)
+	return b
+}
+
+func editFixture(t *testing.T, name string, edit func(doc map[string]any)) []byte {
+	t.Helper()
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(readFixture(t, name), &doc))
+	edit(doc)
+	b, err := json.Marshal(doc)
+	require.NoError(t, err)
+	return b
+}
 
 // logTime reads a time that the capture sink printed.
 func logTime(t *testing.T, s string) time.Time {
@@ -34,24 +55,22 @@ func logTime(t *testing.T, s string) time.Time {
 func TestNewValidatesRedeliveryDeps(t *testing.T) {
 	t.Parallel()
 
-	store := newFakeRedeliveryStore(nil)
+	store := newFakeRedeliveryStore()
 	hooks := newFakeGitHub(nil, store)
-	for name, deps := range map[string]faucet.RedeliveryDeps{
-		"no store":       {Hooks: hooks},
-		"no hook admin":  {Store: store},
-		"negative pages": {Store: store, Hooks: hooks, MaxPagesPerRun: -1},
-		"negative asks":  {Store: store, Hooks: hooks, MaxAsksPerRun: -1},
+	clock := quartz.NewReal()
+	for name, deps := range map[string]redelivery.Deps{
+		"no store":       {Hooks: hooks, Clock: clock},
+		"no hook admin":  {Store: store, Clock: clock},
+		"no clock":       {Store: store, Hooks: hooks},
+		"negative pages": {Store: store, Hooks: hooks, Clock: clock, MaxPagesPerRun: -1},
+		"negative asks":  {Store: store, Hooks: hooks, Clock: clock, MaxAsksPerRun: -1},
 	} {
-		d := testDeps(store)
-		d.Redelivery = &deps
-		_, err := faucet.New(d)
+		_, err := redelivery.New(deps)
 		require.Error(t, err, name)
 	}
 
-	svc, err := faucet.New(testDeps(store))
+	_, err := redelivery.New(redelivery.Deps{Store: store, Hooks: hooks, Clock: clock})
 	require.NoError(t, err)
-	_, err = svc.Redeliver(context.Background())
-	require.ErrorIs(t, err, faucet.ErrNoRedelivery, "a service without redelivery refuses a run")
 }
 
 func TestRedeliverAsksUntilFaucetStoresTheEventAndCountsItOnce(t *testing.T) {
@@ -92,8 +111,8 @@ func TestRedeliverTracksOnlyWhatNormalizeStores(t *testing.T) {
 		{"issue_comment", "issue_comment_created_on_pr"},
 	} {
 		webhooks = append(webhooks,
-			webhook{c.fixture, c.event, fixture(t, c.fixture)},
-			webhook{c.fixture + " with action edited", c.event, mutate(t, c.fixture, func(doc map[string]any) { doc["action"] = "edited" })})
+			webhook{c.fixture, c.event, readFixture(t, c.fixture)},
+			webhook{c.fixture + " with action edited", c.event, editFixture(t, c.fixture, func(doc map[string]any) { doc["action"] = "edited" })})
 	}
 	webhooks = append(webhooks,
 		webhook{"ping", "ping", []byte(`{}`)},
@@ -145,7 +164,7 @@ func TestRedeliverDoesNotAskForADeliveryThatAlreadyWorked(t *testing.T) {
 		env := newRedeliveryEnv(t)
 		env.gh.record("g", env.now().Add(-20*time.Minute), 500)
 		_, _, err := env.store.InsertEvent(context.Background(), faucet.Event{
-			Source: "github", DeliveryID: "g", Type: "ci.run_completed", RepoID: repoID, Data: []byte(`{}`),
+			Source: "github", DeliveryID: "g", Type: "ci.run_completed", RepoID: eventRepoID, Data: []byte(`{}`),
 		})
 		require.NoError(t, err)
 
@@ -170,19 +189,19 @@ func TestRedeliverGivesUpOnADeliveryFaucetAlwaysRejectsAfterTheAskLimit(t *testi
 		env.advance(cronEvery)
 	}
 
-	require.Equal(t, faucet.MaxAsksPerDelivery, asked)
+	require.Equal(t, redelivery.MaxAsksPerDelivery, asked)
 	require.Equal(t, 1, gaveUp, "the give-up is counted once")
 	var offsets []time.Duration
 	for _, at := range env.gh.askedTimes("bad") {
 		offsets = append(offsets, at.Sub(start))
 	}
-	require.Equal(t, faucet.AskOffsets(), offsets, "each ask waits twice as long as the one before")
+	require.Equal(t, redelivery.AskOffsets(), offsets, "each ask waits twice as long as the one before")
 
 	lines := env.logged("redelivery gave up")
 	require.Len(t, lines, 1, "and logged once")
 	require.Equal(t, "bad", lines[0]["delivery_id"])
 	require.Equal(t, "limit", lines[0]["reason"])
-	require.Equal(t, fmt.Sprint(faucet.MaxAsksPerDelivery), lines[0]["asks"])
+	require.Equal(t, fmt.Sprint(redelivery.MaxAsksPerDelivery), lines[0]["asks"])
 }
 
 func TestRedeliverGivesUpWhenGitHubsRetentionEndsFirst(t *testing.T) {
@@ -211,7 +230,7 @@ func TestRedeliverGivesUpWhenGitHubsRetentionEndsFirst(t *testing.T) {
 	asks := env.gh.askedTimes("old")
 	require.NotEmpty(t, asks)
 	for _, at := range asks {
-		require.True(t, at.Before(failedAt.Add(faucet.GitHubDeliveryRetention)), "no ask goes out once GitHub's retention has ended")
+		require.True(t, at.Before(failedAt.Add(redelivery.GitHubDeliveryRetention)), "no ask goes out once GitHub's retention has ended")
 	}
 }
 
@@ -243,7 +262,7 @@ func TestAnAlwaysRejectedDeliveryDoesNotStarveNewFailures(t *testing.T) {
 		require.LessOrEqual(t, times[0].Sub(start.Add(time.Duration(tick)*cronEvery)), 3*cronEvery, "%s waited too long behind the permanent failures", guid)
 	}
 	for _, guid := range permanents {
-		require.LessOrEqual(t, len(env.gh.askedTimes(guid)), faucet.MaxAsksPerDelivery)
+		require.LessOrEqual(t, len(env.gh.askedTimes(guid)), redelivery.MaxAsksPerDelivery)
 	}
 }
 
@@ -254,10 +273,10 @@ func TestRedeliverSendsAtMostTheRunLimitAndTheRestWaitForTheNextRun(t *testing.T
 		env.gh.record(fmt.Sprintf("g-%03d", i), env.now().Add(-time.Duration(120-i)*time.Second), 503)
 	}
 
-	require.Equal(t, faucet.DefaultMaxAsksPerRun, env.run().Asked)
-	require.Equal(t, faucet.DefaultMaxAsksPerRun, env.run().Asked)
+	require.Equal(t, redelivery.DefaultMaxAsksPerRun, env.run().Asked)
+	require.Equal(t, redelivery.DefaultMaxAsksPerRun, env.run().Asked)
 	third := env.run()
-	require.Equal(t, 120-2*faucet.DefaultMaxAsksPerRun, third.Asked)
+	require.Equal(t, 120-2*redelivery.DefaultMaxAsksPerRun, third.Asked)
 	require.Equal(t, 120, env.gh.totalAsks(), "every delivery was asked for once")
 	env.run()
 	for i := range 120 {
@@ -273,7 +292,7 @@ func TestAFailedRequestStopsTheAsksButNotTheRunsAfterIt(t *testing.T) {
 	}
 	env.gh.askFault = func(string) error { return fmt.Errorf("GitHub answered the redelivery request with status 502") }
 
-	res, err := env.svc.Redeliver(context.Background())
+	res, err := env.runner.Run(context.Background())
 	require.ErrorContains(t, err, "502")
 	require.Zero(t, res.Asked)
 	require.Zero(t, env.gh.totalAsks(), "the first failure stops the asks: a wrong token or hook would otherwise fail every one")
@@ -289,7 +308,7 @@ func TestAFailedRequestStopsTheAsksButNotTheRunsAfterIt(t *testing.T) {
 type limitedAdmin struct {
 	*fakeGitHub
 	limited atomic.Bool
-	real    faucet.GitHubHookAdmin
+	real    redelivery.GitHubHookAdmin
 }
 
 func (a *limitedAdmin) Redeliver(ctx context.Context, attemptID int64) error {
@@ -309,16 +328,12 @@ func TestARateLimitedRequestIsNotAFinalStateAndTheScheduleAsksAgain(t *testing.T
 	})
 	admin := &limitedAdmin{fakeGitHub: env.gh, real: newHookAdmin(t, limit, orgHook)}
 	admin.limited.Store(true)
-	deps := testDeps(env.store)
-	deps.Clock = env.clock
-	deps.Logger = slog.Make(env.logs)
-	deps.Redelivery = &faucet.RedeliveryDeps{Store: env.store, Hooks: admin}
-	svc, err := faucet.New(deps)
+	runner, err := redelivery.New(redelivery.Deps{Store: env.store, Hooks: admin, Clock: env.clock, Logger: slog.Make(env.logs)})
 	require.NoError(t, err)
-	env.svc = svc
+	env.runner = runner
 	env.gh.record("g1", env.now().Add(-5*time.Minute), 503)
 
-	res, err := env.svc.Redeliver(context.Background())
+	res, err := env.runner.Run(context.Background())
 	require.ErrorContains(t, err, "rate limit", "the route answers an error, and the log names the limit")
 	require.Zero(t, res.Asked)
 	require.Equal(t, 1, res.Pending)
@@ -353,7 +368,7 @@ func TestASlowListCostsPagesAndNeverTheAsksOrTheSettle(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		res, err := env.svc.Redeliver(ctx)
+		res, err := env.runner.Run(ctx)
 		require.NoError(t, err, "the end of the time for the scan is like the page limit: no failure")
 		require.Equal(t, 6, res.Pages, "the page in flight at the end of the scan time is canceled and not counted")
 		require.Equal(t, 3, res.Tracked)
@@ -387,7 +402,7 @@ func TestSlowAsksStopStartingInTimeForARequestInFlightToEndAndForThePurge(t *tes
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		res, err := env.svc.Redeliver(ctx)
+		res, err := env.runner.Run(ctx)
 		require.NoError(t, err, "no ask is in flight when the time ends, so none is canceled and none is lost")
 		require.Equal(t, 15, res.Asked, "asks start until 80 percent of the time, and every one that started ended")
 		require.Equal(t, 30, res.Pending)
@@ -413,7 +428,7 @@ func TestAFailedFirstPageStopsTheAsksButStillSettles(t *testing.T) {
 
 	env.advance(11 * time.Minute)
 	env.gh.listFault = func(int, string) error { return fmt.Errorf("GitHub answered the delivery list with status 401") }
-	res, err := env.svc.Redeliver(context.Background())
+	res, err := env.runner.Run(context.Background())
 
 	require.ErrorContains(t, err, "401")
 	require.Zero(t, res.Asked, "a token that cannot list deliveries cannot be trusted with redelivery requests")
@@ -472,7 +487,7 @@ func TestTheFirstRunReadsTheLastDayAndRecordsTheRestOfRetentionAsOneGap(t *testi
 	env := newRedeliveryEnv(t)
 	start := env.now()
 	newest := env.gh.record("inside", start.Add(-20*time.Hour), 503)
-	env.gh.record("before", newest.at.Add(-faucet.RedeliveryStartLookback-time.Hour), 503)
+	env.gh.record("before", newest.at.Add(-redelivery.StartLookback-time.Hour), 503)
 
 	first := env.run()
 	require.Equal(t, 1, first.Tracked, "only the delivery inside the lookback is tracked")
@@ -484,8 +499,8 @@ func TestTheFirstRunReadsTheLastDayAndRecordsTheRestOfRetentionAsOneGap(t *testi
 	require.Equal(t, "before tracking began", lines[0]["cause"])
 	require.Equal(t, "gap", lines[0]["reason"])
 	from, to := logTime(t, lines[0]["from"]), logTime(t, lines[0]["to"])
-	require.True(t, newest.at.Add(-faucet.GitHubDeliveryRetention).Equal(from), "the gap is counted from the newest attempt, which is a time of GitHub's: %s", from)
-	require.True(t, newest.at.Add(-faucet.RedeliveryStartLookback).Equal(to), "and so is the lookback: %s", to)
+	require.True(t, newest.at.Add(-redelivery.GitHubDeliveryRetention).Equal(from), "the gap is counted from the newest attempt, which is a time of GitHub's: %s", from)
+	require.True(t, newest.at.Add(-redelivery.StartLookback).Equal(to), "and so is the lookback: %s", to)
 	require.False(t, env.stored("before"), "the delivery before the lookback is inside the recorded gap, so no ask goes out for it")
 }
 
@@ -548,14 +563,14 @@ func TestAReplacedHooksPendingDeliveriesAreNotAskedForOnTheNewHook(t *testing.T)
 	env.gh.record("new-1", env.now(), 503)
 	env.advance(cronEvery) // the second ask of both old deliveries is due
 
-	res, err := env.svc.Redeliver(context.Background())
+	res, err := env.runner.Run(context.Background())
 	require.NoError(t, err, "a request that the new hook would refuse is never sent")
 	require.Equal(t, 1, res.Asked, "the delivery of the new hook goes out")
 	require.Len(t, env.gh.askedTimes("new-1"), 1)
 	require.Len(t, env.gh.askedTimes("old-1"), 1, "the old hook's deliveries are not asked for again")
 	require.Equal(t, 3, res.Pending)
 
-	env.advance(faucet.GitHubDeliveryRetention)
+	env.advance(redelivery.GitHubDeliveryRetention)
 	res = env.run()
 	require.Equal(t, 3, res.GaveUpExpired, "the old deliveries end counted, as expired, with everything else that GitHub forgot")
 	require.Zero(t, res.Pending)
@@ -572,7 +587,7 @@ func TestRedeliverRecordsAGapWhenARangeExpiresUnread(t *testing.T) {
 	require.Equal(t, 1, first.Ranges, "one page was read, and the rest of the list is a range")
 
 	var gaps int
-	end := env.now().Add(faucet.GitHubDeliveryRetention + time.Hour)
+	end := env.now().Add(redelivery.GitHubDeliveryRetention + time.Hour)
 	for i := 0; env.now().Before(end); i++ {
 		env.advance(cronEvery)
 		env.gh.record(fmt.Sprintf("trickle-%04d", i), env.now().Add(-time.Minute), 200)
@@ -608,9 +623,9 @@ func TestRedeliverRecordsOnlyTheExpiredPartOfARangeAsAGap(t *testing.T) {
 	require.Len(t, lines, 2)
 	require.Equal(t, "expired unread", lines[1]["cause"])
 	from, to := logTime(t, lines[1]["from"]), logTime(t, lines[1]["to"])
-	require.WithinDuration(t, start.Add(-faucet.RedeliveryDateMargin-faucet.RedeliveryReadOverlap), from, time.Minute,
+	require.WithinDuration(t, start.Add(-redelivery.DateMargin-redelivery.ReadOverlap), from, time.Minute,
 		"the gap starts where the read of the range stops. The first run found an empty list at start, so the range ends at that Date less the margin, and its read stops the overlap below")
-	require.WithinDuration(t, env.now().Add(-faucet.GitHubDeliveryRetention), to, 2*time.Minute, "and ends at the oldest attempt that GitHub still lists, one attempt above where its list begins")
+	require.WithinDuration(t, env.now().Add(-redelivery.GitHubDeliveryRetention), to, 2*time.Minute, "and ends at the oldest attempt that GitHub still lists, one attempt above where its list begins")
 }
 
 func TestTwoRunsAtOnceSendOneRequestPerDelivery(t *testing.T) {
@@ -627,17 +642,17 @@ func TestTwoRunsAtOnceSendOneRequestPerDelivery(t *testing.T) {
 		})
 	}
 	type outcome struct {
-		res faucet.RedeliverResult
+		res redelivery.Result
 		err error
 	}
 	firstDone := make(chan outcome, 1)
 	go func() {
-		res, err := env.svc.Redeliver(context.Background())
+		res, err := env.runner.Run(context.Background())
 		firstDone <- outcome{res, err}
 	}()
 	<-entered
 
-	second, err := env.svc.Redeliver(context.Background())
+	second, err := env.runner.Run(context.Background())
 	require.NoError(t, err)
 	require.True(t, second.Busy, "a run that starts while another holds the lease does nothing")
 	require.Zero(t, second.Asked)
@@ -705,7 +720,7 @@ func TestRedeliverForgetsFinalDeliveriesAfterGitHubsRetention(t *testing.T) {
 	env.run()
 	require.Equal(t, 1, env.store.rowCount())
 
-	env.advance(faucet.GitHubDeliveryRetention + time.Hour)
+	env.advance(redelivery.GitHubDeliveryRetention + time.Hour)
 	env.run()
 
 	require.Zero(t, env.store.rowCount(), "a final delivery is not kept for longer than GitHub keeps its attempts")
@@ -731,9 +746,9 @@ func TestOnlyRedeliverTimeMakesTheTimesThatTheScanKeepsApart(t *testing.T) {
 	made := regexp.MustCompile(`\b(attemptTime|readBound|pageDate|storedClear)\{`)
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)
-	require.Contains(t, files, "redelivertime.go")
+	require.Contains(t, files, "time.go")
 	for _, file := range files {
-		if file == "redelivertime.go" || strings.HasSuffix(file, "_test.go") {
+		if file == "time.go" || strings.HasSuffix(file, "_test.go") {
 			continue
 		}
 		source, err := os.ReadFile(file)

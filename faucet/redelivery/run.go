@@ -1,4 +1,8 @@
-package faucet
+// Package redelivery asks GitHub to deliver again the webhook deliveries that
+// faucet failed, until faucet stores each event or gives it up. A host builds a
+// Runner with New and calls Run on a schedule. A Store keeps what a run needs
+// between runs, and a HookAdmin is GitHub's webhook API.
+package redelivery
 
 import (
 	"context"
@@ -8,29 +12,31 @@ import (
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog/v3"
+	"github.com/coder/faucet/faucet"
+	"github.com/coder/quartz"
 )
 
 const (
 	// DefaultMaxPagesPerRun is the most pages of GitHub's delivery list that
-	// one run reads when RedeliveryDeps.MaxPagesPerRun is zero. A page holds
-	// 100 attempts.
+	// one run reads when Deps.MaxPagesPerRun is zero. A page holds 100
+	// attempts.
 	DefaultMaxPagesPerRun = 20
 	// DefaultMaxAsksPerRun is the most redelivery requests that one run sends
-	// when RedeliveryDeps.MaxAsksPerRun is zero.
+	// when Deps.MaxAsksPerRun is zero.
 	DefaultMaxAsksPerRun = 50
 	// MaxAsksPerDelivery is the number of times a run asks GitHub to deliver
 	// one event again, before it gives the delivery up with GiveUpLimit.
 	MaxAsksPerDelivery = 7
-	// RedeliveryReadOverlap is how far below its position a run reads again.
+	// ReadOverlap is how far below its position a run reads again.
 	// GitHub writes an attempt down when it ends, and an attempt that ended
 	// late appears below one that ended earlier. The delivery timeout is 10
 	// seconds, so this is a wide margin.
-	RedeliveryReadOverlap = 5 * time.Minute
-	// RedeliveryStartLookback is how far below the newest attempt the first
+	ReadOverlap = 5 * time.Minute
+	// StartLookback is how far below the newest attempt the first
 	// run of a webhook reads. The part of GitHub's retention before it is
 	// recorded as one gap, so the first run does not spend its pages on a
 	// history that nobody waits for.
-	RedeliveryStartLookback = 24 * time.Hour
+	StartLookback = 24 * time.Hour
 
 	redeliveryLeaseTTL  = 2 * time.Minute
 	redeliveryAskSettle = 5 * time.Minute
@@ -57,7 +63,7 @@ var errScanBudget = xerrors.New("the time for reading the delivery list ran out"
 
 // runBudget holds the instants that split a run's deadline. The zero value
 // means no deadline, and nothing ends early. A context deadline is wall time,
-// so the split does not use the service's clock.
+// so the split does not use the runner's clock.
 type runBudget struct {
 	scanEnd, askStart, askEnd time.Time
 }
@@ -111,15 +117,19 @@ func askSchedule() []time.Duration {
 	return append(append([]time.Duration(nil), askWaits[:]...), redeliveryAskSettle)
 }
 
-// ErrNoRedelivery is what Redeliver returns when Deps had no Redelivery.
-var ErrNoRedelivery = xerrors.New("redelivery is not configured")
-
-// RedeliveryDeps turns on redelivery. Nil in Deps leaves it off.
-type RedeliveryDeps struct {
+// Deps are the collaborators a Runner needs.
+type Deps struct {
 	// Store keeps the position and the deliveries between runs.
-	Store RedeliveryStore
+	Store Store
 	// Hooks is GitHub's webhook API for the one webhook that delivers to faucet.
 	Hooks HookAdmin
+	// Clock gives each step its time of record. It is required.
+	Clock quartz.Clock
+	// Logger gets one line for each give-up and each gap, the only record
+	// that names them: a run's reply only counts them, and their rows are
+	// deleted later. The zero value logs nothing, so a host passes the logger
+	// that it gives faucet.Deps.
+	Logger slog.Logger
 	// MaxPagesPerRun bounds the pages one run reads. Zero means
 	// DefaultMaxPagesPerRun.
 	MaxPagesPerRun int
@@ -128,15 +138,21 @@ type RedeliveryDeps struct {
 	MaxAsksPerRun int
 }
 
-type redeliveryState struct {
-	store    RedeliveryStore
+// Runner runs redelivery. It starts no goroutines.
+type Runner struct {
+	store    Store
 	hooks    HookAdmin
+	clock    quartz.Clock
+	logger   slog.Logger
 	maxPages int
 	maxAsks  int
 }
 
-func newRedeliveryState(d RedeliveryDeps) (*redeliveryState, error) {
+// New returns a Runner for d.
+func New(d Deps) (*Runner, error) {
 	switch {
+	case d.Clock == nil:
+		return nil, xerrors.New("clock is required")
 	case d.Store == nil:
 		return nil, xerrors.New("store is required")
 	case d.Hooks == nil:
@@ -144,19 +160,19 @@ func newRedeliveryState(d RedeliveryDeps) (*redeliveryState, error) {
 	case d.MaxPagesPerRun < 0 || d.MaxAsksPerRun < 0:
 		return nil, xerrors.New("run limits must not be negative")
 	}
-	state := &redeliveryState{store: d.Store, hooks: d.Hooks, maxPages: d.MaxPagesPerRun, maxAsks: d.MaxAsksPerRun}
-	if state.maxPages == 0 {
-		state.maxPages = DefaultMaxPagesPerRun
+	r := &Runner{store: d.Store, hooks: d.Hooks, clock: d.Clock, logger: d.Logger, maxPages: d.MaxPagesPerRun, maxAsks: d.MaxAsksPerRun}
+	if r.maxPages == 0 {
+		r.maxPages = DefaultMaxPagesPerRun
 	}
-	if state.maxAsks == 0 {
-		state.maxAsks = DefaultMaxAsksPerRun
+	if r.maxAsks == 0 {
+		r.maxAsks = DefaultMaxAsksPerRun
 	}
-	return state, nil
+	return r, nil
 }
 
-// RedeliverResult counts what one Redeliver run did. Every outcome of a
-// delivery is counted once, in the run that made it, and the run logs it.
-type RedeliverResult struct {
+// Result counts what one run did. Every outcome of a delivery is counted
+// once, in the run that made it, and the run logs it.
+type Result struct {
 	// Busy is true when another run held the lease. Nothing else is set then.
 	Busy bool
 	// Pages is the number of pages of the delivery list the run read, and
@@ -182,8 +198,8 @@ type RedeliverResult struct {
 	Ranges  int
 }
 
-// Redeliver asks GitHub to deliver again each failed webhook delivery of an
-// event type that faucet stores, until faucet stores it. Every such delivery
+// Run asks GitHub to deliver again each failed webhook delivery of an event
+// type that faucet stores, until faucet stores it. Every such delivery
 // ends in exactly one final state, which the run counts and logs: recovered,
 // or given up because every ask was spent (GiveUpLimit) or GitHub's retention
 // ended (GiveUpExpired). A time range of attempts that no run read is counted
@@ -193,29 +209,29 @@ type RedeliverResult struct {
 //
 // A run keeps its place in GitHub's list, which is newest first, in the store.
 // It reads the newest attempts first, up to the position of the run before it
-// (less RedeliveryReadOverlap). When a run cannot read that far inside its
-// page limit, it records the unread part as a range, and the next runs read
-// the ranges, newest first, with what the head read leaves of their page
-// limit. A cursor that GitHub gave is kept with the range, so a later run
-// continues right after the last attempt read. A range whose old end leaves
-// GitHub's retention before it is read becomes a gap, together with the
-// RedeliveryReadOverlap below that end, where a late attempt is listed.
+// (less ReadOverlap). When a run cannot read that far inside its page limit,
+// it records the unread part as a range, and the next runs read the ranges,
+// newest first, with what the head read leaves of their page limit. A cursor
+// that GitHub gave is kept with the range, so a later run continues right
+// after the last attempt read. A range whose old end leaves GitHub's retention
+// before it is read becomes a gap, together with the ReadOverlap below that
+// end, where a late attempt is listed.
 //
 // The scan takes no read bound and no gap from faucet's clock, because that
 // clock and GitHub's differ. Faucet's clock is only the time of record that
 // each step gives the store (ScanStep.Now). Where a read stops comes from the
 // time of an attempt, which GitHub's clock had passed when it listed the
 // attempt. A Date can only lower that bound: the first run after an empty list
-// or the migration also reads back to the Date of that time, less
-// RedeliveryDateMargin, and its gap covers what lies below. Where GitHub's
-// retention has ended comes from the Date header of the page that saw the end
-// of the list, and a gap ends RedeliveryDateSlack above it. After a silence, a
-// gap starts at the Date of the run before, less RedeliveryDateMargin. A Date
-// that is missing, or further behind an attempt than the slack, fails its
-// read: on the first page the run fails, and on a later page the range stays
-// open until it expires. A top that the store returns without a clear fails
-// the run before it reads: the store did not keep the clear, or it holds a top
-// from before there was one, which can be a Date.
+// or the migration also reads back to the Date of that time, less DateMargin,
+// and its gap covers what lies below. Where GitHub's retention has ended comes
+// from the Date header of the page that saw the end of the list, and a gap
+// ends DateSlack above it. After a silence, a gap starts at the Date of the
+// run before, less DateMargin. A Date that is missing, or further behind an
+// attempt than the slack, fails its read: on the first page the run fails,
+// and on a later page the range stays open until it expires. A top that the
+// store returns without a clear fails the run before it reads: the store did
+// not keep the clear, or it holds a top from before there was one, which can
+// be a Date.
 //
 // A delivery is asked for at most MaxAsksPerDelivery times, on the schedule
 // that AskOffsets gives, and at most MaxAsksPerRun times in a run, the delivery
@@ -235,44 +251,41 @@ type RedeliverResult struct {
 // returns at once with Busy set.
 //
 // The method has no auth of its own. The host decides who may call it.
-func (s *Service) Redeliver(ctx context.Context) (RedeliverResult, error) {
-	if s.redelivery == nil {
-		return RedeliverResult{}, ErrNoRedelivery
-	}
-	rd := s.redelivery
-	scan, ok, err := rd.store.AcquireRedeliveryLease(ctx, rd.hooks.Hook(), s.clock.Now(), redeliveryLeaseTTL)
+func (r *Runner) Run(ctx context.Context) (Result, error) {
+	scan, ok, err := r.store.AcquireRedeliveryLease(ctx, r.hooks.Hook(), r.clock.Now(), redeliveryLeaseTTL)
 	if err != nil {
-		return RedeliverResult{}, xerrors.Errorf("acquire redelivery lease: %w", err)
+		return Result{}, xerrors.Errorf("acquire redelivery lease: %w", err)
 	}
 	if !ok {
-		s.logger.Debug(ctx, "redelivery skipped: another run holds the lease")
-		return RedeliverResult{Busy: true}, nil
+		r.logger.Debug(ctx, "redelivery skipped: another run holds the lease")
+		return Result{Busy: true}, nil
 	}
 	defer func() {
 		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
-		if err := rd.store.ReleaseRedeliveryLease(releaseCtx, scan.Epoch); err != nil {
-			s.logger.Warn(ctx, "redelivery lease not released", slog.Error(err))
+		if err := r.store.ReleaseRedeliveryLease(releaseCtx, scan.Epoch); err != nil {
+			r.logger.Warn(ctx, "redelivery lease not released", slog.Error(err))
 		}
 	}()
 
-	run := &redeliveryRun{svc: s, state: rd, epoch: scan.Epoch, budget: newRunBudget(ctx)}
+	run := &redeliveryRun{runner: r, clock: r.clock, logger: r.logger, epoch: scan.Epoch, budget: newRunBudget(ctx)}
 	return run.execute(ctx, scan)
 }
 
 type redeliveryRun struct {
-	svc    *Service
-	state  *redeliveryState
+	runner *Runner
+	clock  quartz.Clock
+	logger slog.Logger
 	epoch  int64
 	budget runBudget
-	res    RedeliverResult
+	res    Result
 }
 
-func (r *redeliveryRun) execute(ctx context.Context, scan RedeliveryScan) (RedeliverResult, error) {
+func (r *redeliveryRun) execute(ctx context.Context, scan Scan) (Result, error) {
 	r.res.Ranges = len(scan.Ranges)
 	if scan.HookChanged {
 		r.res.Ranges = 0
-		r.svc.logger.Warn(ctx, "redelivery hook changed: the scan starts again", slog.F("open_ranges_closed", len(scan.ClosedGaps)))
+		r.logger.Warn(ctx, "redelivery hook changed: the scan starts again", slog.F("open_ranges_closed", len(scan.ClosedGaps)))
 		for _, gap := range scan.ClosedGaps {
 			r.countGap(ctx, gap, gapHookChanged)
 		}
@@ -288,9 +301,9 @@ func (r *redeliveryRun) execute(ctx context.Context, scan RedeliveryScan) (Redel
 	errs = append(errs, r.purge(ctx))
 
 	res := r.res
-	logger := r.svc.logger.Debug
+	logger := r.logger.Debug
 	if res.Tracked > 0 || res.Asked > 0 || res.Recovered > 0 || res.GaveUpLimit > 0 || res.GaveUpExpired > 0 || res.Gaps > 0 {
-		logger = r.svc.logger.Info
+		logger = r.logger.Info
 	}
 	logger(ctx, "redelivery run done",
 		slog.F("pages", res.Pages), slog.F("attempts", res.Attempts), slog.F("tracked", res.Tracked), slog.F("asked", res.Asked),
@@ -318,7 +331,7 @@ func (p pageRead) endOfList() bool { return !p.reachedBound && p.next == "" }
 func (r *redeliveryRun) fetch(ctx context.Context, cursor string) (DeliveryPage, error) {
 	readCtx, cancel := until(ctx, r.budget.scanEnd)
 	defer cancel()
-	page, err := r.state.hooks.ListDeliveries(readCtx, cursor)
+	page, err := r.runner.hooks.ListDeliveries(readCtx, cursor)
 	if err != nil {
 		if ctx.Err() == nil && readCtx.Err() != nil {
 			return DeliveryPage{}, errScanBudget
@@ -338,7 +351,7 @@ func (r *redeliveryRun) classify(page DeliveryPage, bound readBound) pageRead {
 		}
 		p.attempts++
 		p.oldest = p.oldest.orEarlier(deliveredAt(d))
-		if !storesDelivery(d.Event, d.Action) {
+		if !faucet.StoresDelivery(d.Event, d.Action) {
 			continue
 		}
 		if d.StatusCode >= 200 && d.StatusCode < 300 {
@@ -352,18 +365,18 @@ func (r *redeliveryRun) classify(page DeliveryPage, bound readBound) pageRead {
 }
 
 func (r *redeliveryRun) step(p pageRead) ScanStep {
-	return ScanStep{Epoch: r.epoch, Now: r.svc.clock.Now(), Failed: p.failed, Succeeded: p.succeeded}
+	return ScanStep{Epoch: r.epoch, Now: r.clock.Now(), Failed: p.failed, Succeeded: p.succeeded}
 }
 
-func gapBetween(from, to time.Time) *RedeliveryGap {
+func gapBetween(from, to time.Time) *Gap {
 	if !from.Before(to) {
 		return nil
 	}
-	return &RedeliveryGap{From: from, To: to}
+	return &Gap{From: from, To: to}
 }
 
 func (r *redeliveryRun) apply(ctx context.Context, step ScanStep, cause string) (ScanResult, error) {
-	res, err := r.state.store.ApplyRedeliveryScan(ctx, step)
+	res, err := r.runner.store.ApplyRedeliveryScan(ctx, step)
 	if err != nil {
 		return ScanResult{}, xerrors.Errorf("record page: %w", err)
 	}
@@ -378,7 +391,7 @@ func (r *redeliveryRun) apply(ctx context.Context, step ScanStep, cause string) 
 func (r *redeliveryRun) countRecovered(ctx context.Context, guids []string, how string) {
 	for _, guid := range guids {
 		r.res.Recovered++
-		r.svc.logger.Info(ctx, "redelivery recovered", slog.F("delivery_id", guid), slog.F("how", how))
+		r.logger.Info(ctx, "redelivery recovered", slog.F("delivery_id", guid), slog.F("how", how))
 	}
 }
 
@@ -389,15 +402,15 @@ const (
 	gapHookChanged    = "hook changed"
 )
 
-func (r *redeliveryRun) countGap(ctx context.Context, gap RedeliveryGap, cause string) {
+func (r *redeliveryRun) countGap(ctx context.Context, gap Gap, cause string) {
 	r.res.Gaps++
-	r.svc.logger.Warn(ctx, "redelivery gap",
+	r.logger.Warn(ctx, "redelivery gap",
 		slog.F("reason", GiveUpGap), slog.F("cause", cause), slog.F("from", gap.From), slog.F("to", gap.To))
 }
 
 // scan reads the head of the list and then the open ranges, newest first. It
 // returns whether the head read worked.
-func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, error) {
+func (r *redeliveryRun) scan(ctx context.Context, scan Scan) (bool, error) {
 	top, clearAt, err := topAndClearOf(scan)
 	if err != nil {
 		return false, err
@@ -435,7 +448,7 @@ func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, er
 		}
 	}
 	if !head.finished() {
-		step.Open = &RedeliveryRange{NewerAt: head.oldest.at, OlderAt: olderAt, Cursor: head.next}
+		step.Open = &Range{NewerAt: head.oldest.at, OlderAt: olderAt, Cursor: head.next}
 	}
 	res, err := r.apply(ctx, step, cause)
 	if err != nil {
@@ -446,7 +459,7 @@ func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, er
 		opened := *step.Open
 		opened.ID = res.OpenedID
 		r.res.Ranges++
-		ranges = append([]RedeliveryRange{opened}, ranges...)
+		ranges = append([]Range{opened}, ranges...)
 	}
 	live, err := r.closeExpired(ctx, ranges, date, clearAt)
 	if err != nil {
@@ -455,7 +468,7 @@ func (r *redeliveryRun) scan(ctx context.Context, scan RedeliveryScan) (bool, er
 	return true, r.readRanges(ctx, live, top.orLater(newest))
 }
 
-func (r *redeliveryRun) closeExpired(ctx context.Context, ranges []RedeliveryRange, date pageDate, clearAt storedClear) ([]RedeliveryRange, error) {
+func (r *redeliveryRun) closeExpired(ctx context.Context, ranges []Range, date pageDate, clearAt storedClear) ([]Range, error) {
 	floor, ok := expiredByBoth(date, clearAt)
 	if !ok {
 		return ranges, nil
@@ -467,7 +480,7 @@ func (r *redeliveryRun) closeExpired(ctx context.Context, ranges []RedeliveryRan
 			continue
 		}
 		gap := rg.UnreadGap()
-		if _, err := r.apply(ctx, ScanStep{Epoch: r.epoch, Now: r.svc.clock.Now(), CloseID: rg.ID, Gap: &gap}, gapExpiredUnread); err != nil {
+		if _, err := r.apply(ctx, ScanStep{Epoch: r.epoch, Now: r.clock.Now(), CloseID: rg.ID, Gap: &gap}, gapExpiredUnread); err != nil {
 			return nil, err
 		}
 		r.res.Ranges--
@@ -475,7 +488,7 @@ func (r *redeliveryRun) closeExpired(ctx context.Context, ranges []RedeliveryRan
 	return live, nil
 }
 
-func (r *redeliveryRun) readRanges(ctx context.Context, ranges []RedeliveryRange, newestKnown attemptTime) error {
+func (r *redeliveryRun) readRanges(ctx context.Context, ranges []Range, newestKnown attemptTime) error {
 	for _, rg := range ranges {
 		if err := r.readRange(ctx, rg, newestKnown); err != nil {
 			return err
@@ -486,9 +499,9 @@ func (r *redeliveryRun) readRanges(ctx context.Context, ranges []RedeliveryRange
 
 // GitHub deletes attempts in the order of their times, so a page that reaches
 // the bound ends the range without a gap.
-func (r *redeliveryRun) readRange(ctx context.Context, rg RedeliveryRange, newestKnown attemptTime) error {
+func (r *redeliveryRun) readRange(ctx context.Context, rg Range, newestKnown attemptTime) error {
 	bound := rg.bound()
-	for r.res.Pages < r.state.maxPages && ctx.Err() == nil && !r.budget.pastScan() {
+	for r.res.Pages < r.runner.maxPages && ctx.Err() == nil && !r.budget.pastScan() {
 		page, err := r.fetch(ctx, rg.Cursor)
 		if errors.Is(err, errScanBudget) {
 			return nil // the range stays open where the last page left it
@@ -539,8 +552,8 @@ func laterOf(a, b time.Time) time.Time {
 }
 
 func (r *redeliveryRun) settle(ctx context.Context) error {
-	res, err := r.state.store.SettleRedeliveries(ctx, SettleRequest{
-		Now: r.svc.clock.Now(), Retention: GitHubDeliveryRetention, MaxAsks: MaxAsksPerDelivery,
+	res, err := r.runner.store.SettleRedeliveries(ctx, SettleRequest{
+		Now: r.clock.Now(), Retention: GitHubDeliveryRetention, MaxAsks: MaxAsksPerDelivery,
 	})
 	if err != nil {
 		return xerrors.Errorf("settle deliveries: %w", err)
@@ -554,7 +567,7 @@ func (r *redeliveryRun) settle(ctx context.Context) error {
 		case GiveUpExpired:
 			r.res.GaveUpExpired++
 		}
-		r.svc.logger.Warn(ctx, "redelivery gave up", slog.F("delivery_id", g.GUID), slog.F("reason", g.Reason),
+		r.logger.Warn(ctx, "redelivery gave up", slog.F("delivery_id", g.GUID), slog.F("reason", g.Reason),
 			slog.F("asks", g.Asks), slog.F("first_delivered_at", g.FirstDeliveredAt))
 	}
 	return nil
@@ -564,9 +577,9 @@ func (r *redeliveryRun) ask(ctx context.Context) error {
 	schedule := askSchedule()
 	askCtx, cancel := until(ctx, r.budget.askEnd)
 	defer cancel()
-	for r.res.Asked < r.state.maxAsks && askCtx.Err() == nil && !r.budget.pastAskStart() {
-		claim, ok, err := r.state.store.ClaimRedelivery(ctx, ClaimRequest{
-			Now: r.svc.clock.Now(), Retention: GitHubDeliveryRetention, MaxAsks: MaxAsksPerDelivery, Schedule: schedule,
+	for r.res.Asked < r.runner.maxAsks && askCtx.Err() == nil && !r.budget.pastAskStart() {
+		claim, ok, err := r.runner.store.ClaimRedelivery(ctx, ClaimRequest{
+			Now: r.clock.Now(), Retention: GitHubDeliveryRetention, MaxAsks: MaxAsksPerDelivery, Schedule: schedule,
 		})
 		if err != nil {
 			return xerrors.Errorf("claim a redelivery: %w", err)
@@ -574,13 +587,13 @@ func (r *redeliveryRun) ask(ctx context.Context) error {
 		if !ok {
 			return nil
 		}
-		if err := r.state.hooks.Redeliver(askCtx, claim.AttemptID); err != nil {
-			r.svc.logger.Warn(ctx, "redelivery request failed",
+		if err := r.runner.hooks.Redeliver(askCtx, claim.AttemptID); err != nil {
+			r.logger.Warn(ctx, "redelivery request failed",
 				slog.F("delivery_id", claim.GUID), slog.F("attempt_id", claim.AttemptID), slog.F("ask", claim.Ask), slog.Error(err))
 			return xerrors.Errorf("request redelivery: %w", err)
 		}
 		r.res.Asked++
-		r.svc.logger.Info(ctx, "redelivery requested",
+		r.logger.Info(ctx, "redelivery requested",
 			slog.F("delivery_id", claim.GUID), slog.F("attempt_id", claim.AttemptID), slog.F("ask", claim.Ask))
 	}
 	return nil
@@ -589,7 +602,7 @@ func (r *redeliveryRun) ask(ctx context.Context) error {
 // purge deletes what has outlived GitHub's retention, so a table of final
 // deliveries does not grow without end.
 func (r *redeliveryRun) purge(ctx context.Context) error {
-	if _, err := r.state.store.PurgeRedeliveries(ctx, r.svc.clock.Now().Add(-GitHubDeliveryRetention)); err != nil {
+	if _, err := r.runner.store.PurgeRedeliveries(ctx, r.clock.Now().Add(-GitHubDeliveryRetention)); err != nil {
 		return xerrors.Errorf("purge redeliveries: %w", err)
 	}
 	return nil

@@ -2,53 +2,20 @@ package faucet_test
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
-	"net/url"
-	"os"
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/internal/pgtest"
 	"github.com/coder/faucet/faucet/pgstore"
 )
 
 func postgresDB(t *testing.T) *sql.DB {
 	t.Helper()
-	adminURL := os.Getenv("FAUCET_TEST_DATABASE_URL")
-	if adminURL == "" {
-		if os.Getenv("CI") != "" {
-			t.Fatal("FAUCET_TEST_DATABASE_URL must be set in CI")
-		}
-		t.Skip("set FAUCET_TEST_DATABASE_URL to a Postgres URL")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	suffix := make([]byte, 8)
-	_, err := rand.Read(suffix)
-	require.NoError(t, err)
-	name := "faucet_test_" + hex.EncodeToString(suffix)
-	admin, err := sql.Open("postgres", adminURL)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = admin.Close() })
-	_, err = admin.ExecContext(ctx, "CREATE DATABASE "+pq.QuoteIdentifier(name))
-	require.NoError(t, err)
-	u, err := url.Parse(adminURL)
-	require.NoError(t, err)
-	u.Path = "/" + name
-	db, err := sql.Open("postgres", u.String())
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = db.Close()
-		_, err := admin.ExecContext(context.Background(), "DROP DATABASE "+pq.QuoteIdentifier(name)+" WITH (FORCE)")
-		require.NoError(t, err)
-	})
-	require.NoError(t, pgstore.Migrate(ctx, db))
-	return db
+	return pgtest.NewDB(t, pgstore.Migrate)
 }
 
 // holdSubscriptionsLocked keeps faucet_subscriptions locked from another

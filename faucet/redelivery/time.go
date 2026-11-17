@@ -1,4 +1,4 @@
-package faucet
+package redelivery
 
 import (
 	"time"
@@ -7,15 +7,15 @@ import (
 )
 
 const (
-	// RedeliveryDateSlack is how far GitHub's Date header may lie behind the
+	// DateSlack is how far GitHub's Date header may lie behind the
 	// clock that deletes attempts. A gap ends this much above the end of
 	// GitHub's retention that the Date gives, and a Date that is further
 	// behind an attempt that GitHub has listed fails the read.
-	RedeliveryDateSlack = time.Hour
-	// RedeliveryDateMargin is how far GitHub's Date header may run ahead of
+	DateSlack = time.Hour
+	// DateMargin is how far GitHub's Date header may run ahead of
 	// GitHub's list. A gap that starts at the Date of the last head read
 	// starts this much below it.
-	RedeliveryDateMargin = 6 * time.Hour
+	DateMargin = 6 * time.Hour
 
 	// An HTTP Date drops the fraction of its second.
 	redeliveryDateResolution = time.Second
@@ -25,7 +25,7 @@ type attemptTime struct{ at time.Time }
 
 func deliveredAt(d HookDelivery) attemptTime { return attemptTime{d.DeliveredAt} }
 
-func (r RedeliveryRange) newerEnd() attemptTime { return attemptTime{r.NewerAt} }
+func (r Range) newerEnd() attemptTime { return attemptTime{r.NewerAt} }
 
 func newestOn(page DeliveryPage) attemptTime {
 	var newest attemptTime
@@ -58,9 +58,9 @@ func (a attemptTime) orEarlier(b attemptTime) attemptTime {
 
 type readBound struct{ stop time.Time }
 
-func (a attemptTime) bound() readBound { return readBound{a.at.Add(-RedeliveryReadOverlap)} }
+func (a attemptTime) bound() readBound { return readBound{a.at.Add(-ReadOverlap)} }
 
-func (r RedeliveryRange) bound() readBound { return readBound{r.OlderAt.Add(-RedeliveryReadOverlap)} }
+func (r Range) bound() readBound { return readBound{r.OlderAt.Add(-ReadOverlap)} }
 
 func (b readBound) excludes(a attemptTime) bool { return a.at.Before(b.stop) }
 
@@ -75,15 +75,15 @@ func checkDate(page DeliveryPage, newestKnown attemptTime) (pageDate, error) {
 	switch {
 	case page.At.IsZero():
 		return pageDate{}, xerrors.Errorf("%w: the page has none", errUnusableDate)
-	case page.At.Add(redeliveryDateResolution).Before(known.at.Add(-RedeliveryDateSlack)):
+	case page.At.Add(redeliveryDateResolution).Before(known.at.Add(-DateSlack)):
 		return pageDate{}, xerrors.Errorf("%w: it is %s before the newest attempt, and at most %s is allowed",
-			errUnusableDate, known.at.Sub(page.At), RedeliveryDateSlack+redeliveryDateResolution)
+			errUnusableDate, known.at.Sub(page.At), DateSlack+redeliveryDateResolution)
 	}
 	return pageDate{page.At}, nil
 }
 
 func (d pageDate) gapEnd(covered attemptTime) time.Time {
-	end := d.date.Add(redeliveryDateResolution - GitHubDeliveryRetention + RedeliveryDateSlack)
+	end := d.date.Add(redeliveryDateResolution - GitHubDeliveryRetention + DateSlack)
 	if covered.set() && covered.at.Before(end) {
 		end = covered.at
 	}
@@ -94,7 +94,7 @@ type storedClear struct{ clearAt time.Time }
 
 var errTopWithoutClear = xerrors.New("the store returned a top without a clear: a RedeliveryStore must keep Clear, and must move a top that it stored before into Clear")
 
-func topAndClearOf(scan RedeliveryScan) (attemptTime, storedClear, error) {
+func topAndClearOf(scan Scan) (attemptTime, storedClear, error) {
 	top, clearAt := attemptTime{scan.Top}, storedClear{scan.Clear}
 	if top.set() && !clearAt.set() {
 		return attemptTime{}, storedClear{}, errTopWithoutClear
@@ -112,7 +112,7 @@ func expiredByBoth(d pageDate, c storedClear) (time.Time, bool) {
 }
 
 func (c storedClear) unseenFrom() time.Time {
-	return c.clearAt.Add(-RedeliveryDateMargin - RedeliveryReadOverlap)
+	return c.clearAt.Add(-DateMargin - ReadOverlap)
 }
 
 func (c storedClear) headGapStart(top attemptTime) (time.Time, bool) {
@@ -126,9 +126,9 @@ func (c storedClear) headGapStart(top attemptTime) (time.Time, bool) {
 }
 
 func (c storedClear) firstRunBound(newest attemptTime) readBound {
-	bound := readBound{newest.at.Add(-RedeliveryStartLookback)}
+	bound := readBound{newest.at.Add(-StartLookback)}
 	if c.set() {
-		bound = bound.loweredTo(c.clearAt.Add(-RedeliveryDateMargin))
+		bound = bound.loweredTo(c.clearAt.Add(-DateMargin))
 	}
 	return bound
 }

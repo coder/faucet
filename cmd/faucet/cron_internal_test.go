@@ -19,6 +19,7 @@ import (
 	"cdr.dev/slog/v3"
 	"cdr.dev/slog/v3/sloggers/sloghuman"
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/redelivery"
 	"github.com/coder/quartz"
 )
 
@@ -35,38 +36,38 @@ const (
 type cronRedeliveryStore struct {
 	mu        sync.Mutex
 	busy      bool
-	settle    faucet.SettleResult
+	settle    redelivery.SettleResult
 	settleErr error
 	purgeErr  error
 	acquired  int
 }
 
-var _ faucet.RedeliveryStore = (*cronRedeliveryStore)(nil)
+var _ redelivery.Store = (*cronRedeliveryStore)(nil)
 
-func (s *cronRedeliveryStore) AcquireRedeliveryLease(context.Context, string, time.Time, time.Duration) (faucet.RedeliveryScan, bool, error) {
+func (s *cronRedeliveryStore) AcquireRedeliveryLease(context.Context, string, time.Time, time.Duration) (redelivery.Scan, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.busy {
-		return faucet.RedeliveryScan{}, false, nil
+		return redelivery.Scan{}, false, nil
 	}
 	s.acquired++
-	return faucet.RedeliveryScan{Epoch: 1}, true, nil
+	return redelivery.Scan{Epoch: 1}, true, nil
 }
 
 func (*cronRedeliveryStore) ReleaseRedeliveryLease(context.Context, int64) error { return nil }
 
-func (*cronRedeliveryStore) ApplyRedeliveryScan(context.Context, faucet.ScanStep) (faucet.ScanResult, error) {
-	return faucet.ScanResult{}, nil
+func (*cronRedeliveryStore) ApplyRedeliveryScan(context.Context, redelivery.ScanStep) (redelivery.ScanResult, error) {
+	return redelivery.ScanResult{}, nil
 }
 
-func (s *cronRedeliveryStore) SettleRedeliveries(context.Context, faucet.SettleRequest) (faucet.SettleResult, error) {
+func (s *cronRedeliveryStore) SettleRedeliveries(context.Context, redelivery.SettleRequest) (redelivery.SettleResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.settle, s.settleErr
 }
 
-func (*cronRedeliveryStore) ClaimRedelivery(context.Context, faucet.ClaimRequest) (faucet.RedeliveryClaim, bool, error) {
-	return faucet.RedeliveryClaim{}, false, nil
+func (*cronRedeliveryStore) ClaimRedelivery(context.Context, redelivery.ClaimRequest) (redelivery.Claim, bool, error) {
+	return redelivery.Claim{}, false, nil
 }
 
 func (s *cronRedeliveryStore) PurgeRedeliveries(context.Context, time.Time) (int64, error) {
@@ -88,16 +89,16 @@ type cronHooks struct {
 
 func (*cronHooks) Hook() string { return "/orgs/octo-org/hooks/9" }
 
-var attemptThatStartsTracking = faucet.HookDelivery{
+var attemptThatStartsTracking = redelivery.HookDelivery{
 	ID: 1, GUID: "g-listed", DeliveredAt: time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC), StatusCode: http.StatusOK, Event: "ping",
 }
 
-func (h *cronHooks) ListDeliveries(context.Context, string) (faucet.DeliveryPage, error) {
+func (h *cronHooks) ListDeliveries(context.Context, string) (redelivery.DeliveryPage, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.lists++
-	return faucet.DeliveryPage{
-		Deliveries: []faucet.HookDelivery{attemptThatStartsTracking},
+	return redelivery.DeliveryPage{
+		Deliveries: []redelivery.HookDelivery{attemptThatStartsTracking},
 		At:         attemptThatStartsTracking.DeliveredAt.Add(time.Second),
 	}, nil
 }
@@ -213,17 +214,19 @@ func newCronServer(t *testing.T, opts cronOptions) *cronServer {
 		require.NoError(t, err)
 		deps.Webhook = &faucet.WebhookDeps{Key: key, Callbacks: callbacks}
 	}
-	redelivery, hooks := &cronRedeliveryStore{}, &cronHooks{}
-	if opts.redelivery {
-		deps.Redelivery = &faucet.RedeliveryDeps{Store: redelivery, Hooks: hooks}
-	}
 	svc, err := faucet.New(deps)
 	require.NoError(t, err)
+	redeliveries, hooks := &cronRedeliveryStore{}, &cronHooks{}
+	var redeliverer *redelivery.Runner
+	if opts.redelivery {
+		redeliverer, err = redelivery.New(redelivery.Deps{Store: redeliveries, Hooks: hooks, Clock: clock, Logger: logger})
+		require.NoError(t, err)
+	}
 
-	cron := cronRoutes{secret: []byte(opts.secret), svc: svc, retention: retention, delivers: opts.webhook, redelivers: opts.redelivery, clock: clock, logger: logger}
+	cron := cronRoutes{secret: []byte(opts.secret), svc: svc, retention: retention, delivers: opts.webhook, redeliverer: redeliverer, clock: clock, logger: logger}
 	srv := httptest.NewServer(newRouter(svc, authorizer, cron, logger))
 	t.Cleanup(srv.Close)
-	return &cronServer{Server: srv, store: store, redelivery: redelivery, hooks: hooks, clock: clock, logs: logs}
+	return &cronServer{Server: srv, store: store, redelivery: redeliveries, hooks: hooks, clock: clock, logs: logs}
 }
 
 func (s *cronServer) get(t *testing.T, method, path string, authHeader *string) (status int, challenge, body string) {
@@ -367,11 +370,11 @@ func TestCronRedeliverReportsEveryOutcome(t *testing.T) {
 	t.Parallel()
 
 	srv := newCronServer(t, cronOptions{secret: testCronSecret, redelivery: true})
-	srv.redelivery.settle = faucet.SettleResult{
+	srv.redelivery.settle = redelivery.SettleResult{
 		Recovered: []string{"g-1", "g-2"},
-		GaveUp: []faucet.GaveUp{
-			{GUID: "g-3", Reason: faucet.GiveUpLimit, Asks: faucet.MaxAsksPerDelivery},
-			{GUID: "g-4", Reason: faucet.GiveUpExpired},
+		GaveUp: []redelivery.GaveUp{
+			{GUID: "g-3", Reason: redelivery.GiveUpLimit, Asks: redelivery.MaxAsksPerDelivery},
+			{GUID: "g-4", Reason: redelivery.GiveUpExpired},
 		},
 		Pending: 3,
 	}
@@ -429,9 +432,9 @@ func TestCronRedeliverFailureStillReportsTheOutcomesItRecorded(t *testing.T) {
 	t.Parallel()
 
 	srv := newCronServer(t, cronOptions{secret: testCronSecret, redelivery: true})
-	srv.redelivery.settle = faucet.SettleResult{
+	srv.redelivery.settle = redelivery.SettleResult{
 		Recovered: []string{"g-1", "g-2"},
-		GaveUp:    []faucet.GaveUp{{GUID: "g-3", Reason: faucet.GiveUpLimit, Asks: faucet.MaxAsksPerDelivery}},
+		GaveUp:    []redelivery.GaveUp{{GUID: "g-3", Reason: redelivery.GiveUpLimit, Asks: redelivery.MaxAsksPerDelivery}},
 		Pending:   3,
 	}
 	srv.redelivery.purgeErr = xerrors.New("connection to db.internal:5432 refused")

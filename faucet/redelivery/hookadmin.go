@@ -1,4 +1,4 @@
-package faucet
+package redelivery
 
 import (
 	"context"
@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"golang.org/x/xerrors"
+
+	"github.com/coder/faucet/faucet/internal/githubapi"
 )
 
 const (
@@ -47,19 +49,19 @@ type DeliveryPage struct {
 	// Next is the cursor of the next, older page. It is empty on the last page.
 	Next string
 	// At is GitHub's own clock when it answered, which GitHub's Date header
-	// carries. It is zero when GitHub sent none. Redeliver needs At on the
+	// carries. It is zero when GitHub sent none. Runner.Run needs At on the
 	// first page and on a page that ends the list. There it fails the read
-	// when At is zero, or more than RedeliveryDateSlack before the newest
-	// attempt that it knows.
+	// when At is zero, or more than DateSlack before the newest attempt that
+	// it knows.
 	At time.Time
 }
 
-// HookAdmin is the part of GitHub's webhook API that Service.Redeliver needs.
+// HookAdmin is the part of GitHub's webhook API that Runner.Run needs.
 // A token that can call these two methods can usually also edit or delete the
 // webhook, so an implementation must call nothing else.
 type HookAdmin interface {
-	// Hook names the webhook, for example /orgs/acme/hooks/7. Redeliver keeps
-	// its scan position per name, so a name must not be reused for another
+	// Hook names the webhook, for example /orgs/acme/hooks/7. A run keeps its
+	// scan position per name, so a name must not be reused for another
 	// webhook.
 	Hook() string
 	// ListDeliveries returns one page of delivery attempts, newest first.
@@ -67,7 +69,7 @@ type HookAdmin interface {
 	// GitHub's cursor is opaque. A cursor that an earlier call returned must
 	// still continue the same list after newer attempts have arrived. The
 	// call must not fail a page for its Date: it sets DeliveryPage.At, or
-	// leaves it zero, and Redeliver decides whether it needs it.
+	// leaves it zero, and the run decides whether it needs it.
 	ListDeliveries(ctx context.Context, cursor string) (DeliveryPage, error)
 	// Redeliver asks GitHub to send the attempt with this ID again.
 	Redeliver(ctx context.Context, attemptID int64) error
@@ -101,11 +103,11 @@ type GitHubHookAdmin struct {
 var _ HookAdmin = GitHubHookAdmin{}
 
 // NewGitHubHookAdmin returns a GitHubHookAdmin. baseURL follows the rules of
-// TokenAuthorizer.BaseURL. token must be a valid header value, which GitHub
+// faucet.TokenAuthorizer.BaseURL. token must be a valid header value, which GitHub
 // tokens are. client defaults to http.DefaultClient and is never modified. No
 // error carries the token or the base URL.
 func NewGitHubHookAdmin(baseURL, token string, target HookTarget, client *http.Client) (GitHubHookAdmin, error) {
-	base, err := parseBaseURL(baseURL)
+	base, err := githubapi.ParseBaseURL(baseURL)
 	if err != nil {
 		return GitHubHookAdmin{}, err
 	}
@@ -120,12 +122,12 @@ func NewGitHubHookAdmin(baseURL, token string, target HookTarget, client *http.C
 	case target.Org != "" && target.Repo != "":
 		return GitHubHookAdmin{}, xerrors.New("set the hook's org or its repo, not both")
 	case target.Org != "":
-		if !ownerPattern.MatchString(target.Org) {
+		if !githubapi.ValidOwner(target.Org) {
 			return GitHubHookAdmin{}, xerrors.New("hook org is not a valid organization name")
 		}
 		scope = "/orgs/" + url.PathEscape(target.Org)
 	case target.Repo != "":
-		owner, name, err := parseRepo(target.Repo)
+		owner, name, err := githubapi.ParseRepo(target.Repo)
 		if err != nil {
 			return GitHubHookAdmin{}, xerrors.New("hook repo must be written owner/name")
 		}
@@ -175,7 +177,7 @@ func (a GitHubHookAdmin) ListDeliveries(ctx context.Context, cursor string) (Del
 	if cursor != "" {
 		query.Set("cursor", cursor)
 	}
-	resp, err := callGitHub(ctx, a.client, a.base, a.token, http.MethodGet, a.hookPath+"/deliveries", query.Encode())
+	resp, err := githubapi.Call(ctx, a.client, a.base, a.token, http.MethodGet, a.hookPath+"/deliveries", query.Encode())
 	if err != nil {
 		return DeliveryPage{}, err
 	}
@@ -184,7 +186,7 @@ func (a GitHubHookAdmin) ListDeliveries(ctx context.Context, cursor string) (Del
 		return DeliveryPage{}, statusError(resp, "the delivery list")
 	}
 	var raw []deliveryJSON
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAPIResponseBytes)).Decode(&raw); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, githubapi.MaxResponseBytes)).Decode(&raw); err != nil {
 		return DeliveryPage{}, xerrors.Errorf("decode GitHub deliveries: %w", err)
 	}
 	next, err := nextCursor(resp.Header.Get("Link"))
@@ -208,7 +210,7 @@ func (a GitHubHookAdmin) Redeliver(ctx context.Context, attemptID int64) error {
 		return xerrors.New("attempt ID must be positive")
 	}
 	path := a.hookPath + "/deliveries/" + strconv.FormatInt(attemptID, 10) + "/attempts"
-	resp, err := callGitHub(ctx, a.client, a.base, a.token, http.MethodPost, path, "")
+	resp, err := githubapi.Call(ctx, a.client, a.base, a.token, http.MethodPost, path, "")
 	if err != nil {
 		return err
 	}
@@ -216,19 +218,19 @@ func (a GitHubHookAdmin) Redeliver(ctx context.Context, attemptID int64) error {
 	if resp.StatusCode != http.StatusAccepted {
 		return statusError(resp, "the redelivery request")
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxAPIResponseBytes))
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, githubapi.MaxResponseBytes))
 	return nil
 }
 
 // statusError is the error for an answer that is not the one that was needed.
 // It names the status and never the body. A rate limit is told from a denial
-// and wraps errRateLimited, so the log names it. A later run repeats the call
+// and wraps githubapi.ErrRateLimited, so the log names it. A later run repeats the call
 // for either error: no answer from GitHub ends a delivery, and only the ask
 // limit and GitHub's retention do.
 func statusError(resp *http.Response, what string) error {
-	answer, _ := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseBytes))
-	if rateLimited(resp.StatusCode, resp.Header, answer) {
-		return xerrors.Errorf("GitHub answered %s with status %d: %w", what, resp.StatusCode, errRateLimited)
+	answer, _ := io.ReadAll(io.LimitReader(resp.Body, githubapi.MaxResponseBytes))
+	if githubapi.RateLimited(resp.StatusCode, resp.Header, answer) {
+		return xerrors.Errorf("GitHub answered %s with status %d: %w", what, resp.StatusCode, githubapi.ErrRateLimited)
 	}
 	return xerrors.Errorf("GitHub answered %s with status %d", what, resp.StatusCode)
 }

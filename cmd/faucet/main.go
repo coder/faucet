@@ -23,6 +23,7 @@ import (
 	"github.com/coder/faucet/cmd/faucet/internal/dbconn"
 	"github.com/coder/faucet/faucet"
 	"github.com/coder/faucet/faucet/pgstore"
+	"github.com/coder/faucet/faucet/redelivery"
 	"github.com/coder/quartz"
 )
 
@@ -87,7 +88,7 @@ type config struct {
 	cronSecret string
 	retention  time.Duration
 	// hookAdmin is nil when redelivery is off.
-	hookAdmin faucet.HookAdmin
+	hookAdmin redelivery.HookAdmin
 	webhook   *faucet.WebhookDeps
 }
 
@@ -168,7 +169,7 @@ func loadCronConfig(getenv func(string) string, cfg *config) error {
 // variable is set, and then every variable that is needed must be, so a typo
 // does not turn redelivery off. No error names a value, because one of them is
 // the hook token.
-func newHookAdmin(githubAPI, token, org, repo, rawID string) (faucet.HookAdmin, error) {
+func newHookAdmin(githubAPI, token, org, repo, rawID string) (redelivery.HookAdmin, error) {
 	var missing []string
 	for _, v := range []struct{ name, value string }{{envHookToken, token}, {envHookID, rawID}} {
 		if v.value == "" {
@@ -189,7 +190,7 @@ func newHookAdmin(githubAPI, token, org, repo, rawID string) (faucet.HookAdmin, 
 	if err != nil || id < 1 {
 		return nil, xerrors.Errorf("%s must be a positive integer", envHookID)
 	}
-	admin, err := faucet.NewGitHubHookAdmin(githubAPI, token, faucet.HookTarget{Org: org, Repo: repo, HookID: id}, &http.Client{Timeout: githubTimeout})
+	admin, err := redelivery.NewGitHubHookAdmin(githubAPI, token, redelivery.HookTarget{Org: org, Repo: repo, HookID: id}, &http.Client{Timeout: githubTimeout})
 	if err != nil {
 		return nil, xerrors.Errorf("FAUCET_HOOK_*: %w", err)
 	}
@@ -236,18 +237,22 @@ func run() error {
 		Clock:         clock,
 		Webhook:       cfg.webhook,
 	}
-	if cfg.hookAdmin != nil {
-		deps.Redelivery = &faucet.RedeliveryDeps{Store: store, Hooks: cfg.hookAdmin}
-	}
 	svc, err := faucet.New(deps)
 	if err != nil {
 		return xerrors.Errorf("create service: %w", err)
+	}
+	var redeliverer *redelivery.Runner
+	if cfg.hookAdmin != nil {
+		redeliverer, err = redelivery.New(redelivery.Deps{Store: store, Hooks: cfg.hookAdmin, Clock: clock, Logger: logger})
+		if err != nil {
+			return xerrors.Errorf("create service: redelivery: %w", err)
+		}
 	}
 	if err := migrateSchema(ctx, cfg, db); err != nil {
 		return err
 	}
 	cron := cronRoutes{
-		secret: []byte(cfg.cronSecret), svc: svc, retention: cfg.retention, delivers: cfg.webhook != nil, redelivers: cfg.hookAdmin != nil, clock: clock, logger: logger,
+		secret: []byte(cfg.cronSecret), svc: svc, retention: cfg.retention, delivers: cfg.webhook != nil, redeliverer: redeliverer, clock: clock, logger: logger,
 	}
 	return serve(ctx, logger, cfg.port, newRouter(svc, github, cron, logger))
 }

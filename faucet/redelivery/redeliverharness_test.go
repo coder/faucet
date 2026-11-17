@@ -1,4 +1,4 @@
-package faucet_test
+package redelivery_test
 
 import (
 	"context"
@@ -15,6 +15,7 @@ import (
 
 	"cdr.dev/slog/v3"
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/redelivery"
 	"github.com/coder/quartz"
 )
 
@@ -70,7 +71,7 @@ type fakeGitHub struct {
 	refusesStaleCursors bool
 }
 
-var _ faucet.HookAdmin = (*fakeGitHub)(nil)
+var _ redelivery.HookAdmin = (*fakeGitHub)(nil)
 
 func newFakeGitHub(clock quartz.Clock, store *fakeRedeliveryStore) *fakeGitHub {
 	return &fakeGitHub{clock: clock, store: store, pageSize: 100, name: "/orgs/acme/hooks/7", asks: map[string][]time.Time{}}
@@ -104,7 +105,7 @@ func (g *fakeGitHub) deliverLocked(guid string, at time.Time, event, action stri
 	}
 	if status >= 200 && status < 300 && event == handledEvent {
 		_, _, err := g.store.InsertEvent(context.Background(), faucet.Event{
-			Source: "github", DeliveryID: guid, Type: "ci.run_completed", RepoID: repoID, Data: []byte(`{}`),
+			Source: "github", DeliveryID: guid, Type: "ci.run_completed", RepoID: eventRepoID, Data: []byte(`{}`),
 		})
 		if err != nil {
 			panic(err)
@@ -113,7 +114,11 @@ func (g *fakeGitHub) deliverLocked(guid string, at time.Time, event, action stri
 	return g.recordLocked(guid, at, status, event, action)
 }
 
-const http200 = 200
+const (
+	http200 = 200
+	// eventRepoID is the repository of every event that the fake GitHub stores.
+	eventRepoID = 42
+)
 
 // record adds an attempt with the given status, whatever faucet would answer.
 // It stores nothing, so a failed attempt leaves its event unstored.
@@ -140,11 +145,11 @@ func (g *fakeGitHub) recordLocked(guid string, at time.Time, status int, event, 
 func (g *fakeGitHub) visibleLocked() []ghAttempt {
 	now := g.now()
 	hi := sort.Search(len(g.attempts), func(i int) bool { return g.attempts[i].at.After(now) })
-	lo := sort.Search(len(g.attempts), func(i int) bool { return g.attempts[i].at.After(now.Add(-faucet.GitHubDeliveryRetention)) })
+	lo := sort.Search(len(g.attempts), func(i int) bool { return g.attempts[i].at.After(now.Add(-redelivery.GitHubDeliveryRetention)) })
 	return g.attempts[lo:hi]
 }
 
-func (g *fakeGitHub) ListDeliveries(ctx context.Context, cursor string) (faucet.DeliveryPage, error) {
+func (g *fakeGitHub) ListDeliveries(ctx context.Context, cursor string) (redelivery.DeliveryPage, error) {
 	if gate := g.listGate; gate != nil {
 		gate()
 	}
@@ -152,7 +157,7 @@ func (g *fakeGitHub) ListDeliveries(ctx context.Context, cursor string) (faucet.
 		select {
 		case <-time.After(g.listDelay):
 		case <-ctx.Done():
-			return faucet.DeliveryPage{}, ctx.Err()
+			return redelivery.DeliveryPage{}, ctx.Err()
 		}
 	}
 	g.mu.Lock()
@@ -160,7 +165,7 @@ func (g *fakeGitHub) ListDeliveries(ctx context.Context, cursor string) (faucet.
 	g.listCalls++
 	if g.listFault != nil {
 		if err := g.listFault(g.listCalls, cursor); err != nil {
-			return faucet.DeliveryPage{}, err
+			return redelivery.DeliveryPage{}, err
 		}
 	}
 	visible := g.visibleLocked()
@@ -170,32 +175,32 @@ func (g *fakeGitHub) ListDeliveries(ctx context.Context, cursor string) (faucet.
 	case g.style == offsetCursor:
 		off, err := strconv.Atoi(cursor)
 		if err != nil {
-			return faucet.DeliveryPage{}, fmt.Errorf("GitHub rejected the cursor")
+			return redelivery.DeliveryPage{}, fmt.Errorf("GitHub rejected the cursor")
 		}
 		start = len(visible) - off
 	default:
 		id, err := strconv.ParseInt(strings.TrimPrefix(cursor, "v1_"), 10, 64)
 		if err != nil {
-			return faucet.DeliveryPage{}, fmt.Errorf("GitHub rejected the cursor")
+			return redelivery.DeliveryPage{}, fmt.Errorf("GitHub rejected the cursor")
 		}
 		key, ok := g.attemptLocked(id)
 		if !ok {
-			return faucet.DeliveryPage{}, fmt.Errorf("GitHub rejected the cursor")
+			return redelivery.DeliveryPage{}, fmt.Errorf("GitHub rejected the cursor")
 		}
-		if g.refusesStaleCursors && !key.at.After(g.now().Add(-faucet.GitHubDeliveryRetention)) {
-			return faucet.DeliveryPage{}, fmt.Errorf("GitHub answered the delivery list with status 422")
+		if g.refusesStaleCursors && !key.at.After(g.now().Add(-redelivery.GitHubDeliveryRetention)) {
+			return redelivery.DeliveryPage{}, fmt.Errorf("GitHub answered the delivery list with status 422")
 		}
 		start = sort.Search(len(visible), func(i int) bool { return !olderThan(visible[i], key) })
 	}
 	start = max(start, 0)
 	end := max(start-g.pageSize, 0)
-	page := faucet.DeliveryPage{At: g.now()}
+	page := redelivery.DeliveryPage{At: g.now()}
 	if g.date != nil {
 		page.At = g.date(g.listCalls, cursor, g.now())
 	}
 	for i := start - 1; i >= end; i-- {
 		a := visible[i]
-		page.Deliveries = append(page.Deliveries, faucet.HookDelivery{
+		page.Deliveries = append(page.Deliveries, redelivery.HookDelivery{
 			ID: a.id, GUID: a.guid, DeliveredAt: a.at, StatusCode: a.status, Event: a.event, Action: a.action,
 		})
 	}
@@ -309,7 +314,7 @@ func TestFakeGitHubSendsTheDateTakesTheTimeAndRefusesTheCursorThatATestSets(t *t
 	t.Run("a slow page is read after GitHub's clock has moved", func(t *testing.T) {
 		t.Parallel()
 		env := newRedeliveryEnv(t)
-		leaving := env.gh.now().Add(-faucet.GitHubDeliveryRetention + time.Second)
+		leaving := env.gh.now().Add(-redelivery.GitHubDeliveryRetention + time.Second)
 		env.gh.record("leaving", leaving, 503)
 		env.gh.record("staying", env.gh.now().Add(-time.Minute), http200)
 		asked := env.gh.now()
@@ -325,7 +330,7 @@ func TestFakeGitHubSendsTheDateTakesTheTimeAndRefusesTheCursorThatATestSets(t *t
 	t.Run("a cursor of a deleted attempt lists on, or is refused when the test says so", func(t *testing.T) {
 		t.Parallel()
 		env := newRedeliveryEnv(t, func(o *envOptions) { o.pageSize = 1 })
-		old := env.gh.now().Add(-faucet.GitHubDeliveryRetention + time.Minute)
+		old := env.gh.now().Add(-redelivery.GitHubDeliveryRetention + time.Minute)
 		env.gh.record("older", old, http200)
 		env.gh.record("old", old.Add(time.Second), http200)
 		env.gh.record("new", env.gh.now().Add(-time.Minute), http200)
@@ -398,12 +403,12 @@ type envOptions struct {
 }
 
 type redeliveryEnv struct {
-	t     *testing.T
-	clock *quartz.Mock
-	store *fakeRedeliveryStore
-	gh    *fakeGitHub
-	svc   *faucet.Service
-	logs  *captureSink
+	t      *testing.T
+	clock  *quartz.Mock
+	store  *fakeRedeliveryStore
+	gh     *fakeGitHub
+	runner *redelivery.Runner
+	logs   *captureSink
 }
 
 func newRedeliveryEnv(t *testing.T, opts ...func(*envOptions)) *redeliveryEnv {
@@ -413,33 +418,27 @@ func newRedeliveryEnv(t *testing.T, opts ...func(*envOptions)) *redeliveryEnv {
 		opt(&o)
 	}
 	clock := quartz.NewMock(t)
-	store := newFakeRedeliveryStore(func() time.Time { return clock.Now() })
+	store := newFakeRedeliveryStore()
 	gh := newFakeGitHub(clock, store)
 	gh.pageSize, gh.style = o.pageSize, o.style
 	logs := &captureSink{}
 
-	deps := testDeps(store)
-	deps.Clock = clock
-	deps.Logger = slog.Make(logs)
-	deps.Redelivery = &faucet.RedeliveryDeps{Store: store, Hooks: gh, MaxPagesPerRun: o.maxPages, MaxAsksPerRun: o.maxAsks}
-	svc, err := faucet.New(deps)
+	runner, err := redelivery.New(redelivery.Deps{
+		Store: store, Hooks: gh, Clock: clock, Logger: slog.Make(logs), MaxPagesPerRun: o.maxPages, MaxAsksPerRun: o.maxAsks,
+	})
 	require.NoError(t, err)
-	return &redeliveryEnv{t: t, clock: clock, store: store, gh: gh, svc: svc, logs: logs}
+	return &redeliveryEnv{t: t, clock: clock, store: store, gh: gh, runner: runner, logs: logs}
 }
 
 func (e *redeliveryEnv) now() time.Time { return e.clock.Now() }
 
-// useMaxPages replaces the service with one that reads more pages per run, on
+// useMaxPages replaces the runner with one that reads more pages per run, on
 // the same store, GitHub and logs.
 func (e *redeliveryEnv) useMaxPages(pages int) {
 	e.t.Helper()
-	deps := testDeps(e.store)
-	deps.Clock = e.clock
-	deps.Logger = slog.Make(e.logs)
-	deps.Redelivery = &faucet.RedeliveryDeps{Store: e.store, Hooks: e.gh, MaxPagesPerRun: pages}
-	svc, err := faucet.New(deps)
+	runner, err := redelivery.New(redelivery.Deps{Store: e.store, Hooks: e.gh, Clock: e.clock, Logger: slog.Make(e.logs), MaxPagesPerRun: pages})
 	require.NoError(e.t, err)
-	e.svc = svc
+	e.runner = runner
 }
 
 func (e *redeliveryEnv) advance(d time.Duration) {
@@ -455,9 +454,9 @@ func dateOff(d time.Duration) func(int, string, time.Time) time.Time {
 	return func(_ int, _ string, at time.Time) time.Time { return at.Add(d) }
 }
 
-func (e *redeliveryEnv) run() faucet.RedeliverResult {
+func (e *redeliveryEnv) run() redelivery.Result {
 	e.t.Helper()
-	res, err := e.svc.Redeliver(context.Background())
+	res, err := e.runner.Run(context.Background())
 	require.NoError(e.t, err)
 	return res
 }

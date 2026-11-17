@@ -36,7 +36,7 @@ No charter. The stub's control calls are the only way to put deliveries in place
 ## Gotchas
 
 - The first run that reads an attempt records the part of GitHub's 72 hours before its 24 hour lookback as one gap, so its reply says `gaps: 1`. Both are counted from the newest attempt, not from the time of the run. A run on an empty list says `gaps: 0`. That is the design, not a fault.
-- The stub sends Node's `Date` header, which is the stub's clock. A test of a `Date` that leads, lags or is missing belongs in `faucet/redeliver_gaps_test.go`, where the fake GitHub sets it.
+- The stub sends Node's `Date` header, which is the stub's clock. A test of a `Date` that leads, lags or is missing belongs in `faucet/redelivery/redeliver_gaps_test.go`, where the fake GitHub sets it.
 - A delivery that is given up stays lost until someone redelivers it by hand.
 - A stored cursor is GitHub's opaque value. If GitHub keeps refusing it, the range is retried by every run until it expires, and then it is a gap.
 - GitHub lists an attempt when it ends, so an attempt that ended more than 5 minutes late and sits below the position of the last run is not read.

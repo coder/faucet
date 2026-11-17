@@ -1,4 +1,4 @@
-package faucet
+package redelivery
 
 import (
 	"context"
@@ -12,22 +12,22 @@ import (
 // delivery that nobody has read or redelivered by then is gone.
 const GitHubDeliveryRetention = 72 * time.Hour
 
-// ErrRedeliveryLeaseLost is what a RedeliveryStore returns when a write names
-// a lease that another run has replaced. The run must stop.
-var ErrRedeliveryLeaseLost = xerrors.New("redelivery lease lost")
+// ErrLeaseLost is what a Store returns when a write names a lease that
+// another run has replaced. The run must stop.
+var ErrLeaseLost = xerrors.New("redelivery lease lost")
 
-// RedeliveryGiveUpReason says why Service.Redeliver stopped working on something it
-// could not recover.
-type RedeliveryGiveUpReason string
+// GiveUpReason says why a run stopped working on something it could not
+// recover.
+type GiveUpReason string
 
 const (
 	// GiveUpLimit means every ask was spent and the delivery was still not stored.
-	GiveUpLimit RedeliveryGiveUpReason = "limit"
+	GiveUpLimit GiveUpReason = "limit"
 	// GiveUpExpired means GitHub's retention ended before the delivery was stored.
-	GiveUpExpired RedeliveryGiveUpReason = "expired"
+	GiveUpExpired GiveUpReason = "expired"
 	// GiveUpGap means a time range of attempts expired before any run read it.
 	// It names no delivery, because the attempts were never read.
-	GiveUpGap RedeliveryGiveUpReason = "gap"
+	GiveUpGap GiveUpReason = "gap"
 )
 
 // FailedAttempt is one attempt of GitHub to deliver an event that faucet
@@ -51,9 +51,9 @@ func (f FailedAttempt) Validate() error {
 	return nil
 }
 
-// RedeliveryRange is a stretch of GitHub's delivery list that no run has read
+// Range is a stretch of GitHub's delivery list that no run has read
 // yet. The list is newest first: a run reads from NewerAt down to OlderAt.
-type RedeliveryRange struct {
+type Range struct {
 	// ID is assigned by the store.
 	ID int64
 	// NewerAt is the time of the oldest attempt read so far above the range.
@@ -67,22 +67,22 @@ type RedeliveryRange struct {
 	Cursor string
 }
 
-// RedeliveryGap is a time range of attempts that expired unread.
-type RedeliveryGap struct {
+// Gap is a time range of attempts that expired unread.
+type Gap struct {
 	From, To time.Time
 }
 
 // UnreadGap is the gap that the range leaves when it closes before a run has
 // read it to its end. It starts where a read of the range would have stopped,
-// RedeliveryReadOverlap below OlderAt, and ends at NewerAt, the oldest attempt
+// ReadOverlap below OlderAt, and ends at NewerAt, the oldest attempt
 // read above it, or at its start when NewerAt is lower.
-func (r RedeliveryRange) UnreadGap() RedeliveryGap {
+func (r Range) UnreadGap() Gap {
 	from := r.bound().stop
-	return RedeliveryGap{From: from, To: laterOf(r.NewerAt, from)}
+	return Gap{From: from, To: laterOf(r.NewerAt, from)}
 }
 
-// RedeliveryScan is what a run knows when it takes the lease.
-type RedeliveryScan struct {
+// Scan is what a run knows when it takes the lease.
+type Scan struct {
 	// Epoch fences the run's writes. A later lease has a higher epoch.
 	Epoch int64
 	// Top is the time of the newest attempt that an earlier run read, or zero
@@ -97,13 +97,13 @@ type RedeliveryScan struct {
 	// with the Top: a run fails on a Top without a Clear.
 	Clear time.Time
 	// Ranges are the open ranges, newest first.
-	Ranges []RedeliveryRange
+	Ranges []Range
 	// HookChanged is true when the lease found state of another webhook. The
 	// store has reset Top and Clear and closed that state's open ranges as
 	// ClosedGaps: each one is the range's UnreadGap, and the store keeps it
 	// as it reports it.
 	HookChanged bool
-	ClosedGaps  []RedeliveryGap
+	ClosedGaps  []Gap
 }
 
 // RangeAdvance moves an open range down the list.
@@ -133,12 +133,12 @@ type ScanStep struct {
 	Clear time.Time
 	// At most one of Open, Advance and CloseID is set. CloseID deletes an open
 	// range that has been read to its end.
-	Open    *RedeliveryRange
+	Open    *Range
 	Advance *RangeAdvance
 	CloseID int64
 	// Gap records a time range that expired before any run read it, as a final
 	// state. It needs no range.
-	Gap *RedeliveryGap
+	Gap *Gap
 }
 
 // Validate checks the fields a caller supplies to ApplyRedeliveryScan.
@@ -207,7 +207,7 @@ func (r SettleRequest) Validate() error {
 // GaveUp is a delivery that a settle ended without a recovery.
 type GaveUp struct {
 	GUID             string
-	Reason           RedeliveryGiveUpReason
+	Reason           GiveUpReason
 	Asks             int
 	FirstDeliveredAt time.Time
 }
@@ -248,8 +248,8 @@ func (r ClaimRequest) Validate() error {
 	return nil
 }
 
-// RedeliveryClaim is one delivery that a run may ask GitHub for.
-type RedeliveryClaim struct {
+// Claim is one delivery that a run may ask GitHub for.
+type Claim struct {
 	GUID string
 	// AttemptID is the newest failed attempt known for the delivery. GitHub's
 	// redelivery endpoint takes it.
@@ -258,24 +258,24 @@ type RedeliveryClaim struct {
 	Ask int
 }
 
-// RedeliveryStore keeps what Service.Redeliver needs between runs. It is
-// separate from Store, so a host that never redelivers implements nothing.
+// Store keeps what Runner.Run needs between runs. It is separate from
+// faucet.Store, so a host that never redelivers implements nothing.
 // storetest checks it.
 //
 // Every method that takes a time uses that time and never the database
 // clock, so a test with a mock clock sees what a production run sees.
-type RedeliveryStore interface {
+type Store interface {
 	// AcquireRedeliveryLease starts a run for hook. It returns false when
 	// another run holds a lease that has not run out at now. A lease lasts ttl.
 	// When the stored scan belongs to another hook, the call resets it: Top
 	// and Clear go back to zero and the open ranges close as gaps (see
 	// HookChanged).
-	AcquireRedeliveryLease(ctx context.Context, hook string, now time.Time, ttl time.Duration) (RedeliveryScan, bool, error)
+	AcquireRedeliveryLease(ctx context.Context, hook string, now time.Time, ttl time.Duration) (Scan, bool, error)
 	// ReleaseRedeliveryLease ends the lease of epoch. It does nothing when
 	// another lease has replaced it.
 	ReleaseRedeliveryLease(ctx context.Context, epoch int64) error
 	// ApplyRedeliveryScan applies step in one transaction. It returns
-	// ErrRedeliveryLeaseLost, and changes nothing, when step.Epoch is not the
+	// ErrLeaseLost, and changes nothing, when step.Epoch is not the
 	// current epoch. A failed attempt makes a delivery pending, unless the
 	// delivery already has a final state. A pending delivery keeps the
 	// earliest attempt time it has seen as its first time, and the newest
@@ -290,7 +290,7 @@ type RedeliveryStore interface {
 	// has asks left, that is inside GitHub's retention and that is not stored.
 	// It raises the delivery's ask count and sets its next due time in the one
 	// statement that picks it, so two runs never get the same ask.
-	ClaimRedelivery(ctx context.Context, req ClaimRequest) (RedeliveryClaim, bool, error)
+	ClaimRedelivery(ctx context.Context, req ClaimRequest) (Claim, bool, error)
 	// PurgeRedeliveries deletes final deliveries and closed gaps that ended
 	// before the given time. It never deletes a pending delivery.
 	PurgeRedeliveries(ctx context.Context, before time.Time) (int64, error)

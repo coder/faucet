@@ -1,18 +1,20 @@
-package faucet_test
+package redelivery_test
 
 import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/redelivery"
 )
 
 const testHookToken = "ghp_hook0123456789abcdefghijklmnopqrstuvwx"
@@ -24,8 +26,37 @@ type recordedCall struct {
 	auth   string
 }
 
+// apiStub is a GitHub API that counts its requests.
+type apiStub struct {
+	*httptest.Server
+	requests atomic.Int64
+}
+
+func newAPIStub(t *testing.T, handler http.HandlerFunc) *apiStub {
+	t.Helper()
+	stub := &apiStub{}
+	stub.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stub.requests.Add(1)
+		handler(w, r)
+	}))
+	t.Cleanup(stub.Close)
+	return stub
+}
+
+func jsonReply(status int, body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = fmt.Fprint(w, body)
+	}
+}
+
+type transportFunc func(*http.Request) (*http.Response, error)
+
+func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 type hookStub struct {
-	*githubStub
+	*apiStub
 	mu    sync.Mutex
 	calls []recordedCall
 }
@@ -33,7 +64,7 @@ type hookStub struct {
 func newHookStub(t *testing.T, handler http.HandlerFunc) *hookStub {
 	t.Helper()
 	stub := &hookStub{}
-	stub.githubStub = newGitHubStub(t, func(w http.ResponseWriter, r *http.Request) {
+	stub.apiStub = newAPIStub(t, func(w http.ResponseWriter, r *http.Request) {
 		stub.mu.Lock()
 		stub.calls = append(stub.calls, recordedCall{r.Method, r.URL.Path, r.URL.Query(), r.Header.Get("Authorization")})
 		stub.mu.Unlock()
@@ -48,14 +79,14 @@ func (s *hookStub) recorded() []recordedCall {
 	return append([]recordedCall(nil), s.calls...)
 }
 
-func newHookAdmin(t *testing.T, stub *hookStub, target faucet.HookTarget) faucet.GitHubHookAdmin {
+func newHookAdmin(t *testing.T, stub *hookStub, target redelivery.HookTarget) redelivery.GitHubHookAdmin {
 	t.Helper()
-	admin, err := faucet.NewGitHubHookAdmin(stub.URL, testHookToken, target, stub.Client())
+	admin, err := redelivery.NewGitHubHookAdmin(stub.URL, testHookToken, target, stub.Client())
 	require.NoError(t, err)
 	return admin
 }
 
-var orgHook = faucet.HookTarget{Org: "octo-org", HookID: 9}
+var orgHook = redelivery.HookTarget{Org: "octo-org", HookID: 9}
 
 const deliveriesBody = `[
   {"id": 31, "guid": "guid-b", "delivered_at": "2026-11-13T10:05:00Z", "redelivery": false, "status_code": 500, "event": "workflow_run", "action": "completed", "repository_id": 1},
@@ -68,13 +99,13 @@ func TestGitHubHookAdminListsDeliveriesNewestFirstWithACursor(t *testing.T) {
 	stub := newHookStub(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Link", `<https://api.github.com/orgs/octo-org/hooks/9/deliveries?per_page=100&cursor=v1_29>; rel="next", `+
 			`<https://api.github.com/orgs/octo-org/hooks/9/deliveries?per_page=100&cursor=v1_32>; rel="prev"`)
-		reply(http.StatusOK, deliveriesBody)(w, nil)
+		jsonReply(http.StatusOK, deliveriesBody)(w, nil)
 	})
 	admin := newHookAdmin(t, stub, orgHook)
 
 	page, err := admin.ListDeliveries(context.Background(), "")
 	require.NoError(t, err)
-	require.Equal(t, []faucet.HookDelivery{
+	require.Equal(t, []redelivery.HookDelivery{
 		{ID: 31, GUID: "guid-b", DeliveredAt: time.Date(2026, 11, 13, 10, 5, 0, 0, time.UTC), StatusCode: 500, Event: "workflow_run", Action: "completed"},
 		{ID: 30, GUID: "guid-a", DeliveredAt: time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC), StatusCode: 200, Event: "ping"},
 	}, page.Deliveries, "a null action reads as empty")
@@ -119,7 +150,7 @@ func TestGitHubHookAdminTakesGitHubsClockFromTheDateHeader(t *testing.T) {
 func TestGitHubHookAdminLastPageHasNoNext(t *testing.T) {
 	t.Parallel()
 
-	stub := newHookStub(t, reply(http.StatusOK, `[]`))
+	stub := newHookStub(t, jsonReply(http.StatusOK, `[]`))
 	page, err := newHookAdmin(t, stub, orgHook).ListDeliveries(context.Background(), "")
 	require.NoError(t, err)
 	require.Empty(t, page.Deliveries)
@@ -134,9 +165,9 @@ func TestGitHubHookAdminUsesTheRepoEndpointsForARepoHook(t *testing.T) {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		reply(http.StatusOK, `[]`)(w, r)
+		jsonReply(http.StatusOK, `[]`)(w, r)
 	})
-	admin := newHookAdmin(t, stub, faucet.HookTarget{Repo: "octo/the.repo", HookID: 12})
+	admin := newHookAdmin(t, stub, redelivery.HookTarget{Repo: "octo/the.repo", HookID: 12})
 	require.Equal(t, "/repos/octo/the.repo/hooks/12", admin.Hook())
 	require.Equal(t, "/orgs/octo-org/hooks/9", newHookAdmin(t, stub, orgHook).Hook())
 
@@ -157,7 +188,7 @@ func TestGitHubHookAdminTouchesOnlyTheTwoDeliveryEndpoints(t *testing.T) {
 	stub := newHookStub(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/orgs/octo-org/hooks/9/deliveries":
-			reply(http.StatusOK, deliveriesBody)(w, r)
+			jsonReply(http.StatusOK, deliveriesBody)(w, r)
 		case r.Method == http.MethodPost && r.URL.Path == "/orgs/octo-org/hooks/9/deliveries/31/attempts":
 			w.WriteHeader(http.StatusAccepted)
 		default:
@@ -183,12 +214,12 @@ func TestGitHubHookAdminTouchesOnlyTheTwoDeliveryEndpoints(t *testing.T) {
 func TestGitHubHookAdminSendsAHostileLinkAndCursorNowhereElse(t *testing.T) {
 	t.Parallel()
 
-	elsewhere := newGitHubStub(t, reply(http.StatusOK, `[]`))
+	elsewhere := newAPIStub(t, jsonReply(http.StatusOK, `[]`))
 	stub := newHookStub(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("cursor") == "" {
 			w.Header().Set("Link", fmt.Sprintf(`<%s/steal?cursor=a%%20b%%26c%%3Dd>; rel="next"`, elsewhere.URL))
 		}
-		reply(http.StatusOK, `[]`)(w, r)
+		jsonReply(http.StatusOK, `[]`)(w, r)
 	})
 	admin := newHookAdmin(t, stub, orgHook)
 
@@ -214,7 +245,7 @@ func TestGitHubHookAdminRefusesAPaginationLinkItCannotUse(t *testing.T) {
 	} {
 		stub := newHookStub(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Link", link)
-			reply(http.StatusOK, `[]`)(w, r)
+			jsonReply(http.StatusOK, `[]`)(w, r)
 		})
 		_, err := newHookAdmin(t, stub, orgHook).ListDeliveries(context.Background(), "")
 		require.Error(t, err, name)
@@ -233,7 +264,7 @@ func TestGitHubHookAdminRedeliverNeedsAccepted(t *testing.T) {
 		http.StatusUnprocessableEntity: true,
 		http.StatusInternalServerError: true,
 	} {
-		stub := newHookStub(t, reply(status, `{"message":"body that must not reach an error"}`))
+		stub := newHookStub(t, jsonReply(status, `{"message":"body that must not reach an error"}`))
 		err := newHookAdmin(t, stub, orgHook).Redeliver(context.Background(), 5)
 		if !wantErr {
 			require.NoError(t, err, "status %d", status)
@@ -262,7 +293,7 @@ func TestGitHubHookAdminListErrors(t *testing.T) {
 		"a delivery without a time": {http.StatusOK, `[{"id":1,"guid":"g","status_code":500}]`},
 		"a body over 1 MiB":         {http.StatusOK, `[` + strings.Repeat(`{"id":1,"guid":"g","delivered_at":"2026-11-13T10:00:00Z","status_code":500},`, 20000) + `{}]`},
 	} {
-		stub := newHookStub(t, reply(tc.status, tc.body))
+		stub := newHookStub(t, jsonReply(tc.status, tc.body))
 		page, err := newHookAdmin(t, stub, orgHook).ListDeliveries(context.Background(), "")
 		require.Error(t, err, name)
 		require.Empty(t, page.Deliveries, name)
@@ -313,7 +344,7 @@ func TestGitHubHookAdminTellsARateLimitFromADenialAndNeverGivesUpOnEither(t *tes
 func TestGitHubHookAdminErrorsNameNoURLAndNoCursor(t *testing.T) {
 	t.Parallel()
 
-	stub := newHookStub(t, reply(http.StatusOK, `[]`))
+	stub := newHookStub(t, jsonReply(http.StatusOK, `[]`))
 	admin := newHookAdmin(t, stub, orgHook)
 	stub.Close()
 
@@ -327,17 +358,17 @@ func TestGitHubHookAdminErrorsNameNoURLAndNoCursor(t *testing.T) {
 func TestGitHubHookAdminSendsTheTokenOnlyToBaseURL(t *testing.T) {
 	t.Parallel()
 
-	for name, call := range map[string]func(faucet.GitHubHookAdmin) error{
-		"list": func(a faucet.GitHubHookAdmin) error {
+	for name, call := range map[string]func(redelivery.GitHubHookAdmin) error{
+		"list": func(a redelivery.GitHubHookAdmin) error {
 			_, err := a.ListDeliveries(context.Background(), "")
 			return err
 		},
-		"redeliver": func(a faucet.GitHubHookAdmin) error { return a.Redeliver(context.Background(), 5) },
+		"redeliver": func(a redelivery.GitHubHookAdmin) error { return a.Redeliver(context.Background(), 5) },
 	} {
 		t.Run("CrossHostRedirectIsRefused/"+name, func(t *testing.T) {
 			t.Parallel()
 
-			elsewhere := newGitHubStub(t, reply(http.StatusAccepted, `[]`))
+			elsewhere := newAPIStub(t, jsonReply(http.StatusAccepted, `[]`))
 			stub := newHookStub(t, func(w http.ResponseWriter, r *http.Request) {
 				http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusTemporaryRedirect)
 			})
@@ -360,7 +391,7 @@ func TestGitHubHookAdminSendsTheTokenOnlyToBaseURL(t *testing.T) {
 					w.WriteHeader(http.StatusAccepted)
 					return
 				}
-				reply(http.StatusOK, `[]`)(w, r)
+				jsonReply(http.StatusOK, `[]`)(w, r)
 			})
 
 			require.NoError(t, call(newHookAdmin(t, stub, orgHook)))
@@ -382,18 +413,18 @@ func TestGitHubHookAdminRefusesARedirectThatChangesTheScheme(t *testing.T) {
 		"https down to http": {"https://api.github.test", "http://api.github.test/moved"},
 		"http up to https":   {"http://127.0.0.1:8080", "https://127.0.0.1:8080/moved"},
 	} {
-		for call, run := range map[string]func(faucet.GitHubHookAdmin) error{
-			"list": func(a faucet.GitHubHookAdmin) error {
+		for call, run := range map[string]func(redelivery.GitHubHookAdmin) error{
+			"list": func(a redelivery.GitHubHookAdmin) error {
 				_, err := a.ListDeliveries(context.Background(), "")
 				return err
 			},
-			"redeliver": func(a faucet.GitHubHookAdmin) error { return a.Redeliver(context.Background(), 5) },
+			"redeliver": func(a redelivery.GitHubHookAdmin) error { return a.Redeliver(context.Background(), 5) },
 		} {
 			t.Run(name+"/"+call, func(t *testing.T) {
 				t.Parallel()
 
 				var sent []string
-				client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				client := &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
 					sent = append(sent, r.URL.Scheme+"://"+r.URL.Host+r.URL.Path)
 					return &http.Response{
 						StatusCode: http.StatusTemporaryRedirect,
@@ -402,7 +433,7 @@ func TestGitHubHookAdminRefusesARedirectThatChangesTheScheme(t *testing.T) {
 						Request:    r,
 					}, nil
 				})}
-				admin, err := faucet.NewGitHubHookAdmin(tc.base, testHookToken, orgHook, client)
+				admin, err := redelivery.NewGitHubHookAdmin(tc.base, testHookToken, orgHook, client)
 				require.NoError(t, err)
 
 				err = run(admin)
@@ -422,7 +453,7 @@ func TestGitHubHookAdminRefusesAnUnsafeBaseURL(t *testing.T) {
 		"", "api.github.com", "http://api.github.com", "https://user:" + userinfo + "@api.github.com",
 		"https://api.github.com?x=1", "https://api.github.com#frag",
 	} {
-		_, err := faucet.NewGitHubHookAdmin(base, testHookToken, orgHook, nil)
+		_, err := redelivery.NewGitHubHookAdmin(base, testHookToken, orgHook, nil)
 		require.Error(t, err, base)
 		require.NotContains(t, err.Error(), userinfo, "the error must not echo the URL")
 	}
@@ -431,42 +462,42 @@ func TestGitHubHookAdminRefusesAnUnsafeBaseURL(t *testing.T) {
 func TestNewGitHubHookAdminValidatesItsInputs(t *testing.T) {
 	t.Parallel()
 
-	good := func() (string, faucet.HookTarget) { return testHookToken, orgHook }
-	for name, mutate := range map[string]func(token *string, target *faucet.HookTarget){
-		"no token":                func(token *string, _ *faucet.HookTarget) { *token = "" },
-		"a token with a space":    func(token *string, _ *faucet.HookTarget) { *token = "ghp_a b" },
-		"a token with a newline":  func(token *string, _ *faucet.HookTarget) { *token = "ghp_a\nb" },
-		"a token over 1024 bytes": func(token *string, _ *faucet.HookTarget) { *token = strings.Repeat("a", 1025) },
-		"neither org nor repo":    func(_ *string, target *faucet.HookTarget) { target.Org = "" },
-		"both org and repo":       func(_ *string, target *faucet.HookTarget) { target.Repo = "octo/repo" },
-		"an org with a slash":     func(_ *string, target *faucet.HookTarget) { target.Org = "octo/org" },
-		"an org that is dots":     func(_ *string, target *faucet.HookTarget) { target.Org = ".." },
-		"a repo without an owner": func(_ *string, target *faucet.HookTarget) { target.Org, target.Repo = "", "repo" },
-		"a repo that is dots":     func(_ *string, target *faucet.HookTarget) { target.Org, target.Repo = "", "octo/.." },
-		"hook id zero":            func(_ *string, target *faucet.HookTarget) { target.HookID = 0 },
-		"a negative hook id":      func(_ *string, target *faucet.HookTarget) { target.HookID = -3 },
+	good := func() (string, redelivery.HookTarget) { return testHookToken, orgHook }
+	for name, mutate := range map[string]func(token *string, target *redelivery.HookTarget){
+		"no token":                func(token *string, _ *redelivery.HookTarget) { *token = "" },
+		"a token with a space":    func(token *string, _ *redelivery.HookTarget) { *token = "ghp_a b" },
+		"a token with a newline":  func(token *string, _ *redelivery.HookTarget) { *token = "ghp_a\nb" },
+		"a token over 1024 bytes": func(token *string, _ *redelivery.HookTarget) { *token = strings.Repeat("a", 1025) },
+		"neither org nor repo":    func(_ *string, target *redelivery.HookTarget) { target.Org = "" },
+		"both org and repo":       func(_ *string, target *redelivery.HookTarget) { target.Repo = "octo/repo" },
+		"an org with a slash":     func(_ *string, target *redelivery.HookTarget) { target.Org = "octo/org" },
+		"an org that is dots":     func(_ *string, target *redelivery.HookTarget) { target.Org = ".." },
+		"a repo without an owner": func(_ *string, target *redelivery.HookTarget) { target.Org, target.Repo = "", "repo" },
+		"a repo that is dots":     func(_ *string, target *redelivery.HookTarget) { target.Org, target.Repo = "", "octo/.." },
+		"hook id zero":            func(_ *string, target *redelivery.HookTarget) { target.HookID = 0 },
+		"a negative hook id":      func(_ *string, target *redelivery.HookTarget) { target.HookID = -3 },
 	} {
 		token, target := good()
 		mutate(&token, &target)
-		_, err := faucet.NewGitHubHookAdmin("https://api.github.com", token, target, nil)
+		_, err := redelivery.NewGitHubHookAdmin("https://api.github.com", token, target, nil)
 		require.Error(t, err, name)
 		if token != "" {
 			require.NotContains(t, err.Error(), token, "%s: the error must not echo the token", name)
 		}
 	}
-	_, err := faucet.NewGitHubHookAdmin("https://api.github.com", testHookToken, orgHook, nil)
+	_, err := redelivery.NewGitHubHookAdmin("https://api.github.com", testHookToken, orgHook, nil)
 	require.NoError(t, err)
-	_, err = faucet.NewGitHubHookAdmin("https://api.github.com", testHookToken, faucet.HookTarget{Repo: "octo/repo", HookID: 1}, nil)
+	_, err = redelivery.NewGitHubHookAdmin("https://api.github.com", testHookToken, redelivery.HookTarget{Repo: "octo/repo", HookID: 1}, nil)
 	require.NoError(t, err)
 }
 
 func TestGitHubHookAdminNeverPrintsItsToken(t *testing.T) {
 	t.Parallel()
 
-	admin, err := faucet.NewGitHubHookAdmin("https://api.github.com", testHookToken, orgHook, nil)
+	admin, err := redelivery.NewGitHubHookAdmin("https://api.github.com", testHookToken, orgHook, nil)
 	require.NoError(t, err)
 
-	for _, v := range []any{admin, &admin, struct{ Admin faucet.GitHubHookAdmin }{admin}} {
+	for _, v := range []any{admin, &admin, struct{ Admin redelivery.GitHubHookAdmin }{admin}} {
 		for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%d"} {
 			requireNoHookToken(t, fmt.Sprintf(verb, v))
 		}

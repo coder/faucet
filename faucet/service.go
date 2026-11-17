@@ -32,9 +32,6 @@ type Deps struct {
 	// and the webhook mode in events/list. Nil leaves it off, and
 	// events/subscribe then answers Unsupported.
 	Webhook *WebhookDeps
-	// Redelivery turns on Service.Redeliver. Nil leaves it off, and Redeliver
-	// then returns ErrNoRedelivery.
-	Redelivery *RedeliveryDeps
 	// MaxWaitsPerLogin caps how many wait_for_github_events calls one login
 	// holds open at once in this process, so a client that opens waits and
 	// drops its connection cannot pile them up. Zero means 10. A negative value
@@ -73,7 +70,6 @@ type Service struct {
 	principalFrom func(context.Context) (Principal, error)
 	clock         quartz.Clock
 	webhook       *webhookState
-	redelivery    *redeliveryState
 	waits         *waitLimiter
 	listed        []eventDescriptor
 }
@@ -108,12 +104,6 @@ func New(d Deps) (*Service, error) {
 			return nil, xerrors.Errorf("webhook: %w", err)
 		}
 		svc.listed = describeEvents([]string{deliveryPoll, deliveryWebhook})
-	}
-	if d.Redelivery != nil {
-		var err error
-		if svc.redelivery, err = newRedeliveryState(*d.Redelivery); err != nil {
-			return nil, xerrors.Errorf("redelivery: %w", err)
-		}
 	}
 	return svc, nil
 }
