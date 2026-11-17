@@ -145,8 +145,8 @@ var families = []*family{
 		noPRs:       true,
 		properties: `{
     "state": {"type": "string", "description": "pending, success, failure or error, the same as action."},
-    "context": {"type": "string", "description": "The name of the status, for example ci/circleci."},
-    "target_url": {"type": ["string", "null"], "description": "The link that the status names, often its CI page."},
+    "context": {"type": "string", "description": "The label that tells this status from those of other systems, for example default."},
+    "target_url": {"type": ["string", "null"], "description": "The link that GitHub shows with the status."},
     "branches": {"type": "array", "items": {"type": "string"}, "description": "Up to 10 branches that hold the commit. It need not be their head."},
     "html_url": {"type": "string", "description": "The commit page."},
     "sender_login": {"type": "string"},
