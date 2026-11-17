@@ -218,11 +218,14 @@ func (s *Service) authorize(ctx context.Context, logger slog.Logger, op string, 
 // scope of op, before any repository is looked up.
 func (s *Service) principal(ctx context.Context, logger slog.Logger, op string, scope Scope) (Principal, error) {
 	p, err := s.principalFrom(ctx)
-	if err != nil {
+	switch {
+	case err != nil:
 		logger.Info(ctx, op+" without a principal", slog.Error(err))
 		return Principal{}, errAuthRequired
-	}
-	if !p.HasScope(scope) {
+	case !p.authenticated():
+		logger.Info(ctx, op+" by a principal of no kind")
+		return Principal{}, errAuthRequired
+	case !p.HasScope(scope):
 		logger.Info(ctx, op+" denied, scope missing", slog.F("login", p.Login), slog.F("scope", scope))
 		return Principal{}, xerrors.Errorf("the token does not grant the %s scope", scope)
 	}

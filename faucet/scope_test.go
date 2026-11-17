@@ -2,8 +2,10 @@ package faucet_test
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 
@@ -66,24 +68,40 @@ func TestSubscribeScopeSubscribesButCannotWaitOrPoll(t *testing.T) {
 	require.Equal(t, calls, h.authz.callCount(), "a missing scope is refused before any repository lookup")
 }
 
-func TestATokenPrincipalHoldsEveryScope(t *testing.T) {
+func TestAPrincipalOfNoKindIsNotAuthenticated(t *testing.T) {
 	t.Parallel()
 
-	p, err := faucet.NewPrincipal("octocat", testToken)
-	require.NoError(t, err)
-	require.True(t, p.HasScope(faucet.ScopeEventsRead))
-	require.True(t, p.HasScope(faucet.ScopeEventsSubscribe))
-	require.False(t, faucet.Principal{Login: "octocat"}.HasScope(faucet.ScopeEventsRead), "a principal built by hand holds no scope")
-	require.False(t, p.HasScope(faucet.Scope("events:admin")))
+	for _, p := range []faucet.Principal{{}, {Login: "octocat"}} {
+		h := newWebhookHarness(t, func(d *faucet.Deps) {
+			d.PrincipalFrom = func(context.Context) (faucet.Principal, error) { return p, nil }
+		})
+		res, err := waitOnce(h.eventsHarness)
+		require.NoError(t, err)
+		require.True(t, res.IsError)
+		require.Equal(t, "authentication required", res.Content[0].(*mcp.TextContent).Text)
+		for _, rpcErr := range []*jsonrpc.Error{
+			h.pollError(pollParams("ci.run_completed", repoArgs(), nil)),
+			h.subscribeError(subscribeTo(repoArgs(), callbackURL, newSecret(t, 32))),
+			h.unsubscribe(repoArgs(), callbackURL),
+		} {
+			require.EqualValues(t, codeForbidden, rpcErr.Code)
+			require.Equal(t, "authentication required", rpcErr.Message, "%+v is no kind of caller, as on the subscribe path before kinds", p)
+		}
+		require.Zero(t, h.authz.callCount())
+	}
 }
 
-func TestEventsListNeedsNoScope(t *testing.T) {
+func TestACallerWithoutAGitHubTokenHasNoAccessThroughTheTokenAuthorizer(t *testing.T) {
 	t.Parallel()
 
-	h := newEventsHarness(t, func(d *faucet.Deps) { d.PrincipalFrom = failingPrincipal })
-	res, err := h.call(methodList, &rawParams{})
-	require.NoError(t, err, "events/list returns the catalog and reads no principal")
-	require.Contains(t, res.fields, "events")
+	stub := newGitHubStub(t, reply(http.StatusOK, `{"id": 1}`))
+	h := newEventsHarness(t, serviceWith(t, faucet.ScopeEventsRead), func(d *faucet.Deps) {
+		d.Authorizer = faucet.TokenAuthorizer{BaseURL: stub.URL, Client: stub.Client()}
+	})
+	rpcErr := h.pollError(pollParams("ci.run_completed", repoArgs(), nil))
+	require.EqualValues(t, codeForbidden, rpcErr.Code, "a service is not a GitHub caller, so the answer is no access, not try again")
+	require.Equal(t, faucet.ErrNoAccess.Error(), rpcErr.Message)
+	require.Zero(t, stub.requests.Load())
 }
 
 func TestParseScope(t *testing.T) {

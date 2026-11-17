@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 
 	"golang.org/x/xerrors"
 
@@ -85,11 +86,15 @@ type OAuthSession struct {
 }
 
 // ServiceClient is a client that an operator made, and the repositories its
-// grants name.
+// grants name. No grant is empty or holds a NUL byte.
 type ServiceClient struct {
 	ClientID string
 	Grants   []string
 }
+
+// grantSeparator joins the grants of a service into one string, which keeps
+// Principal comparable and its grants out of a caller's reach.
+const grantSeparator = "\x00"
 
 // Principal is an authenticated caller: a login, the scopes it holds, and the
 // kind of caller it is. Build one with NewPrincipal, NewOAuthUser or
@@ -103,9 +108,22 @@ type Principal struct {
 	// token is the GitHub token of a kindGitHubToken caller.
 	token   string
 	session OAuthSession
-	// client is the client of a kindService caller. Its grants are copied in
-	// and out, so no caller can change them.
-	client ServiceClient
+	// clientID and grants are those of a kindService caller, the grants
+	// joined by grantSeparator.
+	clientID string
+	grants   string
+}
+
+// githubLogin rejects a login that GitHub cannot give, so that only a service
+// has a login with a colon.
+func githubLogin(login string) error {
+	switch {
+	case login == "":
+		return xerrors.New("login is required")
+	case strings.Contains(login, ":"):
+		return xerrors.New("a GitHub login holds no colon")
+	}
+	return nil
 }
 
 // NewPrincipal returns a caller who sent a GitHub token, such as a pasted
@@ -113,8 +131,8 @@ type Principal struct {
 // TokenAuthorizer sends to GitHub. An Authorizer that does not call GitHub
 // can take an empty token.
 func NewPrincipal(login, token string) (Principal, error) {
-	if login == "" {
-		return Principal{}, xerrors.New("login is required")
+	if err := githubLogin(login); err != nil {
+		return Principal{}, err
 	}
 	return Principal{Login: login, kind: kindGitHubToken, scopes: 1<<len(knownScopes) - 1, token: token}, nil
 }
@@ -123,10 +141,10 @@ func NewPrincipal(login, token string) (Principal, error) {
 // login is the bare GitHub login, so the wait limit and the subscriptions of
 // a person are the same whichever way they authenticate.
 func NewOAuthUser(login string, session OAuthSession, scopes []Scope) (Principal, error) {
-	switch {
-	case login == "":
-		return Principal{}, xerrors.New("login is required")
-	case session.SessionID == "" || session.ConnectionID == "":
+	if err := githubLogin(login); err != nil {
+		return Principal{}, err
+	}
+	if session.SessionID == "" || session.ConnectionID == "" {
 		return Principal{}, xerrors.New("an OAuth user needs a session ID and a connection ID")
 	}
 	set, err := newScopeSet(scopes)
@@ -142,18 +160,36 @@ func NewService(client ServiceClient, scopes []Scope) (Principal, error) {
 	if client.ClientID == "" {
 		return Principal{}, xerrors.New("a service needs a client ID")
 	}
+	for _, grant := range client.Grants {
+		if grant == "" || strings.Contains(grant, grantSeparator) {
+			return Principal{}, xerrors.New("a grant is not empty and holds no NUL byte")
+		}
+	}
 	set, err := newScopeSet(scopes)
 	if err != nil {
 		return Principal{}, err
 	}
-	client.Grants = slices.Clone(client.Grants)
-	return Principal{Login: "svc:" + client.ClientID, kind: kindService, scopes: set, client: client}, nil
+	return Principal{
+		Login: "svc:" + client.ClientID, kind: kindService, scopes: set,
+		clientID: client.ClientID, grants: strings.Join(client.Grants, grantSeparator),
+	}, nil
 }
 
 // HasScope reports whether p holds scope.
 func (p Principal) HasScope(scope Scope) bool {
 	i := slices.Index(knownScopes, scope)
 	return i >= 0 && p.scopes&(1<<i) != 0
+}
+
+// Scopes returns the scopes that p holds, in a fixed order.
+func (p Principal) Scopes() []Scope {
+	return slices.DeleteFunc(slices.Clone(knownScopes), func(s Scope) bool { return !p.HasScope(s) })
+}
+
+// authenticated reports whether p came from one of the constructors. A
+// Principal built by hand is no kind of caller.
+func (p Principal) authenticated() bool {
+	return p.kind != 0
 }
 
 // OAuthSession returns the session of an OAuth user, and false for any other
@@ -168,7 +204,11 @@ func (p Principal) ServiceClient() (ServiceClient, bool) {
 	if p.kind != kindService {
 		return ServiceClient{}, false
 	}
-	return ServiceClient{ClientID: p.client.ClientID, Grants: slices.Clone(p.client.Grants)}, true
+	client := ServiceClient{ClientID: p.clientID}
+	if p.grants != "" {
+		client.Grants = strings.Split(p.grants, grantSeparator)
+	}
+	return client, true
 }
 
 // Format implements fmt.Formatter so that no verb can print the token.
@@ -215,11 +255,15 @@ func (a TokenAuthorizer) RepoIDFresh(ctx context.Context, p Principal, repo stri
 }
 
 // RepoID implements Authorizer with GET {BaseURL}/repos/{owner}/{name}.
-// 403 and 404 both give ErrNoAccess.
+// 403 and 404 both give ErrNoAccess, and so does a caller without a GitHub
+// token, for whom GitHub cannot answer.
 func (a TokenAuthorizer) RepoID(ctx context.Context, p Principal, repo string) (int64, error) {
 	owner, name, err := githubapi.ParseRepo(repo)
 	if err != nil {
 		return 0, err
+	}
+	if p.token == "" {
+		return 0, ErrNoAccess
 	}
 	var body struct {
 		ID int64 `json:"id"`

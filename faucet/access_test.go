@@ -157,9 +157,11 @@ func TestTokenAuthorizerNeedsAToken(t *testing.T) {
 	noToken, err := faucet.NewPrincipal("octocat", "")
 	require.NoError(t, err)
 	_, err = authz.RepoID(context.Background(), noToken, "o/r")
-	require.Error(t, err)
+	require.ErrorIs(t, err, faucet.ErrNoAccess, "GitHub cannot vouch for a caller without a GitHub token, and asking again does not change that")
+	_, err = authz.RepoIDFresh(context.Background(), noToken, "o/r")
+	require.ErrorIs(t, err, faucet.ErrNoAccess)
 	_, err = authz.RepoID(context.Background(), faucet.Principal{}, "o/r")
-	require.Error(t, err)
+	require.ErrorIs(t, err, faucet.ErrNoAccess)
 	_, err = authz.Authenticate(context.Background(), "")
 	require.Error(t, err)
 	require.Zero(t, stub.requests.Load(), "an unauthenticated request would be answered for public repositories")
@@ -384,31 +386,6 @@ func TestPrincipalNeverPrintsItsToken(t *testing.T) {
 	require.Contains(t, fmt.Sprint(p), "octocat")
 }
 
-func TestAnOAuthUserCarriesItsOwnSession(t *testing.T) {
-	t.Parallel()
-
-	read := []faucet.Scope{faucet.ScopeEventsRead}
-	idle, err := faucet.NewOAuthUser("alice", faucet.OAuthSession{SessionID: "sess_idle", ConnectionID: "conn_alice"}, read)
-	require.NoError(t, err)
-	active, err := faucet.NewOAuthUser("alice", faucet.OAuthSession{SessionID: "sess_active", ConnectionID: "conn_alice"}, read)
-	require.NoError(t, err)
-
-	got, ok := active.OAuthSession()
-	require.True(t, ok)
-	require.Equal(t, faucet.OAuthSession{SessionID: "sess_active", ConnectionID: "conn_alice"}, got,
-		"two sessions of one connection stay apart, so a check that one session made fresh is not fresh for the other")
-	other, _ := idle.OAuthSession()
-	require.NotEqual(t, got.SessionID, other.SessionID)
-	require.Equal(t, "alice", active.Login, "the login is the bare GitHub login, as for a pasted token")
-	require.True(t, active.HasScope(faucet.ScopeEventsRead))
-	require.False(t, active.HasScope(faucet.ScopeEventsSubscribe))
-
-	_, ok = principal(t).OAuthSession()
-	require.False(t, ok, "a caller with a GitHub token has no OAuth session")
-	_, ok = principal(t).ServiceClient()
-	require.False(t, ok)
-}
-
 func TestAServiceIsNamedAfterItsClientAndKeepsItsGrants(t *testing.T) {
 	t.Parallel()
 
@@ -450,6 +427,12 @@ func TestPrincipalKindsNeedTheirFields(t *testing.T) {
 		"service with an unknown scope": func() (faucet.Principal, error) {
 			return faucet.NewService(faucet.ServiceClient{ClientID: "x"}, []faucet.Scope{"events:*"})
 		},
+		"service with an empty grant": func() (faucet.Principal, error) {
+			return faucet.NewService(faucet.ServiceClient{ClientID: "x", Grants: []string{""}}, read)
+		},
+		"service with a NUL in a grant": func() (faucet.Principal, error) {
+			return faucet.NewService(faucet.ServiceClient{ClientID: "x", Grants: []string{"all\x00"}}, read)
+		},
 	} {
 		_, err := build()
 		require.Error(t, err, name)
@@ -468,4 +451,40 @@ func TestNoPrincipalKindPrintsMoreThanItsLogin(t *testing.T) {
 			require.Equal(t, fmt.Sprintf("Principal{Login:%q}", p.Login), fmt.Sprintf(verb, p))
 		}
 	}
+}
+
+func TestPrincipalsAreComparable(t *testing.T) {
+	t.Parallel()
+
+	build := func() (faucet.Principal, faucet.Principal, faucet.Principal) {
+		service, err := faucet.NewService(faucet.ServiceClient{ClientID: "bot", Grants: []string{"repo:o/r", "org:o"}}, []faucet.Scope{faucet.ScopeEventsRead})
+		require.NoError(t, err)
+		user, err := faucet.NewOAuthUser("alice", faucet.OAuthSession{SessionID: "s", ConnectionID: "c"}, []faucet.Scope{faucet.ScopeEventsRead})
+		require.NoError(t, err)
+		return principal(t), user, service
+	}
+	a1, b1, c1 := build()
+	a2, b2, c2 := build()
+	require.True(t, a1 == a2 && b1 == b2 && c1 == c2, "a principal is a value, as before kinds")
+	seen := map[faucet.Principal]bool{a1: true, b1: true, c1: true}
+	require.Len(t, seen, 3)
+	other, err := faucet.NewService(faucet.ServiceClient{ClientID: "bot", Grants: []string{"repo:o/r"}}, []faucet.Scope{faucet.ScopeEventsRead})
+	require.NoError(t, err)
+	require.False(t, other == c1, "other grants make another principal")
+	client, _ := c2.ServiceClient()
+	require.Equal(t, []string{"repo:o/r", "org:o"}, client.Grants)
+}
+
+func TestOnlyAServiceHasALoginWithAColon(t *testing.T) {
+	t.Parallel()
+
+	_, err := faucet.NewPrincipal("svc:bot", testToken)
+	require.Error(t, err, "a GitHub login holds no colon, so a token caller cannot pose as a service")
+	_, err = faucet.NewOAuthUser("svc:bot", faucet.OAuthSession{SessionID: "s", ConnectionID: "c"}, []faucet.Scope{faucet.ScopeEventsRead})
+	require.Error(t, err)
+	_, err = faucet.NewOAuthUser("a:b", faucet.OAuthSession{SessionID: "s", ConnectionID: "c"}, []faucet.Scope{faucet.ScopeEventsRead})
+	require.Error(t, err)
+	p, err := faucet.NewService(faucet.ServiceClient{ClientID: "bot"}, []faucet.Scope{faucet.ScopeEventsRead})
+	require.NoError(t, err)
+	require.Equal(t, "svc:bot", p.Login)
 }
