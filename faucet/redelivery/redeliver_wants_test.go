@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"cdr.dev/slog/v3"
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/redelivery"
 )
 
 // pushInterest is a live interest in the push events of one repository, as a
@@ -134,6 +137,38 @@ func TestAWantsThatFailsIsAFailedHeadRead(t *testing.T) {
 	require.Equal(t, 1, res.Tracked)
 	require.True(t, env.tracked("pushed"))
 	require.Equal(t, 2, res.Asked, "the second ask of waiting and the first of pushed")
+}
+
+// In a synctest bubble the clock moves only when every goroutine waits, so the
+// call ends at the same time on every machine, whatever its load.
+func TestAWantsThatDoesNotAnswerCostsTheScanTimeAndNeverThePurge(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		const limit = 2 * time.Second
+		env := newRedeliveryEnv(t)
+		spy := &purgeSpy{fakeRedeliveryStore: env.store}
+		runner, err := redelivery.New(redelivery.Deps{
+			Store: spy, Hooks: env.gh, Clock: env.clock, Logger: slog.Make(env.logs),
+			Wants: func(ctx context.Context) (func(string, string, int64) bool, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		})
+		require.NoError(t, err)
+		ctx, cancel := context.WithTimeout(context.Background(), limit)
+		defer cancel()
+
+		start := time.Now()
+		res, err := runner.Run(ctx)
+
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.Zero(t, res.Pages)
+		spy.mu.Lock()
+		defer spy.mu.Unlock()
+		require.Equal(t, 1, spy.calls)
+		require.True(t, spy.alive, "the purge runs inside the run's time")
+		require.Equal(t, limit/2, spy.at.Sub(start), "the call is cut where the time for reading the list ends")
+	})
 }
 
 func TestARunThatHoldsTheLeaseLoadsWhatIsWantedOnce(t *testing.T) {
