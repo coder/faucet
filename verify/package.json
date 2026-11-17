@@ -4,12 +4,14 @@
   "type": "module",
   "scripts": {
     "list": "e2e list",
-    "test": "e2e run"
+    "test": "e2e run",
+    "docs:images": "node docs-images.mjs"
   },
   "devDependencies": {
     "@e2e-dev/web": "0.16.0",
     "@types/node": "22.20.5",
     "e2e": "0.23.1",
+    "mermaid": "12.3.0",
     "typescript": "7.0.2"
   }
 }
