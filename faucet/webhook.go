@@ -95,7 +95,7 @@ func (s *Service) serveWebhook(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusInternalServerError, "could not store event")
 		return
 	}
-	logger.Info(r.Context(), "webhook stored",
+	logger.Debug(r.Context(), "webhook stored",
 		slog.F("type", stored.Type), slog.F("event_id", stored.ID), slog.F("inserted", inserted))
 	if !inserted {
 		reply(w, http.StatusOK, "duplicate")
