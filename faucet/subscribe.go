@@ -205,6 +205,11 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 	if err != nil {
 		return nil, err
 	}
+	if entry, raw, err := s.rawSubscriptionEntry(p); err != nil {
+		return nil, err
+	} else if raw {
+		return s.subscribeRaw(ctx, wh, entry, p)
+	}
 	req, err := parseSubscribe(p, wh.allowInsecureLoopback)
 	if err != nil {
 		return nil, err
@@ -215,14 +220,14 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 	if err != nil {
 		return nil, err
 	}
+	key := NewSubscriptionKeyHash(principal.Login, req.callbackURL, req.entry.name, req.canonical)
 	repoID, err := s.authorizeFreshRepo(ctx, logger, principal, "subscribe", req.arguments.Repo)
 	if err != nil {
 		if xerrors.Is(err, ErrNoAccess) {
-			s.endRevokedSubscription(ctx, logger, wh, principal, req)
+			s.endRevokedSubscription(ctx, logger, wh, principal, key)
 		}
 		return nil, accessError(err)
 	}
-	key := NewSubscriptionKeyHash(principal.Login, req.callbackURL, req.entry.name, req.canonical)
 	secret := req.secret
 	verification := CallbackRequest{
 		Login: principal.Login, URL: req.callbackURL, SubscriptionID: key.ID(),
@@ -288,6 +293,11 @@ func (s *Service) unsubscribeMethod(ctx context.Context, _ *mcp.ServerSession, p
 	if p == nil || p.malformed {
 		return nil, invalidParams("params must be an object")
 	}
+	if entry, raw, err := s.rawSubscriptionEntry(p); err != nil {
+		return nil, err
+	} else if raw {
+		return s.unsubscribeRaw(ctx, wh, entry, p)
+	}
 	entry, args, err := parseSubscriptionName(p.fields.Name, p.fields.Arguments, func(e *catalogEntry) *jsonschema.Resolved { return e.endInput })
 	if err != nil {
 		return nil, err
@@ -307,6 +317,11 @@ func (s *Service) unsubscribeMethod(ctx context.Context, _ *mcp.ServerSession, p
 		return nil, err
 	}
 	key := NewSubscriptionKeyHash(principal.Login, callbackURL, entry.name, canonicalArguments(args))
+	return s.endSubscription(ctx, logger, principal, key)
+}
+
+// endSubscription deletes the caller's live subscription of key.
+func (s *Service) endSubscription(ctx context.Context, logger slog.Logger, principal Principal, key SubscriptionKeyHash) (*eventsUnsubscribeResult, error) {
 	_, found, err := s.store.DeleteLiveSubscription(ctx, principal.Login, key, s.clock.Now())
 	if err != nil {
 		return nil, subscriptionStoreError(ctx, logger, err)
@@ -425,17 +440,25 @@ func parseSubscribe(p *subscriptionParams, allowInsecureLoopback bool) (subscrib
 		}
 		req.cursor = &id
 	}
-	if !isAbsent(p.fields.MaxAgeMs) {
-		ms, err := parseInteger(p.fields.MaxAgeMs)
-		if err != nil {
-			return subscribeRequest{}, invalidParams("maxAgeMs must be an integer")
-		}
-		if ms < 1 {
-			return subscribeRequest{}, invalidParams("maxAgeMs must be positive")
-		}
-		req.maxAge = time.Duration(min(ms, maxAgeLimitMs)) * time.Millisecond
+	if req.maxAge, err = parseMaxAge(p.fields.MaxAgeMs); err != nil {
+		return subscribeRequest{}, err
 	}
 	return req, nil
+}
+
+// parseMaxAge reads maxAgeMs. An absent one is zero, which means no limit.
+func parseMaxAge(raw json.RawMessage) (time.Duration, error) {
+	if isAbsent(raw) {
+		return 0, nil
+	}
+	ms, err := parseInteger(raw)
+	if err != nil {
+		return 0, invalidParams("maxAgeMs must be an integer")
+	}
+	if ms < 1 {
+		return 0, invalidParams("maxAgeMs must be positive")
+	}
+	return time.Duration(min(ms, maxAgeLimitMs)) * time.Millisecond, nil
 }
 
 func isAbsent(raw json.RawMessage) bool {
