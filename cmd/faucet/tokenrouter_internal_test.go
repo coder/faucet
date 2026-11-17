@@ -147,19 +147,19 @@ func newTokenServer(t *testing.T, configure ...func(*tokenServerConfig)) *tokenS
 	srv := httptest.NewServer(newRouter(svc, b, cronRoutes{}, logger))
 	t.Cleanup(func() { closeServer(srv, cfg.clock) })
 	return &tokenServer{
-		testServer: &testServer{Server: srv, github: github, store: store, clock: cfg.clock, logs: logs},
+		testServer: &testServer{Server: srv, github: github, store: store, clock: cfg.clock, logs: logs, mcpPath: "/github/mcp"},
 		tokens:     tokens,
 	}
 }
 
-// issue stores a service access token for the /mcp endpoint that expires in
-// 15 minutes.
+// issue stores a service access token for the endpoint at s.mcpPath that
+// expires in 15 minutes.
 func (s *tokenServer) issue(t *testing.T, scopes []faucet.Scope, mutate ...func(*oauth.AccessToken)) string {
 	t.Helper()
 	token := newFaucetToken(t, "fct_")
 	at := oauth.AccessToken{
 		Hash: oauth.HashToken(token), ExpiresAt: s.clock.Now().Add(15 * time.Minute), Scopes: scopes,
-		Resource: testOrigin + "/mcp", SubjectKind: oauth.SubjectService, Subject: "ci-bot",
+		Resource: testOrigin + s.mcpPath, SubjectKind: oauth.SubjectService, Subject: "ci-bot",
 	}
 	for _, m := range mutate {
 		m(&at)
@@ -243,9 +243,28 @@ func TestAFaucetAccessTokenReachesTheEndpointWithoutGitHub(t *testing.T) {
 func TestAFaucetAccessTokenWorksOnlyOnItsOwnResource(t *testing.T) {
 	t.Parallel()
 
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
 	srv := newTokenServer(t)
-	for _, resource := range []string{testOrigin + "/github/mcp", "https://other.example.com/mcp", testOrigin + "/mcp/", "http://faucet.example.com/mcp"} {
-		requireRefused(t, srv.testServer, srv.issue(t, []faucet.Scope{faucet.ScopeEventsRead}, func(at *oauth.AccessToken) { at.Resource = resource }))
+	read := []faucet.Scope{faucet.ScopeEventsRead}
+	issueFor := func(resource string) string {
+		return srv.issue(t, read, func(at *oauth.AccessToken) { at.Resource = resource })
+	}
+	for _, path := range mcpPaths {
+		srv.mcpPath = path
+		res, err := call(ctx, srv.connect(ctx, t, issueFor(testOrigin+path)), "o/r", nil)
+		require.NoError(t, err, path)
+		require.False(t, res.IsError, "%s: %v", path, res.Content)
+
+		other := "/mcp"
+		if path == "/mcp" {
+			other = "/github/mcp"
+		}
+		for _, resource := range []string{
+			testOrigin + other, "https://other.example.com" + path, testOrigin + path + "/", "http://faucet.example.com" + path,
+		} {
+			requireRefused(t, srv.testServer, issueFor(resource))
+		}
 	}
 }
 
@@ -340,7 +359,7 @@ func connectSubscriber(ctx context.Context, t *testing.T, srv *testServer, token
 	require.NoError(t, mcp.AddSendingCustomMethod[*eventsParams, *eventsResult](client, "events/poll"))
 	require.NoError(t, mcp.AddSendingCustomMethod[*subscribeParams, *eventsResult](client, "events/subscribe"))
 	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint:             srv.URL + "/mcp",
+		Endpoint:             srv.URL + srv.mcpPath,
 		HTTPClient:           &http.Client{Transport: eventNameTransport{next: bearerTransport{token, srv.Client().Transport}}},
 		DisableStandaloneSSE: true,
 	}, nil)

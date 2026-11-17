@@ -125,12 +125,18 @@ func (s *stubStore) pollCount() int {
 	return s.polls
 }
 
+// mcpPaths are the paths of the GitHub events MCP endpoint: /github/mcp, and
+// /mcp, its alias for one release.
+var mcpPaths = []string{"/github/mcp", "/mcp"}
+
 type testServer struct {
 	*httptest.Server
 	github *githubStub
 	store  *stubStore
 	clock  *quartz.Mock
 	logs   *syncBuffer
+	// mcpPath is the MCP endpoint that the test's clients call.
+	mcpPath string
 }
 
 func newTestServer(t *testing.T, configure ...func(*httptest.Server)) *testServer {
@@ -158,7 +164,7 @@ func newTestServer(t *testing.T, configure ...func(*httptest.Server)) *testServe
 	}
 	srv.Start()
 	t.Cleanup(func() { closeServer(srv, clock) })
-	return &testServer{Server: srv, github: github, store: store, clock: clock, logs: logs}
+	return &testServer{Server: srv, github: github, store: store, clock: clock, logs: logs, mcpPath: "/github/mcp"}
 }
 
 // closeServer closes srv and fires the pending timers of clock one at a time
@@ -211,7 +217,7 @@ func (s *testServer) connect(ctx context.Context, t *testing.T, token string) *m
 	t.Helper()
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
 	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint:             s.URL + "/mcp",
+		Endpoint:             s.URL + s.mcpPath,
 		HTTPClient:           &http.Client{Transport: bearerTransport{token, s.Client().Transport}},
 		DisableStandaloneSSE: true,
 	}, nil)
@@ -240,7 +246,7 @@ func rawPost(t *testing.T, srv *testServer, header string) (status int, wwwAuthe
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+srv.mcpPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
 	if header != "" {
@@ -257,26 +263,33 @@ func rawPost(t *testing.T, srv *testServer, header string) (status int, wwwAuthe
 func TestMCPRejectsRequestsWithoutAGoodBearerToken(t *testing.T) {
 	t.Parallel()
 
-	srv := newTestServer(t)
-	malformed := []string{
-		"", "Basic YWxpY2U6c2VjcmV0", "Bearer", "Bearer ", "Bearer two tokens", "Token " + aliceToken,
-		"Bearer " + strings.Repeat("a", 1025),
-	}
-	for _, header := range malformed {
-		status, challenge, body := rawPost(t, srv, header)
-		require.Equal(t, http.StatusUnauthorized, status, "%q", header)
-		require.Equal(t, "Bearer", challenge)
-		require.Equal(t, "unauthorized\n", body)
-	}
-	paths, _ := srv.github.seen()
-	require.Empty(t, paths, "a malformed header must not reach GitHub")
+	for _, path := range mcpPaths {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
 
-	status, _, body := rawPost(t, srv, "Bearer "+staleToken)
-	require.Equal(t, http.StatusUnauthorized, status)
-	require.Equal(t, "unauthorized\n", body, "GitHub's refusal looks like a malformed header")
-	paths, _ = srv.github.seen()
-	require.Equal(t, []string{"/user"}, paths)
-	srv.requireNoToken(t, "a response", body)
+			srv := newTestServer(t)
+			srv.mcpPath = path
+			malformed := []string{
+				"", "Basic YWxpY2U6c2VjcmV0", "Bearer", "Bearer ", "Bearer two tokens", "Token " + aliceToken,
+				"Bearer " + strings.Repeat("a", 1025),
+			}
+			for _, header := range malformed {
+				status, challenge, body := rawPost(t, srv, header)
+				require.Equal(t, http.StatusUnauthorized, status, "%q", header)
+				require.Equal(t, "Bearer", challenge)
+				require.Equal(t, "unauthorized\n", body)
+			}
+			paths, _ := srv.github.seen()
+			require.Empty(t, paths, "a malformed header must not reach GitHub")
+
+			status, _, body := rawPost(t, srv, "Bearer "+staleToken)
+			require.Equal(t, http.StatusUnauthorized, status)
+			require.Equal(t, "unauthorized\n", body, "GitHub's refusal looks like a malformed header")
+			paths, _ = srv.github.seen()
+			require.Equal(t, []string{"/user"}, paths)
+			srv.requireNoToken(t, "a response", body)
+		})
+	}
 }
 
 func TestMCPGitHubFailureIsABadGateway(t *testing.T) {
@@ -330,31 +343,38 @@ func TestMCPRateLimitedUserLookupIsABadGatewayNotAnInvalidToken(t *testing.T) {
 func TestMCPToolWaitsForAllowedRepoOverHTTP(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-	srv := newTestServer(t)
-	session := srv.connect(ctx, t, aliceToken)
+	for _, path := range mcpPaths {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
 
-	tools, err := session.ListTools(ctx, nil)
-	require.NoError(t, err)
-	require.Len(t, tools.Tools, 1)
-	require.Equal(t, "wait_for_github_events", tools.Tools[0].Name)
+			ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+			defer cancel()
+			srv := newTestServer(t)
+			srv.mcpPath = path
+			session := srv.connect(ctx, t, aliceToken)
 
-	res, err := call(ctx, session, "o/r", nil)
-	require.NoError(t, err)
-	require.False(t, res.IsError, "%v", res.Content)
-	text := toolText(t, res)
-	require.Contains(t, text, `"type":"ci.run_completed"`)
-	require.Contains(t, text, `"repo_id":42`)
-	require.Contains(t, text, `"cursor":8`)
+			tools, err := session.ListTools(ctx, nil)
+			require.NoError(t, err)
+			require.Len(t, tools.Tools, 1)
+			require.Equal(t, "wait_for_github_events", tools.Tools[0].Name)
 
-	paths, auth := srv.github.seen()
-	require.Contains(t, paths, "/user")
-	require.Contains(t, paths, "/repos/o/r")
-	for _, a := range auth {
-		require.Equal(t, "Bearer "+aliceToken, a, "GitHub got the caller's own token")
+			res, err := call(ctx, session, "o/r", nil)
+			require.NoError(t, err)
+			require.False(t, res.IsError, "%v", res.Content)
+			text := toolText(t, res)
+			require.Contains(t, text, `"type":"ci.run_completed"`)
+			require.Contains(t, text, `"repo_id":42`)
+			require.Contains(t, text, `"cursor":8`)
+
+			paths, auth := srv.github.seen()
+			require.Contains(t, paths, "/user")
+			require.Contains(t, paths, "/repos/o/r")
+			for _, a := range auth {
+				require.Equal(t, "Bearer "+aliceToken, a, "GitHub got the caller's own token")
+			}
+			srv.requireNoToken(t, "a result", text)
+		})
 	}
-	srv.requireNoToken(t, "a result", text)
 }
 
 func TestMCPToolDeniesARepoTheCallerCannotSee(t *testing.T) {
@@ -436,29 +456,36 @@ func TestMCPWaitStopsWhenTheClientDisconnects(t *testing.T) {
 func TestMCPWaitOutlastsTheServerWriteTimeout(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-	const serverWriteTimeout = 300 * time.Millisecond
-	srv := newTestServer(t, func(s *httptest.Server) { s.Config.WriteTimeout = serverWriteTimeout })
-	srv.store.events = nil
-	session := srv.connect(ctx, t, aliceToken)
+	for _, path := range mcpPaths {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
 
-	timers := srv.clock.Trap().NewTimer()
-	defer timers.Close()
-	done := make(chan error, 1)
-	go func() {
-		res, err := call(ctx, session, "o/r", map[string]any{"timeout_s": 2})
-		if err == nil && res.IsError {
-			err = fmt.Errorf("tool error: %s", toolText(t, res))
-		}
-		done <- err
-	}()
-	armed := timers.MustWait(ctx)
-	time.Sleep(2 * serverWriteTimeout)
-	armed.MustRelease(ctx)
-	srv.clock.Advance(2 * time.Second).MustWait(ctx)
+			ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+			defer cancel()
+			const serverWriteTimeout = 300 * time.Millisecond
+			srv := newTestServer(t, func(s *httptest.Server) { s.Config.WriteTimeout = serverWriteTimeout })
+			srv.mcpPath = path
+			srv.store.events = nil
+			session := srv.connect(ctx, t, aliceToken)
 
-	require.NoError(t, <-done, "the response arrives after the server's own write timeout")
+			timers := srv.clock.Trap().NewTimer()
+			defer timers.Close()
+			done := make(chan error, 1)
+			go func() {
+				res, err := call(ctx, session, "o/r", map[string]any{"timeout_s": 2})
+				if err == nil && res.IsError {
+					err = fmt.Errorf("tool error: %s", toolText(t, res))
+				}
+				done <- err
+			}()
+			armed := timers.MustWait(ctx)
+			time.Sleep(2 * serverWriteTimeout)
+			armed.MustRelease(ctx)
+			srv.clock.Advance(2 * time.Second).MustWait(ctx)
+
+			require.NoError(t, <-done, "the response arrives after the server's own write timeout")
+		})
+	}
 }
 
 func TestHealthAndWebhookDoNotNeedABearerToken(t *testing.T) {

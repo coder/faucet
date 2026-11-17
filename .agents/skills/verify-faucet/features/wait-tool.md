@@ -1,6 +1,6 @@
 # Wait tool
 
-An agent waits for GitHub events on one repository through the `wait_for_github_events` MCP tool on `POST /mcp`. The call returns as soon as a matching event exists, or at its deadline with no events and a cursor.
+An agent waits for GitHub events on one repository through the `wait_for_github_events` MCP tool on `POST /github/mcp`. The call returns as soon as a matching event exists, or at its deadline with no events and a cursor.
 
 ## Sub-features
 
@@ -14,7 +14,7 @@ An agent waits for GitHub events on one repository through the `wait_for_github_
 
 ## How to get to it (user POV)
 
-An agent's MCP client sends `tools/call` to `/mcp` with `Authorization: Bearer <GitHub token>`. The stub plays GitHub: it knows one token and the repositories named `verify/r<id>`. The test plays GitHub's webhooks through `faucet.deliver` and the agent through `faucet.waitForEvents`.
+An agent's MCP client sends `tools/call` to `/github/mcp` with `Authorization: Bearer <GitHub token>`. The stub plays GitHub: it knows one token and the repositories named `verify/r<id>`. The test plays GitHub's webhooks through `faucet.deliver` and the agent through `faucet.waitForEvents`.
 
 ## Driving it with e2e
 

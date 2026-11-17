@@ -13,7 +13,7 @@ Faucet receives GitHub webhooks, stores them as typed events, and lets an agent 
 - `faucet/oauth`: `NewVerifier`, `Store` and `Minted` (the access tokens that faucet mints; nothing mints them yet).
 - `faucet/pgstore`: the Postgres store, with embedded migrations and sqlc queries.
 - `faucet/storetest`: the contract tests every `Store` must pass.
-- `cmd/faucet`: the server. It serves `POST /webhook/github`, `/mcp`, `GET /healthz`, `GET /cron/purge` `GET /cron/deliver` and `GET /cron/redeliver`.
+- `cmd/faucet`: the server. It serves `POST /webhook/github`, `/github/mcp` (and `/mcp`, its alias for one release), `GET /healthz`, `GET /cron/purge` `GET /cron/deliver` and `GET /cron/redeliver`.
 
 ## Run the server
 
@@ -64,7 +64,7 @@ Every CI event carries `html_url` (except a check suite, which GitHub gives none
 
 ## Wait for events
 
-`/mcp` is a stateless MCP endpoint. Every request must carry `Authorization: Bearer <GitHub token>`. Faucet checks the token with `GET /user`, then checks that the same token can read the repository with `GET /repos/{owner}/{name}`. The token is held for that one request and sent only to the GitHub API URL. A bearer that starts with `fct_`, `fcr_` or `fcs_` is a faucet token: faucet checks it itself and never sends it to GitHub. This version mints none, so each one is 401. Faucet remembers a successful answer for 60 seconds, keyed by a hash of the token and never the token (see **GitHub API cost**). `FAUCET_GITHUB_API_URL` sets that URL. It defaults to `https://api.github.com`, and it must be `https`, except `http` is accepted for a loopback host.
+`/github/mcp` is a stateless MCP endpoint, the one for GitHub events. Every request must carry `Authorization: Bearer <GitHub token>`. Faucet checks the token with `GET /user`, then checks that the same token can read the repository with `GET /repos/{owner}/{name}`. The token is held for that one request and sent only to the GitHub API URL. A bearer that starts with `fct_`, `fcr_` or `fcs_` is a faucet token: faucet checks it itself and never sends it to GitHub. This version mints none, so each one is 401. Faucet remembers a successful answer for 60 seconds, keyed by a hash of the token and never the token (see **GitHub API cost**). `FAUCET_GITHUB_API_URL` sets that URL. It defaults to `https://api.github.com`, and it must be `https`, except `http` is accepted for a loopback host.
 
 `wait_for_github_events` takes:
 
@@ -239,6 +239,7 @@ The server applies pending migrations when a production instance starts, over `D
 
 `pgstore.Migrate` applies every schema change. The server runs it at start, and on Vercel only in production, see **Deploy on Vercel**.
 
+- **The MCP endpoint is now `/github/mcp`.** Faucet will serve one MCP endpoint per service, and this one serves GitHub events. Point MCP clients at `https://<your host>/github/mcp`. `/mcp` still serves the same endpoint, with the same token check, and a later release removes it. An Instant Rollback to a build before this one answers 404 to clients that already call `/github/mcp`.
 - **An `Authorizer` of your own, and the scopes of a `Principal`.** `Authorizer` has a second method, `RepoIDFresh`, which `events/subscribe` calls for every renewal. `AccessCache.RepoIDUncached` is now `AccessCache.RepoIDFresh`, and `TokenAuthorizer.RepoIDFresh` is its `RepoID`. A `Principal` from `NewPrincipal` holds both scopes, as before, and `NewPrincipal` refuses a login with a colon, which GitHub never gives. One built by hand, as `faucet.Principal{Login: ...}`, is no kind of caller: every method but `events/list` answers it `authentication required`. `TokenAuthorizer` answers a caller without a GitHub token with `ErrNoAccess` and asks GitHub nothing; before, the caller saw `could not verify repository access, try again`. Migration `000010_access_tokens` adds the table `faucet_access_tokens`, which nothing writes yet.
 - **Rows sealed before secret rotation existed.** The first refresh of such a row with the same secret counts as one rotation, because the new sealing of the secret is not the old bytes. For up to 10 minutes the old sealing is the previous secret. It opens to the same secret, so a signature has one `v1,` entry.
 - **A `CRON_SECRET` that no request can carry.** The server now stops at start, and names the variable, when `CRON_SECRET` has a space, a tab, a newline or another control character, a byte outside printable ASCII, or more than 1024 bytes. Before, it started and answered 401 to every cron call. A value from `openssl rand -hex 32` or `openssl rand -base64 32` passes, and so does any other run of printable ASCII characters. A secret that you read from a file can end in a newline that you must remove.

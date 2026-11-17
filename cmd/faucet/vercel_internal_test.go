@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"testing"
 
@@ -48,4 +49,34 @@ func TestVercelCronsCallTheCronRoutesThatTheServerMounts(t *testing.T) {
 
 	// The README sizes the redelivery sweep for a run every 10 minutes.
 	require.Equal(t, "*/10 * * * *", scheduled[redeliverPath])
+}
+
+// Vercel hands a request to the server only when a rewrite routes its path to
+// the faucet service. Each source is read as a whole-path regular expression,
+// which is what a path-to-regexp source of only groups means.
+func TestVercelRewritesRouteTheMCPPathsToTheServer(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile("../../vercel.json")
+	require.NoError(t, err)
+	var config struct {
+		Rewrites []struct {
+			Source      string `json:"source"`
+			Destination struct {
+				Service string `json:"service"`
+			} `json:"destination"`
+		} `json:"rewrites"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &config))
+
+	for _, path := range mcpPaths {
+		var service string
+		for _, rewrite := range config.Rewrites {
+			if regexp.MustCompile("^" + rewrite.Source + "$").MatchString(path) {
+				service = rewrite.Destination.Service
+				break
+			}
+		}
+		require.Equal(t, "faucet", service, "the rewrite of %s", path)
+	}
 }
