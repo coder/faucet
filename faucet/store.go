@@ -223,13 +223,19 @@ type Store interface {
 	// subscription whose PreviousSecretUntil is at or before now, and returns
 	// how many rows it cleared.
 	ClearExpiredPreviousSecrets(ctx context.Context, now time.Time) (int64, error)
-	// UpsertRepository records that a signed delivery named repo at seenAt,
-	// the time of record. It keeps one row per repository ID, with the names
-	// of its latest call. It calls repo.Validate.
-	UpsertRepository(ctx context.Context, repo Repository, seenAt time.Time) error
+	// RecordRepository records repo, which a signed delivery named, at
+	// seenAt, the time of record, when the store holds no row of its ID. A
+	// row that exists keeps its names, so a replayed or late delivery cannot
+	// move a name back to it. It calls repo.Validate.
+	RecordRepository(ctx context.Context, repo Repository, seenAt time.Time) error
+	// RenameRepository gives the row of repo.ID the names of repo at seenAt,
+	// and inserts it when there is none. A repository event that renames or
+	// transfers the repository calls it. It calls repo.Validate.
+	RenameRepository(ctx context.Context, repo Repository, seenAt time.Time) error
 	// RepositoryByName returns the repository whose FullName equals fullName,
-	// ignoring case as GitHub does. When renames left the name on more than
-	// one row, it returns the one recorded latest. It returns
+	// ignoring case as GitHub does. When more than one row holds the name,
+	// as when a repository was deleted with no event that says so and another
+	// took its name, it returns the one that took the name latest. It returns
 	// ErrUnknownRepository when no row holds the name.
 	RepositoryByName(ctx context.Context, fullName string) (Repository, error)
 

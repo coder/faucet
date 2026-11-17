@@ -11,59 +11,87 @@ import (
 )
 
 var repositorySubtests = []subtest{
-	{"RepositoryByNameReadsBackTheLatestNamesOfAnID", repositoryByNameReadsBackTheLatestNamesOfAnID},
+	{"RecordRepositoryKeepsTheNamesAnIDWasFirstSeenUnder", recordRepositoryKeepsTheNamesAnIDWasFirstSeenUnder},
+	{"RenameRepositoryMovesANameAndANewRepositoryCanTakeTheOldOne", renameRepositoryMovesANameAndANewRepositoryCanTakeTheOldOne},
+	{"RenameRepositoryOfAnUnknownIDRecordsIt", renameRepositoryOfAnUnknownIDRecordsIt},
 	{"RepositoryByNameIgnoresCaseAndTakesTheLatestHolderOfAName", repositoryByNameIgnoresCaseAndTakesTheLatestHolderOfAName},
 	{"RepositoryByNameOfAnUnseenNameIsUnknown", repositoryByNameOfAnUnseenNameIsUnknown},
-	{"UpsertRepositoryValidatesInput", upsertRepositoryValidatesInput},
+	{"RecordAndRenameRepositoryValidateInput", recordAndRenameRepositoryValidateInput},
 }
+
+var repositoryTime = time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 
 func repositoryNamed(id int64, fullName string) faucet.Repository {
 	return faucet.Repository{ID: id, OwnerID: 7, OwnerLogin: "coder", FullName: fullName}
 }
 
-func repositoryByNameReadsBackTheLatestNamesOfAnID(t *testing.T, s faucet.Store) {
-	ctx := context.Background()
-	at := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
-	require.NoError(t, s.UpsertRepository(ctx, repositoryNamed(1, "coder/faucet"), at))
-	got, err := s.RepositoryByName(ctx, "coder/faucet")
-	require.NoError(t, err)
-	require.Equal(t, repositoryNamed(1, "coder/faucet"), got)
+func requireRepositoryNamed(t *testing.T, s faucet.Store, fullName string, want faucet.Repository) {
+	t.Helper()
+	got, err := s.RepositoryByName(context.Background(), fullName)
+	require.NoError(t, err, fullName)
+	require.Equal(t, want, got, fullName)
+}
 
+func requireUnknownName(t *testing.T, s faucet.Store, fullName string) {
+	t.Helper()
+	_, err := s.RepositoryByName(context.Background(), fullName)
+	require.ErrorIs(t, err, faucet.ErrUnknownRepository, fullName)
+}
+
+// A replayed or late delivery names a repository as it was then. Recording it
+// must not move a name back to the repository.
+func recordRepositoryKeepsTheNamesAnIDWasFirstSeenUnder(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(1, "coder/faucet"), repositoryTime))
+	requireRepositoryNamed(t, s, "coder/faucet", repositoryNamed(1, "coder/faucet"))
+
+	require.NoError(t, s.RecordRepository(ctx, faucet.Repository{ID: 1, OwnerID: 8, OwnerLogin: "acme", FullName: "acme/old"}, repositoryTime.Add(time.Hour)))
+	requireRepositoryNamed(t, s, "coder/faucet", repositoryNamed(1, "coder/faucet"))
+	requireUnknownName(t, s, "acme/old")
+}
+
+func renameRepositoryMovesANameAndANewRepositoryCanTakeTheOldOne(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(1, "coder/faucet"), repositoryTime))
 	renamed := faucet.Repository{ID: 1, OwnerID: 8, OwnerLogin: "acme", FullName: "acme/tap"}
-	require.NoError(t, s.UpsertRepository(ctx, renamed, at.Add(time.Minute)))
-	got, err = s.RepositoryByName(ctx, "acme/tap")
-	require.NoError(t, err)
-	require.Equal(t, renamed, got)
-	_, err = s.RepositoryByName(ctx, "coder/faucet")
-	require.ErrorIs(t, err, faucet.ErrUnknownRepository, "a rename frees the old name")
+	require.NoError(t, s.RenameRepository(ctx, renamed, repositoryTime.Add(time.Minute)))
+	requireRepositoryNamed(t, s, "acme/tap", renamed)
+	requireUnknownName(t, s, "coder/faucet")
+
+	// A new repository takes the old name, and then a replayed delivery of
+	// the first repository names it under the old name too.
+	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(2, "coder/faucet"), repositoryTime.Add(2*time.Minute)))
+	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(1, "coder/faucet"), repositoryTime.Add(3*time.Minute)))
+	requireRepositoryNamed(t, s, "coder/faucet", repositoryNamed(2, "coder/faucet"))
+	requireRepositoryNamed(t, s, "acme/tap", renamed)
+}
+
+func renameRepositoryOfAnUnknownIDRecordsIt(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	require.NoError(t, s.RenameRepository(ctx, repositoryNamed(3, "coder/new"), repositoryTime))
+	requireRepositoryNamed(t, s, "coder/new", repositoryNamed(3, "coder/new"))
 }
 
 func repositoryByNameIgnoresCaseAndTakesTheLatestHolderOfAName(t *testing.T, s faucet.Store) {
 	ctx := context.Background()
-	at := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
-	require.NoError(t, s.UpsertRepository(ctx, repositoryNamed(1, "coder/faucet"), at))
-	got, err := s.RepositoryByName(ctx, "Coder/Faucet")
-	require.NoError(t, err)
-	require.Equal(t, int64(1), got.ID)
+	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(1, "coder/faucet"), repositoryTime))
+	requireRepositoryNamed(t, s, "Coder/Faucet", repositoryNamed(1, "coder/faucet"))
 
-	// The first repository was deleted without a delivery that says so, and a
-	// new one took its name.
-	require.NoError(t, s.UpsertRepository(ctx, repositoryNamed(2, "coder/Faucet"), at.Add(time.Hour)))
-	got, err = s.RepositoryByName(ctx, "coder/faucet")
-	require.NoError(t, err)
-	require.Equal(t, repositoryNamed(2, "coder/Faucet"), got)
+	// The first repository was deleted with no event that says so, and a new
+	// one took its name.
+	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(2, "coder/Faucet"), repositoryTime.Add(time.Hour)))
+	requireRepositoryNamed(t, s, "coder/faucet", repositoryNamed(2, "coder/Faucet"))
 }
 
 func repositoryByNameOfAnUnseenNameIsUnknown(t *testing.T, s faucet.Store) {
 	ctx := context.Background()
-	require.NoError(t, s.UpsertRepository(ctx, repositoryNamed(1, "coder/faucet"), time.Now()))
+	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(1, "coder/faucet"), repositoryTime))
 	for _, name := range []string{"coder/fauce", "coder/faucet2", "other/faucet", "coder/%", "coder/_aucet"} {
-		_, err := s.RepositoryByName(ctx, name)
-		require.ErrorIs(t, err, faucet.ErrUnknownRepository, name)
+		requireUnknownName(t, s, name)
 	}
 }
 
-func upsertRepositoryValidatesInput(t *testing.T, s faucet.Store) {
+func recordAndRenameRepositoryValidateInput(t *testing.T, s faucet.Store) {
 	ctx := context.Background()
 	for _, bad := range []faucet.Repository{
 		{},
@@ -75,8 +103,8 @@ func upsertRepositoryValidatesInput(t *testing.T, s faucet.Store) {
 		{ID: -1, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/faucet"},
 		{ID: 1, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/fau\x00cet"},
 	} {
-		require.Error(t, s.UpsertRepository(ctx, bad, time.Now()), "%+v", bad)
+		require.Error(t, s.RecordRepository(ctx, bad, repositoryTime), "%+v", bad)
+		require.Error(t, s.RenameRepository(ctx, bad, repositoryTime), "%+v", bad)
 	}
-	_, err := s.RepositoryByName(ctx, "coder/faucet")
-	require.ErrorIs(t, err, faucet.ErrUnknownRepository, "a refused repository is not stored")
+	requireUnknownName(t, s, "coder/faucet")
 }

@@ -37,15 +37,13 @@ func (q *Queries) GetRepositoryByName(ctx context.Context, fullName string) (Get
 	return i, err
 }
 
-const upsertRepository = `-- name: UpsertRepository :exec
+const recordRepository = `-- name: RecordRepository :exec
 INSERT INTO faucet_repos (repo_id, owner_id, owner_login, full_name, seen_at)
 VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT (repo_id) DO UPDATE
-SET owner_id = excluded.owner_id, owner_login = excluded.owner_login,
-    full_name = excluded.full_name, seen_at = excluded.seen_at
+ON CONFLICT (repo_id) DO NOTHING
 `
 
-type UpsertRepositoryParams struct {
+type RecordRepositoryParams struct {
 	RepoID     int64
 	OwnerID    int64
 	OwnerLogin string
@@ -53,8 +51,35 @@ type UpsertRepositoryParams struct {
 	SeenAt     time.Time
 }
 
-func (q *Queries) UpsertRepository(ctx context.Context, arg UpsertRepositoryParams) error {
-	_, err := q.db.ExecContext(ctx, upsertRepository,
+func (q *Queries) RecordRepository(ctx context.Context, arg RecordRepositoryParams) error {
+	_, err := q.db.ExecContext(ctx, recordRepository,
+		arg.RepoID,
+		arg.OwnerID,
+		arg.OwnerLogin,
+		arg.FullName,
+		arg.SeenAt,
+	)
+	return err
+}
+
+const renameRepository = `-- name: RenameRepository :exec
+INSERT INTO faucet_repos (repo_id, owner_id, owner_login, full_name, seen_at)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (repo_id) DO UPDATE
+SET owner_id = excluded.owner_id, owner_login = excluded.owner_login,
+    full_name = excluded.full_name, seen_at = excluded.seen_at
+`
+
+type RenameRepositoryParams struct {
+	RepoID     int64
+	OwnerID    int64
+	OwnerLogin string
+	FullName   string
+	SeenAt     time.Time
+}
+
+func (q *Queries) RenameRepository(ctx context.Context, arg RenameRepositoryParams) error {
+	_, err := q.db.ExecContext(ctx, renameRepository,
 		arg.RepoID,
 		arg.OwnerID,
 		arg.OwnerLogin,

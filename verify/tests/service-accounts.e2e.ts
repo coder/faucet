@@ -153,7 +153,11 @@ describe('service accounts', () => {
     }, { publicUrl: true });
   });
 
-  test('without FAUCET_PUBLIC_URL there is no login server', async ({ faucet }) => {
+  test('without FAUCET_PUBLIC_URL there is no login server, and no delivery writes a repository', async ({ faucet }) => {
+    const repoId = newRepoId();
+    await deliverRun(faucet, repoId);
+    expect(await faucet.sql(`select count(*) from faucet_repos where repo_id = ${repoId}`)).toBe('0');
+
     for (const path of ['/.well-known/oauth-authorization-server', '/.well-known/oauth-protected-resource/github/mcp', '/.well-known/oauth-protected-resource/mcp', '/oauth/authorize']) {
       expect((await faucet.request(path)).status, path).toBe(404);
     }

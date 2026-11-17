@@ -36,8 +36,8 @@ const (
 //	202 an event faucet ignores
 //	500 the store failed, so GitHub records a failed delivery
 //
-// Every signed delivery whose payload names a repository records it in the
-// store before anything else, ping and ignored events too.
+// With Deps.RecordRepositories, every signed delivery whose payload names a
+// repository records it first, ping and ignored events too.
 func (s *Service) WebhookHandler() http.Handler {
 	return http.HandlerFunc(s.serveWebhook)
 }
@@ -76,15 +76,8 @@ func (s *Service) serveWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	logger := s.logger.With(slog.F("github_event", eventName), slog.F("delivery_id", deliveryID))
 
-	// Every signed delivery that names a repository records it, stored or
-	// not, so a service can be granted a repository by name before faucet
-	// stores an event of it.
-	if repo, ok := repositoryOf(body); ok {
-		if err := s.store.UpsertRepository(r.Context(), repo, s.clock.Now()); err != nil {
-			logger.Error(r.Context(), "store repository", slog.Error(err))
-			reply(w, http.StatusInternalServerError, "could not store repository")
-			return
-		}
+	if s.recordRepos {
+		s.recordRepository(r.Context(), logger, eventName, body)
 	}
 	if eventName == "ping" {
 		logger.Debug(r.Context(), "webhook ping")

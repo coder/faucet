@@ -265,6 +265,9 @@ func run() error {
 		PrincipalFrom: principalFrom,
 		Clock:         clock,
 		Webhook:       cfg.webhook,
+		// The grants of services name repositories, which the login server
+		// finds by the deliveries that named them.
+		RecordRepositories: cfg.publicURL != nil,
 	}
 	svc, err := faucet.New(deps)
 	if err != nil {

@@ -1,4 +1,9 @@
--- name: UpsertRepository :exec
+-- name: RecordRepository :exec
+INSERT INTO faucet_repos (repo_id, owner_id, owner_login, full_name, seen_at)
+VALUES (@repo_id, @owner_id, @owner_login, @full_name, @seen_at)
+ON CONFLICT (repo_id) DO NOTHING;
+
+-- name: RenameRepository :exec
 INSERT INTO faucet_repos (repo_id, owner_id, owner_login, full_name, seen_at)
 VALUES (@repo_id, @owner_id, @owner_login, @full_name, @seen_at)
 ON CONFLICT (repo_id) DO UPDATE

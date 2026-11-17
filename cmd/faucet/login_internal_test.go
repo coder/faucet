@@ -61,6 +61,7 @@ func newLoginServer(t *testing.T) *loginServer {
 	require.NoError(t, err)
 	svc, err := faucet.New(faucet.Deps{
 		Store: store, Secret: []byte(testSecret), Logger: logger, Authorizer: authorizer, PrincipalFrom: principalFrom, Clock: clock,
+		RecordRepositories: true,
 	})
 	require.NoError(t, err)
 	srv.Config.Handler = newRouter(svc, tokens, login, cronRoutes{}, logger)

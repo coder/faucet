@@ -1,7 +1,9 @@
 -- faucet_repos maps the GitHub repositories that signed deliveries named to
 -- their IDs, so a service granted a repository by name needs no GitHub call.
--- A name can move to another repository, so it is not unique: a lookup takes
--- the row seen latest.
+-- A row keeps the names it was first seen under until a repository event
+-- renames or transfers it, and seen_at is when it took them. A name can move
+-- to another repository, so it is not unique: a lookup takes the row that
+-- took it latest.
 CREATE TABLE faucet_repos (
   repo_id bigint PRIMARY KEY CHECK (repo_id > 0),
   owner_id bigint NOT NULL CHECK (owner_id > 0),

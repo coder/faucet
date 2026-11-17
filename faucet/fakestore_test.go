@@ -29,14 +29,27 @@ type fakeRepo struct {
 	seenAt time.Time
 }
 
-func (s *fakeStore) UpsertRepository(_ context.Context, repo faucet.Repository, seenAt time.Time) error {
+func (s *fakeStore) RecordRepository(_ context.Context, repo faucet.Repository, seenAt time.Time) error {
+	return s.writeRepository(repo, seenAt, false)
+}
+
+func (s *fakeStore) RenameRepository(_ context.Context, repo faucet.Repository, seenAt time.Time) error {
+	return s.writeRepository(repo, seenAt, true)
+}
+
+func (s *fakeStore) writeRepository(repo faucet.Repository, seenAt time.Time, rename bool) error {
 	if err := repo.Validate(); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.repoWrites++
 	if s.repoErr != nil {
 		return s.repoErr
+	}
+	known := slices.ContainsFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID })
+	if known && !rename {
+		return nil
 	}
 	s.repos = slices.DeleteFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID })
 	s.repos = append(s.repos, fakeRepo{repo: repo, seenAt: seenAt})

@@ -1,10 +1,13 @@
 package faucet
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 
 	"golang.org/x/xerrors"
+
+	"cdr.dev/slog/v3"
 )
 
 // ErrUnknownRepository means the store has seen no delivery that names the
@@ -37,10 +40,31 @@ func (r Repository) Validate() error {
 	return nil
 }
 
-// repositoryOf returns the repository that a delivery's payload names, and
-// false when it names none or names it in a form that Validate refuses.
-func repositoryOf(payload []byte) (Repository, bool) {
+// recordRepository records the repository that a signed delivery names, so a
+// service can be granted it by name before faucet stores an event of it.
+// Only a repository event that renames or transfers it changes the names of
+// a repository the store knows. A failed write is logged, and the delivery
+// goes on: the next one that names the repository writes it.
+func (s *Service) recordRepository(ctx context.Context, logger slog.Logger, eventName string, payload []byte) {
+	repo, action, ok := repositoryOf(payload)
+	if !ok {
+		return
+	}
+	record := s.store.RecordRepository
+	if eventName == "repository" && (action == "renamed" || action == "transferred") {
+		record = s.store.RenameRepository
+	}
+	if err := record(ctx, repo, s.clock.Now()); err != nil {
+		logger.Warn(ctx, "could not record the repository", slog.Error(err))
+	}
+}
+
+// repositoryOf returns the repository that a delivery's payload names and
+// the payload's action, and false when it names none or names it in a form
+// that Validate refuses.
+func repositoryOf(payload []byte) (Repository, string, bool) {
 	var body struct {
+		Action     string `json:"action"`
 		Repository *struct {
 			ID       int64  `json:"id"`
 			FullName string `json:"full_name"`
@@ -51,8 +75,8 @@ func repositoryOf(payload []byte) (Repository, bool) {
 		} `json:"repository"`
 	}
 	if err := json.Unmarshal(payload, &body); err != nil || body.Repository == nil {
-		return Repository{}, false
+		return Repository{}, "", false
 	}
 	r := Repository{ID: body.Repository.ID, OwnerID: body.Repository.Owner.ID, OwnerLogin: body.Repository.Owner.Login, FullName: body.Repository.FullName}
-	return r, r.Validate() == nil
+	return r, body.Action, r.Validate() == nil
 }

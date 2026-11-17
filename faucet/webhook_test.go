@@ -45,6 +45,7 @@ type fakeStore struct {
 	deliveries    map[fakeDeliveryKey]*fakeDelivery
 	gaps          map[faucet.SubscriptionKeyHash]*fakeGap
 	repos         []fakeRepo
+	repoWrites    int
 	// repoErr fails UpsertRepository and RepositoryByName.
 	repoErr error
 }
