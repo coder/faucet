@@ -18,7 +18,7 @@ import (
 
 // These tests keep each feature under faucet/ in its own compartment, with a
 // small, one-way interface to core. A package's role comes from its path:
-// faucet is core, faucet/internal/... holds helpers, the adapters below sit
+// faucet is core, the internals below hold helpers, the adapters below sit
 // between core and the features, and every other directory under faucet/ is
 // a feature.
 const (
@@ -28,9 +28,13 @@ const (
 	maxCoreNames = 5
 )
 
-// adapters is the one list that is kept by hand. A directory missing from it
-// is a feature, so a new adapter fails closed.
-var adapters = []string{"faucet/pgstore", "faucet/storetest"}
+// The two lists that are kept by hand. A directory under faucet/internal that
+// is missing from internals is a violation, and a directory missing from
+// adapters is a feature, so a new helper or adapter fails closed.
+var (
+	internals = []string{"faucet/internal/githubapi", "faucet/internal/pgtest"}
+	adapters  = []string{"faucet/pgstore", "faucet/storetest"}
+)
 
 type role int
 
@@ -40,6 +44,8 @@ const (
 	roleAdapter
 	roleFeature
 	roleOther
+	// roleUnlisted is a directory that needs a place in a hand list.
+	roleUnlisted
 )
 
 type goImport struct {
@@ -66,12 +72,14 @@ type goPackage struct {
 
 // roleOf returns the role of a module-relative directory, and the name of the
 // feature that it belongs to.
-func roleOf(dir string, adapters []string) (role, string) {
+func roleOf(dir string) (role, string) {
 	switch {
 	case dir == "faucet":
 		return roleCore, ""
-	case dir == "faucet/internal" || strings.HasPrefix(dir, "faucet/internal/"):
+	case slices.Contains(internals, dir):
 		return roleInternal, ""
+	case dir == "faucet/internal" || strings.HasPrefix(dir, "faucet/internal/"):
+		return roleUnlisted, ""
 	}
 	for _, a := range adapters {
 		if dir == a || strings.HasPrefix(dir, a+"/") {
@@ -96,7 +104,7 @@ func moduleDir(path string) (string, bool) {
 
 // compartmentViolations checks the layout against the rules and returns one
 // line per violation.
-func compartmentViolations(pkgs []goPackage, adapters []string) []string {
+func compartmentViolations(pkgs []goPackage) []string {
 	var out []string
 	add := func(format string, args ...any) { out = append(out, fmt.Sprintf(format, args...)) }
 
@@ -104,22 +112,27 @@ func compartmentViolations(pkgs []goPackage, adapters []string) []string {
 	features := map[string]bool{}
 	for _, p := range pkgs {
 		dirs[p.dir] = true
-		if r, feature := roleOf(p.dir, adapters); r == roleFeature {
+		switch r, feature := roleOf(p.dir); r {
+		case roleFeature:
 			features[feature] = true
+		case roleUnlisted:
+			add("R8: %s is in no hand list: move its code, or list a new helper in internals", p.dir)
 		}
 	}
 	if len(features) == 0 {
 		add("self-check: the walk found no feature under faucet/")
 	}
-	for _, a := range adapters {
-		if !dirs[a] {
-			add("self-check: the adapter %s does not exist", a)
+	for kind, list := range map[string][]string{"helper": internals, "adapter": adapters} {
+		for _, dir := range list {
+			if !dirs[dir] {
+				add("self-check: the %s %s does not exist", kind, dir)
+			}
 		}
 	}
 
 	coreNames := map[string]map[string]bool{}
 	for _, p := range pkgs {
-		r, feature := roleOf(p.dir, adapters)
+		r, feature := roleOf(p.dir)
 		for _, f := range p.files {
 			where := p.dir + "/" + f.name
 			for _, imp := range f.imports {
@@ -133,7 +146,7 @@ func compartmentViolations(pkgs []goPackage, adapters []string) []string {
 				if slices.ContainsFunc(strings.Split(target, "/"), skipped) {
 					add("R7: %s imports %s: the walk reads no testdata, _ or . directory", where, imp.path)
 				}
-				tr, tfeature := roleOf(target, adapters)
+				tr, tfeature := roleOf(target)
 				switch r {
 				case roleCore:
 					if !f.test() && tr != roleInternal {
@@ -159,7 +172,7 @@ func compartmentViolations(pkgs []goPackage, adapters []string) []string {
 							coreNames[feature][name] = true
 						}
 					}
-				case roleAdapter, roleOther:
+				case roleAdapter, roleOther, roleUnlisted:
 				}
 			}
 			if r == roleCore {
@@ -269,7 +282,7 @@ func importsOf(file *ast.File) []goImport {
 
 func TestCompartments(t *testing.T) {
 	t.Parallel()
-	violations := compartmentViolations(parseLayout(t), adapters)
+	violations := compartmentViolations(parseLayout(t))
 	require.Empty(t, violations, "move the code instead of widening the rule:\n%s", strings.Join(violations, "\n"))
 }
 
@@ -311,7 +324,7 @@ func TestCompartmentRulesRejectEachBreach(t *testing.T) {
 			{dir: "faucet/storetest", files: []goFile{fileOf("storetest.go", use(core, "Store"), use(feature, "Store"))}},
 		}
 	}
-	require.Empty(t, compartmentViolations(valid(), adapters), "the valid layout passes")
+	require.Empty(t, compartmentViolations(valid()), "the valid layout passes")
 
 	addFile := func(dir string, f goFile) func([]goPackage) []goPackage {
 		return func(pkgs []goPackage) []goPackage {
@@ -335,6 +348,8 @@ func TestCompartmentRulesRejectEachBreach(t *testing.T) {
 		{"a core test imports cmd", addFile("faucet", fileOf("x_test.go", use(cmd, "Run"))), "R1: faucet/x_test.go imports " + cmd},
 		{"an internal package imports core", addFile("faucet/internal/githubapi", fileOf("x.go", use(core, "Event"))), "R2: faucet/internal/githubapi/x.go imports " + core},
 		{"an internal package imports another", addFile("faucet/internal/githubapi", fileOf("x_test.go", use(pgtest, "NewDB"))), "R2: faucet/internal/githubapi/x_test.go imports " + pgtest},
+		{"an unlisted directory under faucet/internal", addFile("faucet/internal/redelivercore", fileOf("x.go")), "R8: faucet/internal/redelivercore is in no hand list"},
+		{"core imports an unlisted directory under faucet/internal", addFile("faucet", fileOf("x.go", use(module+"/faucet/internal/redelivercore", "Run"))), "R1: faucet/x.go imports " + module + "/faucet/internal/redelivercore"},
 		{"a feature imports another feature", addFile("faucet/redelivery", fileOf("x.go", use(other, "New"))), "R3: faucet/redelivery/x.go imports " + other},
 		{"a feature test imports another feature", addFile("faucet/redelivery", fileOf("x_test.go", use(other, "New"))), "R3: faucet/redelivery/x_test.go imports " + other},
 		{"a feature's code imports an adapter", addFile("faucet/redelivery", fileOf("x.go", use(pgstore, "New"))), "R3: faucet/redelivery/x.go imports " + pgstore},
@@ -351,15 +366,18 @@ func TestCompartmentRulesRejectEachBreach(t *testing.T) {
 		{"a core file named like a feature's verb", addFile("faucet", fileOf("redeliver_probe.go")), "R6: faucet/redeliver_probe.go is named like the feature redelivery"},
 		{"a core test named like a feature", addFile("faucet", fileOf("redelivery_test.go")), "R6: faucet/redelivery_test.go is named like the feature redelivery"},
 		{"no feature", func(pkgs []goPackage) []goPackage {
-			return slices.DeleteFunc(pkgs, func(p goPackage) bool { r, _ := roleOf(p.dir, adapters); return r == roleFeature })
+			return slices.DeleteFunc(pkgs, func(p goPackage) bool { r, _ := roleOf(p.dir); return r == roleFeature })
 		}, "self-check: the walk found no feature"},
 		{"a listed adapter is missing", func(pkgs []goPackage) []goPackage {
 			return slices.DeleteFunc(pkgs, func(p goPackage) bool { return p.dir == "faucet/storetest" })
 		}, "self-check: the adapter faucet/storetest does not exist"},
+		{"a listed helper is missing", func(pkgs []goPackage) []goPackage {
+			return slices.DeleteFunc(pkgs, func(p goPackage) bool { return p.dir == "faucet/internal/pgtest" })
+		}, "self-check: the helper faucet/internal/pgtest does not exist"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := compartmentViolations(tc.breach(valid()), adapters)
+			got := compartmentViolations(tc.breach(valid()))
 			require.NotEmpty(t, got)
 			require.True(t, slices.ContainsFunc(got, func(v string) bool { return strings.HasPrefix(v, tc.want) }), "want %q in %q", tc.want, got)
 		})
