@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -103,8 +104,10 @@ func (b bearers) resource(path string) string {
 }
 
 // parseOrigin parses faucet's public URL: https with a host and nothing after
-// it, or http on a loopback host. A path, even a trailing slash, would give
-// each endpoint a resource that no client computes.
+// it, or http on a loopback host. The URL must already be in the form that a
+// client computes, because a token is valid only on a resource that matches
+// it byte for byte: a lower-case host with no trailing dot, no default or
+// empty port, and no path, not even a trailing slash.
 func parseOrigin(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	switch {
@@ -114,12 +117,37 @@ func parseOrigin(raw string) (*url.URL, error) {
 		return nil, xerrors.New("faucet's public URL must have no user info, path, trailing slash, query or fragment")
 	case u.Scheme != "https" && (u.Scheme != "http" || !isLoopback(u.Hostname())):
 		return nil, xerrors.New("faucet's public URL must use https, or http on a loopback host")
+	case u.Hostname() != strings.ToLower(u.Hostname()) || strings.HasSuffix(u.Hostname(), "."):
+		return nil, xerrors.New("faucet's public URL must have a lower-case host with no trailing dot")
+	}
+	if err := canonicalPort(u); err != nil {
+		return nil, err
 	}
 	return u, nil
 }
 
+// canonicalPort accepts no port, or a port from 1 to 65535 that is not the
+// scheme's default and has no leading zero.
+func canonicalPort(u *url.URL) error {
+	port := u.Port()
+	if port == "" {
+		if strings.HasSuffix(u.Host, ":") {
+			return xerrors.New("faucet's public URL must not end its host with an empty port")
+		}
+		return nil
+	}
+	n, err := strconv.Atoi(port)
+	switch {
+	case err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port:
+		return xerrors.New("faucet's public URL must have a port from 1 to 65535, written without a leading zero")
+	case (u.Scheme == "https" && n == 443) || (u.Scheme == "http" && n == 80):
+		return xerrors.Errorf("faucet's public URL must leave out the default port %d", n)
+	}
+	return nil
+}
+
 func isLoopback(host string) bool {
-	if host == "localhost" {
+	if strings.EqualFold(host, "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)

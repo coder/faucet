@@ -172,6 +172,29 @@ func (s *tokenServer) issue(t *testing.T, scopes []faucet.Scope, mutate ...func(
 // that printed any of the token would hold.
 func randomPart(token string) string { return token[8:24] }
 
+func requireNoTokenPiece(t *testing.T, logs string, tokens []string) {
+	t.Helper()
+	for _, token := range tokens {
+		if len(token) >= 24 {
+			require.Zero(t, strings.Count(logs, randomPart(token)), "the log never holds a piece of a token")
+		}
+	}
+}
+
+// requireLoggedAt checks that every log line with message has level, as the
+// human sink writes it, such as [debu] or [warn].
+func requireLoggedAt(t *testing.T, logs, message, level string) {
+	t.Helper()
+	found := false
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, "]  "+message) {
+			found = true
+			require.Contains(t, line, level, "%q is logged at %s", message, level)
+		}
+	}
+	require.True(t, found, "the log has no line %q", message)
+}
+
 func requireRefused(t *testing.T, srv *testServer, token string) {
 	t.Helper()
 	status, challenge, body := rawPost(t, srv, "Bearer "+token)
@@ -192,11 +215,14 @@ func TestFaucetTokensNeverReachGitHub(t *testing.T) {
 	t.Run("without a faucet verifier", func(t *testing.T) {
 		t.Parallel()
 		srv := newTestServer(t)
-		for _, token := range refused(t) {
+		tokens := refused(t)
+		for _, token := range tokens {
 			requireRefused(t, srv, token)
 		}
 		paths, _ := srv.github.seen()
 		require.Empty(t, paths, "a token with a faucet prefix is faucet's own, so GitHub never sees it")
+		requireLoggedAt(t, srv.logs.String(), "faucet token rejected", "[debu]")
+		requireNoTokenPiece(t, srv.logs.String(), tokens)
 	})
 	t.Run("with a faucet verifier", func(t *testing.T) {
 		t.Parallel()
@@ -210,14 +236,10 @@ func TestFaucetTokensNeverReachGitHub(t *testing.T) {
 		paths, _ := srv.github.seen()
 		require.Empty(t, paths)
 		logs := srv.logs.String()
-		require.Contains(t, logs, "faucet token rejected")
+		requireLoggedAt(t, logs, "faucet token rejected", "[debu]")
 		require.Contains(t, logs, "not an access token", "the debug log says why")
 		require.Contains(t, logs, "unknown access token")
-		for _, token := range tokens {
-			if len(token) >= 24 {
-				require.Zero(t, strings.Count(logs, randomPart(token)), "the log never holds a piece of a token")
-			}
-		}
+		requireNoTokenPiece(t, logs, tokens)
 	})
 }
 
@@ -296,7 +318,7 @@ func TestAFaucetTokenCheckThatCannotRunIsAServerError(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, status)
 	require.Empty(t, challenge, "a check that could not run is not a rejected token")
 	require.Equal(t, "could not check the token\n", body)
-	require.Contains(t, srv.logs.String(), "could not check the faucet token")
+	requireLoggedAt(t, srv.logs.String(), "could not check the faucet token", "[warn]")
 	require.Zero(t, strings.Count(srv.logs.String(), randomPart(token)), "the log never holds the token, nor a piece of it")
 	paths, _ := srv.github.seen()
 	require.Empty(t, paths)
@@ -328,7 +350,7 @@ func TestAFaucetVerifierNeedsABareOrigin(t *testing.T) {
 	verifier, err := oauth.NewVerifier(&memTokens{}, quartz.NewMock(t), nil)
 	require.NoError(t, err)
 	for _, origin := range []string{
-		"https://faucet.example.com", "https://faucet.example.com:8443", "http://127.0.0.1:8080", "http://localhost:3000", "http://[::1]:80",
+		"https://faucet.example.com", "https://faucet.example.com:8443", "http://127.0.0.1:8080", "http://localhost:3000", "http://[::1]:8080", "https://faucet.example.com:65535",
 	} {
 		_, err := newBearers(nil, verifier, origin)
 		require.NoError(t, err, origin)
@@ -337,6 +359,9 @@ func TestAFaucetVerifierNeedsABareOrigin(t *testing.T) {
 		"", "faucet.example.com", "http://faucet.example.com", "https://faucet.example.com/", "https://faucet.example.com/github",
 		"https://faucet.example.com?x=1", "https://faucet.example.com#top", "https://user@faucet.example.com", "https://",
 		"ftp://faucet.example.com", "http://127.0.0.1.example.com", "https://faucet.example.com/../x",
+		"https://faucet.example.com:", "https://faucet.example.com:0", "https://faucet.example.com:65536", "https://faucet.example.com:0443",
+		"https://faucet.example.com:443", "http://localhost:80", "http://127.0.0.1:80", "https://Faucet.example.com", "http://LOCALHOST:3000",
+		"https://faucet.example.com.", "http://localhost.:3000",
 	} {
 		_, err := newBearers(nil, verifier, origin)
 		require.Error(t, err, "%q", origin)
@@ -501,4 +526,21 @@ func TestTheGitHubPathKeepsItsMinuteOfMemoryBesideAFaucetVerifier(t *testing.T) 
 	require.False(t, res.IsError)
 	require.Equal(t, 2, count("/user"), "after a minute GitHub is asked again")
 	require.Equal(t, 2, count("/repos/o/r"))
+}
+
+func TestAResolverThatAnswersForAnotherPrincipalIsAServerError(t *testing.T) {
+	t.Parallel()
+
+	srv := newTokenServer(t, func(c *tokenServerConfig) {
+		c.subjects[oauth.SubjectService] = func(_ context.Context, _ string, scopes []faucet.Scope) (faucet.Principal, error) {
+			return faucet.NewService(faucet.ServiceClient{ClientID: "other-bot", Grants: []string{"repo:o/r"}}, scopes)
+		}
+	})
+	token := srv.issue(t, []faucet.Scope{faucet.ScopeEventsRead})
+	status, challenge, body := rawPost(t, srv.testServer, "Bearer "+token)
+	require.Equal(t, http.StatusInternalServerError, status, "faucet's own bug is not the caller's bad token")
+	require.Empty(t, challenge)
+	require.Equal(t, "could not check the token\n", body)
+	requireLoggedAt(t, srv.logs.String(), "could not check the faucet token", "[warn]")
+	requireNoTokenPiece(t, srv.logs.String(), []string{token})
 }
