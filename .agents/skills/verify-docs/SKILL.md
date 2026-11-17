@@ -10,7 +10,7 @@ Three checks keep the docs current. CI runs all three: the first two in the `tes
 | Check | Run it | It fails when | Refresh |
 | --- | --- | --- | --- |
 | Tables and names | `go test -count=1 -run 'TestGeneratedTablesAreCurrent\|TestDocsNameWhatExists' ./internal/docgen/` | a `generated:NAME` block differs from what the code gives, or README.md, docs/*.md or source.html name a `FAUCET_*` variable, a route or a relative link (with its `#anchor`) that does not exist | `go run ./internal/docgen` |
-| Pictures | `go test -count=1 -run TestPicturesMatchTheirSource ./internal/docgen/` | `docs/images/SOURCE_SHA256` is not the hash of `docs/diagrams/source.html`, or a picture lacks its light or dark PNG, or a PNG belongs to no picture | `cd verify && npm ci && npm run docs:images` |
+| Pictures | `go test -count=1 -run TestPicturesMatchTheirSource ./internal/docgen/`, or `sha256sum -c docs/images/SOURCE_SHA256` | a hash in `docs/images/SOURCE_SHA256` does not match `docs/diagrams/source.html` or a PNG (so a changed page, a swapped or a truncated image fails), or a picture lacks its light or dark PNG, or a PNG is unlisted | `cd verify && npm ci && npm run docs:images` |
 | Mermaid | `cd verify && npm ci && unset Path && npx e2e run tests/docs-mermaid.e2e.ts` | a ```` ```mermaid ```` block in README.md or docs/*.md does not parse or render (mermaid from `verify/node_modules`, no CDN) | fix the block it names |
 
 The Mermaid run starts the whole verify stack (Postgres, two faucets), so it needs what the `verify-faucet` skill lists. Set `PG_BIN` when `initdb` is not on `PATH`.
@@ -26,9 +26,9 @@ A name check that fails on a path that faucet does not serve but a doc must name
 
 ## Pictures
 
-`docs/diagrams/source.html` is one page of inline SVG and CSS. Each picture is an element with `data-picture="<name>"`, 960 CSS px wide, and its colours switch on `prefers-color-scheme`. `npm run docs:images` (`verify/docs-images.mjs`) screenshots each picture at twice its size in both schemes to `docs/images/<name>-light.png` and `<name>-dark.png`, then writes `SOURCE_SHA256`. Commit the page, the PNGs and the hash together. The README shows each picture with `<picture>`: a `prefers-color-scheme: dark` source, a light source and a light `<img>` with alt text. A new picture needs that block in the README.
+`docs/diagrams/source.html` is one page of inline SVG and CSS. Each picture is an element with `data-picture="<name>"`, 960 CSS px wide, and its colours switch on `prefers-color-scheme`. `npm run docs:images` (`verify/docs-images.mjs`) screenshots each picture at twice its size in both schemes to `docs/images/<name>-light.png` and `<name>-dark.png`, then writes `SOURCE_SHA256`: one sha256sum line for the page and one for each PNG. Commit the page, the PNGs and the hash together. The README shows each picture with `<picture>`: a `prefers-color-scheme: dark` source, a light source and a light `<img>` with alt text. A new picture needs that block in the README.
 
-The hash covers only the page. After a change to `docs-images.mjs`, run it again anyway. The PNG bytes depend on the fonts of the host, so another host can give different bytes for the same page.
+The PNG bytes depend on the fonts of the host, so another host can give different bytes for the same page; commit the PNGs and the hash file from one run. Keep text at 20 px or more at 960 px width, and borders, arrows and lifelines at 3:1 contrast or more against their background in both schemes (text 4.5:1).
 
 ## Look at them
 
