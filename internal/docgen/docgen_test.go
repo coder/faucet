@@ -164,10 +164,9 @@ func TestRegenerate(t *testing.T) {
 func TestSettingsTable(t *testing.T) {
 	t.Parallel()
 	code := map[string]string{
-		// A constant that names a variable is no read, and neither is a read of
-		// a variable that holds the name.
+		// A constant that names a variable is no read.
 		"cmd/faucet/main.go": "package main\n\nimport \"os\"\n\nconst (\n\tenvPort = \"PORT\"\n\tdefaultPort = \"8080\"\n\tmaxDays = 30\n\tenvUnread = \"NOT_READ\"\n)\n\n" +
-			"func main() { load(os.Getenv) }\n\nfunc load(getenv func(string) string) {\n\t_ = getenv(envPort)\n\t_, _ = os.LookupEnv(\"HOOK_KEY\")\n\tname := envUnread\n\t_ = getenv(name)\n}\n",
+			"func main() { load(os.Getenv) }\n\nfunc load(getenv func(string) string) {\n\t_ = getenv(envPort)\n\t_, _ = os.LookupEnv(\"HOOK_KEY\")\n\tfor _, name := range []string{envPort, \"HOOK_KEY\"} {\n\t\t_ = getenv(name)\n\t}\n}\n",
 		// A file behind a build tag and a test file read no variable of a default build.
 		"cmd/faucet/e2e.go":       "//go:build faucet_e2e\n\npackage main\n\nfunc e2e(getenv func(string) string) { getenv(\"E2E_ONLY\") }\n",
 		"cmd/faucet/main_test.go": "package main\n\nimport \"os\"\n\nvar testOnly = os.Getenv(\"TEST_ONLY\")\n",
@@ -179,6 +178,8 @@ func TestSettingsTable(t *testing.T) {
 	cases := []struct {
 		name     string
 		registry []setting
+		// extra is one more file of cmd/faucet.
+		extra string
 		// wantErr are the names that the error must mention.
 		wantErr []string
 	}{
@@ -188,6 +189,21 @@ func TestSettingsTable(t *testing.T) {
 		{name: "a constant that no read takes", registry: append(slices.Clone(registry), setting{"NOT_READ", "no", "x"}), wantErr: []string{"NOT_READ"}},
 		{name: "a variable that only a test or a tagged build reads", registry: append(slices.Clone(registry), setting{"TEST_ONLY", "no", "x"}, setting{"E2E_ONLY", "no", "x"}), wantErr: []string{"TEST_ONLY", "E2E_ONLY"}},
 		{name: "both ways at once", registry: []setting{registry[0], {"GONE", "no", "x"}}, wantErr: []string{"HOOK_KEY", "GONE"}},
+		{
+			name: "a read of a variable that holds the name", registry: registry,
+			extra:   "package main\n\nfunc other(getenv func(string) string) {\n\tname := envUnread\n\t_ = getenv(name)\n}\n",
+			wantErr: []string{"cmd/faucet/extra.go:5:6: cannot name the variable that this read takes"},
+		},
+		{
+			name: "a wrapper that reads its parameter", registry: registry,
+			extra:   "package main\n\nimport \"os\"\n\nfunc envOr(name, fallback string) string {\n\tif v := os.Getenv(name); v != \"\" {\n\t\treturn v\n\t}\n\treturn fallback\n}\n\nvar _ = envOr(\"FAUCET_X\", \"x\")\n",
+			wantErr: []string{"cmd/faucet/extra.go:6:10: cannot name the variable that this read takes"},
+		},
+		{
+			name: "a reader under another name", registry: registry,
+			extra:   "package main\n\nfunc other(env func(string) string) { _ = env(\"FAUCET_X\") }\n",
+			wantErr: []string{"cmd/faucet/extra.go:3:12: the parameter env can read the environment"},
+		},
 		{name: "an unknown placeholder", registry: []setting{registry[0], {"HOOK_KEY", "no", "Default {nope}."}}, wantErr: []string{"{nope}"}},
 	}
 	for _, tc := range cases {
@@ -196,6 +212,9 @@ func TestSettingsTable(t *testing.T) {
 			files := map[string]string{"README.md": block}
 			for name, src := range code {
 				files[name] = src
+			}
+			if tc.extra != "" {
+				files["cmd/faucet/extra.go"] = tc.extra
 			}
 			updates, err := source{fsys: mapFS(files), tables: map[string]table{"settings": settingsTable}, settings: tc.registry}.regenerate()
 			if len(tc.wantErr) == 0 {
@@ -299,5 +318,28 @@ func TestCheckNames(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestEnvReadsOutsideCmdFaucet(t *testing.T) {
+	t.Parallel()
+	read := func(pkg, name string) string {
+		return "package " + pkg + "\n\nimport \"os\"\n\nvar _ = os.Getenv(\"" + name + "\")\n"
+	}
+	_, err := envReads(mapFS(map[string]string{
+		"faucet/internal/pgtest/pgtest.go": read("pgtest", "CI"),
+		"cmd/faucet/main.go":               read("main", "PORT"),
+	}))
+	if err != nil {
+		t.Fatalf("got %v, want the listed reads to pass", err)
+	}
+	_, err = envReads(mapFS(map[string]string{
+		"faucet/other.go":                  read("faucet", "FAUCET_OTHER"),
+		"faucet/internal/pgtest/pgtest.go": read("pgtest", "FAUCET_NEW"),
+	}))
+	for _, want := range []string{"faucet reads FAUCET_OTHER", "faucet/internal/pgtest reads FAUCET_NEW"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error %v does not say %q", err, want)
+		}
 	}
 }

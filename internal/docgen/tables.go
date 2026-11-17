@@ -91,7 +91,11 @@ func settingsTable(s source) ([]string, error) {
 	for i, st := range s.settings {
 		listed[i] = st.name
 	}
-	if err := compareNames(listed, packageEnvReads(cmd), "cmd/faucet reads %s, which the settings registry lacks", "the settings registry lists %s, which cmd/faucet does not read"); err != nil {
+	reads, err := packageEnvReads(cmd)
+	if err != nil {
+		return nil, err
+	}
+	if err := compareNames(listed, reads, "cmd/faucet reads %s, which the settings registry lacks", "the settings registry lists %s, which cmd/faucet does not read"); err != nil {
 		return nil, err
 	}
 	values, err := constValues(s.fsys)

@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"maps"
 	"slices"
+	"strings"
 )
 
 // giveUpMeanings explains each faucet.GiveUpReason, by value. A meaning
@@ -91,6 +92,9 @@ func reasonsOf(s source, typ string, listed []string, registry string) ([]string
 	if err != nil {
 		return nil, nil, err
 	}
+	if made := madeValues(core, typ); len(made) > 0 {
+		return nil, nil, fmt.Errorf("package faucet makes a %s that is no declared constant, so %s cannot list it: %s", typ, registry, strings.Join(made, ", "))
+	}
 	reasons := typedConsts(core, typ)
 	if err := compareNames(listed, reasons,
 		"package faucet declares the "+typ+" %s, which "+registry+" lacks",
@@ -117,4 +121,33 @@ func typedConsts(pkg *goPackage, typ string) []string {
 		}
 	}
 	return values
+}
+
+// madeValues returns where pkg makes a value of type typ other than by naming
+// a constant that declares its type: a conversion typ(...) anywhere, or a
+// variable of type typ with a value.
+func madeValues(pkg *goPackage, typ string) []string {
+	var at []string
+	isTyp := func(e ast.Expr) bool {
+		id, ok := e.(*ast.Ident)
+		return ok && id.Name == typ
+	}
+	for _, f := range pkg.files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.CallExpr:
+				if isTyp(n.Fun) && len(n.Args) == 1 {
+					at = append(at, pkg.fset.Position(n.Pos()).String())
+				}
+			case *ast.GenDecl:
+				for _, spec := range n.Specs {
+					if vs, ok := spec.(*ast.ValueSpec); ok && n.Tok == token.VAR && isTyp(vs.Type) && len(vs.Values) > 0 {
+						at = append(at, pkg.fset.Position(vs.Pos()).String())
+					}
+				}
+			}
+			return true
+		})
+	}
+	return at
 }

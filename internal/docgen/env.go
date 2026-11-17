@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/build"
 	"go/constant"
@@ -16,13 +17,23 @@ import (
 // reads environment variables, such as cmd/faucet's loadConfig(getenv).
 var envReaders = []string{"getenv", "lookup"}
 
+// otherEnvReads are the variables that packages other than cmd/faucet may
+// read, which the settings table leaves out, with the reason.
+var otherEnvReads = map[string][]string{
+	// The scratch database of the Postgres tests, and CI, which makes a test
+	// fail when that database is missing.
+	"faucet/internal/pgtest": {"CI", "FAUCET_TEST_DATABASE_URL"},
+}
+
 // envReads returns, by package directory, the environment variables that
 // the non-test files of the root module read: each call of os.Getenv,
-// os.LookupEnv or an envReaders parameter whose argument is a string
-// literal or a string constant of the package. A directory with a go.mod of
-// its own is another module, and is left out with everything under it.
+// os.LookupEnv or an envReaders parameter. A directory with a go.mod of its
+// own is another module, and is left out with everything under it. It fails
+// on a read it cannot name, and on a package other than cmd/faucet that reads
+// a variable otherEnvReads does not list for it.
 func envReads(fsys fs.FS) (map[string][]string, error) {
 	reads := map[string][]string{}
+	var problems []string
 	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
 		switch {
 		case err != nil:
@@ -43,16 +54,33 @@ func envReads(fsys fs.FS) (map[string][]string, error) {
 		if err != nil {
 			return err
 		}
-		if names := packageEnvReads(pkg); len(names) > 0 {
+		names, err := packageEnvReads(pkg)
+		if err != nil {
+			problems = append(problems, err.Error())
+			return nil
+		}
+		for _, name := range names {
+			if p != "cmd/faucet" && !slices.Contains(otherEnvReads[p], name) {
+				problems = append(problems, fmt.Sprintf("%s reads %s, which only cmd/faucet's settings or otherEnvReads may name", p, name))
+			}
+		}
+		if len(names) > 0 {
 			reads[p] = names
 		}
 		return nil
 	})
+	if err == nil && len(problems) > 0 {
+		err = fmt.Errorf("%s", strings.Join(problems, "; "))
+	}
 	return reads, err
 }
 
-// packageEnvReads returns the variables that pkg reads, sorted.
-func packageEnvReads(pkg *goPackage) []string {
+// packageEnvReads returns the variables that pkg reads, sorted. A read whose
+// name is a string literal, a string constant of the package, or a variable
+// that ranges over a list of those, is read. Any other read fails, and so
+// does a parameter that could read the environment under a name that
+// envReaders does not have.
+func packageEnvReads(pkg *goPackage) ([]string, error) {
 	consts := readConsts(pkg)
 	nameOf := func(e ast.Expr) (string, bool) {
 		if v, ok := stringLit(e); ok {
@@ -65,26 +93,47 @@ func packageEnvReads(pkg *goPackage) []string {
 		}
 		return "", false
 	}
-	var names []string
+	var names, problems []string
+	at := func(n ast.Node) string { return pkg.fset.Position(n.Pos()).String() }
 	for _, f := range pkg.files {
 		osName := importName(f, "os")
+		ranged := map[string][]string{}
 		var walk func(n ast.Node, readers []string)
 		walk = func(n ast.Node, readers []string) {
 			ast.Inspect(n, func(n ast.Node) bool {
 				switch n := n.(type) {
 				case *ast.FuncDecl:
 					if n.Body != nil {
-						walk(n.Body, withReaders(readers, n.Type))
+						walk(n.Body, withReaders(readers, n.Type, at, &problems))
 					}
 					return false
 				case *ast.FuncLit:
-					walk(n.Body, withReaders(readers, n.Type))
+					walk(n.Body, withReaders(readers, n.Type, at, &problems))
 					return false
-				case *ast.CallExpr:
-					if len(n.Args) > 0 && readsEnv(n.Fun, osName, readers) {
-						if name, ok := nameOf(n.Args[0]); ok {
-							names = append(names, name)
+				case *ast.RangeStmt:
+					if v, ok := n.Value.(*ast.Ident); ok {
+						if list, ok := n.X.(*ast.CompositeLit); ok {
+							var values []string
+							for _, elt := range list.Elts {
+								if name, ok := nameOf(elt); ok {
+									values = append(values, name)
+								}
+							}
+							if len(values) == len(list.Elts) {
+								ranged[v.Name] = values
+							}
 						}
+					}
+				case *ast.CallExpr:
+					if len(n.Args) == 0 || !readsEnv(n.Fun, osName, readers) {
+						return true
+					}
+					if name, ok := nameOf(n.Args[0]); ok {
+						names = append(names, name)
+					} else if id, ok := n.Args[0].(*ast.Ident); ok && ranged[id.Name] != nil {
+						names = append(names, ranged[id.Name]...)
+					} else {
+						problems = append(problems, fmt.Sprintf("%s: cannot name the variable that this read takes; read a string constant", at(n)))
 					}
 				}
 				return true
@@ -92,8 +141,11 @@ func packageEnvReads(pkg *goPackage) []string {
 		}
 		walk(f, nil)
 	}
+	if len(problems) > 0 {
+		return nil, fmt.Errorf("%s", strings.Join(problems, "; "))
+	}
 	slices.Sort(names)
-	return slices.Compact(names)
+	return slices.Compact(names), nil
 }
 
 func readsEnv(fun ast.Expr, osName string, readers []string) bool {
@@ -109,21 +161,53 @@ func readsEnv(fun ast.Expr, osName string, readers []string) bool {
 }
 
 // withReaders adds the parameters of ft that read the environment to readers.
-func withReaders(readers []string, ft *ast.FuncType) []string {
+// A parameter of type func(string) string or func(string) (string, bool)
+// under another name is a problem, because a read through it would go
+// unseen.
+func withReaders(readers []string, ft *ast.FuncType, at func(ast.Node) string, problems *[]string) []string {
 	out := slices.Clone(readers)
 	for _, field := range ft.Params.List {
-		fn, ok := field.Type.(*ast.FuncType)
-		if !ok || len(fn.Params.List) != 1 || len(fn.Params.List[0].Names) > 1 {
-			continue
-		}
-		if arg, ok := fn.Params.List[0].Type.(*ast.Ident); !ok || arg.Name != "string" {
+		if !readerType(field.Type) {
 			continue
 		}
 		for _, name := range field.Names {
 			if slices.Contains(envReaders, name.Name) {
 				out = append(out, name.Name)
+			} else {
+				*problems = append(*problems, fmt.Sprintf("%s: the parameter %s can read the environment; name it one of %s", at(name), name.Name, strings.Join(envReaders, ", ")))
 			}
 		}
 	}
 	return out
+}
+
+// readerType says whether t is func(string) string or func(string) (string,
+// bool), the types of os.Getenv and os.LookupEnv.
+func readerType(t ast.Expr) bool {
+	fn, ok := t.(*ast.FuncType)
+	if !ok || len(fn.Params.List) != 1 || len(fn.Params.List[0].Names) > 1 || fn.Results == nil {
+		return false
+	}
+	if !isIdent(fn.Params.List[0].Type, "string") {
+		return false
+	}
+	var results []ast.Expr
+	for _, r := range fn.Results.List {
+		for range max(1, len(r.Names)) {
+			results = append(results, r.Type)
+		}
+	}
+	switch len(results) {
+	case 1:
+		return isIdent(results[0], "string")
+	case 2:
+		return isIdent(results[0], "string") && isIdent(results[1], "bool")
+	default:
+		return false
+	}
+}
+
+func isIdent(e ast.Expr, name string) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == name
 }

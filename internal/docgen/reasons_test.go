@@ -32,6 +32,8 @@ func TestReasonTables(t *testing.T) {
 		name      string
 		giveUps   map[string]string
 		callbacks map[string]callbackReason
+		// extra is one more file of package faucet.
+		extra string
 		// wantErr are the names that the error must mention.
 		wantErr []string
 	}{
@@ -40,6 +42,16 @@ func TestReasonTables(t *testing.T) {
 		{name: "a row without a constant", giveUps: with(giveUps, "gone_away", "x"), callbacks: callbacks, wantErr: []string{"gone_away", "no GiveUpReason"}},
 		{name: "a callback row without a constant", giveUps: giveUps, callbacks: map[string]callbackReason{"timeout": {}, "refused": {}}, wantErr: []string{"refused"}},
 		{name: "a callback constant without a row", giveUps: giveUps, callbacks: map[string]callbackReason{}, wantErr: []string{"timeout"}},
+		{
+			name: "a give-up reason made by a conversion", giveUps: giveUps, callbacks: callbacks,
+			extra:   "package faucet\n\nfunc reason() GiveUpReason { return GiveUpReason(\"x\") }\n",
+			wantErr: []string{"makes a GiveUpReason that is no declared constant", "faucet/extra.go:3:37"},
+		},
+		{
+			name: "a callback reason in a variable", giveUps: giveUps, callbacks: callbacks,
+			extra:   "package faucet\n\nvar fallback CallbackReason = \"refused\"\n",
+			wantErr: []string{"makes a CallbackReason that is no declared constant", "faucet/extra.go:3:5"},
+		},
 		{name: "a size that is no whole KiB", giveUps: with(giveUps, "endpoint_gone", "{faucet.window:KiB}"), callbacks: callbacks, wantErr: []string{"{faucet.window:KiB}", "KiB"}},
 	}
 	for _, tc := range cases {
@@ -48,6 +60,9 @@ func TestReasonTables(t *testing.T) {
 			files := map[string]string{"docs/webhooks.md": doc}
 			for name, src := range code {
 				files[name] = src
+			}
+			if tc.extra != "" {
+				files["faucet/extra.go"] = tc.extra
 			}
 			s := source{
 				fsys: mapFS(files), tables: map[string]table{"give-up-reasons": giveUpTable, "callback-reasons": callbackTable},
