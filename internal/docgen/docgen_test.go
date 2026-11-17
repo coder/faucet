@@ -200,6 +200,16 @@ func TestSettingsTable(t *testing.T) {
 			wantErr: []string{"cmd/faucet/extra.go:6:10: cannot name the variable that this read takes"},
 		},
 		{
+			name: "a wrapper whose parameter shares a loop variable's name", registry: registry,
+			extra:   "package main\n\nfunc first(getenv func(string) string) {\n\tfor _, name := range []string{envPort} {\n\t\t_ = getenv(name)\n\t}\n}\n\nfunc envOr(getenv func(string) string, name, fallback string) string {\n\tif v := getenv(name); v != \"\" {\n\t\treturn v\n\t}\n\treturn fallback\n}\n",
+			wantErr: []string{"cmd/faucet/extra.go:10:10: cannot name the variable that this read takes"},
+		},
+		{
+			name: "a name read after its loop", registry: registry,
+			extra:   "package main\n\nfunc other(getenv func(string) string) {\n\tfor _, name := range []string{envPort} {\n\t\t_ = getenv(name)\n\t}\n\tname := envUnread + \"x\"\n\t_ = getenv(name)\n}\n",
+			wantErr: []string{"cmd/faucet/extra.go:8:6: cannot name the variable that this read takes"},
+		},
+		{
 			name: "a reader under another name", registry: registry,
 			extra:   "package main\n\nfunc other(env func(string) string) { _ = env(\"FAUCET_X\") }\n",
 			wantErr: []string{"cmd/faucet/extra.go:3:12: the parameter env can read the environment"},

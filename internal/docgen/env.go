@@ -6,7 +6,9 @@ import (
 	"go/ast"
 	"go/build"
 	"go/constant"
+	"go/token"
 	"io/fs"
+	"maps"
 	"path"
 	"slices"
 	"strings"
@@ -97,20 +99,32 @@ func packageEnvReads(pkg *goPackage) ([]string, error) {
 	at := func(n ast.Node) string { return pkg.fset.Position(n.Pos()).String() }
 	for _, f := range pkg.files {
 		osName := importName(f, "os")
-		ranged := map[string][]string{}
-		var walk func(n ast.Node, readers []string)
-		walk = func(n ast.Node, readers []string) {
+		// ranged holds, for the body of a range over a list of names, the
+		// names that its value variable takes. A walk gets its own copy, so a
+		// name never outlives its loop, and a redeclaration drops it.
+		var walk func(n ast.Node, readers []string, ranged map[string][]string)
+		walk = func(n ast.Node, readers []string, ranged map[string][]string) {
+			ranged = maps.Clone(ranged)
+			if ranged == nil {
+				ranged = map[string][]string{}
+			}
 			ast.Inspect(n, func(n ast.Node) bool {
 				switch n := n.(type) {
 				case *ast.FuncDecl:
 					if n.Body != nil {
-						walk(n.Body, withReaders(readers, n.Type, at, &problems))
+						walk(n.Body, withReaders(readers, n.Type, at, &problems), nil)
 					}
 					return false
 				case *ast.FuncLit:
-					walk(n.Body, withReaders(readers, n.Type, at, &problems))
+					walk(n.Body, withReaders(readers, n.Type, at, &problems), withoutParams(ranged, n.Type))
 					return false
 				case *ast.RangeStmt:
+					inner := maps.Clone(ranged)
+					for _, e := range []ast.Expr{n.Key, n.Value} {
+						if id, ok := e.(*ast.Ident); ok {
+							delete(inner, id.Name)
+						}
+					}
 					if v, ok := n.Value.(*ast.Ident); ok {
 						if list, ok := n.X.(*ast.CompositeLit); ok {
 							var values []string
@@ -120,9 +134,24 @@ func packageEnvReads(pkg *goPackage) ([]string, error) {
 								}
 							}
 							if len(values) == len(list.Elts) {
-								ranged[v.Name] = values
+								inner[v.Name] = values
 							}
 						}
+					}
+					walk(n.X, readers, ranged)
+					walk(n.Body, readers, inner)
+					return false
+				case *ast.AssignStmt:
+					if n.Tok == token.DEFINE {
+						for _, e := range n.Lhs {
+							if id, ok := e.(*ast.Ident); ok {
+								delete(ranged, id.Name)
+							}
+						}
+					}
+				case *ast.ValueSpec:
+					for _, id := range n.Names {
+						delete(ranged, id.Name)
 					}
 				case *ast.CallExpr:
 					if len(n.Args) == 0 || !readsEnv(n.Fun, osName, readers) {
@@ -139,7 +168,7 @@ func packageEnvReads(pkg *goPackage) ([]string, error) {
 				return true
 			})
 		}
-		walk(f, nil)
+		walk(f, nil, nil)
 	}
 	if len(problems) > 0 {
 		return nil, fmt.Errorf("%s", strings.Join(problems, "; "))
@@ -210,4 +239,16 @@ func readerType(t ast.Expr) bool {
 func isIdent(e ast.Expr, name string) bool {
 	id, ok := e.(*ast.Ident)
 	return ok && id.Name == name
+}
+
+// withoutParams returns ranged without the names that ft's parameters
+// declare, which hide a loop variable of the same name.
+func withoutParams(ranged map[string][]string, ft *ast.FuncType) map[string][]string {
+	out := maps.Clone(ranged)
+	for _, field := range ft.Params.List {
+		for _, id := range field.Names {
+			delete(out, id.Name)
+		}
+	}
+	return out
 }
