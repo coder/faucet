@@ -80,7 +80,8 @@ var rules = map[string]rule{
 	"pull_request_review_thread.unresolved": {eventType: "pr.review_thread_unresolved", extract: decode(reviewThread)},
 }
 
-var actionMembers = map[string]string{"status": "state"}
+// A status webhook has no action member, and its state takes that part.
+var actionMemberOf = map[string]string{"status": "state"}
 
 type envelope struct {
 	repoID int64
@@ -92,7 +93,7 @@ func readEnvelope(eventName string, payload []byte) (envelope, error) {
 	if err := json.Unmarshal(payload, &members); err != nil {
 		return envelope{}, err
 	}
-	member := cmp.Or(actionMembers[eventName], "action")
+	member := cmp.Or(actionMemberOf[eventName], "action")
 	var repo repoRef
 	var word string
 	for name, into := range map[string]any{"repository": &repo, member: &word} {
@@ -175,7 +176,7 @@ func buildEvent(eventName string, payload []byte, deliveryID string) (Event, boo
 // reads the same rules, so the two cannot disagree. A webhook it accepts can
 // still be ignored for its payload, such as a comment on a plain issue.
 func StoresDelivery(eventName, action string) bool {
-	if _, other := actionMembers[eventName]; other {
+	if _, other := actionMemberOf[eventName]; other {
 		return handlesEvent(eventName)
 	}
 	_, found := rules[eventName+"."+action]

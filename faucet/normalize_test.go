@@ -478,9 +478,9 @@ func TestNormalizeRejects(t *testing.T) {
 	t.Parallel()
 
 	handled := []struct {
-		event   string
-		fixture string
-		word    string
+		event        string
+		fixture      string
+		actionMember string
 	}{
 		{"workflow_run", "workflow_run_completed", "action"},
 		{"check_run", "check_run_completed", "action"},
@@ -500,8 +500,8 @@ func TestNormalizeRejects(t *testing.T) {
 			cases := map[string][]byte{
 				"MalformedJSON":      []byte(`{"action":`),
 				"NotAnObject":        []byte(`[]`),
-				"NoActionWord":       mutate(t, h.fixture, func(doc map[string]any) { delete(doc, h.word) }),
-				"ActionWordNotText":  mutate(t, h.fixture, func(doc map[string]any) { doc[h.word] = 1 }),
+				"NoActionWord":       mutate(t, h.fixture, func(doc map[string]any) { delete(doc, h.actionMember) }),
+				"ActionWordNotText":  mutate(t, h.fixture, func(doc map[string]any) { doc[h.actionMember] = 1 }),
 				"NoRepository":       mutate(t, h.fixture, func(doc map[string]any) { delete(doc, "repository") }),
 				"ZeroRepositoryID":   mutate(t, h.fixture, func(doc map[string]any) { doc["repository"] = map[string]any{"id": 0} }),
 				"StringRepositoryID": mutate(t, h.fixture, func(doc map[string]any) { doc["repository"] = map[string]any{"id": "1"} }),

@@ -36,10 +36,10 @@ type family struct {
 // it did before families. SEP-3415 asks that the schemas of a name change only
 // by addition, so it keeps the fields it always required.
 type legacyName struct {
-	name        string
-	description string
-	required    []string
-	pinned      string
+	name             string
+	description      string
+	required         []string
+	frozenProperties string
 }
 
 // catalogEntry is one name that events/list offers.
@@ -229,16 +229,16 @@ var families = []*family{
 
 var legacyNames = []legacyName{
 	{
-		name:        "ci.check_completed",
-		description: "A check run finished on a commit, from GitHub Actions or another app.",
-		required:    []string{"check_run_id", "name", "conclusion", "html_url", "app_slug"},
-		pinned:      `{"conclusion": {"type": "string", "description": "For example success, failure or timed_out."}}`,
+		name:             "ci.check_completed",
+		description:      "A check run finished on a commit, from GitHub Actions or another app.",
+		required:         []string{"check_run_id", "name", "conclusion", "html_url", "app_slug"},
+		frozenProperties: `{"conclusion": {"type": "string", "description": "For example success, failure or timed_out."}}`,
 	},
 	{
-		name:        "ci.run_completed",
-		description: "A GitHub Actions workflow run finished. It fires once per run attempt.",
-		required:    []string{"run_id", "name", "conclusion", "head_branch", "html_url", "run_attempt"},
-		pinned:      `{"conclusion": {"type": "string", "description": "For example success, failure or timed_out."}}`,
+		name:             "ci.run_completed",
+		description:      "A GitHub Actions workflow run finished. It fires once per run attempt.",
+		required:         []string{"run_id", "name", "conclusion", "head_branch", "html_url", "run_attempt"},
+		frozenProperties: `{"conclusion": {"type": "string", "description": "For example success, failure or timed_out."}}`,
 	},
 	{
 		name:        "pr.closed",
@@ -271,6 +271,10 @@ var (
 	headSHAProperty = map[string]any{"type": "string", "description": "The head commit SHA. Absent when the event has none."}
 )
 
+// argumentsSchema is the inputSchema of an event name: repo and the filters of
+// the name. It offers pr and sha unless the family's events name no pull
+// request or no head commit (no family means both), and actions when it is
+// given them.
 func argumentsSchema(f *family, actions []string) json.RawMessage {
 	properties := map[string]any{"repo": repoArgument}
 	if f == nil || !f.noPRs {
@@ -358,13 +362,13 @@ func newLegacyEntry(l legacyName, t storedType) *catalogEntry {
 		family:        t.family,
 		legacy:        true,
 		inputSchema:   input,
-		payloadSchema: payloadSchemaOf(t.family, []string{l.name}, []string{t.action}, append([]string{"prs"}, l.required...), l.pinned),
+		payloadSchema: payloadSchemaOf(t.family, []string{l.name}, []string{t.action}, append([]string{"prs"}, l.required...), l.frozenProperties),
 		input:         mustResolve(string(input)),
 		endInput:      shaInputResolved,
 	}
 }
 
-func payloadSchemaOf(f *family, types, actions, required []string, pinned string) json.RawMessage {
+func payloadSchemaOf(f *family, types, actions, required []string, frozenProperties string) json.RawMessage {
 	properties := map[string]any{
 		"prs":    prsProperty,
 		"event":  map[string]any{"type": "string", "enum": types, "description": "The exact event type, for example pr.closed."},
@@ -373,7 +377,7 @@ func payloadSchemaOf(f *family, types, actions, required []string, pinned string
 	if !f.noHeadSHA {
 		properties["head_sha"] = headSHAProperty
 	}
-	for _, own := range []string{f.properties, cmp.Or(pinned, "{}")} {
+	for _, own := range []string{f.properties, cmp.Or(frozenProperties, "{}")} {
 		var object map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(own), &object); err != nil {
 			panic(fmt.Sprintf("payload properties of %s: %v", f.name, err))
