@@ -2,6 +2,7 @@ package storetest
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -21,6 +22,12 @@ var rawPurgeSubtests = []rawSubtest{
 	{"PurgeRawEventsLeavesTheEventLogAlone", purgeRawEventsLeavesTheEventLogAlone},
 	{"RawWantsListsWhatLiveRawInterestsWantOnce", rawWantsListsWhatLiveRawInterestsWantOnce},
 	{"TheEventLogNeverScansARawSubscription", theEventLogNeverScansARawSubscription},
+	{"IngestRawRefusesAnInvalidDelivery", ingestRawRefusesAnInvalidDelivery},
+	{"OpenRawLeaseRefusesAnInvalidLease", openRawLeaseRefusesAnInvalidLease},
+	{"OpenRawLeaseRefusesAMaxLiveOfZero", openRawLeaseRefusesAMaxLiveOfZero},
+	{"ReadRawLeaseRefusesAnInvalidRead", readRawLeaseRefusesAnInvalidRead},
+	{"PurgeRawEventsRefusesAZeroNow", purgeRawEventsRefusesAZeroNow},
+	{"ClaimRawDeliveryAndGapRefuseALeaseOfZero", claimRawDeliveryAndGapRefuseALeaseOfZero},
 }
 
 // purgeServeOnly plans a delivery for every subscription when subscriptions
@@ -285,4 +292,112 @@ func theEventLogNeverScansARawSubscription(t *testing.T, s RawStore) {
 
 	_, err = s.UpsertSubscription(r.ctx, subscriptionAt(2, r.now.Add(time.Hour)), r.now, 1)
 	require.ErrorIs(t, err, faucet.ErrSubscriptionLimit, "a raw subscription counts toward the principal's live subscriptions")
+}
+
+func ingestRawRefusesAnInvalidDelivery(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	r.subscribe(1, rawSpec{})
+	for name, d := range map[string]faucet.RawDelivery{
+		"an empty delivery ID": {Event: rawEvent, RepoID: rawRepo},
+		"an empty event":       {DeliveryID: "raw-delivery-bad", RepoID: rawRepo},
+		"repository 0":         {DeliveryID: "raw-delivery-bad", Event: rawEvent},
+	} {
+		_, err := s.IngestRaw(r.ctx, d, r.now, func([]faucet.RawInterest) faucet.RawPlan {
+			t.Errorf("the store planned a delivery with %s", name)
+			return faucet.RawPlan{}
+		})
+		require.Error(t, err, "a delivery with %s is refused", name)
+	}
+	require.Zero(t, r.head(), "a refused delivery is not stored")
+	_, ok := r.claim(r.now)
+	require.False(t, ok, "a refused delivery queues nothing")
+}
+
+func openRawLeaseRefusesAnInvalidLease(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	bad := map[string]func(*faucet.RawLease){
+		"a zero ID":               func(l *faucet.RawLease) { l.ID = faucet.RawLeaseID{} },
+		"an empty principal":      func(l *faucet.RawLease) { l.Principal = "" },
+		"an empty event":          func(l *faucet.RawLease) { l.Event = "" },
+		"repository 0":            func(l *faucet.RawLease) { l.RepoID = 0 },
+		"an expiry not after now": func(l *faucet.RawLease) { l.ExpiresAt = r.now },
+	}
+	for name, spoil := range bad {
+		lease := newRawLease(r.leases.Add(1), rawSpec{}, r.now.Add(time.Hour))
+		spoil(&lease)
+		_, err := s.OpenRawLease(r.ctx, lease, r.now, rawMaxLive)
+		require.Error(t, err, "a lease with %s is refused", name)
+	}
+	require.Empty(t, r.purgeWantsAt(r.now.Add(-time.Minute)), "a refused lease is not stored")
+	require.Nil(t, r.interestsAt(r.newDelivery(), r.now), "a refused lease wants nothing")
+}
+
+func openRawLeaseRefusesAMaxLiveOfZero(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	_, err := s.OpenRawLease(r.ctx, newRawLease(r.leases.Add(1), rawSpec{}, r.now.Add(time.Hour)), r.now, 0)
+	require.Error(t, err, "maxLive must be positive")
+	require.Empty(t, r.purgeWantsAt(r.now), "a refused lease is not stored")
+	require.Nil(t, r.interestsAt(r.newDelivery(), r.now), "a refused lease wants nothing")
+}
+
+func readRawLeaseRefusesAnInvalidRead(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	lease := r.open(rawSpec{})
+	id := r.push()
+	bad := map[string]func(*faucet.RawRead){
+		"a negative After":        func(q *faucet.RawRead) { q.After = -1 },
+		"a Limit of 0":            func(q *faucet.RawRead) { q.Limit = 0 },
+		"a MaxBytes of 0":         func(q *faucet.RawRead) { q.MaxBytes = 0 },
+		"an expiry not after Now": func(q *faucet.RawRead) { q.ExpiresAt = q.Now },
+	}
+	for name, spoil := range bad {
+		q := r.query(lease, id)
+		q.ExpiresAt = r.now.Add(time.Minute)
+		spoil(&q)
+		_, found, err := s.ReadRawLease(r.ctx, q)
+		require.Error(t, err, "a read with %s is refused", name)
+		require.False(t, found)
+	}
+	require.NotEmpty(t, r.purgeWantsAt(r.now.Add(30*time.Minute)), "a refused read does not move the expiry")
+	page := r.read(r.query(lease, 0))
+	require.Zero(t, page.AckedThrough, "a refused read acknowledges nothing")
+	require.Equal(t, []int64{id}, rawIDs(page.Events), "a refused read deletes no unread event")
+}
+
+func purgeRawEventsRefusesAZeroNow(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	_, err := s.OpenRawLease(r.ctx, newRawLease(r.leases.Add(1), rawSpec{}, r.now.Add(time.Minute)), r.now, rawMaxLive)
+	require.NoError(t, err)
+	id := r.push()
+	future := time.Now().Add(time.Hour)
+	_, err = s.PurgeRawEvents(r.ctx, faucet.RawPurge{ClearBefore: future, DeleteBefore: future})
+	require.Error(t, err, "a purge needs the time that decides which leases expired")
+	require.Equal(t, id, r.head(), "a refused purge deletes no event")
+	require.Equal(t, faucet.RawPurgeResult{ExpiredLeases: 1, Cleared: 1}, r.purgeAt(r.now.Add(time.Minute)),
+		"a refused purge deleted no lease and cleared no body")
+}
+
+func claimRawDeliveryAndGapRefuseALeaseOfZero(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	r.subscribe(1, rawSpec{})
+	missed := r.subscribe(2, rawSpec{})
+	r.store(r.newDelivery(), func(interests []faucet.RawInterest) faucet.RawPlan {
+		plan := serveAll(rawBody)(interests)
+		in := subscriptionInterest(t, interests, missed)
+		plan.Deliveries = slices.DeleteFunc(plan.Deliveries, func(o faucet.RawOutbox) bool { return o.Key == missed.KeyHash })
+		plan.Gaps = []faucet.RawGap{{Key: in.Subscription, Incarnation: in.Incarnation}}
+		return plan
+	})
+
+	_, ok, err := s.ClaimRawDelivery(r.ctx, r.now, 0, nil)
+	require.Error(t, err, "a claim needs a positive lease")
+	require.False(t, ok)
+	require.EqualValues(t, 1, r.mustClaim(r.now).Ref.Attempt, "a refused claim counts no attempt")
+
+	_, ok, err = s.ClaimRawGap(r.ctx, r.now, 0, nil)
+	require.Error(t, err, "a gap claim needs a positive lease")
+	require.False(t, ok)
+	gap, ok := r.claimGap(r.now)
+	require.True(t, ok, "a refused gap claim leaves the gap owed")
+	require.Equal(t, missed.KeyHash, gap.Ref.Key)
 }
