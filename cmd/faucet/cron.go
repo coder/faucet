@@ -75,7 +75,13 @@ func (c cronRoutes) purge(w http.ResponseWriter, r *http.Request) {
 		PurgedThrough        int64 `json:"purged_through"`
 		ExpiredSubscriptions int64 `json:"expired_subscriptions"`
 		EndedDeliveries      int64 `json:"ended_deliveries"`
-	}{res.Deleted, res.PurgedThrough, res.ExpiredSubscriptions, res.EndedDeliveries})
+		RawEventsCleared     int64 `json:"raw_events_cleared"`
+		RawEventsDeleted     int64 `json:"raw_events_deleted"`
+		ExpiredLeases        int64 `json:"expired_leases"`
+	}{
+		res.Deleted, res.PurgedThrough, res.ExpiredSubscriptions, res.EndedDeliveries,
+		res.Raw.Cleared, res.Raw.Deleted, res.Raw.ExpiredLeases,
+	})
 }
 
 func (c cronRoutes) deliver(w http.ResponseWriter, r *http.Request) {

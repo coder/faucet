@@ -228,26 +228,9 @@ func run() error {
 
 	clock := quartz.NewReal()
 	github := faucet.NewAccessCache(faucet.TokenAuthorizer{BaseURL: cfg.githubAPI, Client: &http.Client{Timeout: githubTimeout}}, clock)
-	store := pgstore.New(db)
-	deps := faucet.Deps{
-		Store:         store,
-		Secret:        []byte(cfg.secret),
-		Logger:        logger,
-		Authorizer:    github,
-		PrincipalFrom: principalFrom,
-		Clock:         clock,
-		Webhook:       cfg.webhook,
-	}
-	svc, err := faucet.New(deps)
+	svc, redeliverer, err := newServices(cfg, db, github, clock, logger)
 	if err != nil {
-		return xerrors.Errorf("create service: %w", err)
-	}
-	var redeliverer *redelivery.Runner
-	if cfg.hookAdmin != nil {
-		redeliverer, err = redelivery.New(redelivery.Deps{Store: store, Hooks: cfg.hookAdmin, Clock: clock, Logger: logger})
-		if err != nil {
-			return xerrors.Errorf("create service: redelivery: %w", err)
-		}
+		return err
 	}
 	if err := migrateSchema(ctx, cfg, db); err != nil {
 		return err
@@ -260,6 +243,35 @@ func run() error {
 		return err
 	}
 	return serve(ctx, logger, cfg.port, newRouter(svc, tokens, cron, logger))
+}
+
+// newServices builds the event service and, when a webhook to redeliver is
+// configured, the redelivery runner. Both use one store, which also holds
+// the raw events, and the runner asks the service which failed deliveries
+// a live raw interest wants.
+func newServices(cfg config, db *sql.DB, github faucet.Authorizer, clock quartz.Clock, logger slog.Logger) (*faucet.Service, *redelivery.Runner, error) {
+	store := pgstore.New(db)
+	svc, err := faucet.New(faucet.Deps{
+		Store:         store,
+		RawStore:      store,
+		Secret:        []byte(cfg.secret),
+		Logger:        logger,
+		Authorizer:    github,
+		PrincipalFrom: principalFrom,
+		Clock:         clock,
+		Webhook:       cfg.webhook,
+	})
+	if err != nil {
+		return nil, nil, xerrors.Errorf("create service: %w", err)
+	}
+	if cfg.hookAdmin == nil {
+		return svc, nil, nil
+	}
+	redeliverer, err := redelivery.New(redelivery.Deps{Store: store, Hooks: cfg.hookAdmin, Clock: clock, Logger: logger, Wants: svc.RawWants})
+	if err != nil {
+		return nil, nil, xerrors.Errorf("create service: redelivery: %w", err)
+	}
+	return svc, redeliverer, nil
 }
 
 // migrateSchema runs prepareSchema with a connection to cfg.migrateURL, which
