@@ -8,7 +8,15 @@ To save GitHub rate limit, faucet remembers a successful check for 60 seconds pe
 
 A GitHub rate-limit answer counts as a failed check that the caller can retry, not as a denial.
 
+A bearer that starts with `fct_`, `fcr_` or `fcs_` is a faucet token: faucet checks it itself and never sends it to GitHub. This version mints none, so each one is 401.
+
 One login can hold 10 waits open at once per process. Embedders can change that with `Deps.MaxWaitsPerLogin`.
+
+## Principals and scopes
+
+A host that embeds faucet tells it who calls. Its `PrincipalFrom` returns a `Principal` from `NewPrincipal` (a caller with a GitHub token, which holds every scope), `NewOAuthUser` or `NewService`. The wait tool and `events/poll` need `events:read`, `events/subscribe` and `events/unsubscribe` need `events:subscribe`, and `events/list` needs none. A `Principal` built by hand, or one whose `Login` changed after a constructor built it, is no kind of caller: every method but `events/list` answers it `authentication required`.
+
+An `Authorizer` answers `RepoID`, which may remember, and `RepoIDFresh`, which every renewal calls and which must ask again. One that sends each kind of principal to another `Authorizer` passes both calls on. `TokenAuthorizer` answers a caller without a GitHub token with `ErrNoAccess` and asks GitHub nothing.
 
 ## Callback URLs
 

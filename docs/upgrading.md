@@ -2,6 +2,15 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## To principal kinds and scopes
+
+This came in [#49](https://github.com/coder/faucet/pull/49). It matters to a host that embeds faucet (see [security.md](security.md#principals-and-scopes)).
+
+- **An `Authorizer` of your own** needs a second method, `RepoIDFresh`, which `events/subscribe` calls for every renewal. `AccessCache.RepoIDUncached` is now `AccessCache.RepoIDFresh`, and `TokenAuthorizer.RepoIDFresh` is its `RepoID`.
+- **A `Principal` from `NewPrincipal`** holds both scopes, as before, and `NewPrincipal` refuses a login with a colon, which GitHub never gives. One built by hand, as `faucet.Principal{Login: ...}`, or one whose `Login` changed after a constructor built it, is no kind of caller (`Principal.Authenticated` says so): every method but `events/list` answers it `authentication required`.
+- **`TokenAuthorizer`** answers a caller without a GitHub token with `ErrNoAccess` and asks GitHub nothing. Before, the caller saw `could not verify repository access, try again`.
+- **Migration `000010_access_tokens`** adds the table `faucet_access_tokens`, which nothing writes yet.
+
 ## To `/github/mcp`
 
 This came in [#48](https://github.com/coder/faucet/pull/48). The MCP endpoint is now `/github/mcp`, because faucet will serve one MCP endpoint per service and this one serves GitHub events. Point MCP clients at `https://<your host>/github/mcp`. `/mcp` still serves the same endpoint with the same token check, and a later release removes it. An Instant Rollback to a build before this one answers 404 to clients that already call `/github/mcp`.
