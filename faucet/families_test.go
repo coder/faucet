@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -413,5 +414,49 @@ func TestEventNamesDescribeWhatEventsListOffers(t *testing.T) {
 		for _, action := range n.Actions {
 			require.True(t, faucet.StoresDelivery(n.GitHubEvent, action), "%s stores %s.%s", n.Name, n.GitHubEvent, action)
 		}
+		if !n.Exact {
+			requireSamplesAreOfFamily(t, n)
+		}
 	}
+}
+
+// requireSamplesAreOfFamily normalizes each recorded sample of the family's
+// GitHub event and requires every stored one to be a type of the family, so
+// that a family that names the wrong GitHub event fails even where the two
+// events share their actions.
+func requireSamplesAreOfFamily(t *testing.T, family faucet.EventName) {
+	t.Helper()
+	samples, err := filepath.Glob(filepath.Join("testdata", family.GitHubEvent+"_*.json"))
+	require.NoError(t, err)
+	stored := 0
+	for _, sample := range samples {
+		if sampleEvent(filepath.Base(sample)) != family.GitHubEvent {
+			continue
+		}
+		payload, err := os.ReadFile(sample)
+		require.NoError(t, err)
+		ev, err := faucet.Normalize(family.GitHubEvent, payload, "guid")
+		require.NoError(t, err, sample)
+		if ev == nil {
+			continue
+		}
+		stored++
+		action, ok := strings.CutPrefix(ev.Type, typePrefix[family.Name])
+		require.True(t, ok && slices.Contains(family.Actions, action), "%s stores %s as %s, which is no type of %s", sample, family.GitHubEvent, ev.Type, family.Name)
+	}
+	require.NotZero(t, stored, "testdata holds no sample of %s that faucet stores", family.GitHubEvent)
+}
+
+// sampleEvent returns the GitHub event of a sample in testdata, which is
+// named <event>_<action>.json: the longest event of a family that the name
+// starts with, so pull_request_review_comment_created.json is not a
+// pull_request.
+func sampleEvent(name string) string {
+	event := ""
+	for _, n := range faucet.EventNames() {
+		if strings.HasPrefix(name, n.GitHubEvent+"_") && len(n.GitHubEvent) > len(event) {
+			event = n.GitHubEvent
+		}
+	}
+	return event
 }
