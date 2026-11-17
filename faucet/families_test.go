@@ -3,6 +3,8 @@ package faucet_test
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -123,6 +125,55 @@ func storeDelivery(ctx context.Context, t *testing.T, store faucet.Store, event,
 	require.NoError(t, err)
 	require.True(t, inserted)
 	return stored
+}
+
+// SEP-3415 lets the payloadSchema of a name change only by addition. The
+// golden file holds the payload schemas of the exact types as families
+// introduced them, and each exact type must keep every property and the
+// required fields it lists.
+func TestAnExactTypeOnlyGainsOptionalPayloadProperties(t *testing.T) {
+	t.Parallel()
+
+	type payloadSchema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+		Required   []string                   `json:"required"`
+	}
+	golden, err := os.ReadFile(filepath.Join("testdata", "exact_type_payload_schemas.json"))
+	require.NoError(t, err)
+	var before map[string]payloadSchema
+	require.NoError(t, json.Unmarshal(golden, &before))
+
+	h := newEventsHarness(t)
+	res, err := h.call(methodList, nil)
+	require.NoError(t, err)
+	var events []struct {
+		Name          string        `json:"name"`
+		PayloadSchema payloadSchema `json:"payloadSchema"`
+	}
+	require.NoError(t, json.Unmarshal(res.fields["events"], &events))
+	seen := 0
+	for _, e := range events {
+		old, ok := before[e.Name]
+		if !ok {
+			continue
+		}
+		seen++
+		require.Equal(t, old.Required, e.PayloadSchema.Required, e.Name)
+		for name, property := range old.Properties {
+			require.Contains(t, e.PayloadSchema.Properties, name, e.Name)
+			require.Equal(t, withoutDescription(t, property), withoutDescription(t, e.PayloadSchema.Properties[name]),
+				"%s keeps the property %s as it was, its description aside", e.Name, name)
+		}
+	}
+	require.Equal(t, len(before), seen, "events/list offers every exact type of the golden file")
+}
+
+func withoutDescription(t *testing.T, property json.RawMessage) map[string]any {
+	t.Helper()
+	var p map[string]any
+	require.NoError(t, json.Unmarshal(property, &p))
+	delete(p, "description")
+	return p
 }
 
 func TestPollOfAFamilyNamesEachEventByTheFamilyAndCarriesItsExactType(t *testing.T) {
