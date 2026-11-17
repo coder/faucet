@@ -364,3 +364,54 @@ func TestWaitWithActionsNarrowsOnlyTheFamiliesThatHaveThem(t *testing.T) {
 		require.Contains(t, h.call(call).failure(t), `action "closed"`, name)
 	}
 }
+
+func TestEventNamesDescribeWhatEventsListOffers(t *testing.T) {
+	t.Parallel()
+
+	h := newEventsHarness(t)
+	res, err := h.call(methodList, nil)
+	require.NoError(t, err)
+	var events []struct {
+		Name        string `json:"name"`
+		InputSchema struct {
+			Properties map[string]struct {
+				Items struct {
+					Enum []string `json:"enum"`
+				} `json:"items"`
+			} `json:"properties"`
+		} `json:"inputSchema"`
+		PayloadSchema struct {
+			Properties struct {
+				Action struct {
+					Enum []string `json:"enum"`
+				} `json:"action"`
+			} `json:"properties"`
+		} `json:"payloadSchema"`
+	}
+	require.NoError(t, json.Unmarshal(res.fields["events"], &events))
+
+	names := faucet.EventNames()
+	require.Len(t, names, len(events))
+	for i, n := range names {
+		e := events[i]
+		require.Equal(t, e.Name, n.Name)
+		require.Equal(t, e.PayloadSchema.Properties.Action.Enum, n.Actions, n.Name)
+		var filters []string
+		for property := range e.InputSchema.Properties {
+			if !slices.Contains([]string{"repo", "pr", "sha", "actions"}, property) {
+				filters = append(filters, property)
+			}
+		}
+		require.ElementsMatch(t, filters, n.Filters, n.Name)
+		if n.Exact {
+			require.NotContains(t, e.InputSchema.Properties, "actions", n.Name)
+			require.True(t, slices.ContainsFunc(names, func(f faucet.EventName) bool { return !f.Exact && f.Name == n.Family }), n.Name)
+		} else {
+			require.Equal(t, n.Name, n.Family)
+			require.Equal(t, n.Actions, e.InputSchema.Properties["actions"].Items.Enum, n.Name)
+		}
+		for _, action := range n.Actions {
+			require.True(t, faucet.StoresDelivery(n.GitHubEvent, action), "%s stores %s.%s", n.Name, n.GitHubEvent, action)
+		}
+	}
+}
