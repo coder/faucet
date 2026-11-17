@@ -1,6 +1,6 @@
 # Events poll
 
-An agent reads the events of one repository through `events/poll` on `POST /mcp`. Each call returns at once with the events after a cursor and a new cursor. The agent waits `nextPollMs` and calls again. This is the poll delivery of the MCP Events extension (SEP-3415). The [wait tool](wait-tool.md) reads the same store, and [events/list](events-list.md) names the five families and the five exact types.
+An agent reads the events of one repository through `events/poll` on `POST /github/mcp`. Each call returns at once with the events after a cursor and a new cursor. The agent waits `nextPollMs` and calls again. This is the poll delivery of the MCP Events extension (SEP-3415). The [wait tool](wait-tool.md) reads the same store, and [events/list](events-list.md) names the five families and the five exact types.
 
 ## Sub-features
 
@@ -19,7 +19,7 @@ An agent reads the events of one repository through `events/poll` on `POST /mcp`
 
 ## How to get to it (user POV)
 
-An agent's MCP client sends `events/poll` to `/mcp` with `Authorization: Bearer <GitHub token>` and `Mcp-Name: <event name>`. The request is a stateless 2026-07-28 request: `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method: events/poll` and the `_meta` triple in `params`. The stub plays GitHub: it knows one token and the repositories named `verify/r<id>`. The test plays GitHub's webhooks through `faucet.deliver` and the agent through `faucet.mcp`.
+An agent's MCP client sends `events/poll` to `/github/mcp` with `Authorization: Bearer <GitHub token>` and `Mcp-Name: <event name>`. The request is a stateless 2026-07-28 request: `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method: events/poll` and the `_meta` triple in `params`. The stub plays GitHub: it knows one token and the repositories named `verify/r<id>`. The test plays GitHub's webhooks through `faucet.deliver` and the agent through `faucet.mcp`.
 
 ## Driving it with e2e
 

@@ -68,8 +68,9 @@ const (
 	dbSetupTimeout  = 30 * time.Second
 	shutdownTimeout = 15 * time.Second
 	githubTimeout   = 10 * time.Second
-	// mcpWriteTimeout replaces the server's write deadline on /mcp. It must
-	// outlast the longest wait the tool allows, which is 50 seconds.
+	// mcpWriteTimeout replaces the server's write deadline on the MCP
+	// endpoint. It must outlast the longest wait the tool allows, which is 50
+	// seconds.
 	mcpWriteTimeout = 75 * time.Second
 )
 
@@ -325,7 +326,10 @@ func newRouter(svc *faucet.Service, authn authenticator, cron cronRoutes, logger
 	r := chi.NewRouter()
 	cron.mount(r)
 	r.Method(http.MethodPost, "/webhook/github", svc.WebhookHandler())
-	r.Handle("/mcp", longResponse(requireBearer(authn, logger, newMCPHandler(svc))))
+	githubMCP := longResponse(requireBearer(authn, logger, newMCPHandler(svc)))
+	r.Handle("/github/mcp", githubMCP)
+	// /mcp is the old path of the GitHub endpoint, kept for one release.
+	r.Handle("/mcp", githubMCP)
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok\n")
 	})
