@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -182,7 +183,7 @@ type eventsUnsubscribeResult struct {
 }
 
 type subscribeRequest struct {
-	eventType   eventType
+	entry       *catalogEntry
 	arguments   pollArguments
 	canonical   json.RawMessage
 	callbackURL string
@@ -209,7 +210,7 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 	if err != nil {
 		return nil, err
 	}
-	logger := s.logger.With(slog.F("repo", req.arguments.Repo), slog.F("event", req.eventType.name))
+	logger := s.logger.With(slog.F("repo", req.arguments.Repo), slog.F("event", req.entry.name))
 
 	principal, err := s.subscriber(ctx, logger, "subscribe")
 	if err != nil {
@@ -222,7 +223,7 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 		}
 		return nil, accessError(err)
 	}
-	key := NewSubscriptionKeyHash(principal.Login, req.callbackURL, req.eventType.name, req.canonical)
+	key := NewSubscriptionKeyHash(principal.Login, req.callbackURL, req.entry.name, req.canonical)
 	secret := req.secret
 	verification := CallbackRequest{
 		Login: principal.Login, URL: req.callbackURL, SubscriptionID: key.ID(),
@@ -245,7 +246,8 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 		KeyHash:     key,
 		Principal:   principal.Login,
 		CallbackURL: req.callbackURL,
-		EventType:   req.eventType.name,
+		EventType:   req.entry.name,
+		EventTypes:  req.entry.types(req.arguments.Actions),
 		Arguments:   req.canonical,
 		RepoID:      repoID,
 		SecretEnc:   sealed,
@@ -287,7 +289,7 @@ func (s *Service) unsubscribeMethod(ctx context.Context, _ *mcp.ServerSession, p
 	if p == nil || p.malformed {
 		return nil, invalidParams("params must be an object")
 	}
-	t, args, err := parseSubscriptionName(p.fields.Name, p.fields.Arguments, func(eventType) *jsonschema.Resolved { return shaInputResolved })
+	entry, args, err := parseSubscriptionName(p.fields.Name, p.fields.Arguments, func(e *catalogEntry) *jsonschema.Resolved { return e.endInput })
 	if err != nil {
 		return nil, err
 	}
@@ -299,13 +301,13 @@ func (s *Service) unsubscribeMethod(ctx context.Context, _ *mcp.ServerSession, p
 	if err != nil {
 		return nil, err
 	}
-	logger := s.logger.With(slog.F("repo", args.Repo), slog.F("event", t.name))
+	logger := s.logger.With(slog.F("repo", args.Repo), slog.F("event", entry.name))
 
 	principal, err := s.subscriber(ctx, logger, "unsubscribe")
 	if err != nil {
 		return nil, err
 	}
-	key := NewSubscriptionKeyHash(principal.Login, callbackURL, t.name, canonicalArguments(args))
+	key := NewSubscriptionKeyHash(principal.Login, callbackURL, entry.name, canonicalArguments(args))
 	_, found, err := s.store.DeleteLiveSubscription(ctx, principal.Login, key, s.clock.Now())
 	if err != nil {
 		return nil, subscriptionStoreError(ctx, logger, err)
@@ -397,7 +399,7 @@ func parseSubscribe(p *subscriptionParams, allowInsecureLoopback bool) (subscrib
 	if p == nil || p.malformed {
 		return subscribeRequest{}, invalidParams("params must be an object")
 	}
-	t, args, err := parseSubscriptionName(p.fields.Name, p.fields.Arguments, func(t eventType) *jsonschema.Resolved { return t.resolvedInput })
+	entry, args, err := parseSubscriptionName(p.fields.Name, p.fields.Arguments, func(e *catalogEntry) *jsonschema.Resolved { return e.input })
 	if err != nil {
 		return subscribeRequest{}, err
 	}
@@ -413,7 +415,7 @@ func parseSubscribe(p *subscriptionParams, allowInsecureLoopback bool) (subscrib
 	if err != nil {
 		return subscribeRequest{}, err
 	}
-	req := subscribeRequest{eventType: t, arguments: args, canonical: canonicalArguments(args), callbackURL: callbackURL, secret: secret}
+	req := subscribeRequest{entry: entry, arguments: args, canonical: canonicalArguments(args), callbackURL: callbackURL, secret: secret}
 	if req.ttl, err = parseTTL(p.fields.TTLMs); err != nil {
 		return subscribeRequest{}, err
 	}
@@ -470,34 +472,39 @@ func parseInteger(raw json.RawMessage) (int64, error) {
 	return int64(f), nil
 }
 
-func parseSubscriptionName(rawName, arguments json.RawMessage, input func(eventType) *jsonschema.Resolved) (eventType, pollArguments, error) {
+func parseSubscriptionName(rawName, arguments json.RawMessage, input func(*catalogEntry) *jsonschema.Resolved) (*catalogEntry, pollArguments, error) {
 	var name string
 	if !isAbsent(rawName) && json.Unmarshal(rawName, &name) != nil {
-		return eventType{}, pollArguments{}, invalidParams("name must be a string")
+		return nil, pollArguments{}, invalidParams("name must be a string")
 	}
 	if name == "" {
-		return eventType{}, pollArguments{}, invalidParams("name is required")
+		return nil, pollArguments{}, invalidParams("name is required")
 	}
-	t, err := eventByName(name)
+	entry, err := eventByName(name)
 	if err != nil {
-		return eventType{}, pollArguments{}, err
+		return nil, pollArguments{}, err
 	}
-	args, err := parsePollArguments(input(t), arguments)
+	args, err := parsePollArguments(input(entry), arguments)
 	if err != nil {
-		return eventType{}, pollArguments{}, err
+		return nil, pollArguments{}, err
 	}
-	return t, args, nil
+	return entry, args, nil
 }
 
 // canonicalArguments is the one JSON spelling of args. Fields come in struct
-// order without spaces, so two requests that differ only in key order or
-// whitespace address the same subscription.
+// order without spaces and actions sorted once each, so two requests that
+// differ only in key order, whitespace or the order and repeats of actions
+// address the same subscription. Arguments without actions keep the spelling
+// they had before actions existed, and so keep their key.
 func canonicalArguments(args pollArguments) json.RawMessage {
+	actions := slices.Clone(args.Actions)
+	slices.Sort(actions)
 	return marshalRaw(struct {
-		Repo string `json:"repo"`
-		SHA  string `json:"sha,omitempty"`
-		PR   int32  `json:"pr,omitempty"`
-	}{args.Repo, args.SHA, args.PR})
+		Repo    string   `json:"repo"`
+		SHA     string   `json:"sha,omitempty"`
+		PR      int32    `json:"pr,omitempty"`
+		Actions []string `json:"actions,omitempty"`
+	}{args.Repo, args.SHA, args.PR, slices.Compact(actions)})
 }
 
 type deliveryParams struct {

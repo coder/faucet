@@ -106,8 +106,8 @@ func (s *fakeStore) Purge(_ context.Context, before time.Time) (faucet.PurgeResu
 
 // advanceSubscriptionsThatLoseNothingLocked moves a subscription that is not
 // below the purge mark yet to the mark that the purge will set (doomed), unless
-// an event of its repository and type above its position, still in the log,
-// lies at or below that mark.
+// an event of its repository and of one of its types above its position, still
+// in the log, lies at or below that mark.
 func (s *fakeStore) advanceSubscriptionsThatLoseNothingLocked(doomed int64) {
 	for key, sub := range s.subs {
 		pos := s.scanned[key]
@@ -115,7 +115,7 @@ func (s *fakeStore) advanceSubscriptionsThatLoseNothingLocked(doomed int64) {
 			continue
 		}
 		if !slices.ContainsFunc(s.events, func(e faucet.Event) bool {
-			return e.RepoID == sub.RepoID && e.Type == sub.EventType && e.ID > pos && e.ID <= doomed
+			return e.RepoID == sub.RepoID && slices.Contains(sub.EventTypes, e.Type) && e.ID > pos && e.ID <= doomed
 		}) {
 			s.scanned[key] = doomed
 		}

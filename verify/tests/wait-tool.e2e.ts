@@ -1,4 +1,4 @@
-import { closedPullRequest, samples } from './payloads';
+import { closedPullRequest, recorded, samples } from './payloads';
 import { appLog, describe, expect, newDeliveryId, newRepoId, test, type Faucet } from './support';
 
 const run = samples['workflow_run.completed'];
@@ -47,6 +47,38 @@ describe('wait tool', () => {
       data: run.expected.data,
     });
     expect(outcome.cursor).toBe(row?.id);
+  });
+
+  test('a wait for a family returns its events with their exact type', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const repo = repoOf(repoId);
+    const idle = await faucet.waitForEvents({ repo, types: ['pr.activity'], timeout_s: 1 });
+    await deliverRun(faucet, repoId);
+    const stored = await faucet.deliver({ event: 'pull_request', delivery: newDeliveryId(), body: JSON.stringify(recorded('pull_request_closed', repoId)) });
+    expect(stored.body).toBe('stored\n');
+
+    const outcome = await faucet.waitForEvents({ repo, types: ['pr.activity'], cursor: idle.cursor, timeout_s: 5 });
+
+    expect(outcome.isError).toBe(false);
+    expect(outcome.events?.map((e) => e.type)).toEqual(['pr.closed']);
+    expect(outcome.events?.[0]).toMatchObject({ repo_id: repoId, prs: [2], data: { merged: false } });
+  });
+
+  test('actions narrow the families in types, and an action of none of them is a tool error', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const repo = repoOf(repoId);
+    const idle = await faucet.waitForEvents({ repo, types: ['pr.activity'], timeout_s: 1 });
+    await deliverRun(faucet, repoId);
+    const stored = await faucet.deliver({ event: 'pull_request', delivery: newDeliveryId(), body: JSON.stringify(recorded('pull_request_closed', repoId)) });
+    expect(stored.body).toBe('stored\n');
+
+    const narrowed = await faucet.waitForEvents({ repo, types: ['pr.activity', 'ci.runs'], actions: ['closed'], cursor: idle.cursor, timeout_s: 5 });
+    const refused = await faucet.waitForEvents({ repo, types: ['ci.runs'], actions: ['closed'], cursor: idle.cursor, timeout_s: 1 });
+
+    expect(narrowed.isError).toBe(false);
+    expect(narrowed.events?.map((e) => e.type)).toEqual(['pr.closed']);
+    expect(refused.isError).toBe(true);
+    expect(refused.text).toContain('action "closed"');
   });
 
   test('an empty wait returns no events and a cursor at its deadline', async ({ faucet }) => {

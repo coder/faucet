@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"slices"
 	"time"
 
 	"golang.org/x/xerrors"
@@ -47,7 +48,11 @@ type Subscription struct {
 	KeyHash     SubscriptionKeyHash
 	Principal   string
 	CallbackURL string
-	EventType   string
+	// EventType is the event name the subscriber gave, and EventTypes are the
+	// stored event types it matches. Every subscribe sets both, so a renewal
+	// picks up the types that a later version adds to the name.
+	EventType  string
+	EventTypes []string
 	// Arguments is the canonical JSON of the event arguments.
 	Arguments json.RawMessage
 	// RepoID is the GitHub ID of the repository that the principal could read
@@ -96,6 +101,8 @@ func (s Subscription) Validate(now time.Time) error {
 		return xerrors.New("callback URL is required")
 	case s.EventType == "":
 		return xerrors.New("event type is required")
+	case len(s.EventTypes) == 0 || slices.Contains(s.EventTypes, ""):
+		return xerrors.New("stored event types are required")
 	case !json.Valid(s.Arguments) || !bytes.HasPrefix(s.Arguments, []byte("{")):
 		return xerrors.New("arguments must be a JSON object")
 	case s.RepoID <= 0:

@@ -276,7 +276,7 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 	}
 	page, err := s.store.PollEvents(ctx, PollQuery{
 		RepoID:  target.RepoID,
-		Types:   []string{target.EventType},
+		Types:   target.EventTypes,
 		HeadSHA: strings.ToLower(args.SHA),
 		PR:      args.PR,
 		After:   target.ScannedThrough,
@@ -584,7 +584,7 @@ func (r *deliveryRun) decide(ctx context.Context, claim DeliveryClaim) attemptOu
 }
 
 func buildBody(claim DeliveryClaim, ev Event) ([]byte, attemptOutcome, bool) {
-	occ, err := occurrenceOf(ev)
+	occ, err := occurrenceOf(claim.EventType, ev)
 	if err != nil {
 		return nil, giveUp(GiveUpEventMalformed), false
 	}

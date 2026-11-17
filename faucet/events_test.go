@@ -251,9 +251,9 @@ func TestEventsListDescribesEveryEventType(t *testing.T) {
 		} `json:"events"`
 	}
 	require.NoError(t, json.Unmarshal(res.fields["events"], &list.Events))
-	require.Len(t, list.Events, len(allTypes))
+	require.Len(t, list.Events, len(allNames))
 	for i, e := range list.Events {
-		require.Equal(t, allTypes[i], e.Name)
+		require.Equal(t, allNames[i], e.Name)
 		require.NotEmpty(t, e.Description, e.Name)
 		require.Equal(t, []string{"poll"}, e.Delivery, e.Name)
 		for what, schema := range map[string]json.RawMessage{"inputSchema": e.InputSchema, "payloadSchema": e.PayloadSchema} {
@@ -270,12 +270,23 @@ func TestEventsListDescribesEveryEventType(t *testing.T) {
 		require.NoError(t, json.Unmarshal(e.InputSchema, &input))
 		require.Equal(t, []string{"repo"}, input.Required)
 		require.Contains(t, input.Properties, "pr")
+		_, legacy := legacyRequired[e.Name]
+		_, takesActions := input.Properties["actions"]
+		require.Equal(t, !legacy, takesActions, "%s: a family takes actions and an exact type does not", e.Name)
 		var payload struct {
 			Properties map[string]any `json:"properties"`
+			Required   []string       `json:"required"`
 		}
 		require.NoError(t, json.Unmarshal(e.PayloadSchema, &payload))
-		require.Contains(t, payload.Properties, "prs")
-		if e.Name == "pr.comment_created" {
+		for _, field := range []string{"prs", "event", "action"} {
+			require.Contains(t, payload.Properties, field, e.Name)
+		}
+		if required, legacy := legacyRequired[e.Name]; legacy {
+			require.Equal(t, required, payload.Required, "%s keeps the required fields it had before families", e.Name)
+		} else {
+			require.Equal(t, []string{"prs", "event", "action"}, payload.Required, "%s requires no field that only some of its actions carry", e.Name)
+		}
+		if e.Name == "pr.comment_created" || e.Name == "pr.comments" {
 			require.NotContains(t, input.Properties, "sha", "GitHub names no head commit in a comment, so a sha filter could never match")
 			require.NotContains(t, payload.Properties, "head_sha")
 			continue
@@ -283,6 +294,14 @@ func TestEventsListDescribesEveryEventType(t *testing.T) {
 		require.Contains(t, input.Properties, "sha", e.Name)
 		require.Contains(t, payload.Properties, "head_sha", e.Name)
 	}
+}
+
+var legacyRequired = map[string][]string{
+	"ci.check_completed":  {"prs", "check_run_id", "name", "conclusion", "html_url", "app_slug"},
+	"ci.run_completed":    {"prs", "run_id", "name", "conclusion", "head_branch", "html_url", "run_attempt"},
+	"pr.closed":           {"prs", "merged", "merge_commit_sha", "html_url"},
+	"pr.comment_created":  {"prs", "comment_id", "user_login", "html_url"},
+	"pr.review_submitted": {"prs", "review_id", "state", "user_login", "html_url"},
 }
 
 func TestEventsListSaysAClosedPullRequestMayCarryAMergeCommitSHA(t *testing.T) {
@@ -372,23 +391,21 @@ func TestPolledDataMatchesThePayloadSchema(t *testing.T) {
 	}
 	want := map[string]int{}
 	for i, d := range deliveries {
-		ev, err := faucet.Normalize(d.event, fixture(t, d.fixture), fmt.Sprintf("guid-%d", i))
-		require.NoError(t, err)
-		require.NotNil(t, ev, d.fixture)
-		ev.RepoID = repoID
-		_, inserted, err := h.store.InsertEvent(h.ctx, *ev)
-		require.NoError(t, err)
-		require.True(t, inserted)
+		ev := storeDelivery(h.ctx, t, h.store, d.event, d.fixture, fmt.Sprintf("guid-%d", i))
 		want[ev.Type]++
+		want[familyOf[ev.Type]]++
 	}
 
 	got := map[string]int{}
-	for _, typ := range allTypes {
-		out := h.poll(pollParams(typ, repoArgs(), cursorOf(start)))
+	for _, name := range allNames {
+		out := h.poll(pollParams(name, repoArgs(), cursorOf(start)))
 		for _, e := range out.Events {
-			require.Equal(t, typ, e.Name)
-			require.NoError(t, schemas[typ].Validate(e.Data), "%s data %v", typ, e.Data)
-			got[typ]++
+			require.Equal(t, name, e.Name)
+			require.NoError(t, schemas[name].Validate(e.Data), "%s data %v", name, e.Data)
+			typ, ok := e.Data["event"].(string)
+			require.True(t, ok, "%s data names the stored type", name)
+			require.Contains(t, []string{typ, familyOf[typ]}, name)
+			got[name]++
 		}
 	}
 	require.Equal(t, want, got)
@@ -440,7 +457,7 @@ func TestPollReplaysEventsAfterTheCursor(t *testing.T) {
 	require.Equal(t, map[string]any{
 		"run_id": float64(1), "name": "CI", "conclusion": "success", "head_branch": "main",
 		"html_url": "https://example.test/run/1", "run_attempt": float64(1),
-		"prs": []any{float64(7), float64(9)}, "head_sha": testShaA,
+		"prs": []any{float64(7), float64(9)}, "head_sha": testShaA, "event": "ci.run_completed", "action": "completed",
 	}, got.Data)
 	require.Equal(t, []any{}, first.Events[1].Data["prs"], "an event without pull requests carries an empty list")
 	require.NotContains(t, first.Events[1].Data, "head_sha", "an event without a head SHA omits the field")

@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 const HEAD_SHA = '0123456789abcdef0123456789abcdef01234567';
 const MERGE_SHA = 'fedcba9876543210fedcba9876543210fedcba98';
 const BASE_SHA = '00112233445566778899aabbccddeeff00112233';
@@ -17,6 +19,8 @@ export interface Sample {
   payload: (repoId: number) => object;
   expected: {
     type: string;
+    family: string;
+    action: string;
     prs: number[];
     headSha: string | null;
     data: Record<string, unknown>;
@@ -56,6 +60,8 @@ export const samples: Record<string, Sample> = {
     }),
     expected: {
       type: 'ci.run_completed',
+      family: 'ci.runs',
+      action: 'completed',
       prs: [PR],
       headSha: HEAD_SHA,
       data: {
@@ -89,6 +95,8 @@ export const samples: Record<string, Sample> = {
     }),
     expected: {
       type: 'ci.check_completed',
+      family: 'ci.checks',
+      action: 'completed',
       prs: [PR, PR + 1],
       headSha: HEAD_SHA,
       data: {
@@ -115,6 +123,8 @@ export const samples: Record<string, Sample> = {
     }),
     expected: {
       type: 'pr.review_submitted',
+      family: 'pr.reviews',
+      action: 'submitted',
       prs: [PR],
       headSha: HEAD_SHA,
       data: {
@@ -130,6 +140,8 @@ export const samples: Record<string, Sample> = {
     payload: closedPullRequest,
     expected: {
       type: 'pr.closed',
+      family: 'pr.activity',
+      action: 'closed',
       prs: [PR],
       headSha: HEAD_SHA,
       data: {
@@ -153,6 +165,8 @@ export const samples: Record<string, Sample> = {
     }),
     expected: {
       type: 'pr.comment_created',
+      family: 'pr.comments',
+      action: 'created',
       prs: [PR],
       headSha: null,
       data: {
@@ -163,3 +177,19 @@ export const samples: Record<string, Sample> = {
     },
   },
 };
+
+// dataOf is the data of an event of the sample, as events/poll and webhook delivery send it.
+export function dataOf(sample: Sample): Record<string, unknown> {
+  const { type, action, prs, headSha, data } = sample.expected;
+  const sent = { ...data, prs, event: type, action };
+  return headSha === null ? sent : { ...sent, head_sha: headSha };
+}
+
+// recorded is a GitHub webhook payload that octokit/webhooks recorded, from faucet/testdata, sent for repository repoId.
+export function recorded(name: string, repoId: number): object {
+  const payload = JSON.parse(readFileSync(new URL(`../../faucet/testdata/${name}.json`, import.meta.url), 'utf8')) as {
+    repository: { id: number };
+  };
+  payload.repository.id = repoId;
+  return payload;
+}

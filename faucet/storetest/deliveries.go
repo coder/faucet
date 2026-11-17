@@ -19,6 +19,7 @@ var deliverySubtests = []subtest{
 	{"ScanTargetsSkipsSubscriptionsAtThePendingCap", scanTargetsSkipsSubscriptionsAtThePendingCap},
 	{"ScanTargetsNeedsAnEventOfTheSubscriptionsRepositoryAndType", scanTargetsNeedsAnEventOfTheSubscriptionsRepositoryAndType},
 	{"ScanTargetsIncludesASubscriptionThatAPurgeOvertook", scanTargetsIncludesASubscriptionThatAPurgeOvertook},
+	{"ScanTargetsMatchEveryStoredTypeOfTheSubscription", scanTargetsMatchEveryStoredTypeOfTheSubscription},
 	{"EnqueueDeliveriesMovesThePositionOnlyForTheCaller", enqueueDeliveriesMovesThePositionOnlyForTheCaller},
 	{"EnqueueDeliveriesWinsOnceUnderConcurrency", enqueueDeliveriesWinsOnceUnderConcurrency},
 	{"EnqueueDeliveriesValidatesInput", enqueueDeliveriesValidatesInput},
@@ -47,6 +48,7 @@ var deliverySubtests = []subtest{
 	{"ScanPositionStartsAtTheCursorAndSurvivesARefresh", scanPositionStartsAtTheCursorAndSurvivesARefresh},
 	{"PurgeLeavesBelowTheMarkOnlyTheSubscriptionsThatLostEvents", purgeLeavesBelowTheMarkOnlyTheSubscriptionsThatLostEvents},
 	{"PurgeMovesASubscriptionPastEventsOfAnotherTypeOfItsRepository", purgeMovesASubscriptionPastEventsOfAnotherTypeOfItsRepository},
+	{"PurgeReadsTheStoredTypesAndNotTheEventName", purgeReadsTheStoredTypesAndNotTheEventName},
 	{"ClaimDeliveryCarriesTheRepositoryTheSubscriptionIsGrantedNow", claimDeliveryCarriesTheRepositoryTheSubscriptionIsGrantedNow},
 }
 
@@ -176,7 +178,7 @@ func scanTargetsListsLiveSubscriptionsBehindTheHead(t *testing.T, s faucet.Store
 	require.Equal(t, ahead.KeyHash, targets[1].KeyHash)
 	require.Equal(t, r.sub.Principal, targets[0].Principal, "a target names the principal that owns it")
 	first := targets[0]
-	require.Equal(t, "ci.run_completed", first.EventType)
+	require.Equal(t, []string{"ci.run_completed"}, first.EventTypes)
 	require.JSONEq(t, `{"repo":"octo/repo"}`, string(first.Arguments))
 	require.EqualValues(t, 42, first.RepoID)
 	require.EqualValues(t, 0, first.ScannedThrough)
@@ -234,6 +236,46 @@ func scanTargetsIncludesASubscriptionThatAPurgeOvertook(t *testing.T, s faucet.S
 	targets := r.targets(r.now, 10)
 	require.Len(t, targets, 1, "the purge mark is the head, and the subscription is below it")
 	require.EqualValues(t, 0, targets[0].ScannedThrough)
+}
+
+// newFamilyRig is a rig whose subscription has an event name that is no stored
+// type, and two stored types.
+func newFamilyRig(t *testing.T, s faucet.Store) *rig {
+	t.Helper()
+	r := &rig{t: t, s: s, ctx: context.Background(), now: subscriptionBase}
+	r.sub = subscriptionAt(1, r.now.Add(time.Hour))
+	r.sub.EventType, r.sub.EventTypes, r.sub.Cursor = "ci.runs", []string{"ci.run_completed", "ci.run_requested"}, 0
+	r.sub.KeyHash = faucet.NewSubscriptionKeyHash(r.sub.Principal, r.sub.CallbackURL, r.sub.EventType, r.sub.Arguments)
+	_, err := s.UpsertSubscription(r.ctx, r.sub, r.now, 10)
+	require.NoError(t, err)
+	return r
+}
+
+func (r *rig) addEventOf(eventType string) faucet.Event {
+	r.t.Helper()
+	ev := newEvent(fmt.Sprintf("%s-%d", eventType, len(r.events)+1))
+	ev.Type = eventType
+	stored, _, err := r.s.InsertEvent(r.ctx, ev)
+	require.NoError(r.t, err)
+	r.events = append(r.events, stored)
+	time.Sleep(2 * time.Millisecond)
+	return stored
+}
+
+func scanTargetsMatchEveryStoredTypeOfTheSubscription(t *testing.T, s faucet.Store) {
+	r := newFamilyRig(t, s)
+	r.addEventOf("pr.closed")
+	require.Empty(t, r.targets(r.now, 10), "an event of a type that the subscription does not store is nothing to read")
+
+	ev := r.addEventOf("ci.run_requested")
+	targets := r.targets(r.now, 10)
+	require.Len(t, targets, 1, "an event of any stored type of the subscription is")
+	require.Equal(t, r.sub.EventTypes, targets[0].EventTypes)
+
+	r.enqueue(ev)
+	claim := r.mustClaim(r.now)
+	require.Equal(t, "ci.runs", claim.EventType, "a claim names the subscription's event name")
+	require.Equal(t, "ci.run_requested", claim.Event.Type, "and carries the stored type of the event")
 }
 
 func enqueueDeliveriesMovesThePositionOnlyForTheCaller(t *testing.T, s faucet.Store) {
@@ -344,6 +386,7 @@ func claimDeliveryReturnsTheDeliveryWithItsEventSecretAndWatermark(t *testing.T,
 	require.EqualValues(t, 1, first.Ref.Attempt)
 	require.Equal(t, messageIDOf(r.events[0]), first.MessageID)
 	require.True(t, r.now.Equal(first.EnqueuedAt))
+	require.Equal(t, r.sub.EventType, first.EventType)
 	require.Equal(t, r.sub.CallbackURL, first.CallbackURL)
 	require.Equal(t, r.sub.SecretEnc, first.SecretEnc)
 	require.EqualValues(t, 42, first.RepoID)
@@ -1018,6 +1061,27 @@ func purgeMovesASubscriptionPastEventsOfAnotherTypeOfItsRepository(t *testing.T,
 	for _, target := range r.targets(r.now, 10) {
 		require.Equal(t, otherType.ID, target.ScannedThrough, "a purge of an event of its own type leaves it below the mark: that is a gap")
 	}
+}
+
+func purgeReadsTheStoredTypesAndNotTheEventName(t *testing.T, s faucet.Store) {
+	r := newFamilyRig(t, s)
+	otherType := r.addEventOf("pr.closed")
+	survivor := r.addEventOf("ci.run_completed")
+
+	_, err := s.Purge(r.ctx, survivor.ReceivedAt)
+	require.NoError(t, err)
+	targets := r.targets(r.now, 10)
+	require.Len(t, targets, 1)
+	require.Equal(t, otherType.ID, targets[0].ScannedThrough, "the purge deleted no event of a stored type, so no gap is owed")
+
+	r.scanned = otherType.ID
+	r.enqueue(survivor)
+	lost := r.addEventOf("ci.run_requested")
+	_, err = s.Purge(r.ctx, lost.ReceivedAt.Add(time.Hour))
+	require.NoError(t, err)
+	targets = r.targets(r.now, 10)
+	require.Len(t, targets, 1)
+	require.Equal(t, survivor.ID, targets[0].ScannedThrough, "an event of the second stored type was purged unread: that is a gap")
 }
 
 func claimDeliveryCarriesTheRepositoryTheSubscriptionIsGrantedNow(t *testing.T, s faucet.Store) {

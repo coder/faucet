@@ -75,7 +75,7 @@ WHERE s.scanned_through < doomed.mark
   AND s.scanned_through >= (SELECT purged_through FROM faucet_purge_mark)
   AND NOT EXISTS (
     SELECT 1 FROM faucet_events e
-    WHERE e.repo_id = s.repo_id AND e.type = s.event_type AND e.id > s.scanned_through AND e.id <= doomed.mark
+    WHERE e.repo_id = s.repo_id AND e.type = ANY(s.event_types) AND e.id > s.scanned_through AND e.id <= doomed.mark
   );
 
 -- name: RaisePurgeMark :one
@@ -92,12 +92,13 @@ DELETE FROM faucet_subscriptions WHERE principal = sqlc.arg(principal) AND expir
 SELECT COUNT(*)::bigint AS others FROM faucet_subscriptions WHERE principal = sqlc.arg(principal) AND key_hash <> sqlc.arg(key_hash);
 
 -- name: UpsertSubscription :one
-INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, scanned_through, created_at, updated_at, expires_at)
+INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, event_types, arguments, repo_id, secret_enc, cursor, scanned_through, created_at, updated_at, expires_at)
 VALUES (
   sqlc.arg(key_hash),
   sqlc.arg(principal),
   sqlc.arg(callback_url),
   sqlc.arg(event_type),
+  sqlc.arg(event_types)::text[],
   sqlc.arg(arguments)::text::jsonb,
   sqlc.arg(repo_id),
   sqlc.arg(secret_enc),
@@ -108,6 +109,7 @@ VALUES (
   sqlc.arg(expires_at)
 )
 ON CONFLICT (key_hash) DO UPDATE SET
+  event_types = EXCLUDED.event_types,
   repo_id = EXCLUDED.repo_id,
   previous_secret_enc = CASE
     WHEN faucet_subscriptions.secret_enc = EXCLUDED.secret_enc THEN faucet_subscriptions.previous_secret_enc

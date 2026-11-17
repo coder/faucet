@@ -95,14 +95,14 @@ type eventsPollResult struct {
 }
 
 func describeEvents(delivery []string) []eventDescriptor {
-	descriptors := make([]eventDescriptor, len(eventCatalog))
-	for i, t := range eventCatalog {
+	descriptors := make([]eventDescriptor, len(catalog))
+	for i, e := range catalog {
 		descriptors[i] = eventDescriptor{
-			Name:          t.name,
-			Description:   t.description,
+			Name:          e.name,
+			Description:   e.description,
 			Delivery:      delivery,
-			InputSchema:   t.inputSchema(),
-			PayloadSchema: t.payloadSchema,
+			InputSchema:   e.inputSchema,
+			PayloadSchema: e.payloadSchema,
 		}
 	}
 	return descriptors
@@ -128,31 +128,31 @@ func (s *Service) listEvents(_ context.Context, _ *mcp.ServerSession, p *eventsL
 }
 
 type pollRequest struct {
-	eventType eventType
-	repo      string
-	query     PollQuery
-	cursor    *int64
-	maxAge    time.Duration
-	limit     int32
+	entry  *catalogEntry
+	repo   string
+	query  PollQuery
+	cursor *int64
+	maxAge time.Duration
+	limit  int32
 }
 
 func parsePoll(p *eventsPollParams) (pollRequest, error) {
 	if p == nil || p.Name == "" {
 		return pollRequest{}, invalidParams("name is required")
 	}
-	t, err := eventByName(p.Name)
+	entry, err := eventByName(p.Name)
 	if err != nil {
 		return pollRequest{}, err
 	}
-	args, err := parsePollArguments(t.resolvedInput, p.Arguments)
+	args, err := parsePollArguments(entry.input, p.Arguments)
 	if err != nil {
 		return pollRequest{}, err
 	}
 	req := pollRequest{
-		eventType: t,
-		repo:      args.Repo,
-		query:     PollQuery{Types: []string{t.name}, HeadSHA: strings.ToLower(args.SHA), PR: args.PR},
-		limit:     pageLimit,
+		entry: entry,
+		repo:  args.Repo,
+		query: PollQuery{Types: entry.types(args.Actions), HeadSHA: strings.ToLower(args.SHA), PR: args.PR},
+		limit: pageLimit,
 	}
 	if p.Cursor != nil {
 		id, ok := decodeCursor(*p.Cursor)
@@ -176,14 +176,14 @@ func parsePoll(p *eventsPollParams) (pollRequest, error) {
 	return req, nil
 }
 
-func eventByName(name string) (eventType, error) {
-	t, ok := lookupEventType(name)
+func eventByName(name string) (*catalogEntry, error) {
+	entry, ok := lookupEntry(name)
 	if !ok {
-		return eventType{}, rpcError(codeNotFound,
-			fmt.Sprintf("unknown event type %q, the types are: %s", name, strings.Join(eventTypes(), ", ")),
+		return nil, rpcError(codeNotFound,
+			fmt.Sprintf("unknown event type %q, the types are: %s", name, strings.Join(catalogNames(), ", ")),
 			map[string]string{"kind": "event"})
 	}
-	return t, nil
+	return entry, nil
 }
 
 func parsePollArguments(input *jsonschema.Resolved, raw json.RawMessage) (pollArguments, error) {
@@ -211,7 +211,7 @@ func (s *Service) pollEventsMethod(ctx context.Context, _ *mcp.ServerSession, p 
 	if err != nil {
 		return nil, err
 	}
-	logger := s.logger.With(slog.F("repo", req.repo), slog.F("event", req.eventType.name))
+	logger := s.logger.With(slog.F("repo", req.repo), slog.F("event", req.entry.name))
 
 	repoID, err := s.authorize(ctx, logger, "poll", req.repo)
 	if err != nil {
@@ -254,7 +254,7 @@ func (s *Service) readEvents(ctx context.Context, req pollRequest) (*eventsPollR
 	}
 	occurrences := make([]eventOccurrence, len(events))
 	for i, ev := range events {
-		if occurrences[i], err = occurrenceOf(ev); err != nil {
+		if occurrences[i], err = occurrenceOf(req.entry.name, ev); err != nil {
 			return nil, err
 		}
 	}
@@ -289,9 +289,10 @@ func newPollResult(events []eventOccurrence, cursor int64, truncated, hasMore bo
 	}
 }
 
-// occurrenceOf adds the pull request numbers and the head SHA to the data,
+// occurrenceOf names the event by the name it was asked for. It adds the pull
+// request numbers, the head SHA, the stored type and its action to the data,
 // because the store keeps them in columns and the payload schemas list them.
-func occurrenceOf(ev Event) (eventOccurrence, error) {
+func occurrenceOf(name string, ev Event) (eventOccurrence, error) {
 	var data map[string]json.RawMessage
 	if err := json.Unmarshal(ev.Data, &data); err != nil || data == nil {
 		return eventOccurrence{}, xerrors.Errorf("data of event %d is not a JSON object", ev.ID)
@@ -304,9 +305,15 @@ func occurrenceOf(ev Event) (eventOccurrence, error) {
 	if ev.HeadSHA != "" {
 		data["head_sha"] = marshalRaw(ev.HeadSHA)
 	}
+	data["event"] = marshalRaw(ev.Type)
+	// A type that this build does not know comes from a newer build during a
+	// rolling deploy, through the stored types of a subscription it renewed.
+	if t, ok := storedTypes[ev.Type]; ok {
+		data["action"] = marshalRaw(t.action)
+	}
 	return eventOccurrence{
 		EventID:   ev.DeliveryID,
-		Name:      ev.Type,
+		Name:      name,
 		Timestamp: ev.ReceivedAt.UTC(),
 		Data:      marshalRaw(data),
 	}, nil

@@ -147,6 +147,8 @@ export interface SubscriptionRow {
   principal: string;
   callback_url: string;
   event_type: string;
+  // event_types are the stored event types that event_type matched at the last subscribe.
+  event_types: string[];
   arguments: Record<string, unknown>;
   repo_id: number;
   secret_enc: string;
@@ -470,7 +472,7 @@ export class Faucet {
     if (!/^[0-9a-z-]{8,}$/.test(marker)) throw new Error('marker must be 8 or more lowercase letters, digits or hyphens');
     const ms = (column: string): string => `floor(extract(epoch from ${column}) * 1000)::bigint as ${column}`;
     const query = `select coalesce(json_agg(t order by created_at, callback_url), '[]') from (
-      select encode(key_hash, 'hex') as key_hash, principal, callback_url, event_type, arguments, repo_id,
+      select encode(key_hash, 'hex') as key_hash, principal, callback_url, event_type, event_types, arguments, repo_id,
         encode(secret_enc, 'hex') as secret_enc, encode(previous_secret_enc, 'hex') as previous_secret_enc, ${ms('previous_secret_until')},
         cursor, ${ms('created_at')}, ${ms('updated_at')}, ${ms('expires_at')}
       from faucet_subscriptions where position('${marker}' in callback_url) > 0) t`;

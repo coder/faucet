@@ -36,7 +36,8 @@ var (
 
 type waitInput struct {
 	Repo     string   `json:"repo" jsonschema:"the repository, written owner/name"`
-	Types    []string `json:"types" jsonschema:"the event types to wait for, at least one"`
+	Types    []string `json:"types" jsonschema:"the event names to wait for, at least one: a family such as pr.activity or an exact type such as pr.closed"`
+	Actions  []string `json:"actions,omitempty" jsonschema:"only events of these GitHub actions, such as closed, from the families in types; each must be an action of one of them, and exact types are not narrowed"`
 	SHA      string   `json:"sha,omitempty" jsonschema:"only events for this 40 character head commit SHA"`
 	PR       int32    `json:"pr,omitempty" jsonschema:"only events that mention this pull request number"`
 	Cursor   *int64   `json:"cursor,omitempty" jsonschema:"return events after this cursor, which is the cursor of an earlier result"`
@@ -75,25 +76,16 @@ type waitOutput struct {
 // matches only a new filter is never returned. Without a cursor it starts at
 // the present, or ten minutes back when sha is set.
 func (s *Service) Register(srv *mcp.Server) {
-	types := eventTypes()
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: toolName,
 		Description: "Wait for GitHub events on a repository, such as a CI run finishing or a pull request review, " +
 			"and return them as soon as they arrive. Returns no events and a cursor when timeout_s runs out; " +
 			"call again with that cursor and the same repo and filters to keep waiting. When truncated is true, a retention purge deleted events after " +
-			"the cursor you passed, so some may be missing. Event types: " + strings.Join(types, ", ") + ".",
+			"the cursor you passed, so some may be missing. Event names: " + strings.Join(catalogNames(), ", ") + ". " +
+			"A family such as pr.activity covers every action of one GitHub event, and actions narrows the families in types. Each event's type is its exact type, such as pr.closed.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, Title: "Wait for GitHub events"},
 	}, s.waitForEvents)
 	s.registerEvents(srv)
-}
-
-func eventTypes() []string {
-	types := make([]string, 0, len(rules))
-	for _, r := range rules {
-		types = append(types, r.eventType)
-	}
-	slices.Sort(types)
-	return slices.Compact(types)
 }
 
 type waitRequest struct {
@@ -106,19 +98,30 @@ func (in waitInput) parse() (waitRequest, error) {
 	if _, _, err := githubapi.ParseRepo(in.Repo); err != nil {
 		return waitRequest{}, err
 	}
-	known := eventTypes()
 	if len(in.Types) == 0 {
-		return waitRequest{}, xerrors.Errorf("types must name at least one of: %s", strings.Join(known, ", "))
+		return waitRequest{}, xerrors.Errorf("types must name at least one of: %s", strings.Join(catalogNames(), ", "))
 	}
-	for _, t := range in.Types {
-		if !slices.Contains(known, t) {
-			return waitRequest{}, xerrors.Errorf("unknown type %q, the types are: %s", t, strings.Join(known, ", "))
+	entries := make([]*catalogEntry, len(in.Types))
+	for i, name := range in.Types {
+		entry, ok := lookupEntry(name)
+		if !ok {
+			return waitRequest{}, xerrors.Errorf("unknown type %q, the types are: %s", name, strings.Join(catalogNames(), ", "))
 		}
+		entries[i] = entry
+	}
+	for _, action := range in.Actions {
+		if !slices.ContainsFunc(entries, func(e *catalogEntry) bool { return e.hasAction(action) }) {
+			return waitRequest{}, xerrors.Errorf("action %q is not an action of any family in types", action)
+		}
+	}
+	var types []string
+	for _, entry := range entries {
+		types = append(types, entry.types(in.Actions)...)
 	}
 	if in.SHA != "" && !shaPattern.MatchString(in.SHA) {
 		return waitRequest{}, xerrors.New("sha must be 40 hexadecimal characters")
 	}
-	if in.SHA != "" && !slices.ContainsFunc(in.Types, func(name string) bool { t, _ := lookupEventType(name); return !t.noHeadSHA }) {
+	if in.SHA != "" && !slices.ContainsFunc(types, func(t string) bool { return !storedTypes[t].family.noHeadSHA }) {
 		return waitRequest{}, xerrors.New("sha matches none of these types, because they carry no head commit; filter by pr")
 	}
 	if in.PR < 0 {
@@ -135,7 +138,6 @@ func (in waitInput) parse() (waitRequest, error) {
 		return waitRequest{}, xerrors.Errorf("timeout_s must be from 1 to %d", maxWaitSeconds)
 	}
 
-	types := slices.Clone(in.Types)
 	slices.Sort(types)
 	return waitRequest{
 		query: PollQuery{

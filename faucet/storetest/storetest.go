@@ -799,6 +799,7 @@ func newSubscription(principal, callbackURL string, expiresAt time.Time) faucet.
 		Principal:   principal,
 		CallbackURL: callbackURL,
 		EventType:   eventType,
+		EventTypes:  []string{eventType},
 		Arguments:   arguments,
 		RepoID:      42,
 		SecretEnc:   []byte("sealed-1"),
@@ -822,6 +823,7 @@ func upsertSubscriptionStoresThenRefreshes(t *testing.T, s faucet.Store) {
 	require.Equal(t, sub.Principal, stored.Principal)
 	require.Equal(t, sub.CallbackURL, stored.CallbackURL)
 	require.Equal(t, sub.EventType, stored.EventType)
+	require.Equal(t, sub.EventTypes, stored.EventTypes)
 	require.JSONEq(t, string(sub.Arguments), string(stored.Arguments))
 	require.EqualValues(t, 42, stored.RepoID)
 	require.Equal(t, []byte("sealed-1"), stored.SecretEnc)
@@ -835,11 +837,13 @@ func upsertSubscriptionStoresThenRefreshes(t *testing.T, s faucet.Store) {
 	refresh.RepoID = 43
 	refresh.SecretEnc = []byte("sealed-2")
 	refresh.Cursor = 99
+	refresh.EventTypes = []string{"ci.run_completed", "ci.run_requested"}
 	refresh.ExpiresAt = later.Add(5 * time.Minute)
 	again, err := s.UpsertSubscription(ctx, refresh, later, 10)
 	require.NoError(t, err)
 	require.EqualValues(t, 43, again.RepoID, "a refresh replaces the repository")
 	require.Equal(t, []byte("sealed-2"), again.SecretEnc, "a refresh replaces the sealed secret")
+	require.Equal(t, refresh.EventTypes, again.EventTypes, "a refresh replaces the stored event types")
 	require.True(t, refresh.ExpiresAt.Equal(again.ExpiresAt), "a refresh sets the new expiry, even a shorter one")
 	require.True(t, later.Equal(again.UpdatedAt))
 	require.True(t, now.Equal(again.CreatedAt), "a refresh keeps created_at")
@@ -1149,6 +1153,8 @@ func upsertSubscriptionValidatesInput(t *testing.T, s faucet.Store) {
 		"empty principal":      func(sub *faucet.Subscription) { sub.Principal = "" },
 		"empty callback URL":   func(sub *faucet.Subscription) { sub.CallbackURL = "" },
 		"empty event type":     func(sub *faucet.Subscription) { sub.EventType = "" },
+		"no stored types":      func(sub *faucet.Subscription) { sub.EventTypes = nil },
+		"empty stored type":    func(sub *faucet.Subscription) { sub.EventTypes = []string{"ci.run_completed", ""} },
 		"arguments not object": func(sub *faucet.Subscription) { sub.Arguments = json.RawMessage(`[1]`) },
 		"arguments not JSON":   func(sub *faucet.Subscription) { sub.Arguments = json.RawMessage(`{"repo":`) },
 		"zero repo ID":         func(sub *faucet.Subscription) { sub.RepoID = 0 },

@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from 'node:timers/promises';
-import { samples, type Sample } from './payloads';
+import { dataOf, recorded, samples, type Sample } from './payloads';
 import { appLog, describe, expect, newDeliveryId, newRepoId, test, type Faucet, type McpOptions, type McpReply } from './support';
 
 const run = samples['workflow_run.completed'];
@@ -68,10 +68,6 @@ function ids(result: PollResult): string[] {
   return result.events.map((e) => e.eventId);
 }
 
-function dataOf(sample: Sample): Record<string, unknown> {
-  const { prs, headSha, data } = sample.expected;
-  return headSha === null ? { ...data, prs } : { ...data, prs, head_sha: headSha };
-}
 
 describe('events poll', () => {
   test('a poll without a cursor returns no events and a cursor, and does not replay earlier events', async ({ faucet }) => {
@@ -129,6 +125,60 @@ describe('events poll', () => {
       const result = polled.get(type);
       expect(result?.events.map((e) => [e.eventId, e.name]), type).toEqual([[deliveries.get(type), type]]);
       expect(result?.events[0]?.data, `${type} data`).toEqual(dataOf(sample));
+    }
+  });
+
+  test('each family is polled under its own name with the data of every type in it', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const cursor = await startCursor(faucet, repoId);
+    const deliveries = new Map<string, string>();
+    for (const sample of Object.values(samples)) {
+      deliveries.set(sample.expected.family, await deliverSample(faucet, sample, repoId));
+    }
+
+    for (const sample of Object.values(samples)) {
+      const { family } = sample.expected;
+      const result = await pollRepo(faucet, family, repoId, { cursor });
+      expect(result.events.map((e) => [e.eventId, e.name]), family).toEqual([[deliveries.get(family), family]]);
+      expect(result.events[0]?.data, `${family} data`).toEqual(dataOf(sample));
+    }
+  });
+
+  test('a recorded pull request webhook is polled under pr.activity and pr.closed with its exact type and action', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const cursor = await startCursor(faucet, repoId);
+    const delivery = newDeliveryId();
+    const stored = await faucet.deliver({ event: 'pull_request', delivery, body: JSON.stringify(recorded('pull_request_closed', repoId)) });
+    expect(stored.body).toBe('stored\n');
+
+    const family = await pollRepo(faucet, 'pr.activity', repoId, { cursor });
+    const legacy = await pollRepo(faucet, 'pr.closed', repoId, { cursor });
+
+    expect(family.events.map((e) => [e.eventId, e.name])).toEqual([[delivery, 'pr.activity']]);
+    expect(legacy.events.map((e) => [e.eventId, e.name])).toEqual([[delivery, 'pr.closed']]);
+    expect(family.events[0]?.data).toMatchObject({ event: 'pr.closed', action: 'closed', merged: false, prs: [2] });
+    expect(legacy.events[0]?.data).toEqual(family.events[0]?.data);
+  });
+
+  test('actions narrow a family, and an action outside it or on an exact type is -32602', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const repo = repoOf(repoId);
+    const cursor = await startCursor(faucet, repoId);
+    const delivery = newDeliveryId();
+    const stored = await faucet.deliver({ event: 'pull_request', delivery, body: JSON.stringify(recorded('pull_request_closed', repoId)) });
+    expect(stored.body).toBe('stored\n');
+
+    const narrowed = await pollRepo(faucet, 'pr.activity', repoId, { cursor }, { actions: ['closed'] });
+    expect(narrowed.events.map((e) => [e.eventId, e.name, e.data.event, e.data.action])).toEqual([[delivery, 'pr.activity', 'pr.closed', 'closed']]);
+
+    for (const [name, actions] of [
+      ['pr.activity', ['completed']],
+      ['pr.activity', []],
+      ['pr.closed', ['closed']],
+    ] as const) {
+      const reply = await poll(faucet, name, { repo, actions }, { cursor }, { name });
+      expect(reply.status, `${name} ${JSON.stringify(actions)}`).toBe(400);
+      expect(reply.error?.code, `${name} ${JSON.stringify(actions)}`).toBe(-32602);
     }
   });
 

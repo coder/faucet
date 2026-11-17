@@ -25,7 +25,7 @@ WHERE s.scanned_through < doomed.mark
   AND s.scanned_through >= (SELECT purged_through FROM faucet_purge_mark)
   AND NOT EXISTS (
     SELECT 1 FROM faucet_events e
-    WHERE e.repo_id = s.repo_id AND e.type = s.event_type AND e.id > s.scanned_through AND e.id <= doomed.mark
+    WHERE e.repo_id = s.repo_id AND e.type = ANY(s.event_types) AND e.id > s.scanned_through AND e.id <= doomed.mark
   )
 `
 
@@ -128,7 +128,7 @@ func (q *Queries) DeleteExpiredSubscriptionsOf(ctx context.Context, arg DeleteEx
 const deleteLiveSubscription = `-- name: DeleteLiveSubscription :one
 DELETE FROM faucet_subscriptions
 WHERE key_hash = $1 AND principal = $2 AND expires_at > $3
-RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until, gap_through, gap_lease_until
+RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until, gap_through, gap_lease_until, event_types
 `
 
 type DeleteLiveSubscriptionParams struct {
@@ -160,6 +160,7 @@ func (q *Queries) DeleteLiveSubscription(ctx context.Context, arg DeleteLiveSubs
 		&i.PreviousSecretUntil,
 		&i.GapThrough,
 		&i.GapLeaseUntil,
+		pq.Array(&i.EventTypes),
 	)
 	return i, err
 }
@@ -430,36 +431,38 @@ func (q *Queries) RaisePurgeMark(ctx context.Context, through int64) (int64, err
 }
 
 const upsertSubscription = `-- name: UpsertSubscription :one
-INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, scanned_through, created_at, updated_at, expires_at)
+INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, event_types, arguments, repo_id, secret_enc, cursor, scanned_through, created_at, updated_at, expires_at)
 VALUES (
   $1,
   $2,
   $3,
   $4,
-  $5::text::jsonb,
-  $6,
+  $5::text[],
+  $6::text::jsonb,
   $7,
   $8,
-  $8,
   $9,
   $9,
-  $10
+  $10,
+  $10,
+  $11
 )
 ON CONFLICT (key_hash) DO UPDATE SET
+  event_types = EXCLUDED.event_types,
   repo_id = EXCLUDED.repo_id,
   previous_secret_enc = CASE
     WHEN faucet_subscriptions.secret_enc = EXCLUDED.secret_enc THEN faucet_subscriptions.previous_secret_enc
-    WHEN $11::timestamptz IS NULL THEN NULL
+    WHEN $12::timestamptz IS NULL THEN NULL
     ELSE faucet_subscriptions.secret_enc
   END,
   previous_secret_until = CASE
     WHEN faucet_subscriptions.secret_enc = EXCLUDED.secret_enc THEN faucet_subscriptions.previous_secret_until
-    ELSE $11::timestamptz
+    ELSE $12::timestamptz
   END,
   secret_enc = EXCLUDED.secret_enc,
   updated_at = EXCLUDED.updated_at,
   expires_at = EXCLUDED.expires_at
-RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until, gap_through, gap_lease_until
+RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until, gap_through, gap_lease_until, event_types
 `
 
 type UpsertSubscriptionParams struct {
@@ -467,6 +470,7 @@ type UpsertSubscriptionParams struct {
 	Principal           string
 	CallbackUrl         string
 	EventType           string
+	EventTypes          []string
 	Arguments           string
 	RepoID              int64
 	SecretEnc           []byte
@@ -482,6 +486,7 @@ func (q *Queries) UpsertSubscription(ctx context.Context, arg UpsertSubscription
 		arg.Principal,
 		arg.CallbackUrl,
 		arg.EventType,
+		pq.Array(arg.EventTypes),
 		arg.Arguments,
 		arg.RepoID,
 		arg.SecretEnc,
@@ -511,6 +516,7 @@ func (q *Queries) UpsertSubscription(ctx context.Context, arg UpsertSubscription
 		&i.PreviousSecretUntil,
 		&i.GapThrough,
 		&i.GapLeaseUntil,
+		pq.Array(&i.EventTypes),
 	)
 	return i, err
 }

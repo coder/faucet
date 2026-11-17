@@ -88,4 +88,5 @@ type FaucetSubscription struct {
 	PreviousSecretUntil sql.NullTime
 	GapThrough          int64
 	GapLeaseUntil       sql.NullTime
+	EventTypes          []string
 }
