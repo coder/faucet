@@ -19,6 +19,9 @@ var rawDeliverySubtests = []rawSubtest{
 	{"FinishRawDeliveryRefusesAnAttemptThatIsNotTheCurrentOne", finishRawDeliveryRefusesAnAttemptThatIsNotTheCurrentOne},
 	{"ClaimRawDeliveryPassesOverTheOriginsItIsToldTo", claimRawDeliveryPassesOverTheOriginsItIsToldTo},
 	{"FinishRawDeliveryDeadDeletesTheSubscriptionOnlyForTheSameSealedSecret", finishRawDeliveryDeadDeletesTheSubscriptionOnlyForTheSameSealedSecret},
+	{"ClaimRawDeliveryNeedsALiveSubscription", claimRawDeliveryNeedsALiveSubscription},
+	{"ClaimRawDeliveryGivesASubscriptionMadeAgainOnlyItsOwnDeliveries", claimRawDeliveryGivesASubscriptionMadeAgainOnlyItsOwnDeliveries},
+	{"ClaimRawDeliveryReturnsNoEventAfterAPurge", claimRawDeliveryReturnsNoEventAfterAPurge},
 }
 
 // deliveryOf returns the claim of the subscription's delivery of the raw ID.
@@ -294,4 +297,77 @@ func finishRawDeliveryDeadDeletesTheSubscriptionOnlyForTheSameSealedSecret(t *te
 	for _, c := range claims {
 		require.Equal(t, kept.KeyHash, c.Ref.Key)
 	}
+}
+
+// deliveryRemake deletes the nth raw subscription, moves the rig a second on
+// and makes the subscription again, which is a new incarnation.
+func (r *rawRig) deliveryRemake(n int, w rawSpec) faucet.Subscription {
+	r.t.Helper()
+	old := newRawSubscription(n, w, r.now)
+	deleted, err := r.s.DeleteSubscription(r.ctx, old.Principal, old.KeyHash)
+	require.NoError(r.t, err)
+	require.True(r.t, deleted)
+	r.now = r.now.Add(time.Second)
+	return r.subscribe(n, w)
+}
+
+func claimRawDeliveryNeedsALiveSubscription(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	gone, expiring := r.subscribe(1, rawSpec{}), r.subscribe(2, rawSpec{})
+	r.push()
+	deleted, err := s.DeleteSubscription(r.ctx, gone.Principal, gone.KeyHash)
+	require.NoError(t, err)
+	require.True(t, deleted)
+
+	_, ok := r.claim(expiring.ExpiresAt)
+	require.False(t, ok, "a subscription that expired at now gets no delivery, and a deleted one none at all")
+	claim := r.mustClaim(expiring.ExpiresAt.Add(-time.Second))
+	require.Equal(t, expiring.KeyHash, claim.Ref.Key, "a subscription that is live at now gets its delivery")
+	_, ok = r.claim(expiring.ExpiresAt.Add(-time.Second))
+	require.False(t, ok, "the deleted subscription's delivery is never claimed")
+}
+
+func claimRawDeliveryGivesASubscriptionMadeAgainOnlyItsOwnDeliveries(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	r.subscribe(1, rawSpec{})
+	r.push()
+	remade := r.deliveryRemake(1, rawSpec{})
+	id := r.push()
+
+	claims := r.claimAll(r.now)
+	require.Len(t, claims, 1, "the old incarnation's delivery is never claimed")
+	require.Equal(t, id, claims[0].Ref.EventID, "the new incarnation gets the events ingested after it was made")
+	require.True(t, remade.CreatedAt.Equal(claims[0].Ref.Incarnation), "got %s", claims[0].Ref.Incarnation)
+	require.Equal(t, id-1, claims[0].Watermark, "the old incarnation's delivery does not hold the new one's watermark back")
+	_, ok := r.claim(r.now.Add(testLease))
+	require.True(t, ok, "the new incarnation's delivery is claimable again after the lease")
+	_, ok = r.claim(r.now.Add(testLease))
+	require.False(t, ok, "and nothing else is")
+}
+
+func claimRawDeliveryReturnsNoEventAfterAPurge(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	r.subscribe(1, rawSpec{})
+	cleared := r.push()
+	time.Sleep(2 * time.Millisecond)
+	deleted := r.push()
+	claims := r.claimAll(r.now)
+	require.Equal(t, []int64{cleared, deleted}, deliveryRefIDs(claims))
+	require.NotNil(t, claims[0].Event)
+	require.NotNil(t, claims[1].Event)
+	clearedAt, deletedAt := claims[0].Event.ReceivedAt, claims[1].Event.ReceivedAt
+	require.True(t, clearedAt.Before(deletedAt), "the events were received apart")
+
+	res := r.purge(faucet.RawPurge{Now: r.now, ClearBefore: deletedAt})
+	require.EqualValues(t, 1, res.Cleared)
+	claims = r.claimAll(r.now.Add(testLease))
+	require.Equal(t, []int64{cleared, deleted}, deliveryRefIDs(claims), "a purge ends no delivery")
+	require.Nil(t, claims[0].Event, "the claim of an event whose body is cleared carries no event")
+	require.NotNil(t, claims[1].Event, "the later event keeps its body")
+
+	res = r.purge(faucet.RawPurge{Now: r.now, DeleteBefore: deletedAt.Add(time.Millisecond)})
+	require.EqualValues(t, 2, res.Deleted)
+	claims = r.claimAll(r.now.Add(2 * testLease))
+	require.Equal(t, []int64{cleared, deleted}, deliveryRefIDs(claims))
+	require.Nil(t, claims[1].Event, "the claim of a deleted event carries no event")
 }
