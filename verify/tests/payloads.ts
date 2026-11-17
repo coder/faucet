@@ -41,8 +41,8 @@ export function closedPullRequest(repoId: number): object {
       merged: true,
       merge_commit_sha: MERGE_SHA,
       user: { login: 'author', id: 3 },
-      head: { ref: 'feat/example', sha: HEAD_SHA },
-      base: { ref: 'main', sha: BASE_SHA },
+      head: { ref: 'feat/example', sha: HEAD_SHA, repo: { id: repoId } },
+      base: { ref: 'main', sha: BASE_SHA, repo: { id: repoId } },
     },
     sender: { login: 'octocat', id: 1 },
   };
@@ -61,6 +61,7 @@ export const samples: Record<string, Sample> = {
         status: 'completed',
         conclusion: 'success',
         head_branch: 'feat/example',
+        head_repository: { id: repoId },
         head_sha: HEAD_SHA,
         event: 'pull_request',
         html_url: 'https://github.com/example/repo/actions/runs/9001',
@@ -82,6 +83,7 @@ export const samples: Record<string, Sample> = {
         conclusion: 'success',
         head_branch: 'feat/example',
         trigger_event: 'pull_request',
+        from_fork: false,
         html_url: 'https://github.com/example/repo/actions/runs/9001',
         run_attempt: 2,
         workflow_id: 9100,
@@ -180,6 +182,7 @@ export const samples: Record<string, Sample> = {
         draft: false,
         base_branch: 'main',
         head_branch: 'feat/example',
+        from_fork: false,
         author_login: 'author',
         sender_login: 'octocat',
         sender_id: 1,
@@ -225,6 +228,7 @@ const RECORDED_PR = {
   merged: false,
   base_branch: 'master',
   head_branch: 'changes',
+  from_fork: false,
   author_login: 'Codertocat',
   sender_login: 'Codertocat',
   sender_id: 21031067,
@@ -342,6 +346,7 @@ export const recordedSamples: Record<string, Sample> = {
         status: 'queued',
         conclusion: null,
         head_branch: 'master',
+        from_fork: false,
         trigger_event: 'repository_dispatch',
         html_url: 'https://github.com/octo-org/octo-repo/actions/runs/289782451',
         run_attempt: 1,
@@ -476,10 +481,17 @@ export function dataOf(sample: Sample): Record<string, unknown> {
 }
 
 // recorded is a GitHub webhook payload that octokit/webhooks recorded, from faucet/testdata, sent for repository repoId.
+// A head repository that was the recorded repository becomes repoId too, so the head stays in the repository.
 export function recorded(name: string, repoId: number): object {
   const payload = JSON.parse(readFileSync(new URL(`../../faucet/testdata/${name}.json`, import.meta.url), 'utf8')) as {
     repository: { id: number };
+    pull_request?: { head: { repo: { id: number } | null } };
+    workflow_run?: { head_repository: { id: number } };
   };
+  const recordedId = payload.repository.id;
+  for (const head of [payload.pull_request?.head.repo, payload.workflow_run?.head_repository]) {
+    if (head?.id === recordedId) head.id = repoId;
+  }
   payload.repository.id = repoId;
   return payload;
 }

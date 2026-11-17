@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -492,19 +491,19 @@ func parseSubscriptionName(rawName, arguments json.RawMessage, input func(*catal
 }
 
 // canonicalArguments is the one JSON spelling of args. Fields come in struct
-// order without spaces and actions sorted once each, so two requests that
-// differ only in key order, whitespace or the order and repeats of actions
-// address the same subscription. Arguments without actions keep the spelling
-// they had before actions existed, and so keep their key.
+// order without spaces, and each list of actions or field values sorted once
+// each, so two requests that differ only in key order, whitespace or the order
+// and repeats of a list address the same subscription. Arguments without
+// actions and field filters keep the spelling they had before those existed,
+// and so keep their key.
 func canonicalArguments(args pollArguments) json.RawMessage {
-	actions := slices.Clone(args.Actions)
-	slices.Sort(actions)
 	return marshalRaw(struct {
 		Repo    string   `json:"repo"`
 		SHA     string   `json:"sha,omitempty"`
 		PR      int32    `json:"pr,omitempty"`
 		Actions []string `json:"actions,omitempty"`
-	}{args.Repo, args.SHA, args.PR, slices.Compact(actions)})
+		fieldArguments
+	}{args.Repo, args.SHA, args.PR, sortedSet(args.Actions), args.canonical()})
 }
 
 type deliveryParams struct {

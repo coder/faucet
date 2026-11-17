@@ -128,9 +128,14 @@ func TestTheExactTypeOfAnActionFollowsTheNamingRule(t *testing.T) {
 // an event of repository repoID.
 func storeDelivery(ctx context.Context, t *testing.T, store faucet.Store, event, fixtureName, guid string) faucet.Event {
 	t.Helper()
-	ev, err := faucet.Normalize(event, fixture(t, fixtureName), guid)
+	return storePayload(ctx, t, store, event, fixture(t, fixtureName), guid)
+}
+
+func storePayload(ctx context.Context, t *testing.T, store faucet.Store, event string, payload []byte, guid string) faucet.Event {
+	t.Helper()
+	ev, err := faucet.Normalize(event, payload, guid)
 	require.NoError(t, err)
-	require.NotNil(t, ev, fixtureName)
+	require.NotNil(t, ev, guid)
 	ev.RepoID = repoID
 	stored, inserted, err := store.InsertEvent(ctx, *ev)
 	require.NoError(t, err)
@@ -329,7 +334,7 @@ func TestASubscriptionNarrowedByActionsIsDeliveredOnlyThoseActions(t *testing.T)
 	require.Equal(t, "closed", body.Data["action"])
 }
 
-func TestWaitWithActionsNarrowsTheFamiliesInTypes(t *testing.T) {
+func TestWaitWithActionsNarrowsOnlyTheFamiliesThatHaveThem(t *testing.T) {
 	t.Parallel()
 
 	h := newWaitHarness(t)
@@ -346,8 +351,8 @@ func TestWaitWithActionsNarrowsTheFamiliesInTypes(t *testing.T) {
 		return got
 	}
 
-	require.Equal(t, []int64{closed.ID}, ids([]string{"pr.activity", "ci.runs"}, []string{"closed"}),
-		"closed narrows pr.activity, and ci.runs has no such action")
+	require.Equal(t, []int64{closed.ID, run.ID}, ids([]string{"pr.activity", "ci.runs"}, []string{"closed"}),
+		"closed narrows pr.activity, and ci.runs, which has no such action, stays whole")
 	require.Equal(t, []int64{closed.ID, run.ID}, ids([]string{"pr.activity", "ci.runs"}, []string{"closed", "completed"}))
 	require.Equal(t, []int64{closed.ID, run.ID}, ids([]string{"pr.activity", "ci.run_completed"}, []string{"closed"}),
 		"actions do not narrow an exact type")

@@ -64,7 +64,7 @@ describe('wait tool', () => {
     expect(outcome.events?.[0]).toMatchObject({ repo_id: repoId, prs: [2], data: { merged: false } });
   });
 
-  test('actions narrow the families in types, and an action of none of them is a tool error', async ({ faucet }) => {
+  test('actions narrow only the families in types that have them, and an action of none of them is a tool error', async ({ faucet }) => {
     const repoId = newRepoId();
     const repo = repoOf(repoId);
     const idle = await faucet.waitForEvents({ repo, types: ['pr.activity'], timeout_s: 1 });
@@ -76,7 +76,7 @@ describe('wait tool', () => {
     const refused = await faucet.waitForEvents({ repo, types: ['ci.runs'], actions: ['closed'], cursor: idle.cursor, timeout_s: 1 });
 
     expect(narrowed.isError).toBe(false);
-    expect(narrowed.events?.map((e) => e.type)).toEqual(['pr.closed']);
+    expect(narrowed.events?.map((e) => e.type), 'ci.runs has no closed action, so it stays whole').toEqual(['ci.run_completed', 'pr.closed']);
     expect(refused.isError).toBe(true);
     expect(refused.text).toContain('action "closed"');
   });

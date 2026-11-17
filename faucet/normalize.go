@@ -231,17 +231,18 @@ type workflowRunPayload struct {
 	Repository  repoRef `json:"repository"`
 	Sender      user    `json:"sender"`
 	WorkflowRun struct {
-		ID           int64   `json:"id"`
-		Name         string  `json:"name"`
-		Status       string  `json:"status"`
-		Conclusion   *string `json:"conclusion"`
-		HeadBranch   string  `json:"head_branch"`
-		HeadSHA      string  `json:"head_sha"`
-		Event        string  `json:"event"`
-		HTMLURL      string  `json:"html_url"`
-		RunAttempt   int32   `json:"run_attempt"`
-		WorkflowID   int64   `json:"workflow_id"`
-		PullRequests []prRef `json:"pull_requests"`
+		ID             int64   `json:"id"`
+		Name           string  `json:"name"`
+		Status         string  `json:"status"`
+		Conclusion     *string `json:"conclusion"`
+		HeadBranch     string  `json:"head_branch"`
+		HeadRepository repoRef `json:"head_repository"`
+		HeadSHA        string  `json:"head_sha"`
+		Event          string  `json:"event"`
+		HTMLURL        string  `json:"html_url"`
+		RunAttempt     int32   `json:"run_attempt"`
+		WorkflowID     int64   `json:"workflow_id"`
+		PullRequests   []prRef `json:"pull_requests"`
 	} `json:"workflow_run"`
 }
 
@@ -256,6 +257,7 @@ func workflowRun(p workflowRunPayload) (fields, bool) {
 			"status":        r.Status,
 			"conclusion":    r.Conclusion,
 			"head_branch":   r.HeadBranch,
+			"from_fork":     r.HeadRepository.ID != p.Repository.ID,
 			"trigger_event": r.Event,
 			"html_url":      r.HTMLURL,
 			"run_attempt":   r.RunAttempt,
@@ -451,7 +453,8 @@ func review(p reviewPayload) (fields, bool) {
 }
 
 type pullRequestPayload struct {
-	Number      int32 `json:"number"`
+	Number      int32   `json:"number"`
+	Repository  repoRef `json:"repository"`
 	PullRequest struct {
 		HTMLURL        string    `json:"html_url"`
 		Title          string    `json:"title"`
@@ -483,6 +486,8 @@ type pullRequestPayload struct {
 type branchRef struct {
 	Ref string `json:"ref"`
 	SHA string `json:"sha"`
+	// Repo is null when the repository was deleted.
+	Repo *repoRef `json:"repo"`
 }
 
 // pullRequestExtra adds to the data the fields that GitHub sends with some
@@ -502,6 +507,7 @@ func pullRequest(extras ...pullRequestExtra) func(pullRequestPayload) (fields, b
 			"merged":       pr.Merged,
 			"base_branch":  pr.Base.Ref,
 			"head_branch":  pr.Head.Ref,
+			"from_fork":    pr.Head.Repo == nil || pr.Head.Repo.ID != p.Repository.ID,
 			"author_login": pr.User.Login,
 		}, p.Sender)
 		for _, extra := range extras {

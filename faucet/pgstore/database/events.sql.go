@@ -339,8 +339,12 @@ WITH mark AS (
     AND (cardinality($3::text[]) = 0 OR e.type = ANY($3::text[]))
     AND ($4::text = '' OR e.head_sha = $4::text)
     AND ($5::int = 0 OR $5::int = ANY(e.prs))
+    AND NOT EXISTS (
+      SELECT 1 FROM jsonb_to_recordset($6::text::jsonb) AS f(field text, matches text[], types text[])
+      WHERE e.type = ANY(f.types) AND NOT COALESCE(e.data ->> f.field = ANY(f.matches), false)
+    )
   ORDER BY e.id
-  LIMIT $6
+  LIMIT $7
 )
 SELECT
   head.max_id,
@@ -358,6 +362,7 @@ type PollEventsParams struct {
 	Types    []string
 	HeadSha  string
 	Pr       int32
+	Fields   string
 	RowLimit int32
 }
 
@@ -382,6 +387,7 @@ func (q *Queries) PollEvents(ctx context.Context, arg PollEventsParams) ([]PollE
 		pq.Array(arg.Types),
 		arg.HeadSha,
 		arg.Pr,
+		arg.Fields,
 		arg.RowLimit,
 	)
 	if err != nil {
