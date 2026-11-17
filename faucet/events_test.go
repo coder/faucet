@@ -310,7 +310,7 @@ var legacyRequired = map[string][]string{
 }
 
 // noPRNames are the event names whose GitHub events name no pull request.
-var noPRNames = []string{"ci.jobs"}
+var noPRNames = []string{"ci.jobs", "ci.statuses"}
 
 func TestPRFilterIsRefusedForEventsThatNameNoPullRequest(t *testing.T) {
 	t.Parallel()
@@ -426,6 +426,7 @@ func TestPolledDataMatchesThePayloadSchema(t *testing.T) {
 		{"check_run", "check_run_completed"},
 		{"check_run", "check_run_created"},
 		{"check_suite", "check_suite_completed"},
+		{"status", "status_success"},
 		{"pull_request_review", "pull_request_review_submitted"},
 		{"pull_request_review", "pull_request_review_dismissed"},
 		{"pull_request", "pull_request_closed"},

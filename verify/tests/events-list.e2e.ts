@@ -2,10 +2,10 @@ import { describe, expect, newRepoId, test } from './support';
 import { newMarker, subscribe, subscribeParams, unsubscribe } from './subscriptions';
 
 const EVENTS_EXTENSION = 'io.modelcontextprotocol/events';
-const families = ['ci.runs', 'ci.jobs', 'ci.checks', 'ci.suites', 'pr.activity', 'pr.reviews', 'pr.comments', 'pr.review_comments', 'pr.review_threads'];
+const families = ['ci.runs', 'ci.jobs', 'ci.checks', 'ci.suites', 'ci.statuses', 'pr.activity', 'pr.reviews', 'pr.comments', 'pr.review_comments', 'pr.review_threads'];
 const eventNames = [...families, 'ci.check_completed', 'ci.run_completed', 'pr.closed', 'pr.comment_created', 'pr.review_submitted'];
 const noHeadCommit = ['pr.comments', 'pr.comment_created'];
-const noPullRequest = ['ci.jobs'];
+const noPullRequest = ['ci.jobs', 'ci.statuses'];
 const WEBHOOK_UNSUPPORTED = {
   code: -32026,
   message: 'webhook delivery is not supported by this server',

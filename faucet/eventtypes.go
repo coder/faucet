@@ -139,6 +139,21 @@ var families = []*family{
 }`,
 	},
 	{
+		name:        "ci.statuses",
+		githubEvent: "status",
+		description: "Commit statuses, which CI services and apps set on a commit. The action is the state: pending, success, failure or error. GitHub names no pull request in these events, so filter by sha and not by pr.",
+		noPRs:       true,
+		properties: `{
+    "state": {"type": "string", "description": "pending, success, failure or error, the same as action."},
+    "context": {"type": "string", "description": "The name of the status, for example ci/circleci."},
+    "target_url": {"type": ["string", "null"], "description": "The link that the status names, often its CI page."},
+    "branches": {"type": "array", "items": {"type": "string"}, "description": "Up to 10 branches that hold the commit. It need not be their head."},
+    "html_url": {"type": "string", "description": "The commit page."},
+    "sender_login": {"type": "string"},
+    "sender_id": {"type": "integer"}
+}`,
+	},
+	{
 		name:        "pr.activity",
 		githubEvent: "pull_request",
 		description: "Pull requests: every action of GitHub's pull_request event, for example opened, synchronize, labeled or closed.",

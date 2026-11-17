@@ -157,6 +157,16 @@ func TestNormalize(t *testing.T) {
 			wantData: `{"check_suite_id":118578147,"status":"completed","conclusion":"success","head_branch":"changes","app_slug":"","sender_login":"Codertocat","sender_id":21031067}`,
 		},
 		{
+			name:     "StatusWithNoActionIsReadByItsState",
+			event:    "status",
+			fixture:  "status_success",
+			wantType: "ci.status_success",
+			wantRepo: 186853002,
+			wantPRs:  []int32{},
+			wantSHA:  "6113728f27ae82c7b1a177c8d03f9e96e0adf246",
+			wantData: `{"state":"success","context":"default","target_url":null,"branches":["master","changes","gh-pages"],"html_url":"https://github.com/Codertocat/Hello-World/commit/6113728f27ae82c7b1a177c8d03f9e96e0adf246","sender_login":"Codertocat","sender_id":21031067}`,
+		},
+		{
 			name:     "ReviewSubmitted",
 			event:    "pull_request_review",
 			fixture:  "pull_request_review_submitted",
@@ -443,6 +453,9 @@ func TestNormalizeIgnores(t *testing.T) {
 				delete(issue, "pull_request")
 			})
 		}},
+		{"StatusOfAStateGitHubNeverSends", "status", func(t *testing.T) []byte {
+			return mutate(t, "status_success", func(doc map[string]any) { doc["state"] = "exploded" })
+		}},
 		{"UnhandledEventIsNotParsed", "push", func(*testing.T) []byte {
 			return []byte("not json")
 		}},
@@ -467,16 +480,19 @@ func TestNormalizeRejects(t *testing.T) {
 	handled := []struct {
 		event   string
 		fixture string
+		// word is the member that holds the action word.
+		word string
 	}{
-		{"workflow_run", "workflow_run_completed"},
-		{"check_run", "check_run_completed"},
-		{"workflow_job", "workflow_job_queued"},
-		{"check_suite", "check_suite_completed"},
-		{"pull_request_review", "pull_request_review_submitted"},
-		{"pull_request", "pull_request_closed"},
-		{"issue_comment", "issue_comment_created_on_pr"},
-		{"pull_request_review_comment", "pull_request_review_comment_created"},
-		{"pull_request_review_thread", "pull_request_review_thread_resolved"},
+		{"workflow_run", "workflow_run_completed", "action"},
+		{"check_run", "check_run_completed", "action"},
+		{"workflow_job", "workflow_job_queued", "action"},
+		{"check_suite", "check_suite_completed", "action"},
+		{"status", "status_success", "state"},
+		{"pull_request_review", "pull_request_review_submitted", "action"},
+		{"pull_request", "pull_request_closed", "action"},
+		{"issue_comment", "issue_comment_created_on_pr", "action"},
+		{"pull_request_review_comment", "pull_request_review_comment_created", "action"},
+		{"pull_request_review_thread", "pull_request_review_thread_resolved", "action"},
 	}
 	for _, h := range handled {
 		t.Run(h.event, func(t *testing.T) {
@@ -485,7 +501,8 @@ func TestNormalizeRejects(t *testing.T) {
 			cases := map[string][]byte{
 				"MalformedJSON":      []byte(`{"action":`),
 				"NotAnObject":        []byte(`[]`),
-				"NoAction":           mutate(t, h.fixture, func(doc map[string]any) { delete(doc, "action") }),
+				"NoActionWord":       mutate(t, h.fixture, func(doc map[string]any) { delete(doc, h.word) }),
+				"ActionWordNotText":  mutate(t, h.fixture, func(doc map[string]any) { doc[h.word] = 1 }),
 				"NoRepository":       mutate(t, h.fixture, func(doc map[string]any) { delete(doc, "repository") }),
 				"ZeroRepositoryID":   mutate(t, h.fixture, func(doc map[string]any) { doc["repository"] = map[string]any{"id": 0} }),
 				"StringRepositoryID": mutate(t, h.fixture, func(doc map[string]any) { doc["repository"] = map[string]any{"id": "1"} }),

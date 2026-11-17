@@ -1,6 +1,7 @@
 package faucet
 
 import (
+	"cmp"
 	"encoding/json"
 	"strings"
 
@@ -37,6 +38,11 @@ var rules = map[string]rule{
 	"check_run.created":     {eventType: "ci.check_created", extract: decode(checkRun)},
 	"check_run.completed":   {eventType: "ci.check_completed", extract: decode(checkRun)},
 	"check_suite.completed": {eventType: "ci.suite_completed", extract: decode(checkSuite)},
+
+	"status.pending": {eventType: "ci.status_pending", extract: decode(commitStatus)},
+	"status.success": {eventType: "ci.status_success", extract: decode(commitStatus)},
+	"status.failure": {eventType: "ci.status_failure", extract: decode(commitStatus)},
+	"status.error":   {eventType: "ci.status_error", extract: decode(commitStatus)},
 
 	"pull_request.assigned":               {eventType: "pr.assigned", extract: decode(pullRequest(withAssignee))},
 	"pull_request.auto_merge_disabled":    {eventType: "pr.auto_merge_disabled", extract: decode(pullRequest())},
@@ -76,11 +82,39 @@ var rules = map[string]rule{
 	"pull_request_review_thread.unresolved": {eventType: "pr.review_thread_unresolved", extract: decode(reviewThread)},
 }
 
+// actionMembers names the payload member that holds the action word of a
+// GitHub event that has no action member. A status has none, and its state
+// (pending, success, failure or error) plays that part.
+var actionMembers = map[string]string{"status": "state"}
+
+// envelope is what faucet reads of every webhook before its rule: the
+// repository and the action word.
 type envelope struct {
-	Action     string `json:"action"`
-	Repository struct {
-		ID int64 `json:"id"`
-	} `json:"repository"`
+	repoID int64
+	word   string
+}
+
+func readEnvelope(eventName string, payload []byte) (envelope, error) {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &members); err != nil {
+		return envelope{}, err
+	}
+	member := cmp.Or(actionMembers[eventName], "action")
+	var repo repoRef
+	var word string
+	for name, into := range map[string]any{"repository": &repo, member: &word} {
+		raw, ok := members[name]
+		if !ok {
+			continue
+		}
+		if err := json.Unmarshal(raw, into); err != nil {
+			return envelope{}, xerrors.Errorf("%s: %w", name, err)
+		}
+	}
+	if word == "" {
+		return envelope{}, xerrors.Errorf("no %s", member)
+	}
+	return envelope{repoID: repo.ID, word: word}, nil
 }
 
 // Normalize turns one GitHub webhook into an Event.
@@ -100,14 +134,11 @@ func buildEvent(eventName string, payload []byte, deliveryID string) (Event, boo
 	if !handlesEvent(eventName) {
 		return Event{}, false, nil
 	}
-	var env envelope
-	if err := json.Unmarshal(payload, &env); err != nil {
+	env, err := readEnvelope(eventName, payload)
+	if err != nil {
 		return Event{}, false, xerrors.Errorf("decode %s payload: %w", eventName, err)
 	}
-	if env.Action == "" {
-		return Event{}, false, xerrors.Errorf("%s payload has no action", eventName)
-	}
-	key := eventName + "." + env.Action
+	key := eventName + "." + env.word
 	r, found := rules[key]
 	if !found {
 		return Event{}, false, nil
@@ -132,7 +163,7 @@ func buildEvent(eventName string, payload []byte, deliveryID string) (Event, boo
 		Source:     sourceGitHub,
 		DeliveryID: deliveryID,
 		Type:       r.eventType,
-		RepoID:     env.Repository.ID,
+		RepoID:     env.repoID,
 		PRs:        f.prs,
 		HeadSHA:    f.headSHA,
 		Data:       data,
@@ -144,10 +175,16 @@ func buildEvent(eventName string, payload []byte, deliveryID string) (Event, boo
 }
 
 // StoresDelivery says whether Normalize turns a webhook with this event name
-// and action into a stored event, as far as the headers tell. It reads the
-// same rules, so the two cannot disagree. A webhook it accepts can still be
-// ignored for its payload, such as a comment on a plain issue.
+// and action into a stored event, as far as the headers tell. action is the
+// action member of the payload, as GitHub's list of deliveries gives it. That
+// list names no other member, so for an event whose action word is another
+// member, such as the state of a status, the event name alone decides. It
+// reads the same rules, so the two cannot disagree. A webhook it accepts can
+// still be ignored for its payload, such as a comment on a plain issue.
 func StoresDelivery(eventName, action string) bool {
+	if _, other := actionMembers[eventName]; other {
+		return handlesEvent(eventName)
+	}
 	_, found := rules[eventName+"."+action]
 	return found
 }
@@ -352,6 +389,42 @@ func checkSuite(p checkSuitePayload) (fields, bool) {
 			"app_slug":       c.App.Slug,
 			"sender_login":   p.Sender.Login,
 			"sender_id":      p.Sender.ID,
+		},
+	}, true
+}
+
+// GitHub names no pull request in a status payload. Its description is free
+// text from whoever set the status, so faucet leaves it out.
+type statusPayload struct {
+	Sender    user    `json:"sender"`
+	SHA       string  `json:"sha"`
+	State     string  `json:"state"`
+	Context   string  `json:"context"`
+	TargetURL *string `json:"target_url"`
+	Commit    struct {
+		HTMLURL string `json:"html_url"`
+	} `json:"commit"`
+	Branches []struct {
+		Name string `json:"name"`
+	} `json:"branches"`
+}
+
+func commitStatus(p statusPayload) (fields, bool) {
+	branches := make([]string, 0, len(p.Branches))
+	for _, b := range p.Branches {
+		branches = append(branches, b.Name)
+	}
+	return fields{
+		prs:     []int32{},
+		headSHA: p.SHA,
+		data: map[string]any{
+			"state":        p.State,
+			"context":      p.Context,
+			"target_url":   p.TargetURL,
+			"branches":     branches,
+			"html_url":     p.Commit.HTMLURL,
+			"sender_login": p.Sender.Login,
+			"sender_id":    p.Sender.ID,
 		},
 	}, true
 }
