@@ -28,13 +28,17 @@ const (
 	maxCoreNames = 5
 )
 
-// The two lists that are kept by hand. A directory under faucet/internal that
-// is missing from internals is a violation, and a directory missing from
-// adapters is a feature, so a new helper or adapter fails closed.
+// The two lists that are kept by hand, each entry one package. A directory
+// under faucet/internal or under an adapter that the lists do not name is a
+// violation, and any other directory missing from adapters is a feature, so a
+// new helper or adapter fails closed.
 var (
 	internals = []string{"faucet/internal/githubapi", "faucet/internal/pgtest"}
-	adapters  = []string{"faucet/pgstore", "faucet/storetest"}
+	adapters  = []string{"faucet/pgstore", "faucet/pgstore/database", "faucet/storetest"}
 )
+
+// banned are the core identifiers that no feature or adapter code names.
+var banned = []string{"Service", "Deps"}
 
 type role int
 
@@ -78,13 +82,11 @@ func roleOf(dir string) (role, string) {
 		return roleCore, ""
 	case slices.Contains(internals, dir):
 		return roleInternal, ""
-	case dir == "faucet/internal" || strings.HasPrefix(dir, "faucet/internal/"):
+	case slices.Contains(adapters, dir):
+		return roleAdapter, ""
+	case strings.HasPrefix(dir+"/", "faucet/internal/"),
+		slices.ContainsFunc(adapters, func(a string) bool { return strings.HasPrefix(dir, a+"/") }):
 		return roleUnlisted, ""
-	}
-	for _, a := range adapters {
-		if dir == a || strings.HasPrefix(dir, a+"/") {
-			return roleAdapter, ""
-		}
 	}
 	if rest, ok := strings.CutPrefix(dir, "faucet/"); ok {
 		feature, _, _ := strings.Cut(rest, "/")
@@ -116,7 +118,7 @@ func compartmentViolations(pkgs []goPackage) []string {
 		case roleFeature:
 			features[feature] = true
 		case roleUnlisted:
-			add("R8: %s is in no hand list: move its code, or list a new helper in internals", p.dir)
+			add("R8: %s is in no hand list: move its code, or list a new helper in internals or a new adapter package in adapters", p.dir)
 		}
 	}
 	if len(features) == 0 {
@@ -172,7 +174,15 @@ func compartmentViolations(pkgs []goPackage) []string {
 							coreNames[feature][name] = true
 						}
 					}
-				case roleAdapter, roleOther, roleUnlisted:
+				case roleAdapter:
+					if tr == roleCore && !f.test() {
+						for _, name := range imp.names {
+							if slices.Contains(banned, name) {
+								add("R4: %s names faucet.%s", where, name)
+							}
+						}
+					}
+				case roleOther, roleUnlisted:
 				}
 			}
 			if r == roleCore {
@@ -191,7 +201,7 @@ func compartmentViolations(pkgs []goPackage) []string {
 		if len(sorted) > maxCoreNames {
 			add("R4: faucet/%s names %d core identifiers, more than %d: %s", feature, len(sorted), maxCoreNames, strings.Join(sorted, ", "))
 		}
-		for _, name := range []string{"Service", "Deps"} {
+		for _, name := range banned {
 			if names[name] {
 				add("R4: faucet/%s names faucet.%s", feature, name)
 			}
@@ -319,7 +329,7 @@ func TestCompartmentRulesRejectEachBreach(t *testing.T) {
 			}},
 			{dir: "faucet/redelivery/sub", files: []goFile{fileOf("sub.go", use(feature, "Store"), use(core, "Event"))}},
 			{dir: "faucet/other", files: []goFile{fileOf("other.go", use(core, "Store"))}},
-			{dir: "faucet/pgstore", files: []goFile{fileOf("pgstore.go", use(core, "Store"), use(feature, "Store"))}},
+			{dir: "faucet/pgstore", files: []goFile{fileOf("pgstore.go", use(core, "Store"), use(feature, "Store")), fileOf("pgstore_test.go", use(core, "Service", "Deps"))}},
 			{dir: "faucet/pgstore/database", files: []goFile{fileOf("db.go")}},
 			{dir: "faucet/storetest", files: []goFile{fileOf("storetest.go", use(core, "Store"), use(feature, "Store"))}},
 		}
@@ -359,6 +369,9 @@ func TestCompartmentRulesRejectEachBreach(t *testing.T) {
 		{"a feature's sub-package counts toward its limit", addFile("faucet/redelivery/sub", fileOf("x.go", use(core, "A", "B", "C", "D"))), "R4: faucet/redelivery names 6 core identifiers"},
 		{"a feature names faucet.Service", addFile("faucet/redelivery", fileOf("x.go", use(core, "Service"))), "R4: faucet/redelivery names faucet.Service"},
 		{"a feature names faucet.Deps", addFile("faucet/other", fileOf("x.go", use(core, "Deps"))), "R4: faucet/other names faucet.Deps"},
+		{"an adapter's code names faucet.Service", addFile("faucet/pgstore", fileOf("x.go", use(core, "Service"))), "R4: faucet/pgstore/x.go names faucet.Service"},
+		{"an adapter package's code names faucet.Deps", addFile("faucet/pgstore/database", fileOf("x.go", use(core, "Deps"))), "R4: faucet/pgstore/database/x.go names faucet.Deps"},
+		{"an unlisted directory under an adapter", addFile("faucet/pgstore/feat", fileOf("x.go", use(core, "Service"))), "R8: faucet/pgstore/feat is in no hand list"},
 		{"a dot import", addFile("faucet/pgstore", fileOf("x.go", goImport{path: core, local: "."})), "R5: faucet/pgstore/x.go dot-imports " + core},
 		{"a feature test imports its testdata package", addFile("faucet/redelivery", fileOf("x_test.go", use(feature+"/testdata/x", "New"))), "R7: faucet/redelivery/x_test.go imports " + feature + "/testdata/x"},
 		{"core imports a package under an underscore directory", addFile("faucet", fileOf("x_test.go", use(module+"/faucet/_scratch", "New"))), "R7: faucet/x_test.go imports " + module + "/faucet/_scratch"},
