@@ -239,21 +239,28 @@ func postEventsPoll(t *testing.T, srv *testServer, token, name, params string) (
 func TestMCPEventsPollNeedsTheNameHeader(t *testing.T) {
 	t.Parallel()
 
-	srv := newTestServer(t)
+	for _, path := range mcpPaths {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
 
-	status, body := eventsPollRequest(t, srv, aliceToken, "ci.run_completed")
-	require.Equal(t, http.StatusOK, status, body)
-	require.Contains(t, body, `"cursor"`)
+			srv := newTestServer(t)
+			srv.mcpPath = path
 
-	for _, name := range []string{"", "pr.closed"} {
-		status, body = eventsPollRequest(t, srv, aliceToken, name)
-		require.Equal(t, http.StatusBadRequest, status, body)
-		require.Contains(t, body, `"code":-32020`)
-		require.Contains(t, body, `"id":7`)
+			status, body := eventsPollRequest(t, srv, aliceToken, "ci.run_completed")
+			require.Equal(t, http.StatusOK, status, body)
+			require.Contains(t, body, `"cursor"`)
+
+			for _, name := range []string{"", "pr.closed"} {
+				status, body = eventsPollRequest(t, srv, aliceToken, name)
+				require.Equal(t, http.StatusBadRequest, status, body)
+				require.Contains(t, body, `"code":-32020`)
+				require.Contains(t, body, `"id":7`)
+			}
+
+			status, _ = eventsPollRequest(t, srv, "", "")
+			require.Equal(t, http.StatusUnauthorized, status, "authentication comes before the header check")
+		})
 	}
-
-	status, _ = eventsPollRequest(t, srv, "", "")
-	require.Equal(t, http.StatusUnauthorized, status, "authentication comes before the header check")
 }
 
 func TestMCPEventsPollNameHeaderAgreesWithTheEventTheSDKServes(t *testing.T) {

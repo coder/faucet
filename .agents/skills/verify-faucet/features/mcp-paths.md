@@ -18,7 +18,7 @@ An agent's MCP client points at `https://<host>/github/mcp` with `Authorization:
 
 ## Proof
 
-Response: 200 with the same JSON-RPC `result` on both paths, or 401 with `unauthorized\n`. The Go tests in `cmd/faucet` run the bearer check, the wait tool, the write deadline and `events/poll` on both paths.
+Response: 200 with the same JSON-RPC `result` on both paths, or 401 with `unauthorized\n`. The Go tests in `cmd/faucet` run the bearer check, the wait tool, the write deadline, `events/poll` and its `Mcp-Name` check on both paths.
 
 ## Charters
 
