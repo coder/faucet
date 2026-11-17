@@ -171,6 +171,27 @@ func lookupRawEntry(name string) (*rawEntry, bool) {
 	return rawCatalog[i], true
 }
 
+// rawEntry returns the entry of a raw event name that the service offers. A
+// service without a RawStore offers none.
+func (s *Service) rawEntry(name string) (*rawEntry, bool) {
+	if s.raw == nil {
+		return nil, false
+	}
+	return lookupRawEntry(name)
+}
+
+// unknownEvent is the error for a name that is no event name of the service.
+// It lists the raw names after the typed ones when the service offers them.
+func (s *Service) unknownEvent(name string) error {
+	names := catalogNames()
+	if s.raw != nil {
+		names = append(names, rawNames()...)
+	}
+	return rpcError(codeNotFound,
+		fmt.Sprintf("unknown event type %q, the types are: %s", name, strings.Join(names, ", ")),
+		map[string]string{"kind": "event"})
+}
+
 func rawNames() []string {
 	names := make([]string, len(rawCatalog))
 	for i, e := range rawCatalog {
