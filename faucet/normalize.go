@@ -21,8 +21,6 @@ type rule struct {
 	extract   func(payload []byte) (f fields, ok bool, err error)
 }
 
-// Repository and organization webhooks receive only the created and completed
-// check_run actions and the completed check_suite action.
 var rules = map[string]rule{
 	"workflow_run.requested":   {eventType: "ci.run_requested", extract: decode(workflowRun)},
 	"workflow_run.in_progress": {eventType: "ci.run_in_progress", extract: decode(workflowRun)},
@@ -33,6 +31,8 @@ var rules = map[string]rule{
 	"workflow_job.in_progress": {eventType: "ci.job_in_progress", extract: decode(workflowJob)},
 	"workflow_job.completed":   {eventType: "ci.job_completed", extract: decode(workflowJob)},
 
+	// Repository and organization webhooks receive only these check_run and
+	// check_suite actions.
 	"check_run.created":     {eventType: "ci.check_created", extract: decode(checkRun)},
 	"check_run.completed":   {eventType: "ci.check_completed", extract: decode(checkRun)},
 	"check_suite.completed": {eventType: "ci.suite_completed", extract: decode(checkSuite)},
@@ -250,7 +250,7 @@ func workflowRun(p workflowRunPayload) (fields, bool) {
 	return fields{
 		prs:     prNumbers(p.Repository.ID, r.PullRequests),
 		headSHA: r.HeadSHA,
-		data: map[string]any{
+		data: withSender(map[string]any{
 			"run_id":        r.ID,
 			"name":          r.Name,
 			"status":        r.Status,
@@ -260,9 +260,7 @@ func workflowRun(p workflowRunPayload) (fields, bool) {
 			"html_url":      r.HTMLURL,
 			"run_attempt":   r.RunAttempt,
 			"workflow_id":   r.WorkflowID,
-			"sender_login":  p.Sender.Login,
-			"sender_id":     p.Sender.ID,
-		},
+		}, p.Sender),
 	}, true
 }
 
@@ -294,7 +292,7 @@ func workflowJob(p workflowJobPayload) (fields, bool) {
 	return fields{
 		prs:     []int32{},
 		headSHA: j.HeadSHA,
-		data: map[string]any{
+		data: withSender(map[string]any{
 			"job_id":        j.ID,
 			"run_id":        j.RunID,
 			"run_attempt":   j.RunAttempt,
@@ -306,9 +304,7 @@ func workflowJob(p workflowJobPayload) (fields, bool) {
 			"runner_name":   j.RunnerName,
 			"labels":        labels,
 			"html_url":      j.HTMLURL,
-			"sender_login":  p.Sender.Login,
-			"sender_id":     p.Sender.ID,
-		},
+		}, p.Sender),
 	}, true
 }
 
@@ -340,7 +336,7 @@ func checkRun(p checkRunPayload) (fields, bool) {
 	return fields{
 		prs:     prNumbers(p.Repository.ID, c.PullRequests),
 		headSHA: c.HeadSHA,
-		data: map[string]any{
+		data: withSender(map[string]any{
 			"check_run_id":   c.ID,
 			"name":           c.Name,
 			"status":         c.Status,
@@ -349,9 +345,7 @@ func checkRun(p checkRunPayload) (fields, bool) {
 			"app_slug":       c.App.Slug,
 			"check_suite_id": c.CheckSuite.ID,
 			"head_branch":    c.CheckSuite.HeadBranch,
-			"sender_login":   p.Sender.Login,
-			"sender_id":      p.Sender.ID,
-		},
+		}, p.Sender),
 	}, true
 }
 
@@ -375,15 +369,13 @@ func checkSuite(p checkSuitePayload) (fields, bool) {
 	return fields{
 		prs:     prNumbers(p.Repository.ID, c.PullRequests),
 		headSHA: c.HeadSHA,
-		data: map[string]any{
+		data: withSender(map[string]any{
 			"check_suite_id": c.ID,
 			"status":         c.Status,
 			"conclusion":     c.Conclusion,
 			"head_branch":    c.HeadBranch,
 			"app_slug":       c.App.Slug,
-			"sender_login":   p.Sender.Login,
-			"sender_id":      p.Sender.ID,
-		},
+		}, p.Sender),
 	}, true
 }
 
@@ -410,15 +402,13 @@ func commitStatus(p statusPayload) (fields, bool) {
 	return fields{
 		prs:     []int32{},
 		headSHA: p.SHA,
-		data: map[string]any{
-			"state":        p.State,
-			"context":      p.Context,
-			"target_url":   p.TargetURL,
-			"branches":     branches,
-			"html_url":     p.Commit.HTMLURL,
-			"sender_login": p.Sender.Login,
-			"sender_id":    p.Sender.ID,
-		},
+		data: withSender(map[string]any{
+			"state":      p.State,
+			"context":    p.Context,
+			"target_url": p.TargetURL,
+			"branches":   branches,
+			"html_url":   p.Commit.HTMLURL,
+		}, p.Sender),
 	}, true
 }
 

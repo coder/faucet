@@ -77,8 +77,8 @@ var families = []*family{
     "html_url": {"type": "string"},
     "run_attempt": {"type": "integer"},
     "workflow_id": {"type": "integer"},
-    "sender_login": {"type": "string"},
-    "sender_id": {"type": "integer"}
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
 }`,
 	},
 	{
@@ -98,8 +98,8 @@ var families = []*family{
     "runner_name": {"type": ["string", "null"]},
     "labels": {"type": "array", "items": {"type": "string"}, "description": "The runner labels that the job asks for."},
     "html_url": {"type": "string"},
-    "sender_login": {"type": "string"},
-    "sender_id": {"type": "integer"}
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
 }`,
 	},
 	{
@@ -115,8 +115,8 @@ var families = []*family{
     "app_slug": {"type": "string", "description": "The app that ran the check."},
     "check_suite_id": {"type": "integer"},
     "head_branch": {"type": ["string", "null"], "description": "The branch of the check suite. Null for a push to a fork."},
-    "sender_login": {"type": "string"},
-    "sender_id": {"type": "integer"}
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
 }`,
 	},
 	{
@@ -129,8 +129,8 @@ var families = []*family{
     "conclusion": {"type": ["string", "null"], "description": "For example success, failure or timed_out."},
     "head_branch": {"type": ["string", "null"], "description": "Null for a push to a fork."},
     "app_slug": {"type": "string", "description": "The app whose check runs the suite holds."},
-    "sender_login": {"type": "string"},
-    "sender_id": {"type": "integer"}
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
 }`,
 	},
 	{
@@ -144,8 +144,8 @@ var families = []*family{
     "target_url": {"type": ["string", "null"], "description": "The link that GitHub shows with the status."},
     "branches": {"type": "array", "items": {"type": "string"}, "description": "Up to 10 branches that hold the commit. It need not be their head."},
     "html_url": {"type": "string", "description": "The commit page."},
-    "sender_login": {"type": "string"},
-    "sender_id": {"type": "integer"}
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
 }`,
 	},
 	{
