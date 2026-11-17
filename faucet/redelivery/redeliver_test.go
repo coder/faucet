@@ -144,7 +144,7 @@ func TestRedeliverTracksOnlyWhatNormalizeStores(t *testing.T) {
 			stored++
 		}
 	}
-	require.Equal(t, 8, stored, "the table covers every event that faucet stores")
+	require.Equal(t, 10, stored, "the table covers every event that faucet stores")
 }
 
 func TestRedeliverAsksAgainForAFailedPullRequestOpened(t *testing.T) {

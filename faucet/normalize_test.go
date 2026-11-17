@@ -104,7 +104,17 @@ func TestNormalize(t *testing.T) {
 			wantRepo: 186853002,
 			wantPRs:  []int32{2},
 			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
-			wantData: `{"review_id":237895671,"state":"approved","user_login":"Codertocat","html_url":"https://github.com/Codertocat/Hello-World/pull/2#pullrequestreview-237895671"}`,
+			wantData: `{"review_id":237895671,"state":"approved","user_login":"Codertocat","html_url":"https://github.com/Codertocat/Hello-World/pull/2#pullrequestreview-237895671","sender_login":"Codertocat","sender_id":21031067}`,
+		},
+		{
+			name:     "ReviewDismissed",
+			event:    "pull_request_review",
+			fixture:  "pull_request_review_dismissed",
+			wantType: "pr.review_dismissed",
+			wantRepo: 186853002,
+			wantPRs:  []int32{2},
+			wantSHA:  "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+			wantData: `{"review_id":237895671,"state":"dismissed","user_login":"Codertocat","html_url":"https://github.com/Codertocat/Hello-World/pull/2#pullrequestreview-237895671","sender_login":"Codertocat","sender_id":21031067}`,
 		},
 		{
 			name:     "PullRequestClosedUnmerged",
@@ -197,7 +207,17 @@ func TestNormalize(t *testing.T) {
 			wantRepo: 186853002,
 			wantPRs:  []int32{1},
 			wantSHA:  "",
-			wantData: `{"comment_id":492700400,"user_login":"Codertocat","html_url":"https://github.com/Codertocat/Hello-World/issues/1#issuecomment-492700400"}`,
+			wantData: `{"comment_id":492700400,"user_login":"Codertocat","html_url":"https://github.com/Codertocat/Hello-World/issues/1#issuecomment-492700400","sender_login":"Codertocat","sender_id":21031067}`,
+		},
+		{
+			name:     "CommentDeletedOnPullRequest",
+			event:    "issue_comment",
+			fixture:  "issue_comment_deleted_on_pr",
+			wantType: "pr.comment_deleted",
+			wantRepo: 186853002,
+			wantPRs:  []int32{1},
+			wantSHA:  "",
+			wantData: `{"comment_id":492700400,"user_login":"Codertocat","html_url":"https://github.com/Codertocat/Hello-World/issues/1#issuecomment-492700400","sender_login":"Codertocat","sender_id":21031067}`,
 		},
 	}
 	for _, tt := range tests {
@@ -332,17 +352,18 @@ func TestNormalizeIgnores(t *testing.T) {
 		{"CheckRunCreated", "check_run", func(t *testing.T) []byte {
 			return mutate(t, "check_run_completed", withAction("created"))
 		}},
-		{"ReviewDismissed", "pull_request_review", func(t *testing.T) []byte {
-			return mutate(t, "pull_request_review_submitted", withAction("dismissed"))
-		}},
 		{"PullRequestActionThatGitHubDoesNotDocument", "pull_request", func(t *testing.T) []byte {
 			return mutate(t, "pull_request_opened", withAction("exploded"))
 		}},
-		{"CommentEdited", "issue_comment", func(t *testing.T) []byte {
-			return mutate(t, "issue_comment_created_on_pr", withAction("edited"))
-		}},
 		{"CommentOnPlainIssue", "issue_comment", func(t *testing.T) []byte {
 			return fixture(t, "issue_comment_created")
+		}},
+		{"CommentDeletedOnPlainIssue", "issue_comment", func(t *testing.T) []byte {
+			return mutate(t, "issue_comment_deleted_on_pr", func(doc map[string]any) {
+				issue, ok := doc["issue"].(map[string]any)
+				require.True(t, ok)
+				delete(issue, "pull_request")
+			})
 		}},
 		{"UnhandledEventIsNotParsed", "push", func(*testing.T) []byte {
 			return []byte("not json")

@@ -46,8 +46,13 @@ var rules = map[string]rule{
 	"pull_request.unlabeled":              {eventType: "pr.unlabeled", extract: decode(pullRequest(withLabel))},
 	"pull_request.unlocked":               {eventType: "pr.unlocked", extract: decode(pullRequest())},
 
-	"pull_request_review.submitted": {eventType: "pr.review_submitted", extract: decode(reviewSubmitted)},
-	"issue_comment.created":         {eventType: "pr.comment_created", extract: decode(issueCommentCreated)},
+	"pull_request_review.dismissed": {eventType: "pr.review_dismissed", extract: decode(review)},
+	"pull_request_review.edited":    {eventType: "pr.review_edited", extract: decode(review)},
+	"pull_request_review.submitted": {eventType: "pr.review_submitted", extract: decode(review)},
+
+	"issue_comment.created": {eventType: "pr.comment_created", extract: decode(issueComment)},
+	"issue_comment.deleted": {eventType: "pr.comment_deleted", extract: decode(issueComment)},
+	"issue_comment.edited":  {eventType: "pr.comment_edited", extract: decode(issueComment)},
 }
 
 type envelope struct {
@@ -235,6 +240,18 @@ type user struct {
 	ID    int64  `json:"id"`
 }
 
+// pullRequestHead is the pull request that a review names.
+type pullRequestHead struct {
+	Number int32 `json:"number"`
+	Head   struct {
+		SHA string `json:"sha"`
+	} `json:"head"`
+}
+
+func (pr pullRequestHead) fields(data map[string]any) fields {
+	return fields{prs: []int32{pr.Number}, headSHA: pr.Head.SHA, data: data}
+}
+
 type reviewPayload struct {
 	Review struct {
 		ID      int64  `json:"id"`
@@ -242,25 +259,17 @@ type reviewPayload struct {
 		User    user   `json:"user"`
 		HTMLURL string `json:"html_url"`
 	} `json:"review"`
-	PullRequest struct {
-		Number int32 `json:"number"`
-		Head   struct {
-			SHA string `json:"sha"`
-		} `json:"head"`
-	} `json:"pull_request"`
+	PullRequest pullRequestHead `json:"pull_request"`
+	Sender      user            `json:"sender"`
 }
 
-func reviewSubmitted(p reviewPayload) (fields, bool) {
-	return fields{
-		prs:     []int32{p.PullRequest.Number},
-		headSHA: p.PullRequest.Head.SHA,
-		data: map[string]any{
-			"review_id":  p.Review.ID,
-			"state":      p.Review.State,
-			"user_login": p.Review.User.Login,
-			"html_url":   p.Review.HTMLURL,
-		},
-	}, true
+func review(p reviewPayload) (fields, bool) {
+	return p.PullRequest.fields(withSender(map[string]any{
+		"review_id":  p.Review.ID,
+		"state":      p.Review.State,
+		"user_login": p.Review.User.Login,
+		"html_url":   p.Review.HTMLURL,
+	}, p.Sender)), true
 }
 
 type pullRequestPayload struct {
@@ -376,18 +385,19 @@ type issueCommentPayload struct {
 		User    user   `json:"user"`
 		HTMLURL string `json:"html_url"`
 	} `json:"comment"`
+	Sender user `json:"sender"`
 }
 
-func issueCommentCreated(p issueCommentPayload) (fields, bool) {
+func issueComment(p issueCommentPayload) (fields, bool) {
 	if p.Issue.PullRequest == nil {
 		return fields{}, false
 	}
 	return fields{
 		prs: []int32{p.Issue.Number},
-		data: map[string]any{
+		data: withSender(map[string]any{
 			"comment_id": p.Comment.ID,
 			"user_login": p.Comment.User.Login,
 			"html_url":   p.Comment.HTMLURL,
-		},
+		}, p.Sender),
 	}, true
 }

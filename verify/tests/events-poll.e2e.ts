@@ -9,7 +9,7 @@ const comment = samples['issue_comment.created'];
 
 const RUN = run.expected.type;
 // otherAction is an action of each family that no sample in recordedSamples has.
-const otherAction: Record<string, string> = { 'pr.activity': 'closed' };
+const otherAction: Record<string, string> = { 'pr.activity': 'closed', 'pr.reviews': 'submitted', 'pr.comments': 'created' };
 const REPO_DENIED = 'repository not found or not accessible';
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 

@@ -398,6 +398,7 @@ func TestPolledDataMatchesThePayloadSchema(t *testing.T) {
 		{"workflow_run", "workflow_run_completed_two_prs"},
 		{"check_run", "check_run_completed"},
 		{"pull_request_review", "pull_request_review_submitted"},
+		{"pull_request_review", "pull_request_review_dismissed"},
 		{"pull_request", "pull_request_closed"},
 		{"pull_request", "pull_request_merged"},
 		{"pull_request", "pull_request_opened"},
@@ -407,6 +408,7 @@ func TestPolledDataMatchesThePayloadSchema(t *testing.T) {
 		{"pull_request", "pull_request_review_requested"},
 		{"pull_request", "pull_request_ready_for_review"},
 		{"issue_comment", "issue_comment_created_on_pr"},
+		{"issue_comment", "issue_comment_deleted_on_pr"},
 	}
 	want := map[string]int{}
 	for i, d := range deliveries {

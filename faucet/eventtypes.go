@@ -113,23 +113,27 @@ var families = []*family{
 	{
 		name:        "pr.reviews",
 		githubEvent: "pull_request_review",
-		description: "Reviews on a pull request.",
+		description: "Reviews on a pull request that were submitted, edited or dismissed.",
 		properties: `{
     "review_id": {"type": "integer"},
-    "state": {"type": "string", "description": "The review state, for example approved, changes_requested or commented."},
-    "user_login": {"type": "string"},
-    "html_url": {"type": "string"}
+    "state": {"type": "string", "description": "The review state, for example approved, changes_requested, commented or dismissed."},
+    "user_login": {"type": "string", "description": "The author of the review."},
+    "html_url": {"type": "string"},
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
 }`,
 	},
 	{
 		name:        "pr.comments",
 		githubEvent: "issue_comment",
-		description: "Comments in the conversation of a pull request. GitHub names no head commit in these events, so filter by pr and not by sha.",
+		description: "Comments in the conversation of a pull request that were created, edited or deleted. GitHub names no head commit in these events, so filter by pr and not by sha.",
 		noHeadSHA:   true,
 		properties: `{
     "comment_id": {"type": "integer"},
-    "user_login": {"type": "string"},
-    "html_url": {"type": "string"}
+    "user_login": {"type": "string", "description": "The author of the comment."},
+    "html_url": {"type": "string"},
+    "sender_login": {"type": "string", "description": "The account that made the change."},
+    "sender_id": {"type": "integer", "description": "The GitHub user ID of sender_login."}
 }`,
 	},
 }

@@ -36,6 +36,8 @@ var (
 			"edited", "enqueued", "labeled", "locked", "milestoned", "opened", "ready_for_review", "reopened",
 			"review_request_removed", "review_requested", "synchronize", "unassigned", "unlabeled", "unlocked",
 		}},
+		"pr.reviews":  {"pull_request_review", []string{"dismissed", "edited", "submitted"}},
+		"pr.comments": {"issue_comment", []string{"created", "deleted", "edited"}},
 	}
 )
 
