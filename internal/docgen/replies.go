@@ -42,6 +42,9 @@ func cronRepliesTable(s source) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
+		if !ok && strings.HasPrefix(r.path, "/cron/") {
+			return nil, fmt.Errorf("%s: %s has no handler that is a method of %s, so its reply cannot be read", r.at, r, cronType)
+		}
 		if !ok {
 			continue
 		}
@@ -65,7 +68,12 @@ func cronRepliesTable(s source) ([]string, error) {
 // one that takes a response writer and a request.
 func cronHandler(cmd *loadedPackage, r route) (*ast.FuncDecl, bool, error) {
 	var found []*ast.FuncDecl
+	inline := false
 	ast.Inspect(r.handler, func(n ast.Node) bool {
+		if _, ok := n.(*ast.FuncLit); ok {
+			inline = true
+			return false
+		}
 		sel, ok := n.(*ast.SelectorExpr)
 		if !ok {
 			return true
@@ -78,10 +86,12 @@ func cronHandler(cmd *loadedPackage, r route) (*ast.FuncDecl, bool, error) {
 		}
 		return true
 	})
-	switch len(found) {
-	case 0:
+	switch {
+	case inline && strings.HasPrefix(r.path, "/cron/"):
+		return nil, false, fmt.Errorf("%s: %s has an inline handler, so its reply cannot be read; make it a method of %s", r.at, r, cronType)
+	case len(found) == 0:
 		return nil, false, nil
-	case 1:
+	case len(found) == 1:
 		return found[0], true, nil
 	default:
 		return nil, false, fmt.Errorf("%s registers %d handlers of %s", r, len(found), cronType)

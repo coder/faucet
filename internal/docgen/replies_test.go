@@ -109,7 +109,31 @@ func TestCronRepliesTable(t *testing.T) {
 			name:     "no cron handler",
 			cron:     strings.Replace(fixtureCron, "c.guard(c.purge)", "http.NotFound", 1),
 			service:  fixtureService,
-			wantErrs: []string{"no route of cmd/faucet registers a handler of cronRoutes"},
+			wantErrs: []string{"cmd/faucet/cron.go:15:2: GET /cron/purge has no handler that is a method of cronRoutes"},
+		},
+		{
+			name:     "an inline cron handler",
+			cron:     strings.Replace(fixtureCron, "c.guard(c.purge)", "func(w http.ResponseWriter, r *http.Request) { c.purge(w, r) }", 1),
+			service:  fixtureService,
+			wantErrs: []string{"GET /cron/purge has an inline handler"},
+		},
+		{
+			name:     "a cron path in a constant",
+			cron:     strings.Replace(strings.Replace(fixtureCron, `r.Get("/cron/purge", c.guard(c.purge))`, `r.Get(purgePath, c.guard(c.purge))`, 1), "type cronRoutes struct", "const purgePath = \"/cron/purge\"\n\ntype cronRoutes struct", 1),
+			service:  fixtureService,
+			wantErrs: []string{"the path of this Get is not a string literal"},
+		},
+		{
+			name:     "a route group",
+			cron:     strings.Replace(fixtureCron, `r.Get("/other", http.NotFound)`, `r.Route("/cron", func(r chi.Router) { r.Get("/deliver", http.NotFound) })`, 1),
+			service:  fixtureService,
+			wantErrs: []string{"Route registers routes that docgen cannot follow"},
+		},
+		{
+			name:     "a method that docgen cannot name",
+			cron:     strings.Replace(fixtureCron, `r.Get("/other", http.NotFound)`, `r.Method(verb, "/other", http.NotFound)`, 1),
+			service:  fixtureService,
+			wantErrs: []string{"cannot read the HTTP method of this route"},
 		},
 	}
 	for _, tc := range cases {
