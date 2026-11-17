@@ -15,8 +15,23 @@ import (
 	"github.com/coder/faucet/faucet/pgstore"
 )
 
-const before000009InsertSubscription = `INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, scanned_through, created_at, updated_at, expires_at)
-VALUES ($1, $2, $3, $4, $5::text::jsonb, $6, $7, $8, $8, $9, $9, $10)`
+const before000009UpsertSubscription = `INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, scanned_through, created_at, updated_at, expires_at)
+VALUES ($1, $2, $3, $4, $5::text::jsonb, $6, $7, $8, $8, $9, $9, $10)
+ON CONFLICT (key_hash) DO UPDATE SET
+  repo_id = EXCLUDED.repo_id,
+  previous_secret_enc = CASE
+    WHEN faucet_subscriptions.secret_enc = EXCLUDED.secret_enc THEN faucet_subscriptions.previous_secret_enc
+    WHEN $11::timestamptz IS NULL THEN NULL
+    ELSE faucet_subscriptions.secret_enc
+  END,
+  previous_secret_until = CASE
+    WHEN faucet_subscriptions.secret_enc = EXCLUDED.secret_enc THEN faucet_subscriptions.previous_secret_until
+    ELSE $11::timestamptz
+  END,
+  secret_enc = EXCLUDED.secret_enc,
+  updated_at = EXCLUDED.updated_at,
+  expires_at = EXCLUDED.expires_at
+RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until, gap_through, gap_lease_until`
 
 func runMigration(t *testing.T, db *sql.DB, name, direction string) {
 	t.Helper()
@@ -67,10 +82,12 @@ func TestARowThatTheBuildBeforeTheEventTypesMigrationInsertsMatchesItsName(t *te
 	now := time.Now()
 	arguments := `{"repo":"octo/repo"}`
 	key := faucet.NewSubscriptionKeyHash("octocat", callbackURL, "pr.closed", json.RawMessage(arguments))
-	_, err := db.ExecContext(ctx, before000009InsertSubscription,
-		key[:], "octocat", callbackURL, "pr.closed", arguments, repoID, []byte("sealed"), 0, now, now.Add(time.Hour))
-	require.NoError(t, err)
-	_, _, err = store.InsertEvent(ctx, faucet.Event{Source: "github", DeliveryID: "closed", Type: "pr.closed", RepoID: repoID, Data: json.RawMessage(`{}`)})
+	for i, sealed := range []string{"sealed-1", "sealed-2"} {
+		_, err := db.ExecContext(ctx, before000009UpsertSubscription,
+			key[:], "octocat", callbackURL, "pr.closed", arguments, repoID, []byte(sealed), 0, now, now.Add(time.Hour), now.Add(time.Minute))
+		require.NoError(t, err, "subscribe %d of the build before the migration", i+1)
+	}
+	_, _, err := store.InsertEvent(ctx, faucet.Event{Source: "github", DeliveryID: "closed", Type: "pr.closed", RepoID: repoID, Data: json.RawMessage(`{}`)})
 	require.NoError(t, err)
 
 	targets, err := store.ScanTargets(ctx, now, faucet.MaxPendingDeliveries, 10)
