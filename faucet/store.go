@@ -216,6 +216,10 @@ type Store interface {
 	// unknown key and a row that has expired, which counts as absent. Of
 	// concurrent callers for one row, exactly one gets found=true.
 	DeleteLiveSubscription(ctx context.Context, principal string, key SubscriptionKeyHash, now time.Time) (deleted Subscription, found bool, err error)
+	// DeleteSubscriptionsOf deletes every subscription of principal, live or
+	// not, with the deliveries and gaps that it holds, and returns how many
+	// it deleted. It deletes no other principal's subscription.
+	DeleteSubscriptionsOf(ctx context.Context, principal string) (int64, error)
 	// DeleteExpiredSubscriptions deletes every subscription that expired at or
 	// before now and returns how many it deleted.
 	DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (int64, error)

@@ -45,6 +45,7 @@ var deliverySubtests = []subtest{
 	{"WatermarkStaysBelowTheLowestUnsentEvent", watermarkStaysBelowTheLowestUnsentEvent},
 	{"ExpireDeliveriesLeavesLiveSubscriptionsAndHeldClaims", expireDeliveriesLeavesLiveSubscriptionsAndHeldClaims},
 	{"DeletingASubscriptionEndsItsDeliveries", deletingASubscriptionEndsItsDeliveries},
+	{"DeleteSubscriptionsOfEndsEveryRowOfThePrincipal", deleteSubscriptionsOfEndsEveryRowOfThePrincipal},
 	{"ScanPositionStartsAtTheCursorAndSurvivesARefresh", scanPositionStartsAtTheCursorAndSurvivesARefresh},
 	{"PurgeLeavesBelowTheMarkOnlyTheSubscriptionsThatLostEvents", purgeLeavesBelowTheMarkOnlyTheSubscriptionsThatLostEvents},
 	{"PurgeMovesASubscriptionPastEventsOfAnotherTypeOfItsRepository", purgeMovesASubscriptionPastEventsOfAnotherTypeOfItsRepository},
@@ -740,6 +741,30 @@ func deletingASubscriptionEndsItsDeliveries(t *testing.T, s faucet.Store) {
 	require.EqualValues(t, 1, expired)
 	_, ok = r.claim(r.now)
 	require.False(t, ok, "an expired subscription's deliveries go with it")
+}
+
+func deleteSubscriptionsOfEndsEveryRowOfThePrincipal(t *testing.T, s faucet.Store) {
+	r := newRig(t, s, 2)
+	r.enqueue(r.events...)
+	lapsed := subscriptionAt(2, r.now.Add(time.Minute))
+	other := newSubscription("svc:triage", "https://hooks.example.test/other", r.now.Add(time.Hour))
+	for _, sub := range []faucet.Subscription{lapsed, other} {
+		_, err := s.UpsertSubscription(r.ctx, sub, r.now, 10)
+		require.NoError(t, err)
+	}
+
+	n, err := s.DeleteSubscriptionsOf(r.ctx, r.sub.Principal)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, n, "the live row and the one that lapses")
+	_, ok := r.claim(r.now)
+	require.False(t, ok, "their deliveries go with them")
+	deleted, err := s.DeleteSubscription(r.ctx, other.Principal, other.KeyHash)
+	require.NoError(t, err)
+	require.True(t, deleted, "another principal's subscription stays")
+
+	n, err = s.DeleteSubscriptionsOf(r.ctx, r.sub.Principal)
+	require.NoError(t, err)
+	require.Zero(t, n)
 }
 
 func scanPositionStartsAtTheCursorAndSurvivesARefresh(t *testing.T, s faucet.Store) {

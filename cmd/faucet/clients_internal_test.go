@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -135,4 +137,45 @@ func TestTheClientsCommandNeedsACurrentDatabase(t *testing.T) {
 	unmigrated := newScratchDatabaseURL(t, adminURL)
 	_, _, err = clients(t, func(name string) string { return map[string]string{envDatabaseURL: unmigrated}[name] }, "list")
 	require.ErrorIs(t, err, pgstore.ErrSchemaNotCurrent, "the command never migrates")
+}
+
+func subscriptionOf(principal, callbackURL string, expiresAt time.Time) faucet.Subscription {
+	arguments := json.RawMessage(`{"repo":"coder/faucet"}`)
+	return faucet.Subscription{
+		KeyHash: faucet.NewSubscriptionKeyHash(principal, callbackURL, "ci.run_completed", arguments), Principal: principal,
+		CallbackURL: callbackURL, EventType: "ci.run_completed", EventTypes: []string{"ci.run_completed"}, Arguments: arguments,
+		RepoID: 42, SecretEnc: []byte("sealed"), ExpiresAt: expiresAt,
+	}
+}
+
+// Faucet owns the subscriptions of a service, so disabling its client ends
+// them and the deliveries they queued, and leaves every other caller's.
+func TestDisablingAClientDeletesItsSubscriptions(t *testing.T) {
+	t.Parallel()
+	getenv, store := newClientsDatabase(t)
+	ctx := context.Background()
+	_, _, err := clients(t, getenv, "create", "-resource", "https://faucet.example.com/github/mcp", "-grant", "repo:coder/faucet", "ci-watcher")
+	require.NoError(t, err)
+	now := time.Now()
+	mine := []faucet.Subscription{
+		subscriptionOf("svc:ci-watcher", "https://hooks.example.test/1", now.Add(time.Hour)),
+		subscriptionOf("svc:ci-watcher", "https://hooks.example.test/2", now.Add(time.Hour)),
+	}
+	other := subscriptionOf("alice", "https://hooks.example.test/1", now.Add(time.Hour))
+	for _, sub := range append(mine, other) {
+		_, err := store.UpsertSubscription(ctx, sub, now, 10)
+		require.NoError(t, err)
+	}
+
+	out, _, err := clients(t, getenv, "disable", "ci-watcher")
+	require.NoError(t, err)
+	require.Contains(t, out, "deleted its 2 subscriptions")
+	for _, sub := range mine {
+		deleted, err := store.DeleteSubscription(ctx, sub.Principal, sub.KeyHash)
+		require.NoError(t, err)
+		require.False(t, deleted, "the client's subscription is gone")
+	}
+	deleted, err := store.DeleteSubscription(ctx, other.Principal, other.KeyHash)
+	require.NoError(t, err)
+	require.True(t, deleted, "another caller's subscription stays")
 }

@@ -157,8 +157,13 @@ func NewOAuthUser(login string, session OAuthSession, scopes []Scope) (Principal
 	return Principal{Login: login, kind: kindOAuthUser, scopes: set, session: session}, nil
 }
 
-// NewService returns a service client. Its login is "svc:" and the client
-// ID. A GitHub login cannot hold a colon, so it never equals a person's.
+// ServiceLogin is the login of the service whose client ID is clientID:
+// "svc:" and the ID. A GitHub login cannot hold a colon, so it never equals a
+// person's.
+func ServiceLogin(clientID string) string { return "svc:" + clientID }
+
+// NewService returns a service client, whose login is ServiceLogin of its
+// client ID.
 func NewService(client ServiceClient, scopes []Scope) (Principal, error) {
 	if client.ClientID == "" {
 		return Principal{}, xerrors.New("a service needs a client ID")
@@ -173,7 +178,7 @@ func NewService(client ServiceClient, scopes []Scope) (Principal, error) {
 		return Principal{}, err
 	}
 	return Principal{
-		Login: "svc:" + client.ClientID, kind: kindService, scopes: set,
+		Login: ServiceLogin(client.ClientID), kind: kindService, scopes: set,
 		clientID: client.ClientID, grants: strings.Join(client.Grants, grantSeparator),
 	}, nil
 }
@@ -199,7 +204,7 @@ func (p Principal) Authenticated() bool {
 	case kindGitHubToken, kindOAuthUser:
 		return githubLogin(p.Login) == nil
 	case kindService:
-		return p.Login == "svc:"+p.clientID
+		return p.Login == ServiceLogin(p.clientID)
 	}
 	return false
 }

@@ -45,11 +45,18 @@ func runClients(ctx context.Context, args []string, getenv func(string) string, 
 	return clientsCommand(ctx, args, pgstore.New(db), time.Now(), stdout, stderr)
 }
 
+// clientStore holds the clients and the subscriptions that services make.
+// pgstore.Store is one.
+type clientStore interface {
+	oauth.Store
+	DeleteSubscriptionsOf(ctx context.Context, principal string) (int64, error)
+}
+
 func isClientsCommand(name string) bool {
 	return name == "create" || name == "list" || name == "disable"
 }
 
-func clientsCommand(ctx context.Context, args []string, store oauth.Store, now time.Time, stdout, stderr io.Writer) error {
+func clientsCommand(ctx context.Context, args []string, store clientStore, now time.Time, stdout, stderr io.Writer) error {
 	switch args[0] {
 	case "create":
 		return createClient(ctx, args[1:], store, now, stdout, stderr)
@@ -62,17 +69,30 @@ func clientsCommand(ctx context.Context, args []string, store oauth.Store, now t
 		if len(args) != 2 {
 			return xerrors.New(clientsUsage)
 		}
-		c, err := store.DisableClient(ctx, args[1], now)
-		if xerrors.Is(err, oauth.ErrUnknownClient) {
-			return xerrors.Errorf("there is no client %q", args[1])
-		}
-		if err != nil {
-			return err
-		}
-		_, err = fmt.Fprintf(stdout, "%s is disabled since %s. Its tokens fail on their next request.\n", c.ID, c.DisabledAt.UTC().Format(time.RFC3339))
-		return err
+		return disableClient(ctx, args[1], store, now, stdout)
 	}
 	return xerrors.New(clientsUsage)
+}
+
+// disableClient disables the client, so its tokens fail on their next
+// request, then deletes the subscriptions of its service and the deliveries
+// they queued: faucet owns that state. Disabling a disabled client deletes
+// what is left.
+func disableClient(ctx context.Context, id string, store clientStore, now time.Time, stdout io.Writer) error {
+	c, err := store.DisableClient(ctx, id, now)
+	if xerrors.Is(err, oauth.ErrUnknownClient) {
+		return xerrors.Errorf("there is no client %q", id)
+	}
+	if err != nil {
+		return err
+	}
+	deleted, err := store.DeleteSubscriptionsOf(ctx, faucet.ServiceLogin(c.ID))
+	if err != nil {
+		return xerrors.Errorf("%s is disabled, but its subscriptions could not be deleted, so run the command again: %w", c.ID, err)
+	}
+	_, err = fmt.Fprintf(stdout, "%s is disabled since %s, and faucet deleted its %d subscriptions. Its tokens fail on their next request.\n",
+		c.ID, c.DisabledAt.UTC().Format(time.RFC3339), deleted)
+	return err
 }
 
 type grantFlags []string

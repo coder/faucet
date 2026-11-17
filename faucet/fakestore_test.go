@@ -257,6 +257,22 @@ func (s *fakeStore) DeleteSubscription(_ context.Context, principal string, key 
 	return true, nil
 }
 
+func (s *fakeStore) DeleteSubscriptionsOf(_ context.Context, principal string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return 0, s.err
+	}
+	var n int64
+	for key, row := range s.subs {
+		if row.Principal == principal {
+			s.dropSubscriptionLocked(key)
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (s *fakeStore) DeleteLiveSubscription(_ context.Context, principal string, key faucet.SubscriptionKeyHash, now time.Time) (faucet.Subscription, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
