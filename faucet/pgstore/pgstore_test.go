@@ -43,6 +43,15 @@ func TestRedeliveryStore(t *testing.T) {
 	})
 }
 
+func TestRawStore(t *testing.T) {
+	t.Parallel()
+	adminURL := testDatabaseURL(t)
+
+	storetest.RunRaw(t, func(t *testing.T) storetest.RawStore {
+		return pgstore.New(newDatabase(t, adminURL))
+	})
+}
+
 type gapRecordingStore struct {
 	*pgstore.Store
 	db *sql.DB
@@ -90,6 +99,15 @@ func TestRedeliveryStoreOverBinaryParameters(t *testing.T) {
 
 	storetest.RunRedelivery(t, func(t *testing.T) storetest.RedeliveryStore {
 		return newGapRecordingStore(newDatabase(t, adminURL))
+	})
+}
+
+func TestRawStoreOverBinaryParameters(t *testing.T) {
+	t.Parallel()
+	adminURL := withBinaryParameters(t, testDatabaseURL(t))
+
+	storetest.RunRaw(t, func(t *testing.T) storetest.RawStore {
+		return pgstore.New(newDatabase(t, adminURL))
 	})
 }
 
