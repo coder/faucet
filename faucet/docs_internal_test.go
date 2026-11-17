@@ -73,7 +73,7 @@ func requireDocSays(t *testing.T, file, doc, format string, args ...any) {
 	phrase := fmt.Sprintf(format, args...)
 	lead, _, _ := strings.Cut(format, "%")
 	require.NotEmpty(t, lead, "a pin starts with words")
-	require.Contains(t, doc, phrase, file)
+	require.True(t, strings.Contains(doc, phrase), "%s does not say %q", file, phrase)
 	require.Equal(t, strings.Count(doc, lead), strings.Count(doc, phrase), "%s: every %q must go on as %q", file, lead, phrase)
 }
 

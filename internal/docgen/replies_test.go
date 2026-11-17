@@ -77,6 +77,11 @@ func TestCronRepliesTable(t *testing.T) {
 	}{
 		{name: "the table matches the code", cron: fixtureCron, service: fixtureService},
 		{
+			name:    "fields set by name",
+			cron:    strings.Replace(fixtureCron, "{int(res.Deleted), res.Kept, counts{res.Limit, res.Gone}, 0, failure}", "{Error: failure, Deleted: int(res.Deleted), Kept: res.Kept, Counts: counts{Gone: res.Gone, Limit: res.Limit}}", 1),
+			service: fixtureService,
+		},
+		{
 			name:     "a result field without a doc comment",
 			cron:     fixtureCron,
 			service:  strings.Replace(fixtureService, "\t// Limit and Gone count the deliveries that ended.\n", "", 1),

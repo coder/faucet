@@ -30,7 +30,7 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		require.NoError(t, err)
 		phrase := fmt.Sprintf(p.format, p.args...)
 		lead, _, _ := strings.Cut(p.format, "%")
-		require.Contains(t, string(doc), phrase, p.file)
+		require.True(t, strings.Contains(string(doc), phrase), "%s does not say %q", p.file, phrase)
 		require.Equal(t, strings.Count(string(doc), lead), strings.Count(string(doc), phrase), "%s: every %q must go on as %q", p.file, lead, phrase)
 	}
 }

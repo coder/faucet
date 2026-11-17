@@ -15,11 +15,11 @@ import (
 	"strings"
 )
 
-// cronType is the type of cmd/faucet whose methods serve the cron routes,
-// and replyWriters are the functions that write their JSON reply, with the
-// value as the last argument.
+// cronType is the type of cmd/faucet whose methods serve the cron routes.
 const cronType = "cronRoutes"
 
+// replyWriters are the functions of cmd/faucet that write a JSON reply, with
+// the value as their last argument.
 var replyWriters = []string{"writeJSON", "writeJSONStatus"}
 
 // cronRepliesTable lists the fields of each cron route's reply and the
@@ -217,32 +217,39 @@ func (sc handlerScope) walk(lit *ast.CompositeLit, prefix string, r *replyFields
 	if err != nil {
 		return err
 	}
-	byKey := len(lit.Elts) > 0
-	if byKey {
-		_, byKey = lit.Elts[0].(*ast.KeyValueExpr)
-	}
+	// encoding/json writes the fields in the order of the struct, whatever
+	// the order of the literal.
+	values := make([]ast.Expr, len(fields))
 	for i, elt := range lit.Elts {
-		f := fields[min(i, len(fields)-1)]
-		value := elt
-		if kv, ok := elt.(*ast.KeyValueExpr); ok && byKey {
-			key, _ := kv.Key.(*ast.Ident)
-			idx := slices.IndexFunc(fields, func(f jsonField) bool { return key != nil && f.goName == key.Name })
-			if idx < 0 {
-				return fmt.Errorf("the reply sets the unknown field %s", exprText(kv.Key))
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			if len(lit.Elts) != len(fields) {
+				return fmt.Errorf("the reply sets %d of the %d fields of its struct by position", len(lit.Elts), len(fields))
 			}
-			f, value = fields[idx], kv.Value
+			values[i] = elt
+			continue
 		}
+		key, _ := kv.Key.(*ast.Ident)
+		idx := slices.IndexFunc(fields, func(f jsonField) bool { return key != nil && f.goName == key.Name })
+		if idx < 0 {
+			return fmt.Errorf("the reply sets the unknown field %s", exprText(kv.Key))
+		}
+		values[idx] = kv.Value
+	}
+	for i, f := range fields {
 		if f.json == "-" {
 			continue
 		}
-		if inner, ok := value.(*ast.CompositeLit); ok {
+		if inner, ok := values[i].(*ast.CompositeLit); ok {
 			if err := sc.walk(inner, prefix+f.json+".", r); err != nil {
 				return err
 			}
 			continue
 		}
 		r.fields = append(r.fields, prefix+f.json)
-		sc.checkSources(value, prefix+f.json, r)
+		if values[i] != nil {
+			sc.checkSources(values[i], prefix+f.json, r)
+		}
 	}
 	return nil
 }
