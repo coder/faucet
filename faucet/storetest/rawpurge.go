@@ -1,6 +1,7 @@
 package storetest
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -16,6 +17,10 @@ var rawPurgeSubtests = []rawSubtest{
 	{"PurgeRawEventsClearsEveryBodyReceivedBeforeClearBefore", purgeRawEventsClearsEveryBodyReceivedBeforeClearBefore},
 	{"PurgeRawEventsDeletesExpiredLeasesWithTheirUnreadEvents", purgeRawEventsDeletesExpiredLeasesWithTheirUnreadEvents},
 	{"PurgeRawEventsDeletesTheEventsReceivedBeforeDeleteBefore", purgeRawEventsDeletesTheEventsReceivedBeforeDeleteBefore},
+	{"PurgeRawEventsKeepsTheDeliveryIDOfAClearedEvent", purgeRawEventsKeepsTheDeliveryIDOfAClearedEvent},
+	{"PurgeRawEventsLeavesTheEventLogAlone", purgeRawEventsLeavesTheEventLogAlone},
+	{"RawWantsListsWhatLiveRawInterestsWantOnce", rawWantsListsWhatLiveRawInterestsWantOnce},
+	{"TheEventLogNeverScansARawSubscription", theEventLogNeverScansARawSubscription},
 }
 
 // purgeServeOnly plans a delivery for every subscription when subscriptions
@@ -182,4 +187,102 @@ func purgeRawEventsDeletesTheEventsReceivedBeforeDeleteBefore(t *testing.T, s Ra
 
 	again := r.store(first, serveAll(rawBody))
 	require.Greater(t, again, ids[2], "a deleted delivery ID is stored again as a new event")
+}
+
+func purgeRawEventsKeepsTheDeliveryIDOfAClearedEvent(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	r.subscribe(1, rawSpec{})
+	d := r.newDelivery()
+	id := r.store(d, serveAll(rawBody))
+	r.purgeDeliver(id)
+	require.Equal(t, faucet.RawPurgeResult{Cleared: 1}, r.purgeAt(r.now))
+
+	res := r.ingestAt(d, r.now, serveAll(rawBody))
+	require.True(t, res.Matched)
+	require.True(t, res.Duplicate, "a cleared event keeps its delivery ID, so GitHub's second send is a duplicate")
+	require.Equal(t, id, r.head(), "a duplicate is not stored")
+	_, ok := r.claim(r.now)
+	require.False(t, ok, "a duplicate plans no delivery")
+}
+
+func purgeRawEventsLeavesTheEventLogAlone(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	r.open(rawSpec{})
+	logged := insertSpaced(t, s, "log", 2)
+	r.push()
+	future := time.Now().Add(time.Hour)
+	require.Equal(t, faucet.RawPurgeResult{Cleared: 1, Deleted: 1}, r.purge(faucet.RawPurge{Now: r.now, ClearBefore: future, DeleteBefore: future}))
+	requireRemaining(t, s, logged...)
+}
+
+// purgeWantsAt returns the wants at now, with no actions as nil.
+func (r *rawRig) purgeWantsAt(now time.Time) []faucet.RawWant {
+	r.t.Helper()
+	wants, err := r.s.RawWants(r.ctx, now)
+	require.NoError(r.t, err)
+	for i := range wants {
+		if len(wants[i].Actions) == 0 {
+			wants[i].Actions = nil
+		}
+	}
+	return wants
+}
+
+func rawWantsListsWhatLiveRawInterestsWantOnce(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	require.Empty(t, r.purgeWantsAt(r.now), "an empty store wants nothing")
+	at := r.now.Add(30 * time.Minute)
+
+	typed := newSubscription("octocat", "https://hooks.example.test/typed", r.now.Add(time.Hour))
+	_, err := s.UpsertSubscription(r.ctx, typed, r.now, rawMaxLive)
+	require.NoError(t, err)
+	r.subscribe(1, rawSpec{actions: []string{"opened", "closed"}})
+	r.open(rawSpec{actions: []string{"closed", "opened"}})
+	r.subscribe(2, rawSpec{})
+	r.open(rawSpec{})
+	r.open(rawSpec{event: "issues", repoID: rawRepo + 1, actions: []string{"labeled"}})
+	r.subscribeAt(3, rawSpec{event: "release"}, at.Add(-time.Hour))
+	_, err = s.OpenRawLease(r.ctx, newRawLease(r.leases.Add(1), rawSpec{event: "fork"}, at), r.now, rawMaxLive)
+	require.NoError(t, err)
+
+	require.ElementsMatch(t, []faucet.RawWant{
+		{RepoID: rawRepo, Event: rawEvent, Actions: []string{"closed", "opened"}},
+		{RepoID: rawRepo, Event: rawEvent},
+		{RepoID: rawRepo + 1, Event: "issues", Actions: []string{"labeled"}},
+	}, r.purgeWantsAt(at), "one entry per want of a live raw interest, with its actions in rising order, and none for a typed subscription")
+	require.Len(t, r.purgeWantsAt(r.now), 5, "the subscription and the lease that expire at the later time are live before it")
+}
+
+func theEventLogNeverScansARawSubscription(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	sub := r.subscribe(1, rawSpec{})
+	typed := newSubscription("hubot", "https://hooks.example.test/typed", r.now.Add(time.Hour))
+	typed.Cursor = 0
+	_, err := s.UpsertSubscription(r.ctx, typed, r.now, rawMaxLive)
+	require.NoError(t, err)
+	scanned := func(typedReads bool, when string) {
+		t.Helper()
+		targets, err := s.ScanTargets(r.ctx, r.now, 10, 100)
+		require.NoError(t, err)
+		keys := make([]faucet.SubscriptionKeyHash, 0, len(targets))
+		for _, target := range targets {
+			keys = append(keys, target.KeyHash)
+		}
+		require.NotContains(t, keys, sub.KeyHash, "the delivery queue never reads a raw subscription %s", when)
+		if typedReads {
+			require.Contains(t, keys, typed.KeyHash, "the typed subscription has something to read %s", when)
+		}
+	}
+	scanned(false, "at first")
+	insertSpaced(t, s, "typed", 2)
+	scanned(true, "after events of its repository")
+	_, err = s.Purge(context.Background(), time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	scanned(true, "after a purge of the event log")
+	_, ok, err := s.ClaimGap(r.ctx, r.now, testLease, nil)
+	require.NoError(t, err)
+	require.False(t, ok, "a purge of the event log records no gap for a raw subscription")
+
+	_, err = s.UpsertSubscription(r.ctx, subscriptionAt(2, r.now.Add(time.Hour)), r.now, 1)
+	require.ErrorIs(t, err, faucet.ErrSubscriptionLimit, "a raw subscription counts toward the principal's live subscriptions")
 }
