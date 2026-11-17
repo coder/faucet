@@ -186,10 +186,14 @@ func compartmentViolations(pkgs []goPackage) []string {
 				}
 			}
 			if r == roleCore {
+				parts := strings.Split(strings.TrimSuffix(strings.TrimSuffix(f.name, ".go"), "_test"), "_")
 				for feature := range features {
-					// The feature's name less its last letter, so that the verb
-					// (redeliver) counts as well as the noun (redelivery).
-					if stem := feature[:len(feature)-1]; strings.HasPrefix(f.name, stem) {
+					// A part of the name is the feature's name, or that name less
+					// a trailing y or s, so that the verb (redeliver) counts as
+					// well as the noun (redelivery).
+					if slices.ContainsFunc(parts, func(p string) bool {
+						return p != "" && (p == feature || p+"y" == feature || p+"s" == feature)
+					}) {
 						add("R6: %s is named like the feature %s: its code belongs in faucet/%s", where, feature, feature)
 					}
 				}
@@ -347,6 +351,10 @@ func TestCompartmentRulesRejectEachBreach(t *testing.T) {
 			return append(pkgs, goPackage{dir: dir, files: []goFile{f}})
 		}
 	}
+	for _, feature := range []string{"events2", "a"} {
+		pkgs := addFile("faucet/"+feature, fileOf("x.go"))(addFile("faucet", fileOf("events.go"))(valid()))
+		require.Empty(t, compartmentViolations(pkgs), "no core file is named like the feature %s", feature)
+	}
 	for _, tc := range []struct {
 		name   string
 		breach func([]goPackage) []goPackage
@@ -378,6 +386,7 @@ func TestCompartmentRulesRejectEachBreach(t *testing.T) {
 		{"core imports a package under a dot directory", addFile("faucet", fileOf("x.go", use(helper+"/.x", "New"))), "R7: faucet/x.go imports " + helper + "/.x"},
 		{"a core file named like a feature's verb", addFile("faucet", fileOf("redeliver_probe.go")), "R6: faucet/redeliver_probe.go is named like the feature redelivery"},
 		{"a core test named like a feature", addFile("faucet", fileOf("redelivery_test.go")), "R6: faucet/redelivery_test.go is named like the feature redelivery"},
+		{"a core file whose last part is a feature's verb", addFile("faucet", fileOf("hook_redeliver.go")), "R6: faucet/hook_redeliver.go is named like the feature redelivery"},
 		{"no feature", func(pkgs []goPackage) []goPackage {
 			return slices.DeleteFunc(pkgs, func(p goPackage) bool { r, _ := roleOf(p.dir); return r == roleFeature })
 		}, "self-check: the walk found no feature"},
