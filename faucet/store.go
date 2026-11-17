@@ -140,6 +140,10 @@ type PurgeResult struct {
 	// deliveries counts it as superseded. Store.Purge leaves both at zero.
 	ExpiredSubscriptions int64
 	EndedDeliveries      int64
+	// Raw is what Service.Purge removed of the raw events, when the service
+	// has a RawStore. Its raw deliveries are counted in EndedDeliveries.
+	// Store.Purge leaves it at zero.
+	Raw RawPurgeResult
 }
 
 func hasNUL(v any) bool {
