@@ -247,8 +247,8 @@ func checkRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo st
 	repoID, err := lookup(ctx, p, repo)
 	switch {
 	case xerrors.Is(err, ErrNoAccess):
-		logger.Info(ctx, op+" denied")
-		return 0, ErrNoAccess
+		logger.Info(ctx, op+" denied", slog.Error(err))
+		return 0, err
 	case xerrors.Is(err, ErrInvalidToken):
 		logger.Info(ctx, op+" denied, token rejected")
 		return 0, ErrInvalidToken

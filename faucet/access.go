@@ -230,8 +230,9 @@ func (p Principal) Format(f fmt.State, _ rune) {
 // that sends each kind to another Authorizer must send both calls on.
 type Authorizer interface {
 	// RepoID returns the numeric ID of repo, written owner/name, when p can
-	// read it. It returns ErrNoAccess when p cannot. It may answer from what
-	// it remembers.
+	// read it. It returns ErrNoAccess when p cannot, or an error that wraps it
+	// and says why: the caller gets that error's text, so it holds nothing
+	// the caller may not read. It may answer from what it remembers.
 	RepoID(ctx context.Context, p Principal, repo string) (int64, error)
 	// RepoIDFresh is RepoID that never answers from what it remembers: it
 	// asks the source of the answer again. events/subscribe calls it, because
