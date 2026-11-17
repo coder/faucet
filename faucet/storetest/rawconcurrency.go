@@ -175,19 +175,26 @@ func openRawLeaseKeepsTheLimitUnderConcurrentOpens(t *testing.T, s RawStore) {
 	}
 }
 
-// concurrentIngester ingests pushes and records, per stored raw ID, the
-// incarnations that its plan served. When stall is set, a plan waits until
-// remade moves, so that the subscription it plans for is made again before
-// the store writes the plan.
+// concurrentIngester ingests pushes from one goroutine at a time and records,
+// per stored raw ID, the incarnation that its plan served.
 type concurrentIngester struct {
 	r      *rawRig
 	now    time.Time
 	remade *atomic.Int64
-	mu     sync.Mutex
-	served map[int64][]time.Time
+	served map[int64]time.Time
 }
 
-func (c *concurrentIngester) ingest(stall bool) error {
+// awaitRemake waits until remade moves, so that a plan that calls it is
+// written after the subscription it planned for is made again.
+func (c *concurrentIngester) awaitRemake() {
+	seen, deadline := c.remade.Load(), time.Now().Add(20*time.Millisecond)
+	for c.remade.Load() == seen && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Microsecond)
+	}
+}
+
+// ingest stores one push; a non-nil stall runs inside its plan.
+func (c *concurrentIngester) ingest(stall func()) error {
 	var incarnations []time.Time
 	res, err := c.r.s.IngestRaw(c.r.ctx, c.r.newDelivery(), c.now, func(interests []faucet.RawInterest) faucet.RawPlan {
 		for _, in := range interests {
@@ -195,11 +202,8 @@ func (c *concurrentIngester) ingest(stall bool) error {
 				incarnations = append(incarnations, in.Incarnation)
 			}
 		}
-		if stall {
-			seen, deadline := c.remade.Load(), time.Now().Add(20*time.Millisecond)
-			for c.remade.Load() == seen && time.Now().Before(deadline) {
-				time.Sleep(50 * time.Microsecond)
-			}
+		if stall != nil {
+			stall()
 		}
 		return serveAll(rawBody)(interests)
 	})
@@ -211,9 +215,7 @@ func (c *concurrentIngester) ingest(stall bool) error {
 	case !res.Matched || res.Duplicate || len(incarnations) == 0:
 		return nil
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.served[res.ID] = incarnations
+	c.served[res.ID] = incarnations[0]
 	return nil
 }
 
@@ -226,7 +228,7 @@ func claimRawDeliveryTakesOnlyTheLiveIncarnationUnderChurn(t *testing.T, s RawSt
 	r := newRawRig(t, s)
 	ingestNow := r.now.Add(time.Minute)
 	var remade atomic.Int64
-	ing := &concurrentIngester{r: r, now: ingestNow, remade: &remade, served: map[int64][]time.Time{}}
+	ing := &concurrentIngester{r: r, now: ingestNow, remade: &remade, served: map[int64]time.Time{}}
 	live := r.subscribe(1, rawSpec{})
 	remake := func() error {
 		deleted, err := s.DeleteSubscription(r.ctx, live.Principal, live.KeyHash)
@@ -251,7 +253,11 @@ func claimRawDeliveryTakesOnlyTheLiveIncarnationUnderChurn(t *testing.T, s RawSt
 	err := concurrentRun(func() error {
 		defer ingesting.Store(false)
 		for n := range ingests {
-			if err := ing.ingest(n%2 == 1); err != nil {
+			var stall func()
+			if n%2 == 1 {
+				stall = ing.awaitRemake
+			}
+			if err := ing.ingest(stall); err != nil {
 				return err
 			}
 		}
@@ -291,11 +297,11 @@ func claimRawDeliveryTakesOnlyTheLiveIncarnationUnderChurn(t *testing.T, s RawSt
 		return serveAll(rawBody)(interests)
 	})
 	require.True(t, stale.Matched)
-	require.NoError(t, ing.ingest(false))
+	require.NoError(t, ing.ingest(nil))
 
 	var want []int64
-	for id, incarnations := range ing.served {
-		if incarnations[0].Equal(live.CreatedAt) {
+	for id, incarnation := range ing.served {
+		if incarnation.Equal(live.CreatedAt) {
 			want = append(want, id)
 		}
 	}
