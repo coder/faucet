@@ -73,7 +73,8 @@ type RawInterest struct {
 	// whole payload.
 	Fields []string
 	// Pending is the number of unsent deliveries that the subscription holds,
-	// or of unread events that the lease holds.
+	// or of unread events that the lease holds. Under concurrent ingests it
+	// can be a few too low.
 	Pending int32
 }
 
@@ -108,7 +109,9 @@ type RawPlan struct {
 	Unread []RawLeaseID
 	// Gaps are the subscriptions that miss the event.
 	Gaps []RawGap
-	// Lost are the leases that miss the event.
+	// Lost are the leases that miss the event. Each keeps one mark, at the
+	// highest raw ID that it missed, and the read that passes the mark counts
+	// it in RawPage.Skipped.
 	Lost []RawLeaseID
 }
 
@@ -208,20 +211,20 @@ func (q RawRead) Validate() error {
 type RawPage struct {
 	// Events are the unread events above RawRead.After in ID order.
 	Events []RawEvent
-	// Next is the position to poll with next: the ID of the last event when
-	// More is set, and else the higher of RawRead.After and the highest raw ID
-	// stored.
+	// Next is the position to poll with next. With More set it is the highest
+	// raw ID that the page returned or passed over. Otherwise it is the highest
+	// of RawRead.After, that ID and the highest raw ID stored, read in the same
+	// snapshot as the page, so that a later read with it skips no event.
 	Next int64
 	// More says that unread events lie beyond the page.
 	More bool
-	// Skipped is the number of unread events that the page passed over: their
-	// row is gone, their body is cleared, or they were received before
-	// RawRead.NotBefore.
+	// Skipped is the number of unread events that the page passed over: the
+	// lease missed them (RawPlan.Lost), their row is gone, their body is
+	// cleared, or they were received before RawRead.NotBefore.
 	Skipped int
 	// AckedThrough is the highest position that the poller had presented before
-	// this read, and LostThrough the highest raw ID that the lease missed.
+	// this read.
 	AckedThrough int64
-	LostThrough  int64
 }
 
 // RawDeliveryClaim is a raw delivery that a run now owns for DeliveryLease.
@@ -250,12 +253,34 @@ type RawDeliveryClaim struct {
 	Event *RawEvent
 }
 
+// RawPurge says what RawStore.PurgeRawEvents removes. A zero ClearBefore or
+// DeleteBefore turns its rule off.
+type RawPurge struct {
+	// Now decides which leases have expired.
+	Now time.Time
+	// ClearBefore drops the body of every event received before it, also
+	// while a delivery or an unread event still names it. It bounds how long
+	// a poller that never moves its cursor keeps payloads.
+	ClearBefore time.Time
+	// DeleteBefore deletes every event received before it.
+	DeleteBefore time.Time
+}
+
+// Validate checks the fields a caller supplies to RawStore.PurgeRawEvents.
+func (p RawPurge) Validate() error {
+	if p.Now.IsZero() {
+		return xerrors.New("purge time is required")
+	}
+	return nil
+}
+
 // RawPurgeResult is what RawStore.PurgeRawEvents reports.
 type RawPurgeResult struct {
 	// ExpiredLeases is the number of poll leases that had expired.
 	ExpiredLeases int64
-	// Cleared is the number of raw events whose body the call dropped, because
-	// no live interest had them unread.
+	// Cleared is the number of raw events whose body the call dropped: no
+	// delivery and no unread event named them any more, or they were received
+	// before RawPurge.ClearBefore.
 	Cleared int64
 	// Deleted is the number of raw events that the call deleted at the
 	// retention.
@@ -278,25 +303,31 @@ type RawWant struct {
 // A raw subscription is such a row with Cursor math.MaxInt64, which keeps
 // the event log's delivery queue from ever reading it.
 //
+// A raw subscription's event is its EventType without the "github." prefix,
+// and its actions and fields are the actions and fields members of its
+// Arguments, each a list of strings that is absent when empty.
+//
 // Matching happens once, in IngestRaw. Every other method reads what
 // IngestRaw wrote for one interest: a delivery for a subscription, an unread
-// event for a lease. No method takes a lock on a subscription that IngestRaw
-// could wait for, and a delivery or gap whose subscription is gone, expired
-// or made again is never claimed.
+// event for a lease. IngestRaw takes no lock on a subscription or a lease, and
+// a delivery or gap whose subscription is gone, expired or made again is
+// never claimed. A method that removes many rows never waits for a row that
+// another caller holds: it leaves that row to the next call.
 //
 // Raw IDs must be visible in commit order, as event IDs are in Store.
 type RawStore interface {
 	// IngestRaw stores one delivery for the interests that are live at now and
 	// match it: a subscription or lease of d.RepoID and d.Event whose actions
 	// are empty or hold d.Action. With no such interest it writes nothing and
-	// reports Matched=false. With a delivery ID that is already stored it
-	// writes nothing and reports Duplicate. Otherwise it calls plan once with
-	// the matching interests and writes, in one transaction, the event with
-	// the plan's body and fields, one delivery per plan.Deliveries due at now,
-	// one unread event per plan.Unread, a gap owed by each of plan.Gaps
-	// through the new raw ID, and the new raw ID as the highest that each of
-	// plan.Lost missed. An interest that is acknowledged before the call
-	// starts is among the interests.
+	// reports Matched=false, whether or not the delivery ID is stored.
+	// Otherwise it calls plan once with the matching interests, outside any
+	// transaction. With a delivery ID that is already stored it then writes
+	// nothing and reports Duplicate. Otherwise it writes, in one transaction,
+	// the event with the plan's body and fields, one delivery per
+	// plan.Deliveries due at now, one unread event per plan.Unread, a gap owed
+	// by each of plan.Gaps through the new raw ID, and the new raw ID as the
+	// mark of each of plan.Lost. An interest that is acknowledged before the
+	// call starts is among the interests.
 	IngestRaw(ctx context.Context, d RawDelivery, now time.Time, plan func([]RawInterest) RawPlan) (RawIngest, error)
 	// RawHead returns the highest raw ID stored, or 0.
 	RawHead(ctx context.Context) (int64, error)
@@ -309,8 +340,10 @@ type RawStore interface {
 	// ReadRawLease serves one poll. found is false, and nothing changes,
 	// unless a lease with q.Lease, q.Key and q.RepoID is live at q.Now. For
 	// such a lease it raises the acknowledged position to q.After, sets the
-	// expiry to q.ExpiresAt, deletes the unread events at or below q.After,
-	// and returns the unread events above it, all in one transaction.
+	// expiry to q.ExpiresAt, returns the unread events above q.After, and
+	// deletes the unread events at or below it, all in one transaction. The
+	// page ends at q.Limit events, and after the event that takes the bodies
+	// read to q.MaxBytes or more.
 	ReadRawLease(ctx context.Context, q RawRead) (page RawPage, found bool, err error)
 	// ClaimRawDelivery is Store.ClaimDelivery for raw deliveries. It takes a
 	// delivery only while a subscription with its key and its incarnation is
@@ -330,12 +363,13 @@ type RawStore interface {
 	// deleted, or was made again. It leaves the ones that a claim holds, and
 	// returns how many deliveries it deleted.
 	ExpireRawDeliveries(ctx context.Context, now time.Time) (int64, error)
-	// PurgeRawEvents deletes the leases that expired at or before now with
+	// PurgeRawEvents deletes the leases that expired at or before p.Now with
 	// their unread events, drops the body of every raw event that no delivery
-	// and no unread event names any more, and deletes the raw events received
-	// before the given time. An event without a body keeps its delivery ID
-	// until then, so a delivery that GitHub sends again is a duplicate.
-	PurgeRawEvents(ctx context.Context, now, before time.Time) (RawPurgeResult, error)
+	// and no unread event names any more or that was received before
+	// p.ClearBefore, and deletes the raw events received before
+	// p.DeleteBefore. An event without a body keeps its delivery ID until
+	// then, so a delivery that GitHub sends again is a duplicate.
+	PurgeRawEvents(ctx context.Context, p RawPurge) (RawPurgeResult, error)
 	// RawWants lists what the interests that are live at now want, without
 	// duplicates.
 	RawWants(ctx context.Context, now time.Time) ([]RawWant, error)

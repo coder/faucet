@@ -14,6 +14,7 @@ CREATE TABLE faucet_raw_events (
   body        bytea,
   fields      text[],
   received_at timestamptz NOT NULL,
+  CHECK (body IS NULL OR octet_length(body) > 0),
   CHECK (fields IS NULL OR body IS NOT NULL)
 );
 
@@ -53,8 +54,7 @@ CREATE TABLE faucet_raw_gaps (
 
 -- One row per poller of a raw event name. key_hash is the SHA-256 of the
 -- login, the event name and the arguments. acked_through is the highest cursor
--- that the poller has presented, and lost_through the highest raw ID that the
--- lease missed.
+-- that the poller has presented.
 CREATE TABLE faucet_raw_leases (
   id            bytea PRIMARY KEY CHECK (octet_length(id) = 16),
   key_hash      bytea NOT NULL CHECK (octet_length(key_hash) = 32),
@@ -64,7 +64,6 @@ CREATE TABLE faucet_raw_leases (
   fields        text[],
   repo_id       bigint NOT NULL CHECK (repo_id > 0),
   acked_through bigint NOT NULL CHECK (acked_through >= 0),
-  lost_through  bigint NOT NULL DEFAULT 0 CHECK (lost_through >= 0),
   created_at    timestamptz NOT NULL,
   polled_at     timestamptz NOT NULL,
   expires_at    timestamptz NOT NULL
@@ -73,14 +72,19 @@ CREATE TABLE faucet_raw_leases (
 CREATE INDEX faucet_raw_leases_match ON faucet_raw_leases (repo_id, event);
 CREATE INDEX faucet_raw_leases_principal ON faucet_raw_leases (principal);
 
--- One row per raw event that a lease has not acknowledged.
+-- One row per raw event that a lease has not acknowledged. A lease also has at
+-- most one row with lost set: the mark of the highest raw ID that it missed,
+-- because it held the most unread events or the event was too large for it.
+-- The insert of an unread row or a mark never locks the lease.
 CREATE TABLE faucet_raw_unread (
   lease_id     bytea NOT NULL CHECK (octet_length(lease_id) = 16),
   raw_event_id bigint NOT NULL CHECK (raw_event_id > 0),
+  lost         boolean NOT NULL DEFAULT false,
   PRIMARY KEY (lease_id, raw_event_id)
 );
 
 CREATE INDEX faucet_raw_unread_event ON faucet_raw_unread (raw_event_id);
+CREATE UNIQUE INDEX faucet_raw_unread_lost ON faucet_raw_unread (lease_id) WHERE lost;
 
 -- The match of a delivery against the raw subscriptions reads by repository.
 CREATE INDEX faucet_subscriptions_raw ON faucet_subscriptions (repo_id, event_type);

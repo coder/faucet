@@ -75,7 +75,6 @@ type FaucetRawLease struct {
 	Fields       []string
 	RepoID       int64
 	AckedThrough int64
-	LostThrough  int64
 	CreatedAt    time.Time
 	PolledAt     time.Time
 	ExpiresAt    time.Time
@@ -84,6 +83,7 @@ type FaucetRawLease struct {
 type FaucetRawUnread struct {
 	LeaseID    []byte
 	RawEventID int64
+	Lost       bool
 }
 
 type FaucetRedelivery struct {
