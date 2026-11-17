@@ -77,8 +77,8 @@ const (
 )
 
 // OAuthSession names the faucet login session of an OAuth user and the
-// GitHub connection that it uses. An access check that a session remembers
-// belongs to that session, so the two IDs travel together.
+// GitHub connection that the session uses. An access check that one session
+// made is not fresh for another session of the same connection.
 type OAuthSession struct {
 	SessionID    string
 	ConnectionID string
@@ -93,8 +93,9 @@ type ServiceClient struct {
 
 // Principal is an authenticated caller: a login, the scopes it holds, and the
 // kind of caller it is. Build one with NewPrincipal, NewOAuthUser or
-// NewService. The zero value holds no scope, so every method denies it. A
-// GitHub token is never exposed: every fmt verb prints the login only.
+// NewService. The zero value holds no scope, so every method that needs one
+// denies it. A GitHub token is never exposed: every fmt verb prints the login
+// only.
 type Principal struct {
 	Login  string
 	kind   principalKind
@@ -183,9 +184,9 @@ type Authorizer interface {
 	// read it. It returns ErrNoAccess when p cannot. It may answer from what
 	// it remembers.
 	RepoID(ctx context.Context, p Principal, repo string) (int64, error)
-	// RepoIDFresh is RepoID that asks the source of the answer again and
-	// remembers the result. events/subscribe calls it, because every renewal
-	// must check access again.
+	// RepoIDFresh is RepoID that never answers from what it remembers: it
+	// asks the source of the answer again. events/subscribe calls it, because
+	// every renewal must check access again.
 	RepoIDFresh(ctx context.Context, p Principal, repo string) (int64, error)
 }
 

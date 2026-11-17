@@ -94,7 +94,7 @@ func requireBearer(b bearers, resource string, logger slog.Logger, next http.Han
 			case xerrors.Is(err, faucet.ErrInvalidToken):
 				unauthorized(w)
 			case err != nil:
-				logger.Error(r.Context(), "could not check the faucet token", slog.Error(err))
+				logger.Warn(r.Context(), "could not check the faucet token", slog.Error(err))
 				http.Error(w, "could not check the token", http.StatusInternalServerError)
 			default:
 				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
