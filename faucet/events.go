@@ -227,7 +227,7 @@ func (s *Service) pollEventsMethod(ctx context.Context, _ *mcp.ServerSession, p 
 	}
 	logger := s.logger.With(slog.F("repo", req.repo), slog.F("event", req.entry.name))
 
-	repoID, err := s.authorize(ctx, logger, "poll", req.repo)
+	repoID, err := s.authorize(ctx, logger, "poll", ScopeEventsRead, req.repo)
 	if err != nil {
 		return nil, accessError(err)
 	}

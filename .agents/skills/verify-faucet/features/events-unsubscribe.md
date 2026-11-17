@@ -1,6 +1,6 @@
 # Events unsubscribe
 
-An agent ends a webhook subscription through `events/unsubscribe` on `POST /mcp`, before it would lapse. The subscription is the one that [events/subscribe](events-subscribe.md) made for the same principal, callback URL, event and arguments.
+An agent ends a webhook subscription through `events/unsubscribe` on `POST /github/mcp`, before it would lapse. The subscription is the one that [events/subscribe](events-subscribe.md) made for the same principal, callback URL, event and arguments.
 
 ## Sub-features
 

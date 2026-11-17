@@ -59,6 +59,11 @@ func (a *fakeAuthorizer) RepoID(_ context.Context, p faucet.Principal, repo stri
 	return id, nil
 }
 
+// RepoIDFresh is RepoID: the fake remembers nothing.
+func (a *fakeAuthorizer) RepoIDFresh(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
+	return a.RepoID(ctx, p, repo)
+}
+
 func (a *fakeAuthorizer) callCount() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()

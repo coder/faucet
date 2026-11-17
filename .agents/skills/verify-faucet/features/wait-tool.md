@@ -1,10 +1,11 @@
 # Wait tool
 
-An agent waits for GitHub events on one repository through the `wait_for_github_events` MCP tool on `POST /mcp`. The call returns as soon as a matching event exists, or at its deadline with no events and a cursor.
+An agent waits for GitHub events on one repository through the `wait_for_github_events` MCP tool on `POST /github/mcp`. The call returns as soon as a matching event exists, or at its deadline with no events and a cursor.
 
 ## Sub-features
 
 - A bearer token that GitHub accepts is required. No header, a malformed header, or a token GitHub refuses is 401 with the body `unauthorized` and `WWW-Authenticate: Bearer`.
+- A bearer that starts with a faucet prefix (`fct_`, `fcr_` or `fcs_`) is faucet's own token and never reaches GitHub. Faucet mints none yet, so every such bearer is the same 401, and the GitHub stub gets no request.
 - The token must be able to read the repository. A repository it cannot see and one that does not exist both give the tool error `repository not found or not accessible` and no events.
 - `repo` is `owner/name`, `types` holds at least one of the fifteen event names (families or exact types), `actions` optionally narrows the families in `types` that have each action, leaves a family that has none of them whole, and must hold only actions of one of them, the [field filters](field-filters.md) narrow only the names in `types` that offer them and each must be offered by one, `timeout_s` is 1 to 50 (default 45), `sha` is 40 hex characters, `pr` and `cursor` are not negative, and a `pr` with only `ci.jobs` or `ci.statuses` events in `types` is refused, because GitHub names no pull request in them. Anything else is a tool error that names the problem.
 - One login can hold 10 waits open at once in a process (`Deps.MaxWaitsPerLogin`). The 11th is a tool error `too many waits are open for this account` at once, and it ends nothing else. Another login is not counted.
@@ -13,7 +14,7 @@ An agent waits for GitHub events on one repository through the `wait_for_github_
 
 ## How to get to it (user POV)
 
-An agent's MCP client sends `tools/call` to `/mcp` with `Authorization: Bearer <GitHub token>`. The stub plays GitHub: it knows one token and the repositories named `verify/r<id>`. The test plays GitHub's webhooks through `faucet.deliver` and the agent through `faucet.waitForEvents`.
+An agent's MCP client sends `tools/call` to `/github/mcp` with `Authorization: Bearer <GitHub token>`. The stub plays GitHub: it knows one token and the repositories named `verify/r<id>`. The test plays GitHub's webhooks through `faucet.deliver` and the agent through `faucet.waitForEvents`.
 
 ## Driving it with e2e
 

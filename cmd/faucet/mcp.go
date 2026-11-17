@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"net"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,6 +14,7 @@ import (
 
 	"cdr.dev/slog/v3"
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/oauth"
 )
 
 const (
@@ -56,18 +60,128 @@ func longResponse(next http.Handler) http.Handler {
 	})
 }
 
-// requireBearer admits a request only when its bearer token is a valid GitHub
-// token. The token is handed to authn and goes no further: it is not logged
-// and not stored. Every rejected token gets the same 401, so the response
-// does not say why GitHub refused it.
-func requireBearer(authn authenticator, logger slog.Logger, next http.Handler) http.Handler {
+// faucetVerifier checks the access tokens that faucet mints. *oauth.Verifier
+// is one.
+type faucetVerifier interface {
+	Verify(ctx context.Context, token, resource string) (faucet.Principal, error)
+}
+
+// bearers sends each bearer token to the one that can check it.
+type bearers struct {
+	// github resolves a GitHub token, such as a pasted personal access token.
+	github authenticator
+	// faucet verifies the tokens that faucet mints. Nil, the default, rejects
+	// every one of them.
+	faucet faucetVerifier
+	// origin is faucet's public URL when faucet is set. The resource of an
+	// endpoint is the origin and the endpoint's path.
+	origin *url.URL
+}
+
+// newBearers returns the bearers for github and, when verifier is not nil,
+// for faucet's own tokens. A verifier needs origin, faucet's public URL,
+// because a token is valid only on the resource it was issued for.
+func newBearers(github authenticator, verifier faucetVerifier, origin string) (bearers, error) {
+	b := bearers{github: github}
+	if verifier == nil {
+		return b, nil
+	}
+	u, err := parseOrigin(origin)
+	if err != nil {
+		return bearers{}, err
+	}
+	b.faucet, b.origin = verifier, u
+	return b, nil
+}
+
+// resource is the resource of the endpoint at path, empty when faucet tokens
+// are off.
+func (b bearers) resource(path string) string {
+	if b.origin == nil {
+		return ""
+	}
+	return b.origin.JoinPath(path).String()
+}
+
+// parseOrigin parses faucet's public URL: https with a host and nothing after
+// it, or http on a loopback host. The URL must already be in the form that a
+// client computes, because a token is valid only on a resource that matches
+// it byte for byte: a lower-case host with no trailing dot, no default or
+// empty port, and no path, not even a trailing slash.
+func parseOrigin(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	switch {
+	case err != nil || u.Host == "" || u.Hostname() == "":
+		return nil, xerrors.New("faucet's public URL must be an absolute URL with a host")
+	case u.User != nil || u.Opaque != "" || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "":
+		return nil, xerrors.New("faucet's public URL must have no user info, path, trailing slash, query or fragment")
+	case u.Scheme != "https" && (u.Scheme != "http" || !isLoopback(u.Hostname())):
+		return nil, xerrors.New("faucet's public URL must use https, or http on a loopback host")
+	case u.Hostname() != strings.ToLower(u.Hostname()) || strings.HasSuffix(u.Hostname(), "."):
+		return nil, xerrors.New("faucet's public URL must have a lower-case host with no trailing dot")
+	}
+	if err := canonicalPort(u); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+// canonicalPort accepts no port, or a port from 1 to 65535 that is not the
+// scheme's default and has no leading zero.
+func canonicalPort(u *url.URL) error {
+	port := u.Port()
+	if port == "" {
+		if strings.HasSuffix(u.Host, ":") {
+			return xerrors.New("faucet's public URL must not end its host with an empty port")
+		}
+		return nil
+	}
+	n, err := strconv.Atoi(port)
+	switch {
+	case err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port:
+		return xerrors.New("faucet's public URL must have a port from 1 to 65535, written without a leading zero")
+	case (u.Scheme == "https" && n == 443) || (u.Scheme == "http" && n == 80):
+		return xerrors.Errorf("faucet's public URL must leave out the default port %d", n)
+	}
+	return nil
+}
+
+func isLoopback(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// requireBearer admits a request only when its bearer token is valid. A token
+// with a faucet prefix is faucet's own: it goes to the faucet verifier, for
+// the endpoint's resource, and never to GitHub. Every other token goes to
+// GitHub. A token is handed to its checker and goes no further: it is not
+// logged and not stored. Every rejected token gets the same 401, so the
+// response does not say why it was refused.
+func requireBearer(b bearers, resource string, logger slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := bearerToken(r.Header.Get("Authorization"))
 		if !ok {
 			unauthorized(w)
 			return
 		}
-		p, err := authn.Authenticate(r.Context(), token)
+		if oauth.Minted(token) {
+			p, err := b.verifyFaucetToken(r.Context(), token, resource)
+			switch {
+			case xerrors.Is(err, faucet.ErrInvalidToken):
+				logger.Debug(r.Context(), "faucet token rejected", slog.Error(err))
+				unauthorized(w)
+			case err != nil:
+				logger.Warn(r.Context(), "could not check the faucet token", slog.Error(err))
+				http.Error(w, "could not check the token", http.StatusInternalServerError)
+			default:
+				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
+			}
+			return
+		}
+		p, err := b.github.Authenticate(r.Context(), token)
 		switch {
 		case xerrors.Is(err, faucet.ErrInvalidToken):
 			unauthorized(w)
@@ -79,6 +193,13 @@ func requireBearer(authn authenticator, logger slog.Logger, next http.Handler) h
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
 	})
+}
+
+func (b bearers) verifyFaucetToken(ctx context.Context, token, resource string) (faucet.Principal, error) {
+	if b.faucet == nil {
+		return faucet.Principal{}, xerrors.Errorf("this server accepts no faucet token yet: %w", faucet.ErrInvalidToken)
+	}
+	return b.faucet.Verify(ctx, token, resource)
 }
 
 func unauthorized(w http.ResponseWriter) {

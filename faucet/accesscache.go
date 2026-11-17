@@ -17,9 +17,10 @@ const (
 	maxAccessCacheEntries = 10000
 )
 
-// tokenChecker is what AccessCache wraps. TokenAuthorizer is one.
+// tokenChecker is what AccessCache wraps. TokenAuthorizer is one. It
+// remembers nothing, so its RepoID is always fresh.
 type tokenChecker interface {
-	Authorizer
+	RepoID(ctx context.Context, p Principal, repo string) (int64, error)
 	Authenticate(ctx context.Context, token string) (Principal, error)
 }
 
@@ -37,7 +38,7 @@ type tokenChecker interface {
 // case of a name.
 //
 // events/subscribe does not use the remembered answer: a renewal calls
-// RepoIDUncached, because every renewal must check access again. A denial that
+// RepoIDFresh, because every renewal must check access again. A denial that
 // a renewal finds leaves a marker for a minute, and a repository lookup of any
 // path that finds the token rejected leaves one in place of the remembered
 // login. Answers are ordered by the start of their lookup, not by when GitHub
@@ -102,10 +103,10 @@ func (c *AccessCache) RepoID(ctx context.Context, p Principal, repo string) (int
 	return id, err
 }
 
-// RepoIDUncached asks the wrapped authorizer and remembers a success. A denial
+// RepoIDFresh asks the wrapped authorizer and remembers a success. A denial
 // leaves a marker in place of what was remembered, so a poll right after a
 // renewal that lost access is refused.
-func (c *AccessCache) RepoIDUncached(ctx context.Context, p Principal, repo string) (int64, error) {
+func (c *AccessCache) RepoIDFresh(ctx context.Context, p Principal, repo string) (int64, error) {
 	id, started, err := c.ask(ctx, p, repo)
 	if p.token != "" && (xerrors.Is(err, ErrNoAccess) || xerrors.Is(err, ErrInvalidToken)) {
 		c.deny(started, keyOf(p.token, repo))
@@ -184,8 +185,4 @@ func (c *AccessCache) put(key accessKey, e accessEntry, started time.Time) {
 	}
 	e.started, e.expires = started, started.Add(accessCacheTTL)
 	c.entries[key] = e
-}
-
-type uncachedAuthorizer interface {
-	RepoIDUncached(ctx context.Context, p Principal, repo string) (int64, error)
 }

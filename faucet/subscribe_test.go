@@ -1225,6 +1225,34 @@ func TestSubscribeRenewalChecksAccessAgainWhateverTheAccessCacheRemembers(t *tes
 	require.Empty(t, d.rows())
 }
 
+// perKind sends each principal to the Authorizer of its kind, as a host that
+// takes several kinds of callers composes them. Every principal here sent a
+// GitHub token.
+type perKind struct{ token faucet.Authorizer }
+
+func (k perKind) RepoID(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
+	return k.token.RepoID(ctx, p, repo)
+}
+
+func (k perKind) RepoIDFresh(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
+	return k.token.RepoIDFresh(ctx, p, repo)
+}
+
+func TestSubscribeRenewalChecksAccessAgainBehindAnAuthorizerPerKind(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t, func(deps *faucet.Deps) {
+		deps.Authorizer = perKind{token: faucet.NewAccessCache(authenticating{deps.Authorizer}, deps.Clock)}
+	})
+	ep := d.endpoint("/hook")
+	d.subscribeEndpoint(ep)
+
+	d.revoke()
+	rpcErr := d.subscribeError(d.renewalParams(ep, newSecret(t, 32)))
+	require.EqualValues(t, codeForbidden, rpcErr.Code, "the cache behind the composed Authorizer holds the first grant, and a renewal asks GitHub anyway")
+	require.Empty(t, d.rows())
+}
+
 func TestSubscribeAndUnsubscribeReadMembersByExactName(t *testing.T) {
 	t.Parallel()
 

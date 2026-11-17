@@ -10,6 +10,15 @@ import (
 	"time"
 )
 
+type FaucetAccessToken struct {
+	TokenHash   []byte
+	ExpiresAt   time.Time
+	Scopes      []string
+	Resource    string
+	SubjectKind string
+	Subject     string
+}
+
 type FaucetDelivery struct {
 	KeyHash       []byte
 	EventID       int64

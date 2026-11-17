@@ -74,9 +74,9 @@ func (s *Service) pollRaw(ctx context.Context, entry *rawEntry, p *eventsPollPar
 		return nil, err
 	}
 	logger := s.logger.With(slog.F("repo", req.args.Repo), slog.F("event", entry.name))
-	principal, err := s.subscriber(ctx, logger, "poll")
+	principal, err := s.principal(ctx, logger, "poll", ScopeEventsRead)
 	if err != nil {
-		return nil, err
+		return nil, accessError(err)
 	}
 	repoID, err := s.authorizeRepo(ctx, logger, principal, "poll", req.args.Repo)
 	if err != nil {

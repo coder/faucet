@@ -68,8 +68,9 @@ const (
 	dbSetupTimeout  = 30 * time.Second
 	shutdownTimeout = 15 * time.Second
 	githubTimeout   = 10 * time.Second
-	// mcpWriteTimeout replaces the server's write deadline on /mcp. It must
-	// outlast the longest wait the tool allows, which is 50 seconds.
+	// mcpWriteTimeout replaces the server's write deadline on the MCP
+	// endpoint. It must outlast the longest wait the tool allows, which is 50
+	// seconds.
 	mcpWriteTimeout = 75 * time.Second
 )
 
@@ -254,7 +255,11 @@ func run() error {
 	cron := cronRoutes{
 		secret: []byte(cfg.cronSecret), svc: svc, retention: cfg.retention, delivers: cfg.webhook != nil, redeliverer: redeliverer, clock: clock, logger: logger,
 	}
-	return serve(ctx, logger, cfg.port, newRouter(svc, github, cron, logger))
+	tokens, err := newBearers(github, nil, "")
+	if err != nil {
+		return err
+	}
+	return serve(ctx, logger, cfg.port, newRouter(svc, tokens, cron, logger))
 }
 
 // migrateSchema runs prepareSchema with a connection to cfg.migrateURL, which
@@ -321,11 +326,16 @@ func prepareSchema(ctx context.Context, db, migrateDB *sql.DB, dep deployment) e
 	return nil
 }
 
-func newRouter(svc *faucet.Service, authn authenticator, cron cronRoutes, logger slog.Logger) http.Handler {
+func newRouter(svc *faucet.Service, tokens bearers, cron cronRoutes, logger slog.Logger) http.Handler {
 	r := chi.NewRouter()
 	cron.mount(r)
 	r.Method(http.MethodPost, "/webhook/github", svc.WebhookHandler())
-	r.Handle("/mcp", longResponse(requireBearer(authn, logger, newMCPHandler(svc))))
+	githubMCP := newMCPHandler(svc)
+	r.Handle("/github/mcp", longResponse(requireBearer(tokens, tokens.resource("/github/mcp"), logger, githubMCP)))
+	// /mcp is the old path of the GitHub endpoint, kept for one release. A
+	// faucet token is valid only on the resource it was issued for, so the
+	// alias checks tokens for its own.
+	r.Handle("/mcp", longResponse(requireBearer(tokens, tokens.resource("/mcp"), logger, githubMCP)))
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok\n")
 	})

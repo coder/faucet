@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { closedPullRequest, recorded, samples } from './payloads';
 import { appLog, describe, expect, newDeliveryId, newRepoId, test, type Faucet } from './support';
 
@@ -151,6 +152,21 @@ describe('wait tool', () => {
       expect(reply.body).toBe('unauthorized\n');
       expect(reply.headers.get('www-authenticate')).toBe('Bearer');
     }
+  });
+
+  test('a bearer with a faucet prefix is 401 and never reaches GitHub', async ({ faucet, hooks }) => {
+    const args = { repo: repoOf(newRepoId()), types: allTypes, timeout_s: 1 };
+    await hooks.arm(faucet, []);
+    for (const prefix of ['fct_', 'fcr_', 'fcs_']) {
+      const reply = await faucet.waitForEvents(args, prefix + randomBytes(32).toString('base64url'));
+      expect(reply.status, prefix).toBe(401);
+      expect(reply.body).toBe('unauthorized\n');
+      expect(reply.headers.get('www-authenticate')).toBe('Bearer');
+    }
+    expect(await hooks.requests(), 'faucet judges its own tokens and sends none to GitHub').toEqual([]);
+
+    await faucet.waitForEvents(args, `ghp_${'0'.repeat(40)}`);
+    expect((await hooks.requests()).map((r) => r.path), 'a GitHub token goes to GitHub').toEqual(['/user']);
   });
 
   test('invalid input is a tool error that names the problem', async ({ faucet }) => {
