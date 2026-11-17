@@ -26,6 +26,7 @@ import (
 // fake, and writes and reads interests through the store's own methods.
 type ingestHarness struct {
 	*harness
+	svc    *faucet.Service
 	clock  *quartz.Mock
 	ctx    context.Context
 	leases atomic.Uint64
@@ -47,6 +48,7 @@ func newIngestHarness(t *testing.T, mutate ...func(*faucet.Deps)) *ingestHarness
 	require.NoError(t, err)
 	return &ingestHarness{
 		harness: &harness{t: t, store: store, logs: logs, handler: svc.WebhookHandler()},
+		svc:     svc,
 		clock:   clock,
 		ctx:     context.Background(),
 	}
