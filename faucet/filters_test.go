@@ -13,8 +13,6 @@ import (
 	"github.com/coder/faucet/faucet"
 )
 
-// The two cases that field filters exist for: wake an agent when CI fails on
-// main, and when a pull request into main waits for a review.
 var (
 	ciFailedOnMain = []any{"actions", []string{"completed"}, "head_branch", []string{"main"}, "conclusion", []string{"failure", "timed_out"}}
 	prsIntoMain    = []any{"actions", []string{"opened", "reopened", "ready_for_review", "synchronize"}, "base_branch", []string{"main"}}
@@ -39,8 +37,6 @@ func prInto(t *testing.T, base, head string) func(doc map[string]any) {
 
 type matched struct{ first, second faucet.Event }
 
-// storeRuns stores six events, and the two that it returns are the CI
-// failures on main.
 func storeRuns(ctx context.Context, t *testing.T, store faucet.Store) matched {
 	t.Helper()
 	run := func(guid string, edits ...func(map[string]any)) faucet.Event {
@@ -55,8 +51,6 @@ func storeRuns(ctx context.Context, t *testing.T, store faucet.Store) matched {
 	return matched{failed, timedOut}
 }
 
-// storePullRequests stores six events, and the two that it returns are pull
-// requests into main that wait for a review.
 func storePullRequests(ctx context.Context, t *testing.T, store faucet.Store) matched {
 	t.Helper()
 	pr := func(fixtureName, guid string, edits ...func(map[string]any)) faucet.Event {

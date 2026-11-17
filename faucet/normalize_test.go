@@ -371,7 +371,6 @@ func TestNormalizeReadsTheDocumentedFieldsThatNoSampleRecords(t *testing.T) {
 	}
 }
 
-// member returns the object at path in a decoded payload.
 func member(t *testing.T, doc map[string]any, path ...string) map[string]any {
 	t.Helper()
 	for _, name := range path {

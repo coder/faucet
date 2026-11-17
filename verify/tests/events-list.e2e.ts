@@ -6,7 +6,6 @@ const families = ['ci.runs', 'ci.jobs', 'ci.checks', 'ci.suites', 'ci.statuses',
 const eventNames = [...families, 'ci.check_completed', 'ci.run_completed', 'pr.closed', 'pr.comment_created', 'pr.review_submitted'];
 const noHeadCommit = ['pr.comments', 'pr.comment_created'];
 const noPullRequest = ['ci.jobs', 'ci.statuses'];
-// fieldFilters are the field filters that each family offers, each named after a field of its data.
 const fieldFilters: Record<string, string[]> = {
   'ci.runs': ['conclusion', 'head_branch'],
   'ci.checks': ['conclusion'],

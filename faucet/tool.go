@@ -320,7 +320,6 @@ func narrowedTypes(filter string, entries []*catalogEntry, entryTypes [][]string
 	return slices.DeleteFunc(narrowed, func(t string) bool { return slices.Contains(whole, t) })
 }
 
-// fieldFiltersOffered lists each field filter with the families that offer it.
 func fieldFiltersOffered() string {
 	described := make([]string, len(fieldFilters))
 	for i, f := range fieldFilters {

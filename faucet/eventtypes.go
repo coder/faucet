@@ -267,7 +267,6 @@ func (a fieldArguments) byName() map[string][]string {
 	return map[string][]string{"base_branch": a.BaseBranch, "head_branch": a.HeadBranch, "conclusion": a.Conclusion}
 }
 
-// canonical sorts each list and lists each value once.
 func (a fieldArguments) canonical() fieldArguments {
 	return fieldArguments{BaseBranch: sortedSet(a.BaseBranch), HeadBranch: sortedSet(a.HeadBranch), Conclusion: sortedSet(a.Conclusion)}
 }
@@ -502,7 +501,6 @@ func (e *catalogEntry) offers(filter string) bool {
 	return !e.legacy && slices.Contains(e.family.filters, filter)
 }
 
-// familiesOffering names the families that offer the field filter.
 func familiesOffering(filter string) []string {
 	var names []string
 	for _, f := range families {
