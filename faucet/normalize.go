@@ -25,6 +25,11 @@ var rules = map[string]rule{
 	"workflow_run.in_progress": {eventType: "ci.run_in_progress", extract: decode(workflowRun)},
 	"workflow_run.completed":   {eventType: "ci.run_completed", extract: decode(workflowRun)},
 
+	"workflow_job.queued":      {eventType: "ci.job_queued", extract: decode(workflowJob)},
+	"workflow_job.waiting":     {eventType: "ci.job_waiting", extract: decode(workflowJob)},
+	"workflow_job.in_progress": {eventType: "ci.job_in_progress", extract: decode(workflowJob)},
+	"workflow_job.completed":   {eventType: "ci.job_completed", extract: decode(workflowJob)},
+
 	"check_run.completed": {eventType: "ci.check_completed", extract: decode(checkRunCompleted)},
 
 	"pull_request.assigned":               {eventType: "pr.assigned", extract: decode(pullRequest(withAssignee))},
@@ -218,6 +223,52 @@ func workflowRun(p workflowRunPayload) (fields, bool) {
 			"html_url":      r.HTMLURL,
 			"run_attempt":   r.RunAttempt,
 			"workflow_id":   r.WorkflowID,
+			"sender_login":  p.Sender.Login,
+			"sender_id":     p.Sender.ID,
+		},
+	}, true
+}
+
+// GitHub names no pull request in a workflow_job payload.
+type workflowJobPayload struct {
+	Sender      user `json:"sender"`
+	WorkflowJob struct {
+		ID           int64    `json:"id"`
+		RunID        int64    `json:"run_id"`
+		RunAttempt   int32    `json:"run_attempt"`
+		Name         string   `json:"name"`
+		WorkflowName *string  `json:"workflow_name"`
+		Status       string   `json:"status"`
+		Conclusion   *string  `json:"conclusion"`
+		HeadBranch   *string  `json:"head_branch"`
+		HeadSHA      string   `json:"head_sha"`
+		HTMLURL      string   `json:"html_url"`
+		RunnerName   *string  `json:"runner_name"`
+		Labels       []string `json:"labels"`
+	} `json:"workflow_job"`
+}
+
+func workflowJob(p workflowJobPayload) (fields, bool) {
+	j := p.WorkflowJob
+	labels := j.Labels
+	if labels == nil {
+		labels = []string{}
+	}
+	return fields{
+		prs:     []int32{},
+		headSHA: j.HeadSHA,
+		data: map[string]any{
+			"job_id":        j.ID,
+			"run_id":        j.RunID,
+			"run_attempt":   j.RunAttempt,
+			"name":          j.Name,
+			"workflow_name": j.WorkflowName,
+			"status":        j.Status,
+			"conclusion":    j.Conclusion,
+			"head_branch":   j.HeadBranch,
+			"runner_name":   j.RunnerName,
+			"labels":        labels,
+			"html_url":      j.HTMLURL,
 			"sender_login":  p.Sender.Login,
 			"sender_id":     p.Sender.ID,
 		},

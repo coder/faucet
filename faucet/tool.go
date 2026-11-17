@@ -127,6 +127,9 @@ func (in waitInput) parse() (waitRequest, error) {
 	if in.PR < 0 {
 		return waitRequest{}, xerrors.New("pr must be a pull request number")
 	}
+	if in.PR != 0 && !slices.ContainsFunc(types, func(t string) bool { return !storedTypes[t].family.noPRs }) {
+		return waitRequest{}, xerrors.New("pr matches none of these types, because GitHub names no pull request in them; filter by sha")
+	}
 	if in.Cursor != nil && *in.Cursor < 0 {
 		return waitRequest{}, xerrors.New("cursor must not be negative")
 	}

@@ -2,9 +2,10 @@ import { describe, expect, newRepoId, test } from './support';
 import { newMarker, subscribe, subscribeParams, unsubscribe } from './subscriptions';
 
 const EVENTS_EXTENSION = 'io.modelcontextprotocol/events';
-const families = ['ci.runs', 'ci.checks', 'pr.activity', 'pr.reviews', 'pr.comments', 'pr.review_comments', 'pr.review_threads'];
+const families = ['ci.runs', 'ci.jobs', 'ci.checks', 'pr.activity', 'pr.reviews', 'pr.comments', 'pr.review_comments', 'pr.review_threads'];
 const eventNames = [...families, 'ci.check_completed', 'ci.run_completed', 'pr.closed', 'pr.comment_created', 'pr.review_submitted'];
 const noHeadCommit = ['pr.comments', 'pr.comment_created'];
+const noPullRequest = ['ci.jobs'];
 const WEBHOOK_UNSUPPORTED = {
   code: -32026,
   message: 'webhook delivery is not supported by this server',
@@ -39,7 +40,7 @@ describe('events list', () => {
     expect(reply.result?.capabilities.extensions?.[EVENTS_EXTENSION]).toEqual({ listChanged: false });
   });
 
-  test('events/list returns the seven families and the five exact types, each with poll and webhook delivery and two schemas', async ({ faucet }) => {
+  test('events/list returns every family and then the five exact types, each with poll and webhook delivery and two schemas', async ({ faucet }) => {
     const reply = await faucet.mcp<ListResult>('events/list');
     const events = reply.result?.events ?? [];
 
@@ -52,7 +53,9 @@ describe('events list', () => {
       expect(event.delivery, `${event.name} delivery`).toEqual(['poll', 'webhook']);
       expect(event.inputSchema.type, `${event.name} inputSchema`).toBe('object');
       const hasHeadCommit = !noHeadCommit.includes(event.name);
-      const properties = hasHeadCommit ? ['pr', 'repo', 'sha'] : ['pr', 'repo'];
+      const properties = ['pr', 'repo', 'sha'].filter(
+        (p) => (p !== 'sha' || hasHeadCommit) && (p !== 'pr' || !noPullRequest.includes(event.name)),
+      );
       expect(Object.keys(event.inputSchema.properties).sort(), `${event.name} inputSchema properties`).toEqual(
         families.includes(event.name) ? ['actions', ...properties] : properties,
       );

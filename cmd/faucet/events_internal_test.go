@@ -116,7 +116,7 @@ func TestMCPEventsListAndPollOverHTTP(t *testing.T) {
 		Delivery []string `json:"delivery"`
 	}
 	require.NoError(t, json.Unmarshal(list["events"], &events))
-	require.Len(t, events, 12)
+	require.Len(t, events, 13)
 	require.Equal(t, []string{"poll"}, events[0].Delivery)
 
 	head, err := callEvents(ctx, session, "events/poll", pollParams("o/r", nil))

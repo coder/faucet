@@ -15,12 +15,13 @@ import (
 )
 
 var (
-	allFamilies = []string{"ci.runs", "ci.checks", "pr.activity", "pr.reviews", "pr.comments", "pr.review_comments", "pr.review_threads"}
+	allFamilies = []string{"ci.runs", "ci.jobs", "ci.checks", "pr.activity", "pr.reviews", "pr.comments", "pr.review_comments", "pr.review_threads"}
 	allNames    = append(slices.Clone(allFamilies), allTypes...)
 	// typePrefix is the naming rule of the exact types: the exact type of
 	// action X of a family is its prefix followed by X.
 	typePrefix = map[string]string{
 		"ci.runs":            "ci.run_",
+		"ci.jobs":            "ci.job_",
 		"ci.checks":          "ci.check_",
 		"pr.activity":        "pr.",
 		"pr.reviews":         "pr.review_",
@@ -36,6 +37,7 @@ var (
 		actions []string
 	}{
 		"ci.runs": {"workflow_run", []string{"completed", "in_progress", "requested"}},
+		"ci.jobs": {"workflow_job", []string{"completed", "in_progress", "queued", "waiting"}},
 		"pr.activity": {"pull_request", []string{
 			"assigned", "auto_merge_disabled", "auto_merge_enabled", "closed", "converted_to_draft", "demilestoned", "dequeued",
 			"edited", "enqueued", "labeled", "locked", "milestoned", "opened", "ready_for_review", "reopened",

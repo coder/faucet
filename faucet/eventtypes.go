@@ -22,6 +22,9 @@ type family struct {
 	// noHeadSHA is set when GitHub's payload names no head commit, so no event
 	// of the family has a head_sha and a sha filter could never match one.
 	noHeadSHA bool
+	// noPRs is set when GitHub's payload names no pull request, so every
+	// event of the family has empty prs and a pr filter could never match.
+	noPRs bool
 	// properties are the payload properties of the family's data, written as
 	// a JSON object.
 	properties string
@@ -79,6 +82,27 @@ var families = []*family{
     "html_url": {"type": "string"},
     "run_attempt": {"type": "integer"},
     "workflow_id": {"type": "integer"},
+    "sender_login": {"type": "string"},
+    "sender_id": {"type": "integer"}
+}`,
+	},
+	{
+		name:        "ci.jobs",
+		githubEvent: "workflow_job",
+		description: "Jobs of GitHub Actions workflow runs. GitHub names no pull request in these events, so filter by sha and not by pr.",
+		noPRs:       true,
+		properties: `{
+    "job_id": {"type": "integer"},
+    "run_id": {"type": "integer"},
+    "run_attempt": {"type": "integer"},
+    "name": {"type": "string", "description": "The job name."},
+    "workflow_name": {"type": ["string", "null"]},
+    "status": {"type": "string", "description": "For example queued, waiting, in_progress or completed."},
+    "conclusion": {"type": ["string", "null"], "description": "For example success, failure or skipped. Null until the job completes."},
+    "head_branch": {"type": ["string", "null"]},
+    "runner_name": {"type": ["string", "null"]},
+    "labels": {"type": "array", "items": {"type": "string"}, "description": "The runner labels that the job asks for."},
+    "html_url": {"type": "string"},
     "sender_login": {"type": "string"},
     "sender_id": {"type": "integer"}
 }`,
@@ -217,11 +241,15 @@ var (
 	headSHAProperty = map[string]any{"type": "string", "description": "The head commit SHA. Absent when the event has none."}
 )
 
-// argumentsSchema is the inputSchema of an event name: repo and pr, and the
-// filters of the name. It offers sha unless the family's events carry no head
-// commit (no family means sha), and actions when it is given them.
+// argumentsSchema is the inputSchema of an event name: repo and the filters of
+// the name. It offers pr and sha unless the family's events name no pull
+// request or no head commit (no family means both), and actions when it is
+// given them.
 func argumentsSchema(f *family, actions []string) json.RawMessage {
-	properties := map[string]any{"repo": repoArgument, "pr": prArgument}
+	properties := map[string]any{"repo": repoArgument}
+	if f == nil || !f.noPRs {
+		properties["pr"] = prArgument
+	}
 	if f == nil || !f.noHeadSHA {
 		properties["sha"] = shaArgument
 	}
