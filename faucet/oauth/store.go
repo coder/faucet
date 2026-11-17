@@ -32,8 +32,15 @@ var subjectOf = map[SubjectKind]func(faucet.Principal) (string, bool){
 	},
 }
 
-// ErrUnknownToken means the store holds no access token with that hash.
-var ErrUnknownToken = xerrors.New("unknown access token")
+var (
+	// ErrUnknownToken means the store holds no access token with that hash.
+	ErrUnknownToken = xerrors.New("unknown access token")
+	// ErrUnknownClient means the store holds no client with that ID.
+	ErrUnknownClient = xerrors.New("unknown client")
+	// ErrClientExists means the store already holds a client with that ID,
+	// live or disabled.
+	ErrClientExists = xerrors.New("a client with this ID exists")
+)
 
 // AccessToken is an access token as a store keeps it: its hash, never the
 // token.
@@ -73,8 +80,8 @@ func (t AccessToken) Validate() error {
 	return nil
 }
 
-// Store keeps faucet's access tokens. storetest.RunOAuth checks an
-// implementation.
+// Store keeps faucet's access tokens and service clients. storetest.RunOAuth
+// checks an implementation.
 type Store interface {
 	// InsertAccessToken stores t. It fails when t is not valid, or when the
 	// store holds a token with the same hash.
@@ -83,4 +90,18 @@ type Store interface {
 	// expired or not, or ErrUnknownToken. A stored token need not pass
 	// Validate: a later build can write a scope that this one does not know.
 	AccessToken(ctx context.Context, hash TokenHash) (AccessToken, error)
+
+	// InsertClient stores c. It fails when c is not valid, and returns
+	// ErrClientExists when the store holds a client with the same ID, even a
+	// disabled one, so no ID is ever given to a second client.
+	InsertClient(ctx context.Context, c Client) error
+	// Client returns the client with this ID, live or disabled, or
+	// ErrUnknownClient.
+	Client(ctx context.Context, id string) (Client, error)
+	// Clients returns every client, in the order of creation.
+	Clients(ctx context.Context) ([]Client, error)
+	// DisableClient disables the client with this ID at now and returns it.
+	// A client that is disabled already keeps the time it was first
+	// disabled. It returns ErrUnknownClient when there is no such client.
+	DisableClient(ctx context.Context, id string, now time.Time) (Client, error)
 }

@@ -25,6 +25,12 @@ func RunOAuth(t *testing.T, newStore func(t *testing.T) oauth.Store) {
 		{"InsertAccessTokenRefusesASecondTokenWithTheSameHash", insertAccessTokenRefusesASecondTokenWithTheSameHash},
 		{"InsertAccessTokenValidatesInput", insertAccessTokenValidatesInput},
 		{"AccessTokenSharesNoSliceWithItsCaller", accessTokenSharesNoSliceWithItsCaller},
+		{"ClientReadsBackAsInserted", clientReadsBackAsInserted},
+		{"ClientOfAnUnknownIDIsUnknown", clientOfAnUnknownIDIsUnknown},
+		{"InsertClientRefusesAnIDThatAnyClientHeld", insertClientRefusesAnIDThatAnyClientHeld},
+		{"DisableClientKeepsTheFirstTime", disableClientKeepsTheFirstTime},
+		{"InsertClientValidatesInput", insertClientValidatesInput},
+		{"ClientSharesNoSliceWithItsCaller", clientSharesNoSliceWithItsCaller},
 	}
 	for _, st := range subtests {
 		t.Run(st.name, func(t *testing.T) {
@@ -141,4 +147,141 @@ func accessTokenSharesNoSliceWithItsCaller(t *testing.T, s oauth.Store) {
 	again, err := s.AccessToken(ctx, want.Hash)
 	require.NoError(t, err)
 	requireSameAccessToken(t, want, again)
+}
+
+// clientAt is a valid live client created at created, which has no time
+// below a microsecond, as Postgres keeps it.
+func clientAt(id string, created time.Time) oauth.Client {
+	return oauth.Client{
+		ID:         id,
+		SecretHash: oauth.HashToken("fcs_" + id),
+		Resource:   "https://faucet.example.com/github/mcp",
+		Grants:     []string{"repo:coder/faucet", "repo:coder/coder"},
+		Scopes:     []faucet.Scope{faucet.ScopeEventsRead, faucet.ScopeEventsSubscribe},
+		CreatedAt:  created.Truncate(time.Microsecond),
+	}
+}
+
+func requireSameClient(t *testing.T, want, got oauth.Client) {
+	t.Helper()
+	require.True(t, want.CreatedAt.Equal(got.CreatedAt), "created_at: want %v, got %v", want.CreatedAt, got.CreatedAt)
+	require.True(t, want.DisabledAt.Equal(got.DisabledAt), "disabled_at: want %v, got %v", want.DisabledAt, got.DisabledAt)
+	got.CreatedAt, got.DisabledAt = want.CreatedAt, want.DisabledAt
+	require.Equal(t, want, got)
+}
+
+func clientReadsBackAsInserted(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	at := time.Now()
+	first := clientAt("ci-watcher", at)
+	second := clientAt("triage", at.Add(time.Second))
+	second.Resource = "https://faucet.example.com/mcp"
+	second.Grants = []string{"repo:coder/faucet"}
+	second.Scopes = []faucet.Scope{faucet.ScopeEventsRead}
+	// Inserted out of order, listed by creation.
+	require.NoError(t, s.InsertClient(ctx, second))
+	require.NoError(t, s.InsertClient(ctx, first))
+
+	got, err := s.Client(ctx, "ci-watcher")
+	require.NoError(t, err)
+	requireSameClient(t, first, got)
+	require.True(t, got.Live())
+	all, err := s.Clients(ctx)
+	require.NoError(t, err)
+	require.Len(t, all, 2)
+	requireSameClient(t, first, all[0])
+	requireSameClient(t, second, all[1])
+}
+
+func clientOfAnUnknownIDIsUnknown(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	require.NoError(t, s.InsertClient(ctx, clientAt("ci-watcher", time.Now())))
+	_, err := s.Client(ctx, "ci-watcher2")
+	require.ErrorIs(t, err, oauth.ErrUnknownClient)
+	_, err = s.DisableClient(ctx, "ci-watcher2", time.Now())
+	require.ErrorIs(t, err, oauth.ErrUnknownClient)
+	all, err := s.Clients(ctx)
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+}
+
+// A service's login is "svc:" and its client ID, and the login owns its
+// subscriptions, so an ID that a client ever held is never given to another.
+func insertClientRefusesAnIDThatAnyClientHeld(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	first := clientAt("ci-watcher", time.Now())
+	require.NoError(t, s.InsertClient(ctx, first))
+	again := clientAt("ci-watcher", time.Now())
+	again.SecretHash = oauth.HashToken("fcs_another")
+	require.ErrorIs(t, s.InsertClient(ctx, again), oauth.ErrClientExists)
+
+	_, err := s.DisableClient(ctx, "ci-watcher", time.Now())
+	require.NoError(t, err)
+	require.ErrorIs(t, s.InsertClient(ctx, again), oauth.ErrClientExists, "a disabled client keeps its ID")
+	got, err := s.Client(ctx, "ci-watcher")
+	require.NoError(t, err)
+	require.Equal(t, first.SecretHash, got.SecretHash)
+}
+
+func disableClientKeepsTheFirstTime(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	at := time.Now().Truncate(time.Microsecond)
+	c := clientAt("ci-watcher", at)
+	require.NoError(t, s.InsertClient(ctx, c))
+	require.NoError(t, s.InsertClient(ctx, clientAt("triage", at)))
+
+	disabled, err := s.DisableClient(ctx, "ci-watcher", at.Add(time.Minute))
+	require.NoError(t, err)
+	want := c
+	want.DisabledAt = at.Add(time.Minute)
+	requireSameClient(t, want, disabled)
+	require.False(t, disabled.Live())
+
+	again, err := s.DisableClient(ctx, "ci-watcher", at.Add(time.Hour))
+	require.NoError(t, err)
+	requireSameClient(t, want, again)
+	got, err := s.Client(ctx, "ci-watcher")
+	require.NoError(t, err)
+	requireSameClient(t, want, got)
+	other, err := s.Client(ctx, "triage")
+	require.NoError(t, err)
+	require.True(t, other.Live(), "disabling one client leaves the others live")
+}
+
+func insertClientValidatesInput(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	for name, mutate := range map[string]func(*oauth.Client){
+		"no ID":              func(c *oauth.Client) { c.ID = "" },
+		"an upper-case ID":   func(c *oauth.Client) { c.ID = "CI" },
+		"an ID with a colon": func(c *oauth.Client) { c.ID = "ci:bot" },
+		"no secret hash":     func(c *oauth.Client) { c.SecretHash = oauth.TokenHash{} },
+		"no resource":        func(c *oauth.Client) { c.Resource = "" },
+		"no scope":           func(c *oauth.Client) { c.Scopes = nil },
+		"an unknown scope":   func(c *oauth.Client) { c.Scopes = []faucet.Scope{"events:everything"} },
+		"a bad grant":        func(c *oauth.Client) { c.Grants = []string{"org:coder"} },
+		"no creation time":   func(c *oauth.Client) { c.CreatedAt = time.Time{} },
+	} {
+		c := clientAt("ci-watcher", time.Now())
+		mutate(&c)
+		require.Error(t, s.InsertClient(ctx, c), name)
+	}
+	all, err := s.Clients(ctx)
+	require.NoError(t, err)
+	require.Empty(t, all, "nothing is stored")
+}
+
+func clientSharesNoSliceWithItsCaller(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	inserted := clientAt("ci-watcher", time.Now())
+	want := clientAt("ci-watcher", inserted.CreatedAt)
+	require.NoError(t, s.InsertClient(ctx, inserted))
+	inserted.Grants[0], inserted.Scopes[0] = "repo:evil/repo", faucet.ScopeEventsSubscribe
+
+	got, err := s.Client(ctx, "ci-watcher")
+	require.NoError(t, err)
+	requireSameClient(t, want, got)
+	got.Grants[0], got.Scopes[0] = "repo:evil/repo", faucet.ScopeEventsSubscribe
+	again, err := s.Client(ctx, "ci-watcher")
+	require.NoError(t, err)
+	requireSameClient(t, want, again)
 }

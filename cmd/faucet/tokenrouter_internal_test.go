@@ -37,6 +37,7 @@ func newFaucetToken(t *testing.T, prefix string) string {
 }
 
 type memTokens struct {
+	oauth.Store
 	mu     sync.Mutex
 	tokens map[oauth.TokenHash]oauth.AccessToken
 	err    error
