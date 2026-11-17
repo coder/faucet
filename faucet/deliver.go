@@ -211,17 +211,20 @@ func (r *deliveryRun) claimDelivery(ctx context.Context) (DeliveryClaim, bool, e
 	return claim, ok, r.unlessEnded(ctx, err)
 }
 
-// claimNext takes the next due delivery: of the kind that rawFirst names
-// first, and of the other kind when that one has nothing due. Without a
-// RawStore it takes typed deliveries only.
-func (r *deliveryRun) claimNext(ctx context.Context, rawFirst bool) (outbound, bool, error) {
-	kinds := []func(context.Context) (outbound, bool, error){r.claimTyped}
+type claimFunc func(context.Context) (outbound, bool, error)
+
+// claimKinds are the kinds of delivery that the run sends: typed ones, and
+// raw ones when the service has a RawStore.
+func (r *deliveryRun) claimKinds() []claimFunc {
+	kinds := []claimFunc{r.claimTyped}
 	if r.svc.raw != nil {
 		kinds = append(kinds, r.claimRaw)
-		if rawFirst {
-			slices.Reverse(kinds)
-		}
 	}
+	return kinds
+}
+
+// claimNext takes the next due delivery of the first kind that has one.
+func claimNext(ctx context.Context, kinds []claimFunc) (outbound, bool, error) {
 	for _, claim := range kinds {
 		if o, ok, err := claim(ctx); err != nil || ok {
 			return o, ok, err
@@ -504,7 +507,7 @@ func (r *deliveryRun) send(ctx context.Context) error {
 				fail(err)
 				return
 			}
-			rawFirst := false
+			kinds := r.claimKinds()
 			for !stopped.Load() {
 				if ctx.Err() != nil || r.outOfTime(ctx) {
 					r.add(func(res *DeliverResult) { res.Incomplete = true })
@@ -514,7 +517,7 @@ func (r *deliveryRun) send(ctx context.Context) error {
 					r.add(func(res *DeliverResult) { res.Incomplete = true })
 					return
 				}
-				o, ok, err := r.claimNext(ctx, rawFirst)
+				o, ok, err := claimNext(ctx, kinds)
 				if err != nil {
 					fail(err)
 					return
@@ -523,7 +526,9 @@ func (r *deliveryRun) send(ctx context.Context) error {
 					reserved.Add(-1)
 					return
 				}
-				rawFirst = !rawFirst
+				// A worker asks the other kind first after each claim, so
+				// that neither kind waits behind a long queue of the other.
+				slices.Reverse(kinds)
 				r.add(func(res *DeliverResult) { res.Claimed++ })
 				if err := r.attempt(ctx, o); err != nil {
 					fail(err)
