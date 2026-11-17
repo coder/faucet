@@ -53,6 +53,14 @@ Keep `FAUCET_WEBHOOK_KEY` stable. Rows sealed under another key can't be read. T
 A renewal keeps the subscription's read position and ignores any `cursor` it carries. A subscribe after the subscription lapsed (it expired or was unsubscribed) starts after the `cursor` you send. A renewal also reports `deliveryStatus`: `lastDeliveryAt`, `lastError` and `failedSince`. `lastError`, and the `data.reason` of a `CallbackEndpointError`, take these values:
 
 <!-- BEGIN generated:callback-reasons -->
+| Value | In lastError | In data.reason | Meaning |
+| --- | --- | --- | --- |
+| `connection_refused` | yes | yes | The connection failed: the port refused it, the name did not resolve, or the address is not public. |
+| `timeout` | yes | yes | No answer within 5 seconds. |
+| `tls_error` | yes | yes | The TLS handshake or the certificate check failed. |
+| `http_4xx` | yes | yes | A 4xx answer. For a delivery, also any other answer that is not 2xx, 5xx, `410` or `413`, such as a redirect. |
+| `http_5xx` | yes | yes | A 5xx answer. For a delivery, also a response whose body is over 64 KiB or whose headers are over 16 KiB. |
+| `challenge_failed` | no | yes | The callback URL's origin is not on the allowlist, or the handshake got no 2xx answer that echoes the challenge. |
 <!-- END generated:callback-reasons -->
 
 `events/unsubscribe` takes `name`, `arguments` (read as `events/subscribe` reads them) and `delivery.url`, and deletes the caller's own live subscription.
@@ -89,6 +97,19 @@ Delivery is **at least once**. An attempt whose result faucet could not record i
 A delivery that doesn't succeed ends with one of these reasons, which `/cron/deliver` counts in `gave_up` and logs:
 
 <!-- BEGIN generated:give-up-reasons -->
+| Reason | Meaning |
+| --- | --- |
+| `endpoint_gone` | The endpoint answered `410 Gone`. This ends the delivery, not the subscription. |
+| `endpoint_payload_too_large` | The endpoint answered `413`. This ends the delivery, not the subscription. |
+| `event_too_large` | The body would be over 256 KiB, so faucet never sent it. |
+| `event_malformed` | Faucet could not build a body from the stored event. |
+| `attempts_exhausted` | All 5 attempts failed. |
+| `window_expired` | The next attempt would come more than 15 minutes after the event was queued. |
+| `event_purged` | A retention purge deleted the event before the delivery ended. |
+| `repo_mismatch` | The event's repository is not the one that the subscription is granted now. |
+| `secret_unreadable` | The subscriber's sealed secret does not open, as after a change of `FAUCET_WEBHOOK_KEY`. The subscription is deleted too, until its subscriber renews. |
+| `subscription_expired` | The subscription expired before the delivery ended. |
+| `arguments_undecodable` | The subscription's stored arguments do not decode, so faucet deleted the subscription with its deliveries. |
 <!-- END generated:give-up-reasons -->
 
 A subscription that holds 100 unsent deliveries reads no new events until some of them end.

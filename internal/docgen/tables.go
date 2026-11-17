@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"regexp"
 	"slices"
 	"strings"
@@ -9,11 +11,14 @@ import (
 	"github.com/coder/faucet/faucet"
 )
 
-// tables renders each generated block by name, header rows included.
-var tables = map[string]func(source) ([]string, error){
-	"events":        eventsTable,
-	"event-actions": eventActionsTable,
-	"settings":      settingsTable,
+// tables renders each generated block by name.
+var tables = map[string]table{
+	"events":           eventsTable,
+	"event-actions":    eventActionsTable,
+	"settings":         settingsTable,
+	"give-up-reasons":  giveUpTable,
+	"callback-reasons": callbackTable,
+	"cron-replies":     cronRepliesTable,
 }
 
 func eventsTable(s source) ([]string, error) {
@@ -50,9 +55,8 @@ func codeList(items []string) string {
 }
 
 // setting is one environment variable that cmd/faucet reads. A purpose names
-// a number or a value of the code as {constName} for a constant of cmd/faucet
-// and {faucet.constName} for one of package faucet, so the table cannot drift
-// from the code.
+// a number or a value of the code as a placeholder (see fill), so the table
+// cannot drift from the code.
 type setting struct {
 	name     string
 	required string
@@ -79,26 +83,19 @@ var settings = []setting{
 }
 
 func settingsTable(s source) ([]string, error) {
-	cmd, err := readConsts(s.fsys, "cmd/faucet")
+	cmd, err := parsePackage(s.fsys, "cmd/faucet")
 	if err != nil {
 		return nil, err
 	}
-	core, err := readConsts(s.fsys, "faucet")
-	if err != nil {
+	listed := make([]string, len(s.settings))
+	for i, st := range s.settings {
+		listed[i] = st.name
+	}
+	if err := compareNames(listed, packageEnvReads(cmd), "cmd/faucet reads %s, which the settings registry lacks", "the settings registry lists %s, which cmd/faucet does not read"); err != nil {
 		return nil, err
 	}
-	values := map[string]string{}
-	var envs []string
-	for name, c := range cmd {
-		values[name] = c.value
-		if c.str && strings.HasPrefix(name, "env") {
-			envs = append(envs, c.value)
-		}
-	}
-	for name, c := range core {
-		values["faucet."+name] = c.value
-	}
-	if err := compareSettings(s.settings, envs); err != nil {
+	values, err := constValues(s.fsys)
+	if err != nil {
 		return nil, err
 	}
 	rows := []string{"| Variable | Required | Purpose |", "| --- | --- | --- |"}
@@ -116,51 +113,78 @@ func settingsTable(s source) ([]string, error) {
 	return rows, nil
 }
 
-// compareSettings fails unless the registry lists exactly the variables that
-// cmd/faucet names in its env* constants.
-func compareSettings(registry []setting, envs []string) error {
-	listed := map[string]bool{}
-	for _, st := range registry {
-		listed[st.name] = true
-	}
-	var unlisted, unread []string
-	for _, env := range envs {
-		if !listed[env] {
-			unlisted = append(unlisted, env)
+// compareNames fails unless listed, the names of a registry, are exactly
+// found, the names in the code. lacks and extra describe the names that only
+// the code has and those that only the registry has, as a format for the
+// list of them.
+func compareNames(listed, found []string, lacks, extra string) error {
+	var onlyCode, onlyListed []string
+	for _, name := range found {
+		if !slices.Contains(listed, name) {
+			onlyCode = append(onlyCode, name)
 		}
 	}
-	for _, st := range registry {
-		if !slices.Contains(envs, st.name) {
-			unread = append(unread, st.name)
+	for _, name := range listed {
+		if !slices.Contains(found, name) {
+			onlyListed = append(onlyListed, name)
 		}
 	}
 	var problems []string
-	if len(unlisted) > 0 {
-		slices.Sort(unlisted)
-		problems = append(problems, "cmd/faucet reads "+strings.Join(unlisted, ", ")+", which the settings registry lacks")
+	if len(onlyCode) > 0 {
+		slices.Sort(onlyCode)
+		problems = append(problems, fmt.Sprintf(lacks, strings.Join(onlyCode, ", ")))
 	}
-	if len(unread) > 0 {
-		problems = append(problems, "the settings registry lists "+strings.Join(unread, ", ")+", which no env* constant of cmd/faucet names")
+	if len(onlyListed) > 0 {
+		slices.Sort(onlyListed)
+		problems = append(problems, fmt.Sprintf(extra, strings.Join(onlyListed, ", ")))
 	}
 	if len(problems) > 0 {
-		return fmt.Errorf("%s", strings.Join(problems, "; "))
+		return errors.New(strings.Join(problems, "; "))
 	}
 	return nil
 }
 
-var placeholderRE = regexp.MustCompile(`\{([A-Za-z][A-Za-z0-9_.]*)\}`)
-
-func fill(text string, values map[string]string) (string, error) {
-	var unknown []string
-	out := placeholderRE.ReplaceAllStringFunc(text, func(m string) string {
-		v, ok := values[m[1:len(m)-1]]
-		if !ok {
-			unknown = append(unknown, m)
+// constValues returns the constants that a registry may name: {name} for one
+// of cmd/faucet and {faucet.name} for one of package faucet.
+func constValues(fsys fs.FS) (map[string]goConst, error) {
+	values := map[string]goConst{}
+	for prefix, dir := range map[string]string{"": "cmd/faucet", "faucet.": "faucet"} {
+		pkg, err := parsePackage(fsys, dir)
+		if err != nil {
+			return nil, err
 		}
-		return v
+		for name, c := range readConsts(pkg) {
+			values[prefix+name] = c
+		}
+	}
+	return values, nil
+}
+
+// placeholderRE matches {name} and {name:KiB}. A constant fills in as its
+// text, and :KiB writes a byte count as a whole number of KiB.
+var placeholderRE = regexp.MustCompile(`\{([A-Za-z][A-Za-z0-9_.]*)(:KiB)?\}`)
+
+func fill(text string, values map[string]goConst) (string, error) {
+	var problems []string
+	out := placeholderRE.ReplaceAllStringFunc(text, func(m string) string {
+		sub := placeholderRE.FindStringSubmatch(m)
+		c, ok := values[sub[1]]
+		switch {
+		case !ok:
+			problems = append(problems, "no constant of cmd/faucet or package faucet for "+m)
+			return ""
+		case sub[2] == ":KiB":
+			kib, err := c.kibText()
+			if err != nil {
+				problems = append(problems, m+": "+err.Error())
+			}
+			return kib
+		default:
+			return c.text()
+		}
 	})
-	if len(unknown) > 0 {
-		return "", fmt.Errorf("no constant of cmd/faucet or package faucet for %s", strings.Join(unknown, ", "))
+	if len(problems) > 0 {
+		return "", errors.New(strings.Join(problems, "; "))
 	}
 	return out, nil
 }

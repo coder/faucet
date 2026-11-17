@@ -82,6 +82,8 @@ const currentEventsDoc = `<!-- BEGIN generated:event-actions -->
 <!-- END generated:event-actions -->
 `
 
+var fixtureTables = map[string]table{"events": eventsTable, "event-actions": eventActionsTable}
+
 func TestRegenerate(t *testing.T) {
 	t.Parallel()
 	emptied := strings.Replace(currentReadme, "| `ci.runs` | `workflow_run` | `ci.run_completed` |\n| `ci.jobs` | `workflow_job` | none |\n", "", 1)
@@ -94,16 +96,18 @@ func TestRegenerate(t *testing.T) {
 		wantErr string
 	}{
 		{name: "current tables", docs: map[string]string{"README.md": currentReadme, "docs/events.md": currentEventsDoc}},
-		{name: "a doc without blocks", docs: map[string]string{"docs/other.md": "# Other\n"}},
+		{name: "a doc without blocks", docs: map[string]string{"README.md": currentReadme, "docs/events.md": currentEventsDoc, "docs/other.md": "# Other\n"}},
+		{name: "a table without a block", docs: map[string]string{"README.md": currentReadme}, wantErr: "generated:event-actions has no block"},
+		{name: "no blocks at all", docs: map[string]string{"docs/other.md": "# Other\n"}, wantErr: "generated:event-actions, generated:events has no block"},
 		{
 			name:  "a row edited by hand",
 			docs:  map[string]string{"README.md": strings.Replace(currentReadme, "| `workflow_job` | none |", "| `workflow_job` | `ci.job_queued` |", 1), "docs/events.md": currentEventsDoc},
 			stale: []string{"README.md events"},
 		},
-		{name: "an empty block", docs: map[string]string{"README.md": emptied}, stale: []string{"README.md events"}},
+		{name: "an empty block", docs: map[string]string{"README.md": emptied, "docs/events.md": currentEventsDoc}, stale: []string{"README.md events"}},
 		{
 			name:  "a stale block in docs",
-			docs:  map[string]string{"docs/events.md": strings.Replace(currentEventsDoc, "`queued`", "`waiting`", 1)},
+			docs:  map[string]string{"README.md": currentReadme, "docs/events.md": strings.Replace(currentEventsDoc, "`queued`", "`waiting`", 1)},
 			stale: []string{"docs/events.md event-actions"},
 		},
 		{name: "an unknown name", docs: map[string]string{"README.md": "# x\n<!-- BEGIN generated:nope -->\n<!-- END generated:nope -->\n"}, wantErr: "README.md:2:"},
@@ -124,7 +128,7 @@ func TestRegenerate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			fsys := mapFS(tc.docs)
-			s := source{fsys: fsys, events: fixtureEvents}
+			s := source{fsys: fsys, tables: fixtureTables, events: fixtureEvents}
 			updates, err := s.regenerate()
 			if tc.wantErr != "" {
 				if err == nil || !strings.HasPrefix(err.Error(), tc.wantErr) {
@@ -160,10 +164,13 @@ func TestRegenerate(t *testing.T) {
 func TestSettingsTable(t *testing.T) {
 	t.Parallel()
 	code := map[string]string{
-		"cmd/faucet/main.go": "package main\n\nconst (\n\tenvPort = \"PORT\"\n\tenvKey = \"HOOK_KEY\"\n\tdefaultPort = \"8080\"\n\tmaxDays = 30\n\tnotEnv = \"NOT_A_VARIABLE\"\n)\n",
+		// A constant that names a variable is no read, and neither is a read of
+		// a variable that holds the name.
+		"cmd/faucet/main.go": "package main\n\nimport \"os\"\n\nconst (\n\tenvPort = \"PORT\"\n\tdefaultPort = \"8080\"\n\tmaxDays = 30\n\tenvUnread = \"NOT_READ\"\n)\n\n" +
+			"func main() { load(os.Getenv) }\n\nfunc load(getenv func(string) string) {\n\t_ = getenv(envPort)\n\t_, _ = os.LookupEnv(\"HOOK_KEY\")\n\tname := envUnread\n\t_ = getenv(name)\n}\n",
 		// A file behind a build tag and a test file read no variable of a default build.
-		"cmd/faucet/e2e.go":       "//go:build faucet_e2e\n\npackage main\n\nconst envE2E = \"E2E_ONLY\"\n",
-		"cmd/faucet/main_test.go": "package main\n\nconst envTest = \"TEST_ONLY\"\n",
+		"cmd/faucet/e2e.go":       "//go:build faucet_e2e\n\npackage main\n\nfunc e2e(getenv func(string) string) { getenv(\"E2E_ONLY\") }\n",
+		"cmd/faucet/main_test.go": "package main\n\nimport \"os\"\n\nvar testOnly = os.Getenv(\"TEST_ONLY\")\n",
 		"faucet/key.go":           "package faucet\n\nconst keyBytes = 32\n",
 	}
 	block := "<!-- BEGIN generated:settings -->\n| Variable | Required | Purpose |\n| --- | --- | --- |\n" +
@@ -178,6 +185,8 @@ func TestSettingsTable(t *testing.T) {
 		{name: "the registry matches the code", registry: registry},
 		{name: "a variable missing from the registry", registry: registry[:1], wantErr: []string{"HOOK_KEY"}},
 		{name: "a variable the code does not read", registry: append(slices.Clone(registry), setting{"GONE", "no", "x"}), wantErr: []string{"GONE"}},
+		{name: "a constant that no read takes", registry: append(slices.Clone(registry), setting{"NOT_READ", "no", "x"}), wantErr: []string{"NOT_READ"}},
+		{name: "a variable that only a test or a tagged build reads", registry: append(slices.Clone(registry), setting{"TEST_ONLY", "no", "x"}, setting{"E2E_ONLY", "no", "x"}), wantErr: []string{"TEST_ONLY", "E2E_ONLY"}},
 		{name: "both ways at once", registry: []setting{registry[0], {"GONE", "no", "x"}}, wantErr: []string{"HOOK_KEY", "GONE"}},
 		{name: "an unknown placeholder", registry: []setting{registry[0], {"HOOK_KEY", "no", "Default {nope}."}}, wantErr: []string{"{nope}"}},
 	}
@@ -188,7 +197,7 @@ func TestSettingsTable(t *testing.T) {
 			for name, src := range code {
 				files[name] = src
 			}
-			updates, err := source{fsys: mapFS(files), settings: tc.registry}.regenerate()
+			updates, err := source{fsys: mapFS(files), tables: map[string]table{"settings": settingsTable}, settings: tc.registry}.regenerate()
 			if len(tc.wantErr) == 0 {
 				if err != nil || len(updates) > 0 {
 					t.Fatalf("got %d updates and error %v, want the table to be current", len(updates), err)
@@ -210,14 +219,17 @@ func TestSettingsTable(t *testing.T) {
 func TestCheckNames(t *testing.T) {
 	t.Parallel()
 	tree := map[string]string{
-		"cmd/faucet/main.go": "package main\n\nconst envKey = \"FAUCET_KEY\"\n\n" +
+		"cmd/faucet/main.go": "package main\n\nimport \"os\"\n\nconst (\n\tenvKey = \"FAUCET_KEY\"\n\tliteral = \"FAUCET_LITERAL\"\n)\n\n" +
+			"func load(getenv func(string) string) {\n\tgetenv(envKey)\n\tgetenv(\"DATABASE_URL\")\n\tos.Getenv(\"PORT\")\n\tos.LookupEnv(\"CRON_SECRET\")\n}\n\n" +
 			"func routes(r chi.Router) {\n\tr.Get(\"/cron/purge\", nil)\n\tr.Method(http.MethodPost, \"/webhook/github\", nil)\n\tr.Handle(\"/mcp\", nil)\n}\n",
-		"cmd/faucet/e2e.go":      "//go:build faucet_e2e\n\npackage main\n\nfunc e2e(r chi.Router) { r.Get(\"/e2e\", nil) }\n",
-		"faucet/db_test.go":      "package faucet_test\n\nconst dbVar = \"FAUCET_TEST_DATABASE_URL\"\n",
-		"verify/run.go":          "package verify\n\nconst v = \"FAUCET_VERIFY_ONLY\"\n",
-		"docs/a.md":              "# A\n\n## Second part\n\n## Twice\n\n## Twice\n\n```sh\n## Not a heading\n```\n",
-		"docs/images/map.png":    "",
-		"faucet/redelivery/x.go": "package redelivery\n",
+		"cmd/faucet/e2e.go":                "//go:build faucet_e2e\n\npackage main\n\nfunc e2e(r chi.Router) { r.Get(\"/e2e\", nil) }\n",
+		"faucet/db_test.go":                "package faucet_test\n\nimport \"os\"\n\nvar dbVar = os.Getenv(\"FAUCET_TEST_ONLY\")\n",
+		"faucet/internal/pgtest/pgtest.go": "package pgtest\n\nimport \"os\"\n\nfunc URL() string { return os.Getenv(\"FAUCET_TEST_DATABASE_URL\") }\n",
+		"verify/go.mod":                    "module github.com/coder/faucet/verify\n",
+		"verify/run.go":                    "package verify\n\nimport \"os\"\n\nvar v = os.Getenv(\"FAUCET_VERIFY_ONLY\")\n",
+		"docs/a.md":                        "# A\n\n## Second part\n\n## Twice\n\n## Twice\n\n```sh\n## Not a heading\n```\n",
+		"docs/images/map.png":              "",
+		"faucet/redelivery/x.go":           "package redelivery\n",
 	}
 	cases := []struct {
 		name   string
@@ -229,12 +241,24 @@ func TestCheckNames(t *testing.T) {
 			name: "names that exist",
 			readme: "# R\n\nSet `FAUCET_KEY`, `FAUCET_TEST_DATABASE_URL` or any `FAUCET_*`. Call `GET /cron/purge`, `POST /webhook/github`,\n" +
 				"`DELETE /mcp`, `/mcp` and `/cron/*`. GitHub answers `GET /user`.\n" +
+				"Set `PORT`, `DATABASE_URL`, `Authorization: Bearer $CRON_SECRET` or `<CRON_SECRET>`. Neon sets `POSTGRES_*` and `PG*`. Send one `POST`.\n" +
+				"Point the hook at `https://<your host>/webhook/github` and clients at https://<production domain>/mcp, on https://<your host>.\n" +
+				"```sh\nDATABASE_URL=x FAUCET_KEY=y go run .\n```\n" +
 				"[a](docs/a.md#second-part) [b](docs/a.md) [c](#r) [d](faucet/redelivery) [e](docs/a.md#twice-1) [f](https://example.com/nope.md#x) [g](mailto:x@example.com)\n" +
 				`<picture><source srcset="docs/images/map.png 2x, docs/images/map.png"><img src="docs/images/map.png" alt="map"></picture>` + "\n" +
 				"Code is skipped: `[x](nope.md)`\n```md\n[y](nope.md)\n```\n",
 		},
 		{name: "an unknown FAUCET_ name", readme: "Set `FAUCET_NOPE`.\n", want: []string{"1 FAUCET_NOPE"}},
 		{name: "a FAUCET_ name that only verify/ has", readme: "x\nFAUCET_VERIFY_ONLY\n", want: []string{"2 FAUCET_VERIFY_ONLY"}},
+		{name: "a FAUCET_ name that the code has but does not read", readme: "Set `FAUCET_LITERAL`.\n", want: []string{"1 FAUCET_LITERAL"}},
+		{name: "a FAUCET_ name that only a test reads", readme: "FAUCET_TEST_ONLY\n", want: []string{"1 FAUCET_TEST_ONLY"}},
+		{name: "an unknown variable in a code span", readme: "Set `CRON_SECRETS`, `Bearer $NOPE_TOKEN` and `HOST`, not CRON_SECRETS.\n", want: []string{"1 CRON_SECRETS", "1 HOST", "1 NOPE_TOKEN"}},
+		{name: "an unknown variable that a code fence sets", readme: "```sh\nNOPE_URL=x go run .\n```\n", want: []string{"2 NOPE_URL"}},
+		{
+			name:   "a placeholder URL whose path is no route",
+			readme: "Use `https://<your host>/webhook/githubx`.\nOr https://<production domain>/mcpx.\n```\ncurl https://<your host>/cron/nope\n```\n",
+			want:   []string{"1 https://<your host>/webhook/githubx", "2 https://<production domain>/mcpx", "4 https://<your host>/cron/nope"},
+		},
 		{name: "an unknown FAUCET_ prefix", readme: "`FAUCET_NOPE_*`\n", want: []string{"1 FAUCET_NOPE_*"}},
 		{name: "an unknown route", readme: "Call `GET /cron/nope`.\n", want: []string{"1 GET /cron/nope"}},
 		{name: "an unknown route in a code fence", readme: "```sh\ncurl\nGET /cron/nope\n```\n", want: []string{"3 GET /cron/nope"}},

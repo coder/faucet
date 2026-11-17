@@ -2,15 +2,12 @@ package main
 
 import (
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io/fs"
+	"maps"
 	"net/url"
 	"path"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"unicode"
 )
@@ -35,32 +32,59 @@ var exemptPaths = []string{
 	"/repos/{owner}/{name}", // GitHub API: the repository check in docs/security.md.
 }
 
+// exemptVariables are environment variables that the docs name and that no
+// code of faucet reads.
+var exemptVariables = []string{
+	"POSTGRES_*", // docs/deploy.md: Neon's Vercel integration sets them next to DATABASE_URL.
+	"PG*",        // docs/deploy.md: the same integration sets libpq's variables too.
+}
+
 var (
 	faucetNameRE = regexp.MustCompile(`FAUCET_[A-Z0-9_]+\*?`)
-	methodPathRE = regexp.MustCompile(`\b(GET|POST|PUT|PATCH|DELETE|HEAD) +(/[A-Za-z0-9_.~{}/*-]*)`)
-	codeSpanRE   = regexp.MustCompile("`[^`]*`")
-	pathSpanRE   = regexp.MustCompile(`^/[A-Za-z0-9_.~{}/-]*\*?$`)
-	fenceRE      = regexp.MustCompile("^\\s*(```|~~~)")
-	mdLinkRE     = regexp.MustCompile(`\]\(([^)\s]+)(?:\s+"[^"]*")?\)`)
-	htmlLinkRE   = regexp.MustCompile(`\b(src|srcset|href)\s*=\s*(?:"([^"]*)"|'([^']*)')`)
-	schemeRE     = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*:|//)`)
-	headingRE    = regexp.MustCompile(`^#{1,6}\s+(.*?)(?:\s+#+)?\s*$`)
+	// envSpanRE finds a name with an underscore inside a code span, such as
+	// `Bearer $CRON_SECRET`, and wordSpanRE a code span that is one
+	// upper-case word, such as `PORT`.
+	envSpanRE  = regexp.MustCompile(`\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]*)+(?:\*|\b)`)
+	wordSpanRE = regexp.MustCompile(`^\$?([A-Z][A-Z0-9]+\*?)$`)
+	// envAssignRE finds a variable that a shell line in a code fence sets.
+	envAssignRE = regexp.MustCompile(`^\s*([A-Z][A-Z0-9_]*)=`)
+	// placeholderURLRE finds a URL whose host is a placeholder, such as
+	// https://<your host>/mcp, and its path.
+	placeholderURLRE = regexp.MustCompile("https?://<[^>]+>(/[^\\s`)\"'<>?#]*)?")
+	methodPathRE     = regexp.MustCompile(`\b(GET|POST|PUT|PATCH|DELETE|HEAD) +(/[A-Za-z0-9_.~{}/*-]*)`)
+	codeSpanRE       = regexp.MustCompile("`[^`]*`")
+	pathSpanRE       = regexp.MustCompile(`^/[A-Za-z0-9_.~{}/-]*\*?$`)
+	fenceRE          = regexp.MustCompile("^\\s*(```|~~~)")
+	mdLinkRE         = regexp.MustCompile(`\]\(([^)\s]+)(?:\s+"[^"]*")?\)`)
+	htmlLinkRE       = regexp.MustCompile(`\b(src|srcset|href)\s*=\s*(?:"([^"]*)"|'([^']*)')`)
+	schemeRE         = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*:|//)`)
+	headingRE        = regexp.MustCompile(`^#{1,6}\s+(.*?)(?:\s+#+)?\s*$`)
 )
 
 type checker struct {
-	fsys     fs.FS
-	literals map[string]bool
-	routes   []route
+	fsys fs.FS
+	// vars are the environment variables that some non-test file of the
+	// module reads.
+	vars   []string
+	routes []route
 }
 
-// checkNames reports every FAUCET_ variable, route and relative link in the
-// docs that the repository does not have.
+// checkNames reports every environment variable, route and relative link in
+// the docs that the repository does not have.
 func checkNames(fsys fs.FS) ([]problem, error) {
-	literals, err := stringLiterals(fsys)
+	byDir, err := envReads(fsys)
 	if err != nil {
 		return nil, err
 	}
-	routes, err := servedRoutes(fsys)
+	var reads []string
+	for _, names := range byDir {
+		reads = append(reads, names...)
+	}
+	cmd, err := parsePackage(fsys, "cmd/faucet")
+	if err != nil {
+		return nil, err
+	}
+	routes, err := servedRoutes(cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +92,7 @@ func checkNames(fsys fs.FS) ([]problem, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := checker{fsys: fsys, literals: literals, routes: routes}
+	c := checker{fsys: fsys, vars: reads, routes: routes}
 	var problems []problem
 	for _, file := range files {
 		content, err := fs.ReadFile(fsys, file)
@@ -87,18 +111,32 @@ func (c checker) check(file, content string) []problem {
 		report := func(name, msg string) {
 			problems = append(problems, problem{file: file, line: i + 1, name: name, msg: msg})
 		}
-		for _, name := range faucetNameRE.FindAllString(line, -1) {
-			if !c.isLiteral(name) {
-				report(name, "is not a string literal of the Go code")
-			}
-		}
 		for _, m := range methodPathRE.FindAllStringSubmatch(line, -1) {
 			if p := strings.TrimRight(m[2], "."); !c.serves(m[1], p) {
 				report(m[1]+" "+p, "is not a route that cmd/faucet registers")
 			}
 		}
+		for _, m := range placeholderURLRE.FindAllStringSubmatch(line, -1) {
+			if p := strings.TrimRight(m[1], ".,:;"); p != "" && !c.serves("", p) {
+				report(strings.TrimRight(m[0], ".,:;"), "has a path that is not a route that cmd/faucet registers")
+			}
+		}
 		var marks bool
-		if fence, marks = fenceAfter(fence, line); marks || fence != "" {
+		fence, marks = fenceAfter(fence, line)
+		inCode := marks || fence != ""
+		names := faucetNameRE.FindAllString(line, -1)
+		if inCode {
+			names = append(names, assignedVariables(line)...)
+		} else {
+			names = append(names, spanVariables(line)...)
+		}
+		slices.Sort(names)
+		for _, name := range slices.Compact(names) {
+			if !c.reads(name) {
+				report(name, "is not an environment variable that a non-test file of the module reads")
+			}
+		}
+		if inCode {
 			continue
 		}
 		for _, span := range codeSpanRE.FindAllString(line, -1) {
@@ -115,17 +153,37 @@ func (c checker) check(file, content string) []problem {
 	return problems
 }
 
-func (c checker) isLiteral(name string) bool {
-	prefix, wild := strings.CutSuffix(name, "*")
-	if !wild {
-		return c.literals[name]
-	}
-	for lit := range c.literals {
-		if strings.HasPrefix(lit, prefix) && faucetNameRE.FindString(lit) == lit {
-			return true
+// spanVariables returns the names in the code spans of a line of prose
+// that look like environment variables.
+func spanVariables(line string) []string {
+	var names []string
+	for _, span := range codeSpanRE.FindAllString(line, -1) {
+		span = strings.Trim(span, "`")
+		names = append(names, envSpanRE.FindAllString(span, -1)...)
+		if m := wordSpanRE.FindStringSubmatch(span); len(m) > 1 && !slices.Contains(slices.Collect(maps.Values(routeMethods)), m[1]) {
+			names = append(names, m[1])
 		}
 	}
-	return false
+	return names
+}
+
+// assignedVariables returns the variable that a shell line of a code fence
+// sets.
+func assignedVariables(line string) []string {
+	if m := envAssignRE.FindStringSubmatch(line); len(m) > 1 {
+		return m[1:2]
+	}
+	return nil
+}
+
+// reads reports whether the module reads the variable name, or for a name
+// that ends in *, a variable that starts with the rest.
+func (c checker) reads(name string) bool {
+	if slices.Contains(exemptVariables, name) {
+		return true
+	}
+	prefix, wild := strings.CutSuffix(name, "*")
+	return slices.ContainsFunc(c.vars, func(read string) bool { return read == name || wild && strings.HasPrefix(read, prefix) })
 }
 
 // serves reports whether cmd/faucet registers p for method, or for every
@@ -253,119 +311,4 @@ func slug(heading string) string {
 			return -1
 		}
 	}, strings.ToLower(heading))
-}
-
-// skippedDirs hold Go code outside the root module, or code that names
-// variables only to describe the docs.
-var skippedDirs = []string{"verify", "tools", "internal/docgen"}
-
-func stringLiterals(fsys fs.FS) (map[string]bool, error) {
-	literals := map[string]bool{}
-	fset := token.NewFileSet()
-	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
-		switch {
-		case err != nil:
-			return err
-		case d.IsDir() && (d.Name() == "node_modules" || d.Name() == ".git" || slices.Contains(skippedDirs, p)):
-			return fs.SkipDir
-		case d.IsDir() || path.Ext(p) != ".go":
-			return nil
-		}
-		src, err := fs.ReadFile(fsys, p)
-		if err != nil {
-			return err
-		}
-		f, err := parser.ParseFile(fset, p, src, parser.SkipObjectResolution)
-		if err != nil {
-			return err
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			if v, ok := stringLit(n); ok {
-				literals[v] = true
-			}
-			return true
-		})
-		return nil
-	})
-	return literals, err
-}
-
-func stringLit(n ast.Node) (string, bool) {
-	lit, ok := n.(*ast.BasicLit)
-	if !ok || lit.Kind != token.STRING {
-		return "", false
-	}
-	v, err := strconv.Unquote(lit.Value)
-	return v, err == nil
-}
-
-// route is a path that cmd/faucet registers. An empty method serves every
-// method.
-type route struct {
-	method string
-	path   string
-}
-
-// routeMethods maps the chi router methods that register a route to the HTTP
-// method they serve. Method takes the HTTP method as its first argument.
-var routeMethods = map[string]string{
-	"Get": "GET", "Post": "POST", "Put": "PUT", "Patch": "PATCH", "Delete": "DELETE", "Head": "HEAD",
-	"Handle": "", "HandleFunc": "", "Method": "",
-}
-
-func servedRoutes(fsys fs.FS) ([]route, error) {
-	files, err := goFiles(fsys, "cmd/faucet")
-	if err != nil {
-		return nil, err
-	}
-	var routes []route
-	var unread []string
-	for _, f := range files {
-		ast.Inspect(f, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			method, ok := routeMethods[sel.Sel.Name]
-			args := call.Args
-			if !ok || len(args) == 0 {
-				return true
-			}
-			if sel.Sel.Name == "Method" {
-				if len(args) < 2 {
-					return true
-				}
-				method, args = httpMethod(args[0]), args[1:]
-			}
-			if p, ok := stringLit(args[0]); ok && strings.HasPrefix(p, "/") {
-				if method == "" && sel.Sel.Name == "Method" {
-					unread = append(unread, p)
-				}
-				routes = append(routes, route{method: method, path: p})
-			}
-			return true
-		})
-	}
-	if len(unread) > 0 {
-		return nil, fmt.Errorf("cannot read the HTTP method of the routes %s in cmd/faucet", strings.Join(unread, ", "))
-	}
-	return routes, nil
-}
-
-// httpMethod reads a method written as a string or as an http.Method*
-// constant, or returns "".
-func httpMethod(e ast.Expr) string {
-	if v, ok := stringLit(e); ok {
-		return v
-	}
-	if sel, ok := e.(*ast.SelectorExpr); ok {
-		if name, ok := strings.CutPrefix(sel.Sel.Name, "Method"); ok {
-			return strings.ToUpper(name)
-		}
-	}
-	return ""
 }

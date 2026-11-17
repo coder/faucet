@@ -46,6 +46,11 @@ A preview runs any branch's code, and the Neon integration gives previews the pr
 Each `/cron/*` route answers 200 with a JSON object of counts. The result type in the table documents each field. A failed `/cron/redeliver` run answers 500 with the counts it made and an `error` that names nothing, and the log has the cause. A failed `/cron/deliver` or `/cron/purge` answers 500 with no counts.
 
 <!-- BEGIN generated:cron-replies -->
+| Route | Reply fields | Documented on |
+| --- | --- | --- |
+| `GET /cron/purge` | `deleted`, `purged_through`, `expired_subscriptions`, `ended_deliveries` | `faucet.PurgeResult` |
+| `GET /cron/deliver` | `enqueued`, `gaps`, `gaps_sent`, `gaps_failed`, `claimed`, `sent`, `delivered`, `retried`, `gave_up`, `superseded`, `previous_secrets_cleared`, `incomplete` | `faucet.DeliverResult` |
+| `GET /cron/redeliver` | `busy`, `pages`, `attempts`, `tracked`, `asked`, `recovered`, `gave_up.limit`, `gave_up.expired`, `gaps`, `pending`, `ranges`, `error` | `redelivery.Result` |
 <!-- END generated:cron-replies -->
 
 ## Runbooks
