@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/internal/pgtest"
 	"github.com/coder/faucet/faucet/pgstore"
 	"github.com/coder/quartz"
 )
@@ -125,7 +126,7 @@ func TestARunOfTheBuildBeforeTheClearMigrationFailsAfterItAndWritesNoPosition(t 
 			ctx := context.Background()
 			env := newRedeliveryEnv(t)
 			env.clock.WithLogger(quartz.NoOpLogger)
-			db := postgresDB(t)
+			db := pgtest.NewDB(t, pgstore.Migrate)
 			env.use(pgstore.New(db), env.gh)
 			old := buildBefore000008{db: db, hook: env.gh.Hook()}
 

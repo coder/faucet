@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,8 +26,37 @@ type recordedCall struct {
 	auth   string
 }
 
+// apiStub is a GitHub API that counts its requests.
+type apiStub struct {
+	*httptest.Server
+	requests atomic.Int64
+}
+
+func newAPIStub(t *testing.T, handler http.HandlerFunc) *apiStub {
+	t.Helper()
+	stub := &apiStub{}
+	stub.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stub.requests.Add(1)
+		handler(w, r)
+	}))
+	t.Cleanup(stub.Close)
+	return stub
+}
+
+func jsonReply(status int, body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = fmt.Fprint(w, body)
+	}
+}
+
+type transportFunc func(*http.Request) (*http.Response, error)
+
+func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 type hookStub struct {
-	*githubStub
+	*apiStub
 	mu    sync.Mutex
 	calls []recordedCall
 }
@@ -33,7 +64,7 @@ type hookStub struct {
 func newHookStub(t *testing.T, handler http.HandlerFunc) *hookStub {
 	t.Helper()
 	stub := &hookStub{}
-	stub.githubStub = newGitHubStub(t, func(w http.ResponseWriter, r *http.Request) {
+	stub.apiStub = newAPIStub(t, func(w http.ResponseWriter, r *http.Request) {
 		stub.mu.Lock()
 		stub.calls = append(stub.calls, recordedCall{r.Method, r.URL.Path, r.URL.Query(), r.Header.Get("Authorization")})
 		stub.mu.Unlock()
@@ -68,7 +99,7 @@ func TestGitHubHookAdminListsDeliveriesNewestFirstWithACursor(t *testing.T) {
 	stub := newHookStub(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Link", `<https://api.github.com/orgs/octo-org/hooks/9/deliveries?per_page=100&cursor=v1_29>; rel="next", `+
 			`<https://api.github.com/orgs/octo-org/hooks/9/deliveries?per_page=100&cursor=v1_32>; rel="prev"`)
-		reply(http.StatusOK, deliveriesBody)(w, nil)
+		jsonReply(http.StatusOK, deliveriesBody)(w, nil)
 	})
 	admin := newHookAdmin(t, stub, orgHook)
 
@@ -119,7 +150,7 @@ func TestGitHubHookAdminTakesGitHubsClockFromTheDateHeader(t *testing.T) {
 func TestGitHubHookAdminLastPageHasNoNext(t *testing.T) {
 	t.Parallel()
 
-	stub := newHookStub(t, reply(http.StatusOK, `[]`))
+	stub := newHookStub(t, jsonReply(http.StatusOK, `[]`))
 	page, err := newHookAdmin(t, stub, orgHook).ListDeliveries(context.Background(), "")
 	require.NoError(t, err)
 	require.Empty(t, page.Deliveries)
@@ -134,7 +165,7 @@ func TestGitHubHookAdminUsesTheRepoEndpointsForARepoHook(t *testing.T) {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		reply(http.StatusOK, `[]`)(w, r)
+		jsonReply(http.StatusOK, `[]`)(w, r)
 	})
 	admin := newHookAdmin(t, stub, faucet.HookTarget{Repo: "octo/the.repo", HookID: 12})
 	require.Equal(t, "/repos/octo/the.repo/hooks/12", admin.Hook())
@@ -157,7 +188,7 @@ func TestGitHubHookAdminTouchesOnlyTheTwoDeliveryEndpoints(t *testing.T) {
 	stub := newHookStub(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/orgs/octo-org/hooks/9/deliveries":
-			reply(http.StatusOK, deliveriesBody)(w, r)
+			jsonReply(http.StatusOK, deliveriesBody)(w, r)
 		case r.Method == http.MethodPost && r.URL.Path == "/orgs/octo-org/hooks/9/deliveries/31/attempts":
 			w.WriteHeader(http.StatusAccepted)
 		default:
@@ -183,12 +214,12 @@ func TestGitHubHookAdminTouchesOnlyTheTwoDeliveryEndpoints(t *testing.T) {
 func TestGitHubHookAdminSendsAHostileLinkAndCursorNowhereElse(t *testing.T) {
 	t.Parallel()
 
-	elsewhere := newGitHubStub(t, reply(http.StatusOK, `[]`))
+	elsewhere := newAPIStub(t, jsonReply(http.StatusOK, `[]`))
 	stub := newHookStub(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("cursor") == "" {
 			w.Header().Set("Link", fmt.Sprintf(`<%s/steal?cursor=a%%20b%%26c%%3Dd>; rel="next"`, elsewhere.URL))
 		}
-		reply(http.StatusOK, `[]`)(w, r)
+		jsonReply(http.StatusOK, `[]`)(w, r)
 	})
 	admin := newHookAdmin(t, stub, orgHook)
 
@@ -214,7 +245,7 @@ func TestGitHubHookAdminRefusesAPaginationLinkItCannotUse(t *testing.T) {
 	} {
 		stub := newHookStub(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Link", link)
-			reply(http.StatusOK, `[]`)(w, r)
+			jsonReply(http.StatusOK, `[]`)(w, r)
 		})
 		_, err := newHookAdmin(t, stub, orgHook).ListDeliveries(context.Background(), "")
 		require.Error(t, err, name)
@@ -233,7 +264,7 @@ func TestGitHubHookAdminRedeliverNeedsAccepted(t *testing.T) {
 		http.StatusUnprocessableEntity: true,
 		http.StatusInternalServerError: true,
 	} {
-		stub := newHookStub(t, reply(status, `{"message":"body that must not reach an error"}`))
+		stub := newHookStub(t, jsonReply(status, `{"message":"body that must not reach an error"}`))
 		err := newHookAdmin(t, stub, orgHook).Redeliver(context.Background(), 5)
 		if !wantErr {
 			require.NoError(t, err, "status %d", status)
@@ -262,7 +293,7 @@ func TestGitHubHookAdminListErrors(t *testing.T) {
 		"a delivery without a time": {http.StatusOK, `[{"id":1,"guid":"g","status_code":500}]`},
 		"a body over 1 MiB":         {http.StatusOK, `[` + strings.Repeat(`{"id":1,"guid":"g","delivered_at":"2026-11-13T10:00:00Z","status_code":500},`, 20000) + `{}]`},
 	} {
-		stub := newHookStub(t, reply(tc.status, tc.body))
+		stub := newHookStub(t, jsonReply(tc.status, tc.body))
 		page, err := newHookAdmin(t, stub, orgHook).ListDeliveries(context.Background(), "")
 		require.Error(t, err, name)
 		require.Empty(t, page.Deliveries, name)
@@ -313,7 +344,7 @@ func TestGitHubHookAdminTellsARateLimitFromADenialAndNeverGivesUpOnEither(t *tes
 func TestGitHubHookAdminErrorsNameNoURLAndNoCursor(t *testing.T) {
 	t.Parallel()
 
-	stub := newHookStub(t, reply(http.StatusOK, `[]`))
+	stub := newHookStub(t, jsonReply(http.StatusOK, `[]`))
 	admin := newHookAdmin(t, stub, orgHook)
 	stub.Close()
 
@@ -337,7 +368,7 @@ func TestGitHubHookAdminSendsTheTokenOnlyToBaseURL(t *testing.T) {
 		t.Run("CrossHostRedirectIsRefused/"+name, func(t *testing.T) {
 			t.Parallel()
 
-			elsewhere := newGitHubStub(t, reply(http.StatusAccepted, `[]`))
+			elsewhere := newAPIStub(t, jsonReply(http.StatusAccepted, `[]`))
 			stub := newHookStub(t, func(w http.ResponseWriter, r *http.Request) {
 				http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusTemporaryRedirect)
 			})
@@ -360,7 +391,7 @@ func TestGitHubHookAdminSendsTheTokenOnlyToBaseURL(t *testing.T) {
 					w.WriteHeader(http.StatusAccepted)
 					return
 				}
-				reply(http.StatusOK, `[]`)(w, r)
+				jsonReply(http.StatusOK, `[]`)(w, r)
 			})
 
 			require.NoError(t, call(newHookAdmin(t, stub, orgHook)))
@@ -393,7 +424,7 @@ func TestGitHubHookAdminRefusesARedirectThatChangesTheScheme(t *testing.T) {
 				t.Parallel()
 
 				var sent []string
-				client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				client := &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
 					sent = append(sent, r.URL.Scheme+"://"+r.URL.Host+r.URL.Path)
 					return &http.Response{
 						StatusCode: http.StatusTemporaryRedirect,

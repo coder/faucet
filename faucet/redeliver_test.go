@@ -23,6 +23,25 @@ import (
 
 const cronEvery = 10 * time.Minute
 
+// readFixture reads a webhook payload from the samples that the Normalize
+// tests use.
+func readFixture(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", name+".json"))
+	require.NoError(t, err)
+	return b
+}
+
+func editFixture(t *testing.T, name string, edit func(doc map[string]any)) []byte {
+	t.Helper()
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(readFixture(t, name), &doc))
+	edit(doc)
+	b, err := json.Marshal(doc)
+	require.NoError(t, err)
+	return b
+}
+
 // logTime reads a time that the capture sink printed.
 func logTime(t *testing.T, s string) time.Time {
 	t.Helper()
@@ -34,7 +53,7 @@ func logTime(t *testing.T, s string) time.Time {
 func TestNewValidatesRedeliveryDeps(t *testing.T) {
 	t.Parallel()
 
-	store := newFakeRedeliveryStore(nil)
+	store := newFakeRedeliveryStore()
 	hooks := newFakeGitHub(nil, store)
 	for name, deps := range map[string]faucet.RedeliveryDeps{
 		"no store":       {Hooks: hooks},
@@ -92,8 +111,8 @@ func TestRedeliverTracksOnlyWhatNormalizeStores(t *testing.T) {
 		{"issue_comment", "issue_comment_created_on_pr"},
 	} {
 		webhooks = append(webhooks,
-			webhook{c.fixture, c.event, fixture(t, c.fixture)},
-			webhook{c.fixture + " with action edited", c.event, mutate(t, c.fixture, func(doc map[string]any) { doc["action"] = "edited" })})
+			webhook{c.fixture, c.event, readFixture(t, c.fixture)},
+			webhook{c.fixture + " with action edited", c.event, editFixture(t, c.fixture, func(doc map[string]any) { doc["action"] = "edited" })})
 	}
 	webhooks = append(webhooks,
 		webhook{"ping", "ping", []byte(`{}`)},
@@ -145,7 +164,7 @@ func TestRedeliverDoesNotAskForADeliveryThatAlreadyWorked(t *testing.T) {
 		env := newRedeliveryEnv(t)
 		env.gh.record("g", env.now().Add(-20*time.Minute), 500)
 		_, _, err := env.store.InsertEvent(context.Background(), faucet.Event{
-			Source: "github", DeliveryID: "g", Type: "ci.run_completed", RepoID: repoID, Data: []byte(`{}`),
+			Source: "github", DeliveryID: "g", Type: "ci.run_completed", RepoID: eventRepoID, Data: []byte(`{}`),
 		})
 		require.NoError(t, err)
 

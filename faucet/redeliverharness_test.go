@@ -104,7 +104,7 @@ func (g *fakeGitHub) deliverLocked(guid string, at time.Time, event, action stri
 	}
 	if status >= 200 && status < 300 && event == handledEvent {
 		_, _, err := g.store.InsertEvent(context.Background(), faucet.Event{
-			Source: "github", DeliveryID: guid, Type: "ci.run_completed", RepoID: repoID, Data: []byte(`{}`),
+			Source: "github", DeliveryID: guid, Type: "ci.run_completed", RepoID: eventRepoID, Data: []byte(`{}`),
 		})
 		if err != nil {
 			panic(err)
@@ -113,7 +113,11 @@ func (g *fakeGitHub) deliverLocked(guid string, at time.Time, event, action stri
 	return g.recordLocked(guid, at, status, event, action)
 }
 
-const http200 = 200
+const (
+	http200 = 200
+	// eventRepoID is the repository of every event that the fake GitHub stores.
+	eventRepoID = 42
+)
 
 // record adds an attempt with the given status, whatever faucet would answer.
 // It stores nothing, so a failed attempt leaves its event unstored.
@@ -413,7 +417,7 @@ func newRedeliveryEnv(t *testing.T, opts ...func(*envOptions)) *redeliveryEnv {
 		opt(&o)
 	}
 	clock := quartz.NewMock(t)
-	store := newFakeRedeliveryStore(func() time.Time { return clock.Now() })
+	store := newFakeRedeliveryStore()
 	gh := newFakeGitHub(clock, store)
 	gh.pageSize, gh.style = o.pageSize, o.style
 	logs := &captureSink{}

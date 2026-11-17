@@ -42,7 +42,10 @@ type fakeRange struct {
 // events, as pgstore does. TestFakeRedeliveryStoreMatchesContract keeps it
 // honest.
 type fakeRedeliveryStore struct {
-	*fakeStore
+	// Store stays nil. The redelivery tests call only InsertEvent, which the
+	// fake implements. The rest of faucet.Store is here to satisfy
+	// storetest.RedeliveryStore.
+	faucet.Store
 	rmu sync.Mutex
 
 	stored      map[string]bool
@@ -58,11 +61,10 @@ type fakeRedeliveryStore struct {
 
 var _ faucet.RedeliveryStore = (*fakeRedeliveryStore)(nil)
 
-func newFakeRedeliveryStore(clock func() time.Time) *fakeRedeliveryStore {
+func newFakeRedeliveryStore() *fakeRedeliveryStore {
 	return &fakeRedeliveryStore{
-		fakeStore: &fakeStore{now: clock},
-		stored:    map[string]bool{},
-		rows:      map[string]*fakeRedeliveryRow{},
+		stored: map[string]bool{},
+		rows:   map[string]*fakeRedeliveryRow{},
 	}
 }
 
@@ -323,7 +325,7 @@ func (s *fakeRedeliveryStore) PurgeRedeliveries(_ context.Context, before time.T
 func TestFakeRedeliveryStoreMatchesContract(t *testing.T) {
 	t.Parallel()
 
-	storetest.RunRedelivery(t, func(*testing.T) storetest.RedeliveryStore { return newFakeRedeliveryStore(nil) })
+	storetest.RunRedelivery(t, func(*testing.T) storetest.RedeliveryStore { return newFakeRedeliveryStore() })
 }
 
 var _ storetest.GapRecords = (*fakeRedeliveryStore)(nil)
