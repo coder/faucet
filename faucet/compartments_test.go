@@ -21,12 +21,7 @@ import (
 // faucet is core, the internals below hold helpers, the adapters below sit
 // between core and the features, and every other directory under faucet/ is
 // a feature.
-const (
-	module = "github.com/coder/faucet"
-	// maxCoreNames is how many distinct core identifiers the non-test code of
-	// one feature may name.
-	maxCoreNames = 5
-)
+const module = "github.com/coder/faucet"
 
 // The two lists that are kept by hand, each entry one package. A directory
 // under faucet/internal or under an adapter that the lists do not name is a
@@ -36,6 +31,14 @@ var (
 	internals = []string{"faucet/internal/githubapi", "faucet/internal/pgtest"}
 	adapters  = []string{"faucet/pgstore", "faucet/pgstore/database", "faucet/storetest"}
 )
+
+// coreUses lists, for each feature, the core identifiers that its non-test
+// code names. A new name is one reviewed line here, and a name that the code no
+// longer uses fails too, so the list says exactly what a feature takes from
+// core.
+var coreUses = map[string][]string{
+	"redelivery": {"StoresDelivery"},
+}
 
 // banned are the core identifiers that no feature or adapter code names.
 var banned = []string{"Service", "Deps"}
@@ -106,7 +109,7 @@ func moduleDir(path string) (string, bool) {
 
 // compartmentViolations checks the layout against the rules and returns one
 // line per violation.
-func compartmentViolations(pkgs []goPackage) []string {
+func compartmentViolations(pkgs []goPackage, coreUses map[string][]string) []string {
 	var out []string
 	add := func(format string, args ...any) { out = append(out, fmt.Sprintf(format, args...)) }
 
@@ -201,13 +204,19 @@ func compartmentViolations(pkgs []goPackage) []string {
 		}
 	}
 	for feature, names := range coreNames {
-		sorted := slices.Sorted(maps.Keys(names))
-		if len(sorted) > maxCoreNames {
-			add("R4: faucet/%s names %d core identifiers, more than %d: %s", feature, len(sorted), maxCoreNames, strings.Join(sorted, ", "))
-		}
-		for _, name := range banned {
-			if names[name] {
+		for _, name := range slices.Sorted(maps.Keys(names)) {
+			switch {
+			case slices.Contains(banned, name):
 				add("R4: faucet/%s names faucet.%s", feature, name)
+			case !slices.Contains(coreUses[feature], name):
+				add("R4: faucet/%s names faucet.%s, which coreUses does not list for it", feature, name)
+			}
+		}
+	}
+	for _, feature := range slices.Sorted(maps.Keys(coreUses)) {
+		for _, name := range coreUses[feature] {
+			if !coreNames[feature][name] {
+				add("R4: coreUses lists faucet.%s for faucet/%s, which its code does not name", name, feature)
 			}
 		}
 	}
@@ -296,7 +305,7 @@ func importsOf(file *ast.File) []goImport {
 
 func TestCompartments(t *testing.T) {
 	t.Parallel()
-	violations := compartmentViolations(parseLayout(t))
+	violations := compartmentViolations(parseLayout(t), coreUses)
 	require.Empty(t, violations, "move the code instead of widening the rule:\n%s", strings.Join(violations, "\n"))
 }
 
@@ -338,7 +347,10 @@ func TestCompartmentRulesRejectEachBreach(t *testing.T) {
 			{dir: "faucet/storetest", files: []goFile{fileOf("storetest.go", use(core, "Store"), use(feature, "Store"))}},
 		}
 	}
-	require.Empty(t, compartmentViolations(valid()), "the valid layout passes")
+	uses := map[string][]string{"redelivery": {"Event", "StoresDelivery"}, "other": {"Store"}}
+	require.Empty(t, compartmentViolations(valid(), uses), "the valid layout passes")
+	stale := map[string][]string{"redelivery": {"Event", "Gone", "StoresDelivery"}, "other": {"Store"}}
+	require.Contains(t, compartmentViolations(valid(), stale), "R4: coreUses lists faucet.Gone for faucet/redelivery, which its code does not name")
 
 	addFile := func(dir string, f goFile) func([]goPackage) []goPackage {
 		return func(pkgs []goPackage) []goPackage {
@@ -353,7 +365,7 @@ func TestCompartmentRulesRejectEachBreach(t *testing.T) {
 	}
 	for _, feature := range []string{"events2", "a"} {
 		pkgs := addFile("faucet/"+feature, fileOf("x.go"))(addFile("faucet", fileOf("events.go"))(valid()))
-		require.Empty(t, compartmentViolations(pkgs), "no core file is named like the feature %s", feature)
+		require.Empty(t, compartmentViolations(pkgs, uses), "no core file is named like the feature %s", feature)
 	}
 	for _, tc := range []struct {
 		name   string
@@ -373,8 +385,9 @@ func TestCompartmentRulesRejectEachBreach(t *testing.T) {
 		{"a feature's code imports an adapter", addFile("faucet/redelivery", fileOf("x.go", use(pgstore, "New"))), "R3: faucet/redelivery/x.go imports " + pgstore},
 		{"a feature imports cmd", addFile("faucet/redelivery", fileOf("x.go", use(cmd, "Run"))), "R3: faucet/redelivery/x.go imports " + cmd},
 		{"an unlisted adapter is a feature", addFile("faucet/sqlite", fileOf("x.go", use(feature, "Store"))), "R3: faucet/sqlite/x.go imports " + feature},
-		{"a feature names too many core identifiers", addFile("faucet/redelivery", fileOf("x.go", use(core, "A", "B", "C", "D"))), "R4: faucet/redelivery names 6 core identifiers"},
-		{"a feature's sub-package counts toward its limit", addFile("faucet/redelivery/sub", fileOf("x.go", use(core, "A", "B", "C", "D"))), "R4: faucet/redelivery names 6 core identifiers"},
+		{"a feature names a core identifier that coreUses does not list", addFile("faucet/redelivery", fileOf("x.go", use(core, "Store"))), "R4: faucet/redelivery names faucet.Store, which coreUses does not list for it"},
+		{"a new feature names core without a coreUses entry", addFile("faucet/fresh", fileOf("x.go", use(core, "Event"))), "R4: faucet/fresh names faucet.Event, which coreUses does not list for it"},
+		{"a feature's sub-package is held to its coreUses entry", addFile("faucet/redelivery/sub", fileOf("x.go", use(core, "Store"))), "R4: faucet/redelivery names faucet.Store, which coreUses does not list for it"},
 		{"a feature names faucet.Service", addFile("faucet/redelivery", fileOf("x.go", use(core, "Service"))), "R4: faucet/redelivery names faucet.Service"},
 		{"a feature names faucet.Deps", addFile("faucet/other", fileOf("x.go", use(core, "Deps"))), "R4: faucet/other names faucet.Deps"},
 		{"an adapter's code names faucet.Service", addFile("faucet/pgstore", fileOf("x.go", use(core, "Service"))), "R4: faucet/pgstore/x.go names faucet.Service"},
@@ -399,7 +412,7 @@ func TestCompartmentRulesRejectEachBreach(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := compartmentViolations(tc.breach(valid()))
+			got := compartmentViolations(tc.breach(valid()), uses)
 			require.NotEmpty(t, got)
 			require.True(t, slices.ContainsFunc(got, func(v string) bool { return strings.HasPrefix(v, tc.want) }), "want %q in %q", tc.want, got)
 		})
