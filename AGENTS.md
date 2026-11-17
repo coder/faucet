@@ -3,6 +3,7 @@
 Faucet is a Go library with a thin server (`cmd/faucet`). Read `README.md` first, then the page in `docs/` for the area you touch.
 
 - `README.md` is the overview for humans and `docs/` holds what the code cannot tell: the contract for webhook receivers, the redelivery guarantees and limits, the security model and the deploy runbooks. Do not restate in either what an agent can read from the code (exported names, interface methods, reply fields, validation rules). When a change alters a documented behaviour or number, update the page in the same PR.
+- CI keeps the docs' generated tables, the README's pictures and the Mermaid diagrams current; the `verify-docs` skill in `.agents/skills/` says how to run those checks and refresh each.
 - Run the tests with a local Postgres 13 or newer: `FAUCET_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable' go test -race ./...`. They fail in CI when the variable is unset.
 - After you change a migration or a query, run `go -C tools tool sqlc generate -f ../sqlc.yaml` and commit the result.
 - The end-to-end checks live in `verify/` and are described by the `verify-faucet` skill in `.agents/skills/`.
