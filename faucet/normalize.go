@@ -95,11 +95,11 @@ func buildEvent(eventName string, payload []byte, deliveryID string) (Event, boo
 	return ev, true, nil
 }
 
-// storesDelivery says whether Normalize turns a webhook with this event name
+// StoresDelivery says whether Normalize turns a webhook with this event name
 // and action into a stored event, as far as the headers tell. It reads the
 // same rules, so the two cannot disagree. A webhook it accepts can still be
 // ignored for its payload, such as a comment on a plain issue.
-func storesDelivery(eventName, action string) bool {
+func StoresDelivery(eventName, action string) bool {
 	_, found := rules[eventName+"."+action]
 	return found
 }

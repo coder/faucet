@@ -8,6 +8,7 @@ import (
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog/v3"
+	"github.com/coder/quartz"
 )
 
 const (
@@ -256,13 +257,14 @@ func (s *Service) Redeliver(ctx context.Context) (RedeliverResult, error) {
 		}
 	}()
 
-	run := &redeliveryRun{svc: s, state: rd, epoch: scan.Epoch, budget: newRunBudget(ctx)}
+	run := &redeliveryRun{state: rd, clock: s.clock, logger: s.logger, epoch: scan.Epoch, budget: newRunBudget(ctx)}
 	return run.execute(ctx, scan)
 }
 
 type redeliveryRun struct {
-	svc    *Service
 	state  *redeliveryState
+	clock  quartz.Clock
+	logger slog.Logger
 	epoch  int64
 	budget runBudget
 	res    RedeliverResult
@@ -272,7 +274,7 @@ func (r *redeliveryRun) execute(ctx context.Context, scan RedeliveryScan) (Redel
 	r.res.Ranges = len(scan.Ranges)
 	if scan.HookChanged {
 		r.res.Ranges = 0
-		r.svc.logger.Warn(ctx, "redelivery hook changed: the scan starts again", slog.F("open_ranges_closed", len(scan.ClosedGaps)))
+		r.logger.Warn(ctx, "redelivery hook changed: the scan starts again", slog.F("open_ranges_closed", len(scan.ClosedGaps)))
 		for _, gap := range scan.ClosedGaps {
 			r.countGap(ctx, gap, gapHookChanged)
 		}
@@ -288,7 +290,7 @@ func (r *redeliveryRun) execute(ctx context.Context, scan RedeliveryScan) (Redel
 	errs = append(errs, r.purge(ctx))
 
 	res := r.res
-	r.svc.logger.Info(ctx, "redelivery run done",
+	r.logger.Info(ctx, "redelivery run done",
 		slog.F("pages", res.Pages), slog.F("attempts", res.Attempts), slog.F("tracked", res.Tracked), slog.F("asked", res.Asked),
 		slog.F("recovered", res.Recovered), slog.F("gave_up_limit", res.GaveUpLimit), slog.F("gave_up_expired", res.GaveUpExpired),
 		slog.F("gaps", res.Gaps), slog.F("pending", res.Pending), slog.F("open_ranges", res.Ranges))
@@ -334,7 +336,7 @@ func (r *redeliveryRun) classify(page DeliveryPage, bound readBound) pageRead {
 		}
 		p.attempts++
 		p.oldest = p.oldest.orEarlier(deliveredAt(d))
-		if !storesDelivery(d.Event, d.Action) {
+		if !StoresDelivery(d.Event, d.Action) {
 			continue
 		}
 		if d.StatusCode >= 200 && d.StatusCode < 300 {
@@ -348,7 +350,7 @@ func (r *redeliveryRun) classify(page DeliveryPage, bound readBound) pageRead {
 }
 
 func (r *redeliveryRun) step(p pageRead) ScanStep {
-	return ScanStep{Epoch: r.epoch, Now: r.svc.clock.Now(), Failed: p.failed, Succeeded: p.succeeded}
+	return ScanStep{Epoch: r.epoch, Now: r.clock.Now(), Failed: p.failed, Succeeded: p.succeeded}
 }
 
 func gapBetween(from, to time.Time) *RedeliveryGap {
@@ -374,7 +376,7 @@ func (r *redeliveryRun) apply(ctx context.Context, step ScanStep, cause string) 
 func (r *redeliveryRun) countRecovered(ctx context.Context, guids []string, how string) {
 	for _, guid := range guids {
 		r.res.Recovered++
-		r.svc.logger.Info(ctx, "redelivery recovered", slog.F("delivery_id", guid), slog.F("how", how))
+		r.logger.Info(ctx, "redelivery recovered", slog.F("delivery_id", guid), slog.F("how", how))
 	}
 }
 
@@ -387,7 +389,7 @@ const (
 
 func (r *redeliveryRun) countGap(ctx context.Context, gap RedeliveryGap, cause string) {
 	r.res.Gaps++
-	r.svc.logger.Warn(ctx, "redelivery gap",
+	r.logger.Warn(ctx, "redelivery gap",
 		slog.F("reason", GiveUpGap), slog.F("cause", cause), slog.F("from", gap.From), slog.F("to", gap.To))
 }
 
@@ -463,7 +465,7 @@ func (r *redeliveryRun) closeExpired(ctx context.Context, ranges []RedeliveryRan
 			continue
 		}
 		gap := rg.UnreadGap()
-		if _, err := r.apply(ctx, ScanStep{Epoch: r.epoch, Now: r.svc.clock.Now(), CloseID: rg.ID, Gap: &gap}, gapExpiredUnread); err != nil {
+		if _, err := r.apply(ctx, ScanStep{Epoch: r.epoch, Now: r.clock.Now(), CloseID: rg.ID, Gap: &gap}, gapExpiredUnread); err != nil {
 			return nil, err
 		}
 		r.res.Ranges--
@@ -536,7 +538,7 @@ func laterOf(a, b time.Time) time.Time {
 
 func (r *redeliveryRun) settle(ctx context.Context) error {
 	res, err := r.state.store.SettleRedeliveries(ctx, SettleRequest{
-		Now: r.svc.clock.Now(), Retention: GitHubDeliveryRetention, MaxAsks: MaxAsksPerDelivery,
+		Now: r.clock.Now(), Retention: GitHubDeliveryRetention, MaxAsks: MaxAsksPerDelivery,
 	})
 	if err != nil {
 		return xerrors.Errorf("settle deliveries: %w", err)
@@ -550,7 +552,7 @@ func (r *redeliveryRun) settle(ctx context.Context) error {
 		case GiveUpExpired:
 			r.res.GaveUpExpired++
 		}
-		r.svc.logger.Warn(ctx, "redelivery gave up", slog.F("delivery_id", g.GUID), slog.F("reason", g.Reason),
+		r.logger.Warn(ctx, "redelivery gave up", slog.F("delivery_id", g.GUID), slog.F("reason", g.Reason),
 			slog.F("asks", g.Asks), slog.F("first_delivered_at", g.FirstDeliveredAt))
 	}
 	return nil
@@ -562,7 +564,7 @@ func (r *redeliveryRun) ask(ctx context.Context) error {
 	defer cancel()
 	for r.res.Asked < r.state.maxAsks && askCtx.Err() == nil && !r.budget.pastAskStart() {
 		claim, ok, err := r.state.store.ClaimRedelivery(ctx, ClaimRequest{
-			Now: r.svc.clock.Now(), Retention: GitHubDeliveryRetention, MaxAsks: MaxAsksPerDelivery, Schedule: schedule,
+			Now: r.clock.Now(), Retention: GitHubDeliveryRetention, MaxAsks: MaxAsksPerDelivery, Schedule: schedule,
 		})
 		if err != nil {
 			return xerrors.Errorf("claim a redelivery: %w", err)
@@ -571,12 +573,12 @@ func (r *redeliveryRun) ask(ctx context.Context) error {
 			return nil
 		}
 		if err := r.state.hooks.Redeliver(askCtx, claim.AttemptID); err != nil {
-			r.svc.logger.Warn(ctx, "redelivery request failed",
+			r.logger.Warn(ctx, "redelivery request failed",
 				slog.F("delivery_id", claim.GUID), slog.F("attempt_id", claim.AttemptID), slog.F("ask", claim.Ask), slog.Error(err))
 			return xerrors.Errorf("request redelivery: %w", err)
 		}
 		r.res.Asked++
-		r.svc.logger.Info(ctx, "redelivery requested",
+		r.logger.Info(ctx, "redelivery requested",
 			slog.F("delivery_id", claim.GUID), slog.F("attempt_id", claim.AttemptID), slog.F("ask", claim.Ask))
 	}
 	return nil
@@ -585,7 +587,7 @@ func (r *redeliveryRun) ask(ctx context.Context) error {
 // purge deletes what has outlived GitHub's retention, so a table of final
 // deliveries does not grow without end.
 func (r *redeliveryRun) purge(ctx context.Context) error {
-	if _, err := r.state.store.PurgeRedeliveries(ctx, r.svc.clock.Now().Add(-GitHubDeliveryRetention)); err != nil {
+	if _, err := r.state.store.PurgeRedeliveries(ctx, r.clock.Now().Add(-GitHubDeliveryRetention)); err != nil {
 		return xerrors.Errorf("purge redeliveries: %w", err)
 	}
 	return nil
