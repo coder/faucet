@@ -104,14 +104,18 @@ func New(d Deps) (*Service, error) {
 		principalFrom: d.PrincipalFrom,
 		clock:         d.Clock,
 		waits:         newWaitLimiter(d.MaxWaitsPerLogin),
-		listed:        describeEvents([]string{deliveryPoll}),
 	}
+	delivery := []string{deliveryPoll}
 	if d.Webhook != nil {
 		var err error
 		if svc.webhook, err = newWebhookState(*d.Webhook, d.Clock, d.Logger); err != nil {
 			return nil, xerrors.Errorf("webhook: %w", err)
 		}
-		svc.listed = describeEvents([]string{deliveryPoll, deliveryWebhook})
+		delivery = []string{deliveryPoll, deliveryWebhook}
+	}
+	svc.listed = describeEvents(delivery)
+	if d.RawStore != nil {
+		svc.listed = append(svc.listed, describeRawEvents(delivery)...)
 	}
 	return svc, nil
 }
