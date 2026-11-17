@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -13,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/xerrors"
 
@@ -92,9 +95,21 @@ type tokenServer struct {
 	tokens *memTokens
 }
 
-// newTokenServer is newTestServer with a faucet verifier whose service
-// subjects are live, for an origin of testOrigin.
-func newTokenServer(t *testing.T) *tokenServer {
+// tokenServerConfig is what newTokenServer builds the server from. A test
+// changes it before the server starts.
+type tokenServerConfig struct {
+	github   faucet.TokenAuthorizer
+	clock    *quartz.Mock
+	authn    authenticator
+	authz    faucet.Authorizer
+	subjects map[oauth.SubjectKind]oauth.SubjectResolver
+	webhook  *faucet.WebhookDeps
+}
+
+// newTokenServer is newTestServer with a faucet verifier for an origin of
+// testOrigin. By default its service subjects are live and hold the grant
+// repo:o/r.
+func newTokenServer(t *testing.T, configure ...func(*tokenServerConfig)) *tokenServer {
 	t.Helper()
 	github := newGitHubStub(t)
 	store := &stubStore{events: []faucet.Event{{
@@ -102,28 +117,37 @@ func newTokenServer(t *testing.T) *tokenServer {
 		PRs: []int32{3}, HeadSHA: strings.Repeat("a", 40), Data: json.RawMessage(`{"conclusion":"success"}`),
 		ReceivedAt: time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC),
 	}}}
-	clock := quartz.NewMock(t)
 	logs := &syncBuffer{}
 	logger := slog.Make(sloghuman.Sink(logs)).Leveled(slog.LevelDebug)
 
-	authz := faucet.TokenAuthorizer{BaseURL: github.URL, Client: github.Client()}
+	cfg := tokenServerConfig{
+		github: faucet.TokenAuthorizer{BaseURL: github.URL, Client: github.Client()},
+		clock:  quartz.NewMock(t),
+		subjects: map[oauth.SubjectKind]oauth.SubjectResolver{
+			oauth.SubjectService: func(_ context.Context, id string, scopes []faucet.Scope) (faucet.Principal, error) {
+				return faucet.NewService(faucet.ServiceClient{ClientID: id, Grants: []string{"repo:o/r"}}, scopes)
+			},
+		},
+	}
+	cfg.authn, cfg.authz = cfg.github, byKind{github: cfg.github}
+	for _, c := range configure {
+		c(&cfg)
+	}
 	svc, err := faucet.New(faucet.Deps{
 		Store: store, Secret: []byte(testSecret), Logger: logger,
-		Authorizer: byKind{github: authz}, PrincipalFrom: principalFrom, Clock: clock,
+		Authorizer: cfg.authz, PrincipalFrom: principalFrom, Clock: cfg.clock, Webhook: cfg.webhook,
 	})
 	require.NoError(t, err)
 	tokens := &memTokens{tokens: map[oauth.TokenHash]oauth.AccessToken{}}
-	verifier, err := oauth.NewVerifier(tokens, clock, map[oauth.SubjectKind]oauth.SubjectResolver{
-		oauth.SubjectService: func(_ context.Context, id string, scopes []faucet.Scope) (faucet.Principal, error) {
-			return faucet.NewService(faucet.ServiceClient{ClientID: id, Grants: []string{"repo:o/r"}}, scopes)
-		},
-	})
+	verifier, err := oauth.NewVerifier(tokens, cfg.clock, cfg.subjects)
+	require.NoError(t, err)
+	b, err := newBearers(cfg.authn, verifier, testOrigin)
 	require.NoError(t, err)
 
-	srv := httptest.NewServer(newRouter(svc, bearers{github: authz, faucet: verifier, origin: testOrigin}, cronRoutes{}, logger))
-	t.Cleanup(func() { closeServer(srv, clock) })
+	srv := httptest.NewServer(newRouter(svc, b, cronRoutes{}, logger))
+	t.Cleanup(func() { closeServer(srv, cfg.clock) })
 	return &tokenServer{
-		testServer: &testServer{Server: srv, github: github, store: store, clock: clock, logs: logs},
+		testServer: &testServer{Server: srv, github: github, store: store, clock: cfg.clock, logs: logs},
 		tokens:     tokens,
 	}
 }
@@ -143,6 +167,10 @@ func (s *tokenServer) issue(t *testing.T, scopes []faucet.Scope, mutate ...func(
 	require.NoError(t, s.tokens.InsertAccessToken(context.Background(), at))
 	return token
 }
+
+// randomPart is a piece of the random part of a faucet token, which a log
+// that printed any of the token would hold.
+func randomPart(token string) string { return token[8:24] }
 
 func requireRefused(t *testing.T, srv *testServer, token string) {
 	t.Helper()
@@ -175,11 +203,21 @@ func TestFaucetTokensNeverReachGitHub(t *testing.T) {
 		srv := newTokenServer(t)
 		refresh := newFaucetToken(t, "fcr_")
 		srv.issue(t, []faucet.Scope{faucet.ScopeEventsRead}, func(at *oauth.AccessToken) { at.Hash = oauth.HashToken(refresh) })
-		for _, token := range append(refused(t), refresh) {
+		tokens := append(refused(t), refresh)
+		for _, token := range tokens {
 			requireRefused(t, srv.testServer, token)
 		}
 		paths, _ := srv.github.seen()
 		require.Empty(t, paths)
+		logs := srv.logs.String()
+		require.Contains(t, logs, "faucet token rejected")
+		require.Contains(t, logs, "not an access token", "the debug log says why")
+		require.Contains(t, logs, "unknown access token")
+		for _, token := range tokens {
+			if len(token) >= 24 {
+				require.Zero(t, strings.Count(logs, randomPart(token)), "the log never holds a piece of a token")
+			}
+		}
 	})
 }
 
@@ -240,7 +278,7 @@ func TestAFaucetTokenCheckThatCannotRunIsAServerError(t *testing.T) {
 	require.Empty(t, challenge, "a check that could not run is not a rejected token")
 	require.Equal(t, "could not check the token\n", body)
 	require.Contains(t, srv.logs.String(), "could not check the faucet token")
-	require.Zero(t, strings.Count(srv.logs.String(), token), "the log never holds the token")
+	require.Zero(t, strings.Count(srv.logs.String(), randomPart(token)), "the log never holds the token, nor a piece of it")
 	paths, _ := srv.github.seen()
 	require.Empty(t, paths)
 }
@@ -263,4 +301,185 @@ func TestAGitHubTokenTakesTheGitHubPathBesideAFaucetVerifier(t *testing.T) {
 	status, _, body := rawPost(t, srv.testServer, "Bearer "+bobToken)
 	require.Equal(t, http.StatusBadGateway, status)
 	require.Equal(t, "could not check the token with GitHub\n", body)
+}
+
+func TestAFaucetVerifierNeedsABareOrigin(t *testing.T) {
+	t.Parallel()
+
+	verifier, err := oauth.NewVerifier(&memTokens{}, quartz.NewMock(t), nil)
+	require.NoError(t, err)
+	for _, origin := range []string{
+		"https://faucet.example.com", "https://faucet.example.com:8443", "http://127.0.0.1:8080", "http://localhost:3000", "http://[::1]:80",
+	} {
+		_, err := newBearers(nil, verifier, origin)
+		require.NoError(t, err, origin)
+	}
+	for _, origin := range []string{
+		"", "faucet.example.com", "http://faucet.example.com", "https://faucet.example.com/", "https://faucet.example.com/github",
+		"https://faucet.example.com?x=1", "https://faucet.example.com#top", "https://user@faucet.example.com", "https://",
+		"ftp://faucet.example.com", "http://127.0.0.1.example.com", "https://faucet.example.com/../x",
+	} {
+		_, err := newBearers(nil, verifier, origin)
+		require.Error(t, err, "%q", origin)
+	}
+	b, err := newBearers(nil, nil, "")
+	require.NoError(t, err, "without a verifier no origin is needed")
+	require.Nil(t, b.faucet)
+}
+
+type subscribeParams struct {
+	mcp.ParamsBase
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
+	Delivery  map[string]any `json:"delivery"`
+}
+
+func connectSubscriber(ctx context.Context, t *testing.T, srv *testServer, token string) *mcp.ClientSession {
+	t.Helper()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	require.NoError(t, mcp.AddSendingCustomMethod[*eventsParams, *eventsResult](client, "events/poll"))
+	require.NoError(t, mcp.AddSendingCustomMethod[*subscribeParams, *eventsResult](client, "events/subscribe"))
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint:             srv.URL + "/mcp",
+		HTTPClient:           &http.Client{Transport: eventNameTransport{next: bearerTransport{token, srv.Client().Transport}}},
+		DisableStandaloneSSE: true,
+	}, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = session.Close() })
+	return session
+}
+
+// The finding (R12): an events:read token must read and must not subscribe.
+func TestAReadOnlyFaucetTokenPollsButCannotSubscribe(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	srv := newTokenServer(t, func(c *tokenServerConfig) {
+		key, err := faucet.NewWebhookKey(bytes.Repeat([]byte{1}, 32))
+		require.NoError(t, err)
+		allow, err := faucet.NewCallbackAllowlist([]string{"https://hooks.example.com"}, false)
+		require.NoError(t, err)
+		c.webhook = &faucet.WebhookDeps{Key: key, Callbacks: allow}
+	})
+	session := connectSubscriber(ctx, t, srv.testServer, srv.issue(t, []faucet.Scope{faucet.ScopeEventsRead}))
+
+	polled, err := callEvents(ctx, session, "events/poll", pollParams("o/r", nil))
+	require.NoError(t, err, "events:read covers events/poll")
+	require.Contains(t, polled, "cursor")
+
+	_, err = mcp.CallCustomMethod[*subscribeParams, *eventsResult](ctx, session, "events/subscribe", &subscribeParams{
+		Name: "ci.run_completed", Arguments: map[string]any{"repo": "o/r"},
+		Delivery: map[string]any{"mode": "webhook", "url": "https://hooks.example.com/cb", "secret": "whsec_" + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32))},
+	})
+	var rpcErr *jsonrpc.Error
+	require.ErrorAs(t, err, &rpcErr, "a token without events:subscribe cannot subscribe")
+	require.EqualValues(t, -32024, rpcErr.Code)
+	require.Contains(t, rpcErr.Message, "events:subscribe")
+}
+
+// sessionChecks answers for OAuth users as their access checks will: a
+// repository that passed a check at or after the caller's own session last
+// refreshed passes with no GitHub call, and any other repository asks GitHub,
+// which has revoked the access.
+type sessionChecks struct {
+	mu          sync.Mutex
+	checkedAt   time.Time
+	refreshedAt map[string]time.Time
+	asked       []string
+}
+
+func (a *sessionChecks) RepoID(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
+	session, ok := p.OAuthSession()
+	if !ok {
+		return 0, faucet.ErrNoAccess
+	}
+	a.mu.Lock()
+	fresh := repo == "o/r" && !a.checkedAt.Before(a.refreshedAt[session.SessionID])
+	a.mu.Unlock()
+	if fresh {
+		return 42, nil
+	}
+	return a.RepoIDFresh(ctx, p, repo)
+}
+
+func (a *sessionChecks) RepoIDFresh(_ context.Context, p faucet.Principal, _ string) (int64, error) {
+	session, _ := p.OAuthSession()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.asked = append(a.asked, session.SessionID)
+	return 0, faucet.ErrNoAccess
+}
+
+// The finding (R13): an access check that one session made fresh must not be
+// fresh for another session of the same connection.
+func TestAnAccessCheckIsFreshOnlyForTheSessionOfTheToken(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	checks := &sessionChecks{refreshedAt: map[string]time.Time{}}
+	srv := newTokenServer(t, func(c *tokenServerConfig) {
+		t0 := c.clock.Now()
+		checks.refreshedAt["sess_idle"] = t0
+		checks.checkedAt = t0.Add(time.Minute)
+		checks.refreshedAt["sess_active"] = t0.Add(15 * time.Minute)
+		c.authz = checks
+		c.subjects[oauth.SubjectUser] = func(_ context.Context, id string, scopes []faucet.Scope) (faucet.Principal, error) {
+			return faucet.NewOAuthUser("alice", faucet.OAuthSession{SessionID: id, ConnectionID: "conn_alice"}, scopes)
+		}
+	})
+	asUser := func(session string) func(*oauth.AccessToken) {
+		return func(at *oauth.AccessToken) { at.SubjectKind, at.Subject = oauth.SubjectUser, session }
+	}
+	read := []faucet.Scope{faucet.ScopeEventsRead}
+
+	res, err := call(ctx, srv.connect(ctx, t, srv.issue(t, read, asUser("sess_idle"))), "o/r", nil)
+	require.NoError(t, err)
+	require.False(t, res.IsError, "the idle session has not refreshed since the check: %v", res.Content)
+
+	res, err = call(ctx, srv.connect(ctx, t, srv.issue(t, read, asUser("sess_active"))), "o/r", nil)
+	require.NoError(t, err)
+	require.True(t, res.IsError, "the active session refreshed after the check, so it asks GitHub, which says no")
+	require.Contains(t, toolText(t, res), "not found or not accessible")
+	checks.mu.Lock()
+	defer checks.mu.Unlock()
+	require.Equal(t, []string{"sess_active"}, checks.asked)
+}
+
+func TestTheGitHubPathKeepsItsMinuteOfMemoryBesideAFaucetVerifier(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	srv := newTokenServer(t, func(c *tokenServerConfig) {
+		cache := faucet.NewAccessCache(c.github, c.clock)
+		c.authn, c.authz = cache, byKind{github: cache}
+	})
+	count := func(path string) int {
+		paths, _ := srv.github.seen()
+		n := 0
+		for _, p := range paths {
+			if p == path {
+				n++
+			}
+		}
+		return n
+	}
+	session := srv.connect(ctx, t, aliceToken)
+	for range 3 {
+		res, err := call(ctx, session, "o/r", nil)
+		require.NoError(t, err)
+		require.False(t, res.IsError, "%v", res.Content)
+	}
+	require.Equal(t, 1, count("/user"), "the login is remembered for a minute")
+	require.Equal(t, 1, count("/repos/o/r"), "and so is the repository")
+
+	requireRefused(t, srv.testServer, newFaucetToken(t, "fcr_"))
+	srv.clock.Advance(time.Minute)
+	res, err := call(ctx, session, "o/r", nil)
+	require.NoError(t, err)
+	require.False(t, res.IsError)
+	require.Equal(t, 2, count("/user"), "after a minute GitHub is asked again")
+	require.Equal(t, 2, count("/repos/o/r"))
 }
