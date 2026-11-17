@@ -270,6 +270,9 @@ func TestEventsListDescribesEveryEventType(t *testing.T) {
 		require.NoError(t, json.Unmarshal(e.InputSchema, &input))
 		require.Equal(t, []string{"repo"}, input.Required)
 		require.Contains(t, input.Properties, "pr")
+		_, legacy := legacyRequired[e.Name]
+		_, takesActions := input.Properties["actions"]
+		require.Equal(t, !legacy, takesActions, "%s: a family takes actions and an exact type does not", e.Name)
 		var payload struct {
 			Properties map[string]any `json:"properties"`
 			Required   []string       `json:"required"`

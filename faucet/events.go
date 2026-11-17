@@ -151,7 +151,7 @@ func parsePoll(p *eventsPollParams) (pollRequest, error) {
 	req := pollRequest{
 		entry: entry,
 		repo:  args.Repo,
-		query: PollQuery{Types: entry.types(nil), HeadSHA: strings.ToLower(args.SHA), PR: args.PR},
+		query: PollQuery{Types: entry.types(args.Actions), HeadSHA: strings.ToLower(args.SHA), PR: args.PR},
 		limit: pageLimit,
 	}
 	if p.Cursor != nil {

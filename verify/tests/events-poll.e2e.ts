@@ -160,6 +160,28 @@ describe('events poll', () => {
     expect(legacy.events[0]?.data).toEqual(family.events[0]?.data);
   });
 
+  test('actions narrow a family, and an action outside it or on an exact type is -32602', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const repo = repoOf(repoId);
+    const cursor = await startCursor(faucet, repoId);
+    const delivery = newDeliveryId();
+    const stored = await faucet.deliver({ event: 'pull_request', delivery, body: JSON.stringify(recorded('pull_request_closed', repoId)) });
+    expect(stored.body).toBe('stored\n');
+
+    const narrowed = await pollRepo(faucet, 'pr.activity', repoId, { cursor }, { actions: ['closed'] });
+    expect(narrowed.events.map((e) => [e.eventId, e.name, e.data.event, e.data.action])).toEqual([[delivery, 'pr.activity', 'pr.closed', 'closed']]);
+
+    for (const [name, actions] of [
+      ['pr.activity', ['completed']],
+      ['pr.activity', []],
+      ['pr.closed', ['closed']],
+    ] as const) {
+      const reply = await poll(faucet, name, { repo, actions }, { cursor }, { name });
+      expect(reply.status, `${name} ${JSON.stringify(actions)}`).toBe(400);
+      expect(reply.error?.code, `${name} ${JSON.stringify(actions)}`).toBe(-32602);
+    }
+  });
+
   test('chained cursors return every event once, with no repeat and no gap', async ({ faucet }) => {
     const repoId = newRepoId();
     const otherId = newRepoId();

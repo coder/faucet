@@ -52,8 +52,9 @@ describe('events list', () => {
       expect(event.delivery, `${event.name} delivery`).toEqual(['poll', 'webhook']);
       expect(event.inputSchema.type, `${event.name} inputSchema`).toBe('object');
       const hasHeadCommit = !noHeadCommit.includes(event.name);
+      const properties = hasHeadCommit ? ['pr', 'repo', 'sha'] : ['pr', 'repo'];
       expect(Object.keys(event.inputSchema.properties).sort(), `${event.name} inputSchema properties`).toEqual(
-        hasHeadCommit ? ['pr', 'repo', 'sha'] : ['pr', 'repo'],
+        families.includes(event.name) ? ['actions', ...properties] : properties,
       );
       expect(event.inputSchema.required, `${event.name} inputSchema required`).toEqual(['repo']);
       expect(event.payloadSchema.type, `${event.name} payloadSchema`).toBe('object');

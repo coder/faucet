@@ -159,6 +159,9 @@ const pollArgumentsTemplate = `{
 const shaArgumentProperty = `
     "sha": {"type": "string", "pattern": "^[0-9A-Fa-f]{40}$", "description": "Only events for this 40 character head commit SHA."},`
 
+const actionsArgumentTemplate = `,
+    "actions": {"type": "array", "minItems": 1, "items": {"type": "string", "enum": %s}, "description": "Only events of these GitHub actions. Without it, events of every action."}`
+
 const payloadTemplate = `{
   "type": "object",
   "properties": {
@@ -217,7 +220,7 @@ func init() {
 }
 
 func newFamilyEntry(f *family) *catalogEntry {
-	input := json.RawMessage(fmt.Sprintf(pollArgumentsTemplate, shaArgument(f), ""))
+	input := json.RawMessage(fmt.Sprintf(pollArgumentsTemplate, shaArgument(f), fmt.Sprintf(actionsArgumentTemplate, marshalRaw(f.actions))))
 	resolved := mustResolve(string(input))
 	return &catalogEntry{
 		name:          f.name,
@@ -284,6 +287,10 @@ func (e *catalogEntry) types(actions []string) []string {
 	return types
 }
 
+func (e *catalogEntry) hasAction(action string) bool {
+	return !e.legacy && slices.Contains(e.family.actions, action)
+}
+
 func catalogNames() []string {
 	names := make([]string, len(catalog))
 	for i, e := range catalog {
@@ -293,9 +300,10 @@ func catalogNames() []string {
 }
 
 type pollArguments struct {
-	Repo string `json:"repo"`
-	SHA  string `json:"sha"`
-	PR   int32  `json:"pr"`
+	Repo    string   `json:"repo"`
+	SHA     string   `json:"sha"`
+	PR      int32    `json:"pr"`
+	Actions []string `json:"actions"`
 }
 
 func mustResolve(schema string) *jsonschema.Resolved {
