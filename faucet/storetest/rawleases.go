@@ -22,6 +22,10 @@ var rawLeaseSubtests = []rawSubtest{
 	{"ReadRawLeasePassesOverEventsReceivedBeforeNotBefore", readRawLeasePassesOverEventsReceivedBeforeNotBefore},
 	{"ReadRawLeasePassesOverDeletedClearedAndLostEvents", readRawLeasePassesOverDeletedClearedAndLostEvents},
 	{"ReadRawLeaseNextIsTheHeadWhenNothingIsUnread", readRawLeaseNextIsTheHeadWhenNothingIsUnread},
+	{"ReadRawLeaseCountsALostMarkOnceWhenItPassesIt", readRawLeaseCountsALostMarkOnceWhenItPassesIt},
+	{"IngestRawKeepsOneLostMarkPerLeaseAtTheHighestID", ingestRawKeepsOneLostMarkPerLeaseAtTheHighestID},
+	{"RawLeasesOfOneKeyAreIndependent", rawLeasesOfOneKeyAreIndependent},
+	{"OpenRawLeaseEndsOnlyTheLeasePolledLongestAgoAtTheLimit", openRawLeaseEndsOnlyTheLeasePolledLongestAgoAtTheLimit},
 }
 
 // leasePending ingests a delivery that only lease matches, without giving it
@@ -319,4 +323,112 @@ func readRawLeaseNextIsTheHeadWhenNothingIsUnread(t *testing.T, s RawStore) {
 	require.Equal(t, head, page.Next, "the head rose through events of other interests")
 	page = r.read(r.query(lease, head+5))
 	require.Equal(t, head+5, page.Next, "the next position is never below the read's position")
+}
+
+func readRawLeaseCountsALostMarkOnceWhenItPassesIt(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	lease := r.open(rawSpec{})
+	event := r.push()
+	mark := r.leaseLose(lease)
+
+	q := r.query(lease, 0)
+	q.Limit = 1
+	page := r.read(q)
+	require.Equal(t, []int64{event}, rawIDs(page.Events))
+	require.True(t, page.More, "the lease holds a mark beyond the page")
+	require.Zero(t, page.Skipped, "a page that ends before a mark does not count it")
+	require.Equal(t, event, page.Next)
+
+	page = r.read(r.query(lease, page.Next))
+	require.Empty(t, page.Events)
+	require.Equal(t, 1, page.Skipped, "the page that passes a mark counts it")
+	require.False(t, page.More)
+	require.Equal(t, mark, page.Next)
+
+	page = r.read(r.query(lease, page.Next))
+	require.Zero(t, page.Skipped, "a mark at or below the read's position is counted once")
+	page = r.read(r.query(lease, 0))
+	require.Zero(t, page.Skipped, "a read deletes the mark at or below its position")
+	require.Empty(t, page.Events)
+}
+
+func ingestRawKeepsOneLostMarkPerLeaseAtTheHighestID(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	lease := r.open(rawSpec{})
+	first := r.leaseLose(lease)
+	r.leaseLose(lease)
+	event := r.push()
+	require.Equal(t, int32(1), r.leasePending(lease), "a lease's pending count never counts its mark")
+
+	page := r.read(r.query(lease, 0))
+	require.Equal(t, []int64{event}, rawIDs(page.Events))
+	require.Equal(t, 1, page.Skipped, "two ingests that a lease misses leave one mark")
+	page = r.read(r.query(lease, first))
+	require.Equal(t, []int64{event}, rawIDs(page.Events))
+	require.Equal(t, 1, page.Skipped, "the mark is at the higher raw ID")
+}
+
+func rawLeasesOfOneKeyAreIndependent(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	one, two := r.open(rawSpec{}), r.open(rawSpec{})
+	require.Equal(t, one.Key, two.Key)
+	require.NotEqual(t, one.ID, two.ID)
+	ids := []int64{r.push(), r.push()}
+
+	require.Equal(t, ids, rawIDs(r.read(r.query(one, 0)).Events), "each lease gets every event")
+	require.Empty(t, r.read(r.query(one, ids[1])).Events)
+	require.Equal(t, ids, rawIDs(r.read(r.query(two, 0)).Events), "a read of one lease deletes nothing of the other")
+	require.Zero(t, r.read(r.query(two, 0)).AckedThrough, "a read of one lease acknowledges nothing for the other")
+}
+
+func openRawLeaseEndsOnlyTheLeasePolledLongestAgoAtTheLimit(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	const maxLive = 3
+	var n uint64 = 100
+	openAt := func(w rawSpec, at time.Time, ttl time.Duration) faucet.RawLease {
+		t.Helper()
+		n++
+		lease := newRawLease(n, w, at.Add(ttl))
+		_, err := s.OpenRawLease(r.ctx, lease, at, maxLive)
+		require.NoError(t, err)
+		return lease
+	}
+	readAt := func(lease faucet.RawLease, at time.Time) (faucet.RawPage, bool) {
+		t.Helper()
+		q := r.query(lease, 0)
+		q.Now, q.ExpiresAt = at, at.Add(time.Hour)
+		return r.leaseFind(q)
+	}
+	minute := func(m int) time.Time { return r.now.Add(time.Duration(m) * time.Minute) }
+
+	openAt(rawSpec{}, minute(0), time.Minute)
+	hubot := []faucet.RawLease{
+		openAt(rawSpec{principal: "hubot"}, minute(0), time.Hour),
+		openAt(rawSpec{principal: "hubot"}, minute(0), time.Hour),
+		openAt(rawSpec{principal: "hubot"}, minute(0), time.Hour),
+	}
+	first := openAt(rawSpec{}, minute(2), time.Hour)
+	second := openAt(rawSpec{}, minute(3), time.Hour)
+	third := openAt(rawSpec{}, minute(4), time.Hour)
+	for _, lease := range []faucet.RawLease{first, second, third} {
+		_, found := readAt(lease, minute(5))
+		require.True(t, found, "an expired lease and another principal's leases do not count toward the limit")
+	}
+
+	_, found := readAt(first, minute(6))
+	require.True(t, found)
+	_, found = readAt(third, minute(6))
+	require.True(t, found)
+	event := r.store(r.newDelivery(), serveAll(rawBody))
+	fourth := openAt(rawSpec{}, minute(7), time.Hour)
+
+	_, found = readAt(second, minute(8))
+	require.False(t, found, "a new lease at the limit ends the lease polled longest ago")
+	for _, lease := range append([]faucet.RawLease{first, third}, hubot...) {
+		page, found := readAt(lease, minute(8))
+		require.True(t, found, "a new lease ends only one lease")
+		require.Equal(t, []int64{event}, rawIDs(page.Events), "the leases that stay keep their events")
+	}
+	_, found = readAt(fourth, minute(8))
+	require.True(t, found)
 }
