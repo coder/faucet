@@ -213,6 +213,14 @@ func parsePollArguments(input *jsonschema.Resolved, raw json.RawMessage) (pollAr
 }
 
 func (s *Service) pollEventsMethod(ctx context.Context, _ *mcp.ServerSession, p *eventsPollParams) (*eventsPollResult, error) {
+	if p != nil && p.Name != "" && s.raw != nil {
+		if entry, ok := s.rawEntry(p.Name); ok {
+			return s.pollRaw(ctx, entry, p)
+		}
+		if _, typed := lookupEntry(p.Name); !typed {
+			return nil, s.unknownEvent(p.Name)
+		}
+	}
 	req, err := parsePoll(p)
 	if err != nil {
 		return nil, err
