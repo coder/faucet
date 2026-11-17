@@ -57,7 +57,7 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/webhooks.md", "Each login has one per destination: %d at once, then one %s", []any{handshakeLoginBurst, refillText(handshakeLoginRefill)}},
 		{"docs/webhooks.md", "Each destination has one for all logins: %d at once, then one %s", []any{handshakeHostBurst, refillText(handshakeHostRefill)}},
 		{"docs/diagrams/source.html", "waits up to %d s<", []any{maxWaitSeconds}},
-		{"docs/diagrams/source.html", "renew within %d min<", []any{minutes(maxSubscriptionTTL)}},
+		{"docs/diagrams/source.html", ">within %d min<", []any{minutes(maxSubscriptionTTL)}},
 	} {
 		doc, err := os.ReadFile(filepath.Join("..", filepath.FromSlash(p.file)))
 		require.NoError(t, err)
