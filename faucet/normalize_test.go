@@ -31,6 +31,7 @@ func helloWorldPR(state string, merged bool, extras map[string]any) string {
 		"merged":       merged,
 		"base_branch":  "master",
 		"head_branch":  "changes",
+		"from_fork":    false,
 		"author_login": "Codertocat",
 		"sender_login": "Codertocat",
 		"sender_id":    21031067,
@@ -74,7 +75,7 @@ func TestNormalize(t *testing.T) {
 			wantRepo: 300029405,
 			wantPRs:  []int32{},
 			wantSHA:  "3484a3fb816e0859fd6e1cea078d76385ff50625",
-			wantData: `{"run_id":289782451,"name":"CI","status":"completed","conclusion":"success","head_branch":"master","trigger_event":"repository_dispatch","html_url":"https://github.com/octo-org/octo-repo/actions/runs/289782451","run_attempt":1,"workflow_id":2823525,"sender_login":"Codertocat","sender_id":15669918}`,
+			wantData: `{"run_id":289782451,"name":"CI","status":"completed","conclusion":"success","head_branch":"master","from_fork":false,"trigger_event":"repository_dispatch","html_url":"https://github.com/octo-org/octo-repo/actions/runs/289782451","run_attempt":1,"workflow_id":2823525,"sender_login":"Codertocat","sender_id":15669918}`,
 		},
 		{
 			name:     "WorkflowRunWithTwoPRs",
@@ -84,7 +85,7 @@ func TestNormalize(t *testing.T) {
 			wantRepo: 300029405,
 			wantPRs:  []int32{2, 3},
 			wantSHA:  "3484a3fb816e0859fd6e1cea078d76385ff50625",
-			wantData: `{"run_id":289782451,"name":"CI","status":"completed","conclusion":"success","head_branch":"master","trigger_event":"repository_dispatch","html_url":"https://github.com/octo-org/octo-repo/actions/runs/289782451","run_attempt":1,"workflow_id":2823525,"sender_login":"Codertocat","sender_id":15669918}`,
+			wantData: `{"run_id":289782451,"name":"CI","status":"completed","conclusion":"success","head_branch":"master","from_fork":false,"trigger_event":"repository_dispatch","html_url":"https://github.com/octo-org/octo-repo/actions/runs/289782451","run_attempt":1,"workflow_id":2823525,"sender_login":"Codertocat","sender_id":15669918}`,
 		},
 		{
 			name:     "WorkflowRunRequested",
@@ -94,7 +95,7 @@ func TestNormalize(t *testing.T) {
 			wantRepo: 300029405,
 			wantPRs:  []int32{},
 			wantSHA:  "3484a3fb816e0859fd6e1cea078d76385ff50625",
-			wantData: `{"run_id":289782451,"name":"","status":"queued","conclusion":null,"head_branch":"master","trigger_event":"repository_dispatch","html_url":"https://github.com/octo-org/octo-repo/actions/runs/289782451","run_attempt":1,"workflow_id":2823525,"sender_login":"Codertocat","sender_id":15669918}`,
+			wantData: `{"run_id":289782451,"name":"","status":"queued","conclusion":null,"head_branch":"master","from_fork":false,"trigger_event":"repository_dispatch","html_url":"https://github.com/octo-org/octo-repo/actions/runs/289782451","run_attempt":1,"workflow_id":2823525,"sender_login":"Codertocat","sender_id":15669918}`,
 		},
 		{
 			name:     "WorkflowJobQueued",
@@ -364,6 +365,57 @@ func TestNormalizeReadsTheDocumentedFieldsThatNoSampleRecords(t *testing.T) {
 			require.NotNil(t, ev)
 			require.Equal(t, tc.wantType, ev.Type)
 			require.JSONEq(t, helloWorldPR("open", false, tc.want), string(ev.Data))
+		})
+	}
+}
+
+// octokit/webhooks records no payload whose head is in a fork, so editedToFork
+// edits a recorded one: its head repository becomes another repository, or
+// null, which GitHub sends for a pull request whose fork was deleted (head.repo
+// in payload-schemas/api.github.com/common/pull-request.schema.json is a
+// repository or null).
+func editedToFork(t *testing.T, event, fixtureName string, headRepo any) []byte {
+	t.Helper()
+	return mutate(t, fixtureName, func(doc map[string]any) {
+		object, ok := doc[event].(map[string]any)
+		require.True(t, ok)
+		switch event {
+		case "workflow_run":
+			object["head_repository"] = headRepo
+		case "pull_request":
+			head, ok := object["head"].(map[string]any)
+			require.True(t, ok)
+			head["repo"] = headRepo
+		}
+	})
+}
+
+var forkRepo = map[string]any{"id": 999999, "name": "Hello-World", "full_name": "forker/Hello-World", "fork": true}
+
+func TestNormalizeTellsAHeadInAForkInRecordedPayloadsEditedToOne(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		event    string
+		payload  []byte
+		fromFork bool
+	}{
+		"WorkflowRunOfTheRepository":              {"workflow_run", fixture(t, "workflow_run_completed"), false},
+		"WorkflowRunEditedToComeFromAFork":        {"workflow_run", editedToFork(t, "workflow_run", "workflow_run_completed", forkRepo), true},
+		"PullRequestOfTheRepository":              {"pull_request", fixture(t, "pull_request_opened"), false},
+		"PullRequestEditedToComeFromAFork":        {"pull_request", editedToFork(t, "pull_request", "pull_request_opened", forkRepo), true},
+		"PullRequestEditedToComeFromADeletedFork": {"pull_request", editedToFork(t, "pull_request", "pull_request_opened", nil), true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ev, err := faucet.Normalize(tc.event, tc.payload, "delivery-1")
+			require.NoError(t, err)
+			require.NotNil(t, ev)
+			var data map[string]any
+			require.NoError(t, json.Unmarshal(ev.Data, &data))
+			require.Equal(t, tc.fromFork, data["from_fork"])
+			require.NotEmpty(t, data["head_branch"], "the branch name stays as GitHub sent it")
 		})
 	}
 }
