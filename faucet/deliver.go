@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -210,10 +211,40 @@ func (r *deliveryRun) claimDelivery(ctx context.Context) (DeliveryClaim, bool, e
 	return claim, ok, r.unlessEnded(ctx, err)
 }
 
-func (r *deliveryRun) claimGap(ctx context.Context) (GapClaim, bool, error) {
+// claimNext takes the next due delivery: of the kind that rawFirst names
+// first, and of the other kind when that one has nothing due. Without a
+// RawStore it takes typed deliveries only.
+func (r *deliveryRun) claimNext(ctx context.Context, rawFirst bool) (outbound, bool, error) {
+	kinds := []func(context.Context) (outbound, bool, error){r.claimTyped}
+	if r.svc.raw != nil {
+		kinds = append(kinds, r.claimRaw)
+		if rawFirst {
+			slices.Reverse(kinds)
+		}
+	}
+	for _, claim := range kinds {
+		if o, ok, err := claim(ctx); err != nil || ok {
+			return o, ok, err
+		}
+	}
+	return outbound{}, false, nil
+}
+
+func (r *deliveryRun) claimTyped(ctx context.Context) (outbound, bool, error) {
+	claim, ok, err := r.claimDelivery(ctx)
+	if err != nil {
+		return outbound{}, false, xerrors.Errorf("claim a delivery: %w", err)
+	}
+	if !ok {
+		return outbound{}, false, nil
+	}
+	return r.typedOutbound(claim), true, nil
+}
+
+func (r *deliveryRun) claimGap(ctx context.Context, kind gapKind) (GapClaim, bool, error) {
 	r.claimMu.Lock()
 	defer r.claimMu.Unlock()
-	claim, ok, err := r.svc.store.ClaimGap(ctx, r.svc.clock.Now(), DeliveryLease, r.gate.full())
+	claim, ok, err := kind.claim(ctx, r.svc.clock.Now(), DeliveryLease, r.gate.full())
 	if ok {
 		r.gate.enter(CallbackOrigin(claim.CallbackURL))
 	}
@@ -327,46 +358,80 @@ func (r *deliveryRun) endUndecodable(ctx context.Context, now time.Time, target 
 	return nil
 }
 
+// gapKind is what differs between the gaps that a purge left on typed
+// subscriptions and the gaps that a raw ingest recorded.
+type gapKind struct {
+	noun   string
+	claim  func(ctx context.Context, now time.Time, lease time.Duration, skip []string) (GapClaim, bool, error)
+	finish func(ctx context.Context, ref GapRef) error
+	cursor func(through int64) string
+	// sent and failed are the log lines of a gap envelope that was delivered
+	// and of one that was not.
+	sent, failed string
+}
+
+func (r *deliveryRun) typedGaps() gapKind {
+	return gapKind{
+		noun: "gap", claim: r.svc.store.ClaimGap, finish: r.svc.store.FinishGap, cursor: encodeCursor,
+		sent:   "a purge deleted events before the subscription read them, the gap envelope was sent",
+		failed: "a purge deleted events before the subscription read them, the gap envelope was not delivered",
+	}
+}
+
+// sendGaps sends the typed gaps and then, with a RawStore, the raw ones.
 func (r *deliveryRun) sendGaps(ctx context.Context) error {
-	for ctx.Err() == nil && !r.outOfTime(ctx) {
-		claim, ok, err := r.claimGap(ctx)
-		if err != nil {
-			return xerrors.Errorf("claim a gap: %w", err)
-		}
-		if !ok {
-			return nil
-		}
-		if err := r.sendGap(ctx, claim); err != nil {
+	kinds := []gapKind{r.typedGaps()}
+	if r.svc.raw != nil {
+		kinds = append(kinds, r.rawGaps())
+	}
+	for _, kind := range kinds {
+		if err := r.sendGapsOf(ctx, kind); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// sendGap tells a subscription that a purge deleted events before the run read
-// them: one request, no retry, counted and logged once. The cursor is the
-// purge mark. Every event that still exists lies above it, so a client that
-// resumes from it loses none of them, and every watermark that a later event
-// carries is at or above it. A request that the end of the run cut short has no
-// result: the claim keeps its lease, and a later run sends the gap again.
-func (r *deliveryRun) sendGap(ctx context.Context, claim GapClaim) error {
+func (r *deliveryRun) sendGapsOf(ctx context.Context, kind gapKind) error {
+	for ctx.Err() == nil && !r.outOfTime(ctx) {
+		claim, ok, err := r.claimGap(ctx, kind)
+		if err != nil {
+			return xerrors.Errorf("claim a %s: %w", kind.noun, err)
+		}
+		if !ok {
+			return nil
+		}
+		if err := r.sendGap(ctx, kind, claim); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sendGap tells a subscription that it missed events: one request, no retry,
+// counted and logged once. For a typed gap the cursor is the purge mark. Every
+// event that still exists lies above it, so a client that resumes from it
+// loses none of them, and every watermark that a later event carries is at or
+// above it. A request that the end of the run cut short has no result: the
+// claim keeps its lease, and a later run sends the gap again.
+func (r *deliveryRun) sendGap(ctx context.Context, kind gapKind, claim GapClaim) error {
 	defer r.gate.leave(CallbackOrigin(claim.CallbackURL))
 	logger := r.svc.logger.With(slog.F("subscription", claim.Ref.Key.ID()), slog.F("purged_through", claim.Ref.Through))
 	failure := r.wh.sendEnvelope(ctx, r.svc.clock.Now(), envelopeGap, claim.Ref.Key, claim.CallbackURL, claim.sealedSecrets(),
-		gapEnvelope{Type: envelopeGap, Cursor: encodeCursor(claim.Ref.Through)})
+		gapEnvelope{Type: envelopeGap, Cursor: kind.cursor(claim.Ref.Through)})
 	if failure != "" && ctx.Err() != nil {
 		logger.Info(ctx, "the run ended during the request, the gap envelope waits for its lease")
 		return nil
 	}
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
 	defer cancel()
-	if err := r.svc.store.FinishGap(finishCtx, claim.Ref); err != nil {
-		return xerrors.Errorf("record the end of a gap: %w", err)
+	if err := kind.finish(finishCtx, claim.Ref); err != nil {
+		return xerrors.Errorf("record the end of a %s: %w", kind.noun, err)
 	}
 	if failure == "" {
-		logger.Warn(ctx, "a purge deleted events before the subscription read them, the gap envelope was sent")
+		logger.Warn(ctx, kind.sent)
 	} else {
-		logger.Warn(ctx, "a purge deleted events before the subscription read them, the gap envelope was not delivered", slog.F("reason", failure))
+		logger.Warn(ctx, kind.failed, slog.F("reason", failure))
 	}
 	r.add(func(res *DeliverResult) {
 		if failure == "" {
@@ -378,16 +443,27 @@ func (r *deliveryRun) sendGap(ctx context.Context, claim GapClaim) error {
 	return nil
 }
 
+// sweepExpired ends the deliveries, typed and raw, that no live subscription
+// holds any more.
 func (r *deliveryRun) sweepExpired(ctx context.Context) error {
-	deleted, err := r.svc.store.ExpireDeliveries(ctx, r.svc.clock.Now())
+	now := r.svc.clock.Now()
+	deleted, err := r.svc.store.ExpireDeliveries(ctx, now)
 	if err != nil {
 		return xerrors.Errorf("expire deliveries: %w", err)
+	}
+	if r.svc.raw != nil {
+		var rawDeleted int64
+		rawDeleted, err = r.svc.raw.ExpireRawDeliveries(ctx, now)
+		if err != nil {
+			err = xerrors.Errorf("expire raw deliveries: %w", err)
+		}
+		deleted += rawDeleted
 	}
 	if deleted > 0 {
 		r.svc.logger.Info(ctx, "deliveries of expired subscriptions ended", slog.F("count", deleted))
 		r.add(func(res *DeliverResult) { res.GaveUp[GiveUpSubscriptionExpired] += int(deleted) })
 	}
-	return nil
+	return err
 }
 
 // A sweep failure ends nothing else: signing ignores a window that ended, so
@@ -428,6 +504,7 @@ func (r *deliveryRun) send(ctx context.Context) error {
 				fail(err)
 				return
 			}
+			rawFirst := false
 			for !stopped.Load() {
 				if ctx.Err() != nil || r.outOfTime(ctx) {
 					r.add(func(res *DeliverResult) { res.Incomplete = true })
@@ -437,17 +514,18 @@ func (r *deliveryRun) send(ctx context.Context) error {
 					r.add(func(res *DeliverResult) { res.Incomplete = true })
 					return
 				}
-				claim, ok, err := r.claimDelivery(ctx)
+				o, ok, err := r.claimNext(ctx, rawFirst)
 				if err != nil {
-					fail(xerrors.Errorf("claim a delivery: %w", err))
+					fail(err)
 					return
 				}
 				if !ok {
 					reserved.Add(-1)
 					return
 				}
+				rawFirst = !rawFirst
 				r.add(func(res *DeliverResult) { res.Claimed++ })
-				if err := r.attempt(ctx, claim); err != nil {
+				if err := r.attempt(ctx, o); err != nil {
 					fail(err)
 					return
 				}
@@ -486,13 +564,51 @@ func giveUp(reason GiveUpReason) attemptOutcome {
 	return attemptOutcome{finish: Finish{Kind: FinishGiveUp}, reason: reason}
 }
 
-func (r *deliveryRun) attempt(ctx context.Context, claim DeliveryClaim) error {
-	defer r.gate.leave(CallbackOrigin(claim.CallbackURL))
+// outbound is one claimed attempt of a typed or a raw delivery: what the
+// shared attempt path needs, and the steps where the two kinds differ.
+type outbound struct {
+	ref         DeliveryRef
+	messageID   string
+	enqueuedAt  time.Time
+	callbackURL string
+	secretEnc   []byte
+	secrets     sealedSecrets
+	// mustEnd names why the delivery ends before any request, or is empty.
+	mustEnd func(ctx context.Context) GiveUpReason
+	// build returns the body to send, or the outcome that ends the attempt.
+	build func(ctx context.Context) ([]byte, attemptOutcome, bool)
+	// finish records the result in the store that holds the delivery.
+	finish func(ctx context.Context, ref DeliveryRef, now time.Time, f Finish) (FinishResult, error)
+}
+
+func (r *deliveryRun) typedOutbound(claim DeliveryClaim) outbound {
+	s := r.svc
+	return outbound{
+		ref: claim.Ref, messageID: claim.MessageID, enqueuedAt: claim.EnqueuedAt,
+		callbackURL: claim.CallbackURL, secretEnc: claim.SecretEnc, secrets: claim.sealedSecrets(),
+		mustEnd: func(ctx context.Context) GiveUpReason {
+			switch ev := claim.Event; {
+			case ev == nil:
+				return GiveUpEventPurged
+			case ev.RepoID != claim.RepoID:
+				s.logger.Error(ctx, "event belongs to another repository than the subscription's",
+					slog.F("subscription", claim.Ref.Key.ID()), slog.F("event_id", ev.ID))
+				return GiveUpRepoMismatch
+			}
+			return ""
+		},
+		build:  func(context.Context) ([]byte, attemptOutcome, bool) { return buildBody(claim, *claim.Event) },
+		finish: s.store.FinishDelivery,
+	}
+}
+
+func (r *deliveryRun) attempt(ctx context.Context, o outbound) error {
+	defer r.gate.leave(CallbackOrigin(o.callbackURL))
 	s := r.svc
 	logger := s.logger.With(
-		slog.F("subscription", claim.Ref.Key.ID()), slog.F("event_id", claim.Ref.EventID),
-		slog.F("attempt", claim.Ref.Attempt), slog.F("host", callbackHost(claim.CallbackURL)))
-	out := r.decide(ctx, claim)
+		slog.F("subscription", o.ref.Key.ID()), slog.F("event_id", o.ref.EventID),
+		slog.F("attempt", o.ref.Attempt), slog.F("host", callbackHost(o.callbackURL)))
+	out := r.decide(ctx, o)
 	if out.abandoned {
 		logger.Info(ctx, "the run ended during the request, the delivery waits for its lease")
 		return nil
@@ -500,7 +616,7 @@ func (r *deliveryRun) attempt(ctx context.Context, claim DeliveryClaim) error {
 
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
 	defer cancel()
-	res, err := s.store.FinishDelivery(finishCtx, claim.Ref, s.clock.Now(), out.finish)
+	res, err := o.finish(finishCtx, o.ref, s.clock.Now(), out.finish)
 	if err != nil {
 		return xerrors.Errorf("record the result of a delivery: %w", err)
 	}
@@ -550,39 +666,35 @@ func callbackHost(raw string) string {
 // sends nothing for a delivery that must end first: a purged event, an event
 // of another repository, one that went past its attempts or its window, one
 // too large, or one whose secret does not open.
-func (r *deliveryRun) decide(ctx context.Context, claim DeliveryClaim) attemptOutcome {
+func (r *deliveryRun) decide(ctx context.Context, o outbound) attemptOutcome {
 	s := r.svc
 	now := s.clock.Now()
-	ev := claim.Event
+	if reason := o.mustEnd(ctx); reason != "" {
+		return giveUp(reason)
+	}
 	switch {
-	case ev == nil:
-		return giveUp(GiveUpEventPurged)
-	case ev.RepoID != claim.RepoID:
-		s.logger.Error(ctx, "event belongs to another repository than the subscription's",
-			slog.F("subscription", claim.Ref.Key.ID()), slog.F("event_id", ev.ID))
-		return giveUp(GiveUpRepoMismatch)
-	case claim.Ref.Attempt > MaxDeliveryAttempts:
+	case o.ref.Attempt > MaxDeliveryAttempts:
 		return giveUp(GiveUpAttemptsExhausted)
-	case now.Sub(claim.EnqueuedAt) > DeliveryWindow:
+	case now.Sub(o.enqueuedAt) > DeliveryWindow:
 		return giveUp(GiveUpWindowExpired)
 	}
-	secrets, err := r.wh.signingSecrets(ctx, now, claim.Ref.Key, claim.sealedSecrets())
+	secrets, err := r.wh.signingSecrets(ctx, now, o.ref.Key, o.secrets)
 	if err != nil {
-		return attemptOutcome{finish: Finish{Kind: FinishDead, Unreadable: claim.SecretEnc}, reason: GiveUpSecretUnreadable}
+		return attemptOutcome{finish: Finish{Kind: FinishDead, Unreadable: o.secretEnc}, reason: GiveUpSecretUnreadable}
 	}
-	body, outcome, ok := buildBody(claim, *ev)
+	body, outcome, ok := o.build(ctx)
 	if !ok {
 		return outcome
 	}
-	headers, err := signWithSecrets(secrets, claim.MessageID, now, body)
+	headers, err := signWithSecrets(secrets, o.messageID, now, body)
 	if err != nil {
-		return attemptOutcome{finish: Finish{Kind: FinishDead, Unreadable: claim.SecretEnc}, reason: GiveUpSecretUnreadable}
+		return attemptOutcome{finish: Finish{Kind: FinishDead, Unreadable: o.secretEnc}, reason: GiveUpSecretUnreadable}
 	}
-	status, category := r.wh.post(ctx, claim.CallbackURL, claim.Ref.Key.ID(), headers, body)
+	status, category := r.wh.post(ctx, o.callbackURL, o.ref.Key.ID(), headers, body)
 	if status == 0 && ctx.Err() != nil {
 		return attemptOutcome{abandoned: true}
 	}
-	return classify(claim, now, status, category)
+	return classify(o, now, status, category)
 }
 
 func buildBody(claim DeliveryClaim, ev Event) ([]byte, attemptOutcome, bool) {
@@ -590,9 +702,13 @@ func buildBody(claim DeliveryClaim, ev Event) ([]byte, attemptOutcome, bool) {
 	if err != nil {
 		return nil, giveUp(GiveUpEventMalformed), false
 	}
-	body, err := json.Marshal(webhookBody{
+	return encodeWebhookBody(webhookBody{
 		EventID: claim.MessageID, Name: occ.Name, Timestamp: occ.Timestamp, Data: occ.Data, Cursor: encodeCursor(claim.Watermark),
 	})
+}
+
+func encodeWebhookBody(b webhookBody) ([]byte, attemptOutcome, bool) {
+	body, err := json.Marshal(b)
 	if err != nil {
 		return nil, giveUp(GiveUpEventMalformed), false
 	}
@@ -619,7 +735,7 @@ func deliveryFailureOf(err error) CallbackReason {
 // delivery status alone (SEP-3415), and every other answer fails
 // the attempt. A failed attempt is retried after its backoff unless it was the
 // last one or the next one would fall outside the window.
-func classify(claim DeliveryClaim, now time.Time, status int, category CallbackReason) attemptOutcome {
+func classify(o outbound, now time.Time, status int, category CallbackReason) attemptOutcome {
 	out := attemptOutcome{sent: true, category: category}
 	switch {
 	case status >= 200 && status <= 299:
@@ -636,10 +752,10 @@ func classify(claim DeliveryClaim, now time.Time, status int, category CallbackR
 	case status > 0:
 		out.category = CallbackHTTP4xx
 	}
-	switch retryAt := now.Add(deliveryBackoff[min(int(claim.Ref.Attempt), len(deliveryBackoff))-1]); {
-	case claim.Ref.Attempt >= MaxDeliveryAttempts:
+	switch retryAt := now.Add(deliveryBackoff[min(int(o.ref.Attempt), len(deliveryBackoff))-1]); {
+	case o.ref.Attempt >= MaxDeliveryAttempts:
 		out.finish, out.reason = Finish{Kind: FinishGiveUp, Failure: out.category}, GiveUpAttemptsExhausted
-	case retryAt.Sub(claim.EnqueuedAt) > DeliveryWindow:
+	case retryAt.Sub(o.enqueuedAt) > DeliveryWindow:
 		out.finish, out.reason = Finish{Kind: FinishGiveUp, Failure: out.category}, GiveUpWindowExpired
 	default:
 		out.finish = Finish{Kind: FinishRetry, RetryAt: retryAt, Failure: out.category}
