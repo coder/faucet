@@ -19,6 +19,9 @@ var rawLeaseSubtests = []rawSubtest{
 	{"ReadRawLeaseMovesTheExpiry", readRawLeaseMovesTheExpiry},
 	{"ReadRawLeaseEndsAPageAtTheLimit", readRawLeaseEndsAPageAtTheLimit},
 	{"ReadRawLeaseEndsAPageAtMaxBytes", readRawLeaseEndsAPageAtMaxBytes},
+	{"ReadRawLeasePassesOverEventsReceivedBeforeNotBefore", readRawLeasePassesOverEventsReceivedBeforeNotBefore},
+	{"ReadRawLeasePassesOverDeletedClearedAndLostEvents", readRawLeasePassesOverDeletedClearedAndLostEvents},
+	{"ReadRawLeaseNextIsTheHeadWhenNothingIsUnread", readRawLeaseNextIsTheHeadWhenNothingIsUnread},
 }
 
 // leasePending ingests a delivery that only lease matches, without giving it
@@ -31,6 +34,30 @@ func (r *rawRig) leasePending(lease faucet.RawLease) int32 {
 		return faucet.RawPlan{Body: rawBody}
 	})
 	return pending
+}
+
+// leaseSpaced pushes n events for every interest that matches them, with
+// time between their receive times, and returns them as lease reads them.
+func (r *rawRig) leaseSpaced(lease faucet.RawLease, n int) []faucet.RawEvent {
+	r.t.Helper()
+	ids := make([]int64, 0, n)
+	for range n {
+		ids = append(ids, r.push())
+		time.Sleep(2 * time.Millisecond)
+	}
+	q := r.query(lease, 0)
+	q.Limit = int32(n)
+	events := r.read(q).Events
+	require.Equal(r.t, ids, rawIDs(events))
+	return events
+}
+
+// leaseLose stores a delivery that lease misses and returns its raw ID.
+func (r *rawRig) leaseLose(lease faucet.RawLease) int64 {
+	r.t.Helper()
+	return r.store(r.newDelivery(), func([]faucet.RawInterest) faucet.RawPlan {
+		return faucet.RawPlan{Lost: []faucet.RawLeaseID{lease.ID}}
+	})
 }
 
 // leaseFind polls a lease and reports whether it was found.
@@ -215,4 +242,81 @@ func readRawLeaseEndsAPageAtMaxBytes(t *testing.T, s RawStore) {
 			require.Equal(t, tc.want[len(tc.want)-1], page.Next, "max bytes %d: a page that ended early ends at its last event", tc.maxBytes)
 		}
 	}
+}
+
+func readRawLeasePassesOverEventsReceivedBeforeNotBefore(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	lease := r.open(rawSpec{})
+	events := r.leaseSpaced(lease, 4)
+	ids := rawIDs(events)
+
+	q := r.query(lease, 0)
+	q.NotBefore = events[2].ReceivedAt
+	page := r.read(q)
+	require.Equal(t, ids[2:], rawIDs(page.Events), "a read passes over the events received before its floor")
+	require.Equal(t, 2, page.Skipped, "a read counts the events that it passed over")
+
+	q.Limit = 1
+	page = r.read(q)
+	require.Equal(t, ids[2:3], rawIDs(page.Events))
+	require.True(t, page.More)
+	require.Equal(t, 2, page.Skipped, "events passed over do not count toward the limit")
+	require.Equal(t, ids[2], page.Next, "the next position is past the events passed over")
+
+	q.Limit, q.NotBefore = 100, events[3].ReceivedAt.Add(time.Hour)
+	page = r.read(q)
+	require.Empty(t, page.Events)
+	require.Equal(t, 4, page.Skipped)
+	require.False(t, page.More)
+	require.Equal(t, ids[3], page.Next, "a page that passes over every event moves past them")
+}
+
+func readRawLeasePassesOverDeletedClearedAndLostEvents(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	lease := r.open(rawSpec{})
+	events := r.leaseSpaced(lease, 3)
+	kept := events[2].ID
+	r.leaseLose(lease)
+	last := r.push()
+	res := r.purge(faucet.RawPurge{Now: r.now, DeleteBefore: events[1].ReceivedAt, ClearBefore: events[2].ReceivedAt})
+	require.Equal(t, int64(1), res.Deleted, "the purge deletes the oldest event")
+
+	q := r.query(lease, 0)
+	q.Limit = 2
+	page := r.read(q)
+	require.Equal(t, []int64{kept, last}, rawIDs(page.Events), "rows passed over do not count toward the limit")
+	require.Equal(t, 3, page.Skipped, "a deleted event, a cleared event and a lost mark are passed over and counted")
+	require.False(t, page.More)
+	require.Equal(t, last, page.Next)
+
+	q.Limit = 1
+	page = r.read(q)
+	require.Equal(t, []int64{kept}, rawIDs(page.Events))
+	require.Equal(t, 2, page.Skipped, "the page counts only the rows that it passed")
+	require.True(t, page.More)
+	require.Equal(t, kept, page.Next, "the next position is past the rows passed over")
+}
+
+func readRawLeaseNextIsTheHeadWhenNothingIsUnread(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	lease := r.open(rawSpec{})
+	r.open(rawSpec{event: "issues"})
+	page := r.read(r.query(lease, 0))
+	require.Empty(t, page.Events)
+	require.Zero(t, page.Next, "an empty store has head 0")
+
+	own := r.push()
+	issues := faucet.RawDelivery{DeliveryID: "raw-issues-1", Event: "issues", RepoID: rawRepo}
+	r.store(issues, serveAll(rawBody))
+	issues.DeliveryID = "raw-issues-2"
+	head := r.store(issues, serveAll(rawBody))
+
+	page = r.read(r.query(lease, 0))
+	require.Equal(t, []int64{own}, rawIDs(page.Events))
+	require.Equal(t, head, page.Next, "the next position is the head when nothing beyond the page is unread")
+	page = r.read(r.query(lease, own))
+	require.Empty(t, page.Events)
+	require.Equal(t, head, page.Next, "the head rose through events of other interests")
+	page = r.read(r.query(lease, head+5))
+	require.Equal(t, head+5, page.Next, "the next position is never below the read's position")
 }
