@@ -35,6 +35,9 @@ const (
 // knownScopes holds every scope, each at its bit in a scopeSet.
 var knownScopes = []Scope{ScopeEventsRead, ScopeEventsSubscribe}
 
+// AllScopes returns every scope that faucet knows, in a fixed order.
+func AllScopes() []Scope { return slices.Clone(knownScopes) }
+
 // ParseScope returns the scope named s, or an error when faucet knows no
 // such scope.
 func ParseScope(s string) (Scope, error) {

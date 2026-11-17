@@ -109,6 +109,12 @@ func (s *fakeStore) AccessToken(_ context.Context, hash oauth.TokenHash) (oauth.
 	return t, nil
 }
 
+func (s *fakeStore) tokenCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.tokens)
+}
+
 func (s *fakeStore) readCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

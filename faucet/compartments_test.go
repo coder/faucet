@@ -40,7 +40,10 @@ var (
 // longer uses fails too, so the list says exactly what a feature takes from
 // core.
 var coreUses = map[string][]string{
-	"oauth":      {"ErrInvalidToken", "ParseScope", "Principal", "Scope"},
+	"oauth": {
+		"AllScopes", "Authorizer", "ErrInvalidToken", "ErrNoAccess", "ErrUnknownRepository", "NewService", "ParseScope",
+		"Principal", "Repository", "Scope", "ServiceClient",
+	},
 	"redelivery": {"StoresDelivery"},
 }
 

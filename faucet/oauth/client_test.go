@@ -41,17 +41,35 @@ func TestNewClientRefusesAClientThatCannotWork(t *testing.T) {
 	const resource = "https://faucet.example.com/github/mcp"
 	grants := []string{"repo:coder/faucet"}
 	for name, mk := range map[string]func() (oauth.Client, string, error){
-		"no grant":        func() (oauth.Client, string, error) { return oauth.NewClient("ci", resource, bothScopes, nil, time.Now()) },
-		"an org grant":    func() (oauth.Client, string, error) { return oauth.NewClient("ci", resource, bothScopes, []string{"org:coder"}, time.Now()) },
-		"a bare repo":     func() (oauth.Client, string, error) { return oauth.NewClient("ci", resource, bothScopes, []string{"coder/faucet"}, time.Now()) },
-		"a grant of ..":   func() (oauth.Client, string, error) { return oauth.NewClient("ci", resource, bothScopes, []string{"repo:coder/.."}, time.Now()) },
-		"no scope":        func() (oauth.Client, string, error) { return oauth.NewClient("ci", resource, nil, grants, time.Now()) },
-		"an unknown one":  func() (oauth.Client, string, error) { return oauth.NewClient("ci", resource, []faucet.Scope{"events:all"}, grants, time.Now()) },
-		"no resource":     func() (oauth.Client, string, error) { return oauth.NewClient("ci", "", bothScopes, grants, time.Now()) },
-		"an empty ID":     func() (oauth.Client, string, error) { return oauth.NewClient("", resource, bothScopes, grants, time.Now()) },
-		"a hyphen at end": func() (oauth.Client, string, error) { return oauth.NewClient("ci-", resource, bothScopes, grants, time.Now()) },
-		"a percent":       func() (oauth.Client, string, error) { return oauth.NewClient("ci%2D1", resource, bothScopes, grants, time.Now()) },
-		"65 bytes":        func() (oauth.Client, string, error) { return oauth.NewClient(strings.Repeat("a", 65), resource, bothScopes, grants, time.Now()) },
+		"no grant": func() (oauth.Client, string, error) {
+			return oauth.NewClient("ci", resource, bothScopes, nil, time.Now())
+		},
+		"an org grant": func() (oauth.Client, string, error) {
+			return oauth.NewClient("ci", resource, bothScopes, []string{"org:coder"}, time.Now())
+		},
+		"a bare repo": func() (oauth.Client, string, error) {
+			return oauth.NewClient("ci", resource, bothScopes, []string{"coder/faucet"}, time.Now())
+		},
+		"a grant of ..": func() (oauth.Client, string, error) {
+			return oauth.NewClient("ci", resource, bothScopes, []string{"repo:coder/.."}, time.Now())
+		},
+		"no scope": func() (oauth.Client, string, error) { return oauth.NewClient("ci", resource, nil, grants, time.Now()) },
+		"an unknown one": func() (oauth.Client, string, error) {
+			return oauth.NewClient("ci", resource, []faucet.Scope{"events:all"}, grants, time.Now())
+		},
+		"no resource": func() (oauth.Client, string, error) { return oauth.NewClient("ci", "", bothScopes, grants, time.Now()) },
+		"an empty ID": func() (oauth.Client, string, error) {
+			return oauth.NewClient("", resource, bothScopes, grants, time.Now())
+		},
+		"a hyphen at end": func() (oauth.Client, string, error) {
+			return oauth.NewClient("ci-", resource, bothScopes, grants, time.Now())
+		},
+		"a percent": func() (oauth.Client, string, error) {
+			return oauth.NewClient("ci%2D1", resource, bothScopes, grants, time.Now())
+		},
+		"65 bytes": func() (oauth.Client, string, error) {
+			return oauth.NewClient(strings.Repeat("a", 65), resource, bothScopes, grants, time.Now())
+		},
 	} {
 		_, secret, err := mk()
 		require.Error(t, err, name)
