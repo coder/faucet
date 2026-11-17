@@ -1,6 +1,7 @@
 package faucet_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -316,4 +317,148 @@ func TestPollOfARawNameChecksTheCallerAndTheRepository(t *testing.T) {
 	anonymous := newRawPollHarness(t, func(d *faucet.Deps) { d.PrincipalFrom = failingPrincipal })
 	rpcErr := anonymous.pollError(pollParams("github.push", repoArgs(), nil))
 	require.Equal(t, "authentication required", rpcErr.Message)
+}
+
+// pollData polls and returns the data of each event as it came over the wire.
+func (h *rawPollHarness) pollData(params *rawParams) []json.RawMessage {
+	h.t.Helper()
+	res, err := h.call(methodPoll, params)
+	require.NoError(h.t, err)
+	var events []struct {
+		Data json.RawMessage `json:"data"`
+	}
+	require.NoError(h.t, json.Unmarshal(res.fields["events"], &events))
+	data := make([]json.RawMessage, len(events))
+	for i, ev := range events {
+		data[i] = ev.Data
+	}
+	return data
+}
+
+func TestPollOfARawNameWithFieldsReturnsOnlyThoseMembers(t *testing.T) {
+	t.Parallel()
+
+	big := strings.Repeat("x", 200<<10)
+	for _, tc := range []struct {
+		name   string
+		body   string
+		fields []string
+		want   string
+	}{
+		{"top level members", `{"b":1,"a":"x","c":true}`, []string{"c", "a"}, `{"a":"x","c":true}`},
+		{"nested members keep their nesting", `{"head_commit":{"id":"abc","message":"m","author":{"name":"n","email":"e"}},"ref":"r"}`, []string{"head_commit.id", "head_commit.author.name", "ref"}, `{"head_commit":{"author":{"name":"n"},"id":"abc"},"ref":"r"}`},
+		{"a shorter path wins over a longer one, given first", `{"h":{"id":"1", "m" : 2}}`, []string{"h", "h.id"}, `{"h":{"id":"1","m":2}}`},
+		{"a shorter path wins over a longer one, given last", `{"h":{"id":"1", "m" : 2}}`, []string{"h.id", "h"}, `{"h":{"id":"1","m":2}}`},
+		{"a segment is a whole name, not a prefix", `{"head":1,"head_commit":{"id":"1"}}`, []string{"head"}, `{"head":1}`},
+		{"a path through an array applies to each element that is an object", `{"commits":[{"id":"1","x":2},{"x":3},5,"s",null,true,[{"id":"9"}],{"id":"2"}]}`, []string{"commits.id"}, `{"commits":[{"id":"1"},{},{"id":"2"}]}`},
+		{"an array of objects where nothing matches keeps its elements", `{"a":[{"x":1},{"y":2}]}`, []string{"a.b"}, `{"a":[{},{}]}`},
+		{"an array of scalars that a path continues through is left out", `{"a":[1,2],"k":1}`, []string{"a.b", "k"}, `{"k":1}`},
+		{"an empty array that a path continues through is left out", `{"a":[]}`, []string{"a.b"}, `{}`},
+		{"a whole array", `{"a":[1, 2 ,{"b":3}]}`, []string{"a"}, `{"a":[1,2,{"b":3}]}`},
+		{"an array in an array is not entered", `{"a":[[{"b":1}]]}`, []string{"a.b"}, `{}`},
+		{"an array inside an element of an array", `{"a":[{"b":[{"c":1,"d":2},{"d":3}]}]}`, []string{"a.b.c"}, `{"a":[{"b":[{"c":1},{}]}]}`},
+		{"members that the payload does not have", `{"a":{"x":1}}`, []string{"nope", "a.nope", "a.x.y"}, `{}`},
+		{"a path through a string, a number, a boolean or null", `{"s":"x","n":1,"b":true,"z":null}`, []string{"s.a", "n.a", "b.a", "z.a"}, `{}`},
+		{"a null that is selected", `{"z":null}`, []string{"z"}, `{"z":null}`},
+		{"an object that ends up empty is left out", `{"a":{},"b":{"c":1}}`, []string{"a.x", "b.c"}, `{"b":{"c":1}}`},
+		{"an empty object that is selected", `{"a":{}}`, []string{"a"}, `{"a":{}}`},
+		{"escapes and numbers as GitHub wrote them", `{"a":"\u0000<>&\u003c\"","b":1.50e+3,"c":"é","d":-0}`, []string{"a", "b", "c", "d"}, `{"a":"\u0000<>&\u003c\"","b":1.50e+3,"c":"é","d":-0}`},
+		{"a member name that is repeated: the last one", `{"a":1,"a":2}`, []string{"a"}, `{"a":2}`},
+		{"a member name written with an escape", `{"\u0069d":1}`, []string{"id"}, `{"id":1}`},
+		{"a path that is given twice", `{"a":1}`, []string{"a", "a"}, `{"a":1}`},
+		{"a value of 200 KiB", `{"big":"` + big + `","small":1}`, []string{"big"}, `{"big":"` + big + `"}`},
+		{"a path of eight segments", `{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":1,"i":2}}}}}}}}`, []string{"a.b.c.d.e.f.g.h"}, `{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":1}}}}}}}}`},
+		{"nothing selected", `{"a":1}`, []string{"b"}, `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newRawPollHarness(t)
+			opened := h.open("fields", tc.fields)
+			body := `{"repository":{"id":42},` + tc.body[1:]
+			require.Equal(t, "stored", h.deliver("push", "fields", []byte(body)))
+
+			data := h.pollData(pollParams("github.push", repoArgs("fields", tc.fields), raw(opened.Cursor)))
+			require.Len(t, data, 1)
+			require.JSONEq(t, tc.want, string(data[0]))
+		})
+	}
+}
+
+func TestEachLeaseOfARawNameGetsWhatItAskedFor(t *testing.T) {
+	t.Parallel()
+
+	h := newRawPollHarness(t)
+	payload := map[string]any{"ref": "refs/heads/main", "after": "abc", "commits": []any{map[string]any{"id": "1", "message": "m"}}}
+	refs := h.open("fields", []string{"ref"})
+	commits := h.open("fields", []string{"commits.id", "repository.id"})
+	h.push(payload)
+
+	require.Equal(t, map[string]any{"ref": "refs/heads/main"},
+		h.pollRaw("github.push", repoArgs("fields", []string{"ref"}), refs.Cursor).Events[0].Data, "one lease's fields are not served to another")
+	require.Equal(t, map[string]any{"commits": []any{map[string]any{"id": "1"}}, "repository": map[string]any{"id": float64(repoID)}},
+		h.pollRaw("github.push", repoArgs("fields", []string{"commits.id", "repository.id"}), commits.Cursor).Events[0].Data)
+
+	whole := h.open()
+	h.push(payload)
+	got := h.pollRaw("github.push", repoArgs(), whole.Cursor).Events[0].Data
+	require.Equal(t, "abc", got["after"], "a lease without fields gets the whole payload")
+	require.Equal(t, map[string]any{"id": float64(repoID), "full_name": testRepo}, got["repository"])
+	page := h.pollRaw("github.push", repoArgs("fields", []string{"ref"}), refs.Cursor)
+	require.Len(t, page.Events, 2)
+	require.Equal(t, map[string]any{"ref": "refs/heads/main"}, page.Events[1].Data, "and a lease with fields still gets only its own")
+}
+
+func TestPollOfARawNameChecksItsArguments(t *testing.T) {
+	t.Parallel()
+
+	h := newRawPollHarness(t)
+	many := make([]string, 33)
+	for i := range many {
+		many[i] = fmt.Sprintf("f%d", i)
+	}
+	for name, arguments := range map[string]map[string]any{
+		"an argument of the typed names":  repoArgs("sha", strings.Repeat("a", 40)),
+		"empty actions":                   repoArgs("actions", []string{}),
+		"an empty action":                 repoArgs("actions", []string{"opened", ""}),
+		"empty fields":                    repoArgs("fields", []string{}),
+		"more than 32 fields":             repoArgs("fields", many),
+		"a field path with an empty part": repoArgs("fields", []string{"a..b"}),
+		"a field path with an index":      repoArgs("fields", []string{"commits[0]"}),
+		"a field path of nine parts":      repoArgs("fields", []string{"a.b.c.d.e.f.g.h.i"}),
+		"a repository without an owner":   args("repo", "repo"),
+		"no repository":                   {},
+	} {
+		rpcErr := h.pollError(pollParams("github.push", arguments, nil))
+		require.EqualValues(t, codeInvalidParams, rpcErr.Code, name)
+	}
+	for name, change := range map[string]func(*rawParams){
+		"maxEvents of zero": func(p *rawParams) { p.MaxEvents = raw(0) },
+		"maxAgeMs of zero":  func(p *rawParams) { p.MaxAgeMs = raw(0) },
+	} {
+		params := pollParams("github.push", repoArgs(), nil)
+		change(params)
+		require.EqualValues(t, codeInvalidParams, h.pollError(params).Code, name)
+	}
+	require.Equal(t, "ignored", h.deliver("push", "refused", rawPayload(repoID, "", nil)), "a refused poll opens no lease")
+
+	opened := h.open("actions", []string{"b", "a"}, "fields", []string{"y", "x"})
+	respelled := h.pollRaw("github.push", repoArgs("fields", []string{"x", "y", "x"}, "actions", []string{"a", "b"}), opened.Cursor)
+	require.False(t, respelled.Truncated, "another spelling of the same arguments reads the same lease")
+}
+
+func TestPollKnowsRawNamesOnlyOnAServiceWithARawStore(t *testing.T) {
+	t.Parallel()
+
+	on := newRawPollHarness(t)
+	rpcErr := on.pollError(pollParams("github.nope", repoArgs(), nil))
+	require.EqualValues(t, codeNotFound, rpcErr.Code)
+	require.Contains(t, rpcErr.Message, "ci.run_completed")
+	require.Contains(t, rpcErr.Message, "github.push")
+	require.Empty(t, on.poll(pollParams("ci.run_completed", repoArgs(), nil)).Events, "a typed name is polled as before")
+
+	off := newEventsHarness(t)
+	rpcErr = off.pollError(pollParams("github.push", repoArgs(), nil))
+	require.EqualValues(t, codeNotFound, rpcErr.Code)
+	require.Contains(t, rpcErr.Message, "ci.run_completed")
+	require.NotContains(t, rpcErr.Message, "github.star")
 }
