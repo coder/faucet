@@ -53,7 +53,7 @@ func (c cronRoutes) guard(next http.HandlerFunc) http.HandlerFunc {
 		token, ok := bearerToken(r.Header.Get("Authorization"))
 		got := sha256.Sum256([]byte(token))
 		if !ok || subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
-			unauthorized(w)
+			unauthorized(w, "Bearer")
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), cronTimeout)

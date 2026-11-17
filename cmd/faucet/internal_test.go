@@ -125,10 +125,6 @@ func (s *stubStore) pollCount() int {
 	return s.polls
 }
 
-// mcpPaths are the paths of the GitHub events MCP endpoint: /github/mcp, and
-// /mcp, its alias for one release.
-var mcpPaths = []string{"/github/mcp", "/mcp"}
-
 type testServer struct {
 	*httptest.Server
 	github *githubStub
@@ -158,7 +154,7 @@ func newTestServer(t *testing.T, configure ...func(*httptest.Server)) *testServe
 	})
 	require.NoError(t, err)
 
-	srv := httptest.NewUnstartedServer(newRouter(svc, bearers{github: authz}, cronRoutes{}, logger))
+	srv := httptest.NewUnstartedServer(newRouter(svc, bearers{github: authz}, nil, cronRoutes{}, logger))
 	for _, c := range configure {
 		c(srv)
 	}
