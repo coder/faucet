@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/oauth"
 	"github.com/coder/faucet/faucet/pgstore"
 	"github.com/coder/faucet/faucet/redelivery"
 	"github.com/coder/faucet/faucet/storetest"
@@ -40,6 +41,24 @@ func TestRedeliveryStore(t *testing.T) {
 
 	storetest.RunRedelivery(t, func(t *testing.T) storetest.RedeliveryStore {
 		return newGapRecordingStore(newDatabase(t, adminURL))
+	})
+}
+
+func TestOAuthStore(t *testing.T) {
+	t.Parallel()
+	adminURL := testDatabaseURL(t)
+
+	storetest.RunOAuth(t, func(t *testing.T) oauth.Store {
+		return pgstore.New(newDatabase(t, adminURL))
+	})
+}
+
+func TestOAuthStoreOverBinaryParameters(t *testing.T) {
+	t.Parallel()
+	adminURL := withBinaryParameters(t, testDatabaseURL(t))
+
+	storetest.RunOAuth(t, func(t *testing.T) oauth.Store {
+		return pgstore.New(newDatabase(t, adminURL))
 	})
 }
 
@@ -148,7 +167,7 @@ func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {
 	require.EqualValues(t, 400, hostVersion)
 	var faucetVersion int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM `+pq.QuoteIdentifier(pgstore.MigrationsTable)).Scan(&faucetVersion))
-	require.EqualValues(t, 9, faucetVersion)
+	require.EqualValues(t, 10, faucetVersion)
 }
 
 func TestTheClearMigrationMovesTheOldTopToTheClearAndBack(t *testing.T) {
