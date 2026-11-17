@@ -2,6 +2,7 @@ package redelivery_test
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -20,10 +21,9 @@ func TestRedeliveryDocStatesTheRedeliveryCapacityThatTheConstantsGive(t *testing
 
 	const (
 		schedule    = 10 * time.Minute
-		perPage     = 100
 		asksPerHour = int(time.Hour / schedule)
 	)
-	pages := redelivery.DefaultMaxPagesPerRun
+	pages, perPage := redelivery.DefaultMaxPagesPerRun, redelivery.DeliveriesPerPage
 	perRun := pages * perPage
 	covered := schedule + redelivery.ReadOverlap
 	// The doc rounds the sweep's capacity down to a hundred, for a run that starts late.
@@ -53,6 +53,11 @@ func TestRedeliveryDocStatesTheRedeliveryCapacityThatTheConstantsGive(t *testing
 		fmt.Sprintf("GitHub keeps a delivery for %d hours", int(redelivery.GitHubDeliveryRetention/time.Hour)),
 		fmt.Sprintf("lookback of %d hours", int(redelivery.StartLookback/time.Hour)),
 		fmt.Sprintf("ends within %d minutes of the first run", int(offsets[len(offsets)-1]/time.Minute)),
+		fmt.Sprintf("a run covers %d minutes of the list (%d new minutes plus the %d minute overlap)",
+			int(covered/time.Minute), int(schedule/time.Minute), int(redelivery.ReadOverlap/time.Minute)),
+		fmt.Sprintf("because a run spends %s of its", shareText(redelivery.ScanShare)),
+		fmt.Sprintf("A run reads the list for %s of that", shareText(redelivery.ScanShare)),
+		fmt.Sprintf("asks until %s of the time has passed", shareText(redelivery.AskStartShare)),
 		"*/10 * * * *",
 	} {
 		require.Contains(t, text, want)
@@ -83,6 +88,14 @@ func TestRedeliveryDocStatesTheDateWindowThatTheConstantsGive(t *testing.T) {
 	} {
 		require.Contains(t, text, want)
 	}
+}
+
+// shareText writes a share of a run's time as docs/redelivery.md does.
+func shareText(share float64) string {
+	if share == 0.5 {
+		return "half"
+	}
+	return fmt.Sprintf("%d percent", int(math.Round(share*100)))
 }
 
 func hoursAndMinutes(d time.Duration) string {
