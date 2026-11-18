@@ -46,11 +46,13 @@ type loginConfig struct {
 	webhook *faucet.WebhookDeps
 	// logins wraps the store that the login server reads.
 	logins func(*pgstore.Store) loginStore
+	// rawEvents are the events that the server offers raw, push without it.
+	rawEvents []string
 }
 
 func newLoginServer(t *testing.T, configure ...func(*loginConfig)) *loginServer {
 	t.Helper()
-	var cfg loginConfig
+	cfg := loginConfig{rawEvents: []string{"push"}}
 	for _, c := range configure {
 		c(&cfg)
 	}
@@ -79,7 +81,7 @@ func newLoginServer(t *testing.T, configure ...func(*loginConfig)) *loginServer 
 	}
 	tokens, login, checks, err := newLogin(publicURL, logins, cache, clock, logger)
 	require.NoError(t, err)
-	svc, _, err := newServices(config{secret: testSecret, publicURL: publicURL, webhook: cfg.webhook, rawEvents: []string{"push"}}, store, checks, clock, logger)
+	svc, _, err := newServices(config{secret: testSecret, publicURL: publicURL, webhook: cfg.webhook, rawEvents: cfg.rawEvents}, store, checks, clock, logger)
 	require.NoError(t, err)
 	cron := cronRoutes{secret: []byte(loginCronSecret), svc: svc, retention: 24 * time.Hour, login: login, clock: clock, logger: logger}
 	srv.Config.Handler = newRouter(svc, tokens, login, cron, logger)

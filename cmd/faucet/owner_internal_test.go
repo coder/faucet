@@ -240,7 +240,7 @@ func TestAServicePollsTheRawEventsOfAnOrganization(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
-	srv := newLoginServer(t)
+	srv := newLoginServer(t, func(c *loginConfig) { c.rawEvents = []string{"push", "repository_ruleset"} })
 	secret := srv.client(t, "org-watcher", "/github/mcp", []faucet.Scope{faucet.ScopeEventsRead}, "org:coder", "all")
 	srv.deliverRunOf(t, "existing-1", coderExisting)
 	session := srv.connectServiceEvents(ctx, t, "org-watcher", secret)
