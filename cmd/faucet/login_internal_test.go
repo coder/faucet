@@ -13,10 +13,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/auth/extauth"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 	"github.com/stretchr/testify/require"
@@ -38,8 +40,19 @@ type loginServer struct {
 	logs   *syncBuffer
 }
 
-func newLoginServer(t *testing.T) *loginServer {
+// loginConfig is what newLoginServer changes from its defaults.
+type loginConfig struct {
+	webhook *faucet.WebhookDeps
+	// logins wraps the store that the login server reads.
+	logins func(*pgstore.Store) loginStore
+}
+
+func newLoginServer(t *testing.T, configure ...func(*loginConfig)) *loginServer {
 	t.Helper()
+	var cfg loginConfig
+	for _, c := range configure {
+		c(&cfg)
+	}
 	adminURL := os.Getenv(testDatabaseURLEnv)
 	if adminURL == "" {
 		if os.Getenv("CI") != "" {
@@ -59,11 +72,15 @@ func newLoginServer(t *testing.T) *loginServer {
 	logs := &syncBuffer{}
 	logger := slog.Make(sloghuman.Sink(logs)).Leveled(slog.LevelDebug)
 	cache := faucet.NewAccessCache(faucet.TokenAuthorizer{BaseURL: github.URL, Client: github.Client()}, clock)
-	tokens, login, authorizer, err := newLogin(publicURL, store, cache, clock, logger)
+	var logins loginStore = store
+	if cfg.logins != nil {
+		logins = cfg.logins(store)
+	}
+	tokens, login, authorizer, err := newLogin(publicURL, logins, cache, clock, logger)
 	require.NoError(t, err)
 	svc, err := faucet.New(faucet.Deps{
 		Store: store, Secret: []byte(testSecret), Logger: logger, Authorizer: authorizer, PrincipalFrom: principalFrom, Clock: clock,
-		RecordRepositories: true,
+		RecordRepositories: true, Webhook: cfg.webhook,
 	})
 	require.NoError(t, err)
 	cron := cronRoutes{secret: []byte(loginCronSecret), svc: svc, retention: 24 * time.Hour, login: login, clock: clock, logger: logger}
@@ -441,4 +458,83 @@ func TestTheLoginRoutesAnswerTheirMethods(t *testing.T) {
 	status, header := do(http.MethodGet, "/oauth/token")
 	require.Equal(t, http.StatusMethodNotAllowed, status)
 	require.Equal(t, http.MethodPost, header.Get("Allow"))
+}
+
+// countingClients counts the reads of a client.
+type countingClients struct {
+	*pgstore.Store
+	reads atomic.Int64
+}
+
+func (c *countingClients) Client(ctx context.Context, id string) (oauth.Client, error) {
+	c.reads.Add(1)
+	return c.Store.Client(ctx, id)
+}
+
+// token asks the token endpoint for a token of the client, as a client
+// credentials handler does.
+func (s *loginServer) token(t *testing.T, id, secret string) string {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, s.URL+"/oauth/token", strings.NewReader("grant_type=client_credentials"))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(id, secret)
+	resp, err := s.Client().Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var body struct {
+		AccessToken string `json:"access_token"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	return body.AccessToken
+}
+
+func subscribeTo(ctx context.Context, session *mcp.ClientSession, repo string) error {
+	_, err := mcp.CallCustomMethod[*subscribeParams, *eventsResult](ctx, session, "events/subscribe", &subscribeParams{
+		Name: "ci.run_completed", Arguments: map[string]any{"repo": repo},
+		Delivery: map[string]any{"mode": "webhook", "url": "https://hooks.example.com/cb", "secret": "whsec_" + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32))},
+	})
+	return err
+}
+
+// Every renewal checks access again at its source (R3), through the
+// Authorizer that run() composes: GitHub for a GitHub token, past the minute
+// that the cache remembers, and the client's row for a service, past the
+// grants that the token check read.
+func TestARenewalChecksAccessAgainForEveryKindOfCaller(t *testing.T) {
+	t.Parallel()
+	key, err := faucet.NewWebhookKey(bytes.Repeat([]byte{1}, 32))
+	require.NoError(t, err)
+	allow, err := faucet.NewCallbackAllowlist([]string{"https://hooks.example.com"}, false)
+	require.NoError(t, err)
+	counted := &countingClients{}
+	srv := newLoginServer(t, func(c *loginConfig) {
+		c.webhook = &faucet.WebhookDeps{Key: key, Callbacks: allow}
+		c.logins = func(store *pgstore.Store) loginStore {
+			counted.Store = store
+			return counted
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	t.Run("GitHubToken", func(t *testing.T) {
+		person := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, aliceToken)
+		require.NoError(t, subscribeTo(ctx, person, "o/r"))
+		srv.github.mu.Lock()
+		srv.github.revoked = true
+		srv.github.mu.Unlock()
+		var rpcErr *jsonrpc.Error
+		require.ErrorAs(t, subscribeTo(ctx, person, "o/r"), &rpcErr, "the renewal asks GitHub, which revoked the access, within the minute the cache remembers")
+		require.Contains(t, rpcErr.Message, "not found or not accessible")
+	})
+	t.Run("Service", func(t *testing.T) {
+		secret := srv.client(t, "ci-watcher", "/github/mcp", bothScopes, "repo:octo-org/octo-repo")
+		srv.deliver(t, "d-1")
+		service := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, srv.token(t, "ci-watcher", secret))
+		before := counted.reads.Load()
+		require.NoError(t, subscribeTo(ctx, service, "octo-org/octo-repo"))
+		require.EqualValues(t, 2, counted.reads.Load()-before, "the token check reads the client, and the renewal reads it again")
+	})
 }

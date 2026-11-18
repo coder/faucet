@@ -57,6 +57,8 @@ type githubStub struct {
 	auth       []string
 	userErr    int
 	userHeader http.Header
+	// revoked makes GitHub deny alice o/r.
+	revoked bool
 }
 
 // newGitHubStub knows alice and bob. Alice can read o/r and nobody can see
@@ -68,7 +70,7 @@ func newGitHubStub(t *testing.T) *githubStub {
 		stub.mu.Lock()
 		stub.requests = append(stub.requests, r.URL.Path)
 		stub.auth = append(stub.auth, r.Header.Get("Authorization"))
-		userErr, userHeader := stub.userErr, stub.userHeader
+		userErr, userHeader, revoked := stub.userErr, stub.userHeader, stub.revoked
 		stub.mu.Unlock()
 
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -83,7 +85,7 @@ func newGitHubStub(t *testing.T) *githubStub {
 			w.WriteHeader(http.StatusUnauthorized)
 		case r.URL.Path == "/user":
 			_, _ = fmt.Fprintf(w, `{"login": %q}`, login)
-		case r.URL.Path == "/repos/o/r" && login == "alice":
+		case r.URL.Path == "/repos/o/r" && login == "alice" && !revoked:
 			_, _ = fmt.Fprint(w, `{"id": 42}`)
 		default:
 			w.WriteHeader(http.StatusNotFound)
