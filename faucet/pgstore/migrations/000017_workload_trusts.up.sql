@@ -1,6 +1,9 @@
 -- A client that faucet clients create -no-secret made has no secret_hash, so
--- the client credentials grant refuses it.
+-- the client credentials grant refuses it. The down gives such a client the
+-- hash of 32 zero bytes, which no client with a secret holds, as
+-- oauth.Client.Validate refuses it.
 ALTER TABLE faucet_service_clients ALTER COLUMN secret_hash DROP NOT NULL;
+UPDATE faucet_service_clients SET secret_hash = NULL WHERE secret_hash = decode(repeat('00', 32), 'hex');
 
 -- faucet_workload_trusts holds the trust rules of the service clients. A
 -- token that issuer signs for a workload acts as the client when it holds

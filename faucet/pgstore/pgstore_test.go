@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"slices"
@@ -17,6 +19,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 
+	"cdr.dev/slog/v3"
 	"github.com/coder/faucet/faucet"
 	"github.com/coder/faucet/faucet/oauth"
 	"github.com/coder/faucet/faucet/pgstore"
@@ -437,39 +440,61 @@ func TestTheOrgGrantsMigrationBindsEachLoginToTheAccountThatHoldsItAndBack(t *te
 }
 
 // The workload trusts migration lets a client have no secret. Its down drops
-// the trust rules and gives each client with no secret the hash of its own
-// random value, which no one holds, as the build before needs a hash.
-func TestTheWorkloadTrustsMigrationGivesEachClientWithNoSecretAHashOfItsOwnOnTheWayDown(t *testing.T) {
+// the trust rules and gives each client with no secret the hash of 32 zero
+// bytes, which no known secret has, as the build before needs a hash, and
+// its up takes that hash back to no secret. No secret logs such a client in
+// at any step.
+func TestTheWorkloadTrustsMigrationKeepsAClientWithNoSecretWithoutOneDownAndUp(t *testing.T) {
 	t.Parallel()
 	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
 	ctx := context.Background()
-	// secretHash is an any, as lib/pq sends a nil []byte as an empty bytea,
-	// not as NULL.
-	insertClient := func(id string, secretHash any) {
+	const resource = "https://faucet.example.com/github/mcp"
+	server, err := oauth.NewServer(oauth.ServerDeps{Store: store, Clock: quartz.NewReal(), Logger: slog.Make(), Issuer: "https://faucet.example.com", Resources: []string{resource}})
+	require.NoError(t, err)
+	logIn := func(id, secret string) int {
 		t.Helper()
-		_, err := db.ExecContext(ctx, `INSERT INTO faucet_service_clients (client_id, secret_hash, resource, grants, scopes, created_at)
-			VALUES ($1, $2, 'https://faucet.example.com/github/mcp', '{repo:coder/faucet}', '{events:read}', now())`, id, secretHash)
-		require.NoError(t, err)
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost, oauth.TokenPath, strings.NewReader(url.Values{"grant_type": {"client_credentials"}}.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.SetBasicAuth(url.QueryEscape(id), url.QueryEscape(secret))
+		reply := httptest.NewRecorder()
+		server.TokenHandler().ServeHTTP(reply, req)
+		return reply.Code
 	}
 	secretHashOf := func(id string) (hash []byte) {
 		t.Helper()
 		require.NoError(t, db.QueryRowContext(ctx, `SELECT secret_hash FROM faucet_service_clients WHERE client_id = $1`, id).Scan(&hash))
 		return hash
 	}
-	secret := oauth.HashToken("fcs_kept")
-	insertClient("with-secret", secret[:])
-	insertClient("workload-a", nil)
-	insertClient("workload-b", nil)
-	_, err := db.ExecContext(ctx, `INSERT INTO faucet_workload_trusts (client_id, issuer, claims, rule_hash, created_at)
-		VALUES ('workload-a', 'https://k8s.wi-test.invalid', '{"sub":"system:serviceaccount:apps:digest-bot"}', sha256('rule'), now())`)
+	scopes, grants, now := []faucet.Scope{faucet.ScopeEventsRead}, []string{"repo:coder/faucet"}, time.Now()
+	withSecret, secret, err := oauth.NewClient("with-secret", resource, scopes, grants, now)
 	require.NoError(t, err)
+	require.NoError(t, store.InsertClient(ctx, withSecret))
+	workloads := []string{"workload-a", "workload-b"}
+	for _, id := range workloads {
+		c, err := oauth.NewSecretlessClient(id, resource, scopes, grants, now)
+		require.NoError(t, err)
+		require.NoError(t, store.InsertClient(ctx, c))
+	}
+	_, err = store.AddTrustRule(ctx, "workload-a", oauth.TrustRule{Issuer: "https://k8s.wi-test.invalid", Claims: map[string]string{"sub": "system:serviceaccount:apps:digest-bot"}}, now)
+	require.NoError(t, err)
+	requireNoLogIn := func(step string) {
+		t.Helper()
+		require.Equal(t, http.StatusOK, logIn("with-secret", secret), "%s: the client with a secret logs in", step)
+		for _, id := range workloads {
+			for _, attempt := range []string{"", secret, "fcs_" + strings.Repeat("A", 43)} {
+				require.Equal(t, http.StatusUnauthorized, logIn(id, attempt), "%s: %s logs in with %q", step, id, attempt)
+			}
+		}
+	}
+	requireNoLogIn("before the down")
 
 	runMigrationFile(t, db, "000017_workload_trusts.down.sql")
-	require.Equal(t, secret[:], secretHashOf("with-secret"))
-	a, b := secretHashOf("workload-a"), secretHashOf("workload-b")
-	require.Len(t, a, 32)
-	require.Len(t, b, 32)
-	require.NotEqual(t, a, b, "each client gets the hash of a value of its own, which no one can know")
+	requireNoLogIn("after the down")
+	require.Equal(t, withSecret.SecretHash[:], secretHashOf("with-secret"))
+	for _, id := range workloads {
+		require.Equal(t, make([]byte, 32), secretHashOf(id), "%s gets the hash of 32 zero bytes", id)
+	}
 	_, err = db.ExecContext(ctx, `UPDATE faucet_service_clients SET secret_hash = NULL WHERE client_id = 'workload-a'`)
 	require.Error(t, err, "a client needs a secret hash again")
 	var trusts *string
@@ -477,7 +502,18 @@ func TestTheWorkloadTrustsMigrationGivesEachClientWithNoSecretAHashOfItsOwnOnThe
 	require.Nil(t, trusts, "the trust rules are gone")
 
 	runMigrationFile(t, db, "000017_workload_trusts.up.sql")
-	insertClient("workload-c", nil)
+	requireNoLogIn("after the up")
+	for _, id := range workloads {
+		c, err := store.Client(ctx, id)
+		require.NoError(t, err)
+		require.Nil(t, c.SecretHash, "%s has no secret again", id)
+	}
+	c, err := store.Client(ctx, "with-secret")
+	require.NoError(t, err)
+	require.Equal(t, withSecret.SecretHash, c.SecretHash)
+	workload, err := oauth.NewSecretlessClient("workload-c", resource, scopes, grants, now)
+	require.NoError(t, err)
+	require.NoError(t, store.InsertClient(ctx, workload), "a client with no secret is taken again")
 }
 
 // The claims of a trust rule are an object of strings, as oauth.TrustRule
