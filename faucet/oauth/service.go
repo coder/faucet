@@ -76,7 +76,7 @@ func NewServiceAccess(clients Store, repos Repositories) (ServiceAccess, error) 
 
 // RepoID implements faucet.Authorizer with the grants that p holds.
 func (a ServiceAccess) RepoID(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
-	grants, err := a.grantsOf(ctx, p, false)
+	grants, err := heldGrants(p)
 	if err != nil {
 		return 0, err
 	}
@@ -87,7 +87,7 @@ func (a ServiceAccess) RepoID(ctx context.Context, p faucet.Principal, repo stri
 // holds in the store now. A client that is gone or disabled is
 // faucet.ErrInvalidToken.
 func (a ServiceAccess) RepoIDFresh(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
-	grants, err := a.grantsOf(ctx, p, true)
+	grants, err := a.liveGrants(ctx, p)
 	if err != nil {
 		return 0, err
 	}
@@ -96,7 +96,7 @@ func (a ServiceAccess) RepoIDFresh(ctx context.Context, p faucet.Principal, repo
 
 // OwnerID implements faucet.ServiceGrants with the grants that p holds.
 func (a ServiceAccess) OwnerID(ctx context.Context, p faucet.Principal, owner string) (int64, error) {
-	grants, err := a.grantsOf(ctx, p, false)
+	grants, err := heldGrants(p)
 	if err != nil {
 		return 0, err
 	}
@@ -106,7 +106,7 @@ func (a ServiceAccess) OwnerID(ctx context.Context, p faucet.Principal, owner st
 // OwnerIDFresh implements faucet.ServiceGrants with the grants that the
 // client holds in the store now.
 func (a ServiceAccess) OwnerIDFresh(ctx context.Context, p faucet.Principal, owner string) (int64, error) {
-	grants, err := a.grantsOf(ctx, p, true)
+	grants, err := a.liveGrants(ctx, p)
 	if err != nil {
 		return 0, err
 	}
@@ -114,8 +114,8 @@ func (a ServiceAccess) OwnerIDFresh(ctx context.Context, p faucet.Principal, own
 }
 
 // CoversAll implements faucet.ServiceGrants with the grants that p holds.
-func (a ServiceAccess) CoversAll(ctx context.Context, p faucet.Principal) error {
-	grants, err := a.grantsOf(ctx, p, false)
+func (ServiceAccess) CoversAll(_ context.Context, p faucet.Principal) error {
+	grants, err := heldGrants(p)
 	if err != nil {
 		return err
 	}
@@ -125,22 +125,28 @@ func (a ServiceAccess) CoversAll(ctx context.Context, p faucet.Principal) error 
 // CoversAllFresh implements faucet.ServiceGrants with the grants that the
 // client holds in the store now.
 func (a ServiceAccess) CoversAllFresh(ctx context.Context, p faucet.Principal) error {
-	grants, err := a.grantsOf(ctx, p, true)
+	grants, err := a.liveGrants(ctx, p)
 	if err != nil {
 		return err
 	}
 	return allGranted(grants)
 }
 
-// grantsOf returns the grants of the service p: those that p holds, or with
-// fresh those that its client holds in the store now.
-func (a ServiceAccess) grantsOf(ctx context.Context, p faucet.Principal, fresh bool) ([]clientGrant, error) {
+// heldGrants returns the grants that the service p holds.
+func heldGrants(p faucet.Principal) ([]clientGrant, error) {
 	client, ok := p.ServiceClient()
 	if !ok {
 		return nil, xerrors.Errorf("only a service is checked by its grants: %w", faucet.ErrNoAccess)
 	}
-	if !fresh {
-		return parseGrants(client.Grants), nil
+	return parseGrants(client.Grants), nil
+}
+
+// liveGrants returns the grants that the client of the service p holds in
+// the store now.
+func (a ServiceAccess) liveGrants(ctx context.Context, p faucet.Principal) ([]clientGrant, error) {
+	client, ok := p.ServiceClient()
+	if !ok {
+		return nil, xerrors.Errorf("only a service is checked by its grants: %w", faucet.ErrNoAccess)
 	}
 	c, err := liveClient(ctx, a.clients, client.ClientID)
 	if err != nil {

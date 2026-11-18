@@ -177,7 +177,7 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err != nil {
 		return nil, waitOutput{}, err
 	}
-	req.query.Target, err = s.authorizeTarget(ctx, logger, p, "wait", in.targetArguments, false)
+	req.query.Target, err = s.authorizeTarget(ctx, logger, p, "wait", in.targetArguments)
 	if err != nil {
 		return nil, waitOutput{}, err
 	}
@@ -210,7 +210,7 @@ func (s *Service) authorize(ctx context.Context, logger slog.Logger, op string, 
 	if err != nil {
 		return Target{}, err
 	}
-	return s.authorizeTarget(ctx, logger, p, op, a, false)
+	return s.authorizeTarget(ctx, logger, p, op, a)
 }
 
 // principal returns the caller of this request when it holds scope, the
@@ -238,24 +238,34 @@ var (
 
 // authorizeTarget returns the target that a names when p may read it. A
 // repository is the Authorizer's to answer, and an owner or every repository
-// is the ServiceGrants', for a service only. fresh asks the source of the
-// answer again, as every subscribe does, so a renewal checks access again.
-func (s *Service) authorizeTarget(ctx context.Context, logger slog.Logger, p Principal, op string, a targetArguments, fresh bool) (Target, error) {
+// is the ServiceGrants', for a service only. It may answer from what they
+// remember.
+func (s *Service) authorizeTarget(ctx context.Context, logger slog.Logger, p Principal, op string, a targetArguments) (Target, error) {
+	return s.checkTarget(ctx, logger, p, op, a, s.authorizer.RepoID, ServiceGrants.OwnerID, ServiceGrants.CoversAll)
+}
+
+// authorizeFreshTarget is authorizeTarget that asks the source of the answer
+// again, as every subscribe does, so a renewal checks access again.
+func (s *Service) authorizeFreshTarget(ctx context.Context, logger slog.Logger, p Principal, op string, a targetArguments) (Target, error) {
+	return s.checkTarget(ctx, logger, p, op, a, s.authorizer.RepoIDFresh, ServiceGrants.OwnerIDFresh, ServiceGrants.CoversAllFresh)
+}
+
+func (s *Service) checkTarget(ctx context.Context, logger slog.Logger, p Principal, op string, a targetArguments,
+	repoID func(context.Context, Principal, string) (int64, error),
+	ownerID func(ServiceGrants, context.Context, Principal, string) (int64, error),
+	coversAll func(ServiceGrants, context.Context, Principal) error,
+) (Target, error) {
 	logger = logger.With(slog.F("login", p.Login))
 	if a.Repo != "" {
-		lookup := s.authorizer.RepoID
-		if fresh {
-			lookup = s.authorizer.RepoIDFresh
-		}
-		repoID, err := lookup(ctx, p, a.Repo)
+		id, err := repoID(ctx, p, a.Repo)
 		if err != nil {
 			return Target{}, denied(ctx, logger, op, err)
 		}
-		if repoID <= 0 {
+		if id <= 0 {
 			logger.Error(ctx, "authorizer returned a repository without an ID")
 			return Target{}, errVerify
 		}
-		return RepoTarget(repoID), nil
+		return RepoTarget(id), nil
 	}
 	if _, ok := p.ServiceClient(); !ok {
 		return Target{}, denied(ctx, logger, op, errServiceTargets)
@@ -264,25 +274,17 @@ func (s *Service) authorizeTarget(ctx context.Context, logger slog.Logger, p Pri
 		return Target{}, denied(ctx, logger, op, errNoGrants)
 	}
 	if a.Owner != "" {
-		lookup := s.grants.OwnerID
-		if fresh {
-			lookup = s.grants.OwnerIDFresh
-		}
-		ownerID, err := lookup(ctx, p, a.Owner)
+		id, err := ownerID(s.grants, ctx, p, a.Owner)
 		if err != nil {
 			return Target{}, denied(ctx, logger, op, err)
 		}
-		if ownerID <= 0 {
+		if id <= 0 {
 			logger.Error(ctx, "service grants returned an owner without an ID")
 			return Target{}, errVerify
 		}
-		return OwnerTarget(ownerID), nil
+		return OwnerTarget(id), nil
 	}
-	covers := s.grants.CoversAll
-	if fresh {
-		covers = s.grants.CoversAllFresh
-	}
-	if err := covers(ctx, p); err != nil {
+	if err := coversAll(s.grants, ctx, p); err != nil {
 		return Target{}, denied(ctx, logger, op, err)
 	}
 	return AllTarget(), nil

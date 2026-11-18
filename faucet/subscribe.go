@@ -221,7 +221,7 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 		return nil, err
 	}
 	key := NewSubscriptionKeyHash(principal.Login, req.callbackURL, req.entry.name, req.canonical)
-	target, err := s.authorizeTarget(ctx, logger, principal, "subscribe", req.arguments.targetArguments, true)
+	target, err := s.authorizeFreshTarget(ctx, logger, principal, "subscribe", req.arguments.targetArguments)
 	if err != nil {
 		if xerrors.Is(err, ErrNoAccess) {
 			s.endRevokedSubscription(ctx, logger, wh, principal, key)
@@ -524,7 +524,7 @@ func canonicalArguments(args pollArguments) json.RawMessage {
 		PR      int32    `json:"pr,omitempty"`
 		Actions []string `json:"actions,omitempty"`
 		fieldArguments
-	}{args.targetArguments.normalized(), args.SHA, args.PR, sortedSet(args.Actions), args.canonical()})
+	}{args.normalized(), args.SHA, args.PR, sortedSet(args.Actions), args.canonical()})
 }
 
 type deliveryParams struct {

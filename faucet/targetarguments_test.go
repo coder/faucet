@@ -59,11 +59,11 @@ func TestTheArgumentsOfARepositoryKeepTheirSpelling(t *testing.T) {
 	h := newWebhookHarness(t)
 	h.subscribe(&rawParams{
 		Name: "ci.runs",
-		Arguments: raw(args("conclusion", []string{"failure", "cancelled", "failure"}, "actions", []string{"completed"},
+		Arguments: raw(args("conclusion", []string{"failure", "timed_out", "failure"}, "actions", []string{"completed"},
 			"sha", testShaA, "pr", 7, "repo", testRepo)),
 		Delivery: deliveryTo(callbackURL, newSecret(t, 32)),
 	})
 	rows := h.rows()
 	require.Len(t, rows, 1)
-	require.Equal(t, `{"repo":"octo/repo","sha":"`+testShaA+`","pr":7,"actions":["completed"],"conclusion":["cancelled","failure"]}`, string(rows[0].Arguments))
+	require.Equal(t, `{"repo":"octo/repo","sha":"`+testShaA+`","pr":7,"actions":["completed"],"conclusion":["failure","timed_out"]}`, string(rows[0].Arguments))
 }

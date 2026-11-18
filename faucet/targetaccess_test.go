@@ -24,23 +24,19 @@ type fakeGrants struct {
 	calls  []string
 }
 
-func (g *fakeGrants) record(call string, fresh bool) error {
+func (g *fakeGrants) record(call string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if fresh {
-		call += " fresh"
-	}
 	g.calls = append(g.calls, call)
-	if fresh {
-		return g.err
-	}
-	return nil
 }
 
-func (g *fakeGrants) owner(owner string, fresh bool) (int64, error) {
-	if err := g.record("owner "+owner, fresh); err != nil {
-		return 0, err
-	}
+func (g *fakeGrants) freshErr() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.err
+}
+
+func (g *fakeGrants) ownerOf(owner string) (int64, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	id, ok := g.owners[strings.ToLower(owner)]
@@ -50,10 +46,7 @@ func (g *fakeGrants) owner(owner string, fresh bool) (int64, error) {
 	return id, nil
 }
 
-func (g *fakeGrants) covers(fresh bool) error {
-	if err := g.record("all", fresh); err != nil {
-		return err
-	}
+func (g *fakeGrants) grantsAll() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if !g.all {
@@ -63,16 +56,30 @@ func (g *fakeGrants) covers(fresh bool) error {
 }
 
 func (g *fakeGrants) OwnerID(_ context.Context, _ faucet.Principal, owner string) (int64, error) {
-	return g.owner(owner, false)
+	g.record("owner " + owner)
+	return g.ownerOf(owner)
 }
 
 func (g *fakeGrants) OwnerIDFresh(_ context.Context, _ faucet.Principal, owner string) (int64, error) {
-	return g.owner(owner, true)
+	g.record("owner " + owner + " fresh")
+	if err := g.freshErr(); err != nil {
+		return 0, err
+	}
+	return g.ownerOf(owner)
 }
 
-func (g *fakeGrants) CoversAll(context.Context, faucet.Principal) error { return g.covers(false) }
+func (g *fakeGrants) CoversAll(context.Context, faucet.Principal) error {
+	g.record("all")
+	return g.grantsAll()
+}
 
-func (g *fakeGrants) CoversAllFresh(context.Context, faucet.Principal) error { return g.covers(true) }
+func (g *fakeGrants) CoversAllFresh(context.Context, faucet.Principal) error {
+	g.record("all fresh")
+	if err := g.freshErr(); err != nil {
+		return err
+	}
+	return g.grantsAll()
+}
 
 func (g *fakeGrants) seen() []string {
 	g.mu.Lock()

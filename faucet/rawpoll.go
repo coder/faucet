@@ -78,7 +78,7 @@ func (s *Service) pollRaw(ctx context.Context, entry *rawEntry, p *eventsPollPar
 	if err != nil {
 		return nil, accessError(err)
 	}
-	target, err := s.authorizeTarget(ctx, logger, principal, "poll", req.args.targetArguments, false)
+	target, err := s.authorizeTarget(ctx, logger, principal, "poll", req.args.targetArguments)
 	if err != nil {
 		return nil, accessError(err)
 	}
