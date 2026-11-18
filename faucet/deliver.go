@@ -264,10 +264,17 @@ func (r *deliveryRun) claimGap(ctx context.Context, kind gapKind) (GapClaim, boo
 		return GapClaim{}, false, nil
 	}
 	claim, ok, err := kind.claim(ctx, r.svc.clock.Now(), DeliveryLease, r.gate.full())
+	err = r.unlessEnded(ctx, err)
+	if err != nil && kind.raw {
+		// The raw part ends while the claim lock is held, so no other worker
+		// claims after the failure.
+		r.rawFailed(ctx, xerrors.Errorf("claim a %s: %w", kind.noun, err))
+		return GapClaim{}, false, nil
+	}
 	if ok {
 		r.gate.enter(CallbackOrigin(claim.CallbackURL))
 	}
-	return claim, ok, r.unlessEnded(ctx, err)
+	return claim, ok, err
 }
 
 func (r *deliveryRun) add(update func(*DeliverResult)) {
