@@ -10,6 +10,25 @@ import (
 	"time"
 )
 
+const addOwner = `-- name: AddOwner :exec
+INSERT INTO faucet_owners (owner_id, login, seen_at)
+VALUES ($1, $2, $3)
+ON CONFLICT DO NOTHING
+`
+
+type AddOwnerParams struct {
+	OwnerID int64
+	Login   string
+	SeenAt  time.Time
+}
+
+// An account that holds a row, or a login that another account holds, makes
+// it write nothing.
+func (q *Queries) AddOwner(ctx context.Context, arg AddOwnerParams) error {
+	_, err := q.db.ExecContext(ctx, addOwner, arg.OwnerID, arg.Login, arg.SeenAt)
+	return err
+}
+
 const getOwnerByLogin = `-- name: GetOwnerByLogin :one
 SELECT owner_id, login
 FROM faucet_owners

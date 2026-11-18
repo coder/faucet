@@ -13,20 +13,18 @@ import (
 )
 
 // RecordRepository implements faucet.Store. A row of the same ID makes it
-// write nothing but the owner's login.
+// write nothing.
 func (s *Store) RecordRepository(ctx context.Context, repo faucet.Repository, seenAt time.Time) (err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if err := repo.Validate(); err != nil {
 		return xerrors.Errorf("validate repository: %w", err)
 	}
-	return s.inRepositoryTx(ctx, faucet.Owner{ID: repo.OwnerID, Login: repo.OwnerLogin}, seenAt, func(q *database.Queries) error {
-		if err := q.RecordRepository(ctx, database.RecordRepositoryParams{
-			RepoID: repo.ID, OwnerID: repo.OwnerID, OwnerLogin: repo.OwnerLogin, FullName: repo.FullName, SeenAt: seenAt,
-		}); err != nil {
-			return xerrors.Errorf("record repository: %w", err)
-		}
-		return nil
-	})
+	if err := s.q.RecordRepository(ctx, database.RecordRepositoryParams{
+		RepoID: repo.ID, OwnerID: repo.OwnerID, OwnerLogin: repo.OwnerLogin, FullName: repo.FullName, SeenAt: seenAt,
+	}); err != nil {
+		return xerrors.Errorf("record repository: %w", err)
+	}
+	return nil
 }
 
 // RenameRepository implements faucet.Store.
@@ -35,30 +33,23 @@ func (s *Store) RenameRepository(ctx context.Context, repo faucet.Repository, fr
 	if err := repo.Validate(); err != nil {
 		return xerrors.Errorf("validate repository: %w", err)
 	}
-	return s.inRepositoryTx(ctx, faucet.Owner{ID: repo.OwnerID, Login: repo.OwnerLogin}, seenAt, func(q *database.Queries) error {
-		if err := q.RenameRepository(ctx, database.RenameRepositoryParams{
-			RepoID: repo.ID, OwnerID: repo.OwnerID, OwnerLogin: repo.OwnerLogin, FullName: repo.FullName, SeenAt: seenAt,
-			PreviousFullName: from,
-		}); err != nil {
-			return xerrors.Errorf("rename repository: %w", err)
-		}
-		return nil
-	})
+	if err := s.q.RenameRepository(ctx, database.RenameRepositoryParams{
+		RepoID: repo.ID, OwnerID: repo.OwnerID, OwnerLogin: repo.OwnerLogin, FullName: repo.FullName, SeenAt: seenAt,
+		PreviousFullName: from,
+	}); err != nil {
+		return xerrors.Errorf("rename repository: %w", err)
+	}
+	return nil
 }
 
-// RecordOwner implements faucet.Store.
+// RecordOwner implements faucet.Store. Another account that held the login
+// gives it up first, in the same transaction, so the unique login of
+// faucet_owners never refuses the write.
 func (s *Store) RecordOwner(ctx context.Context, owner faucet.Owner, seenAt time.Time) (err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if err := owner.Validate(); err != nil {
 		return xerrors.Errorf("validate owner: %w", err)
 	}
-	return s.inRepositoryTx(ctx, owner, seenAt, func(*database.Queries) error { return nil })
-}
-
-// inRepositoryTx records the login of owner and then runs write, in one
-// transaction. Another account that held the login gives it up first, so
-// the unique login of faucet_owners never refuses the write.
-func (s *Store) inRepositoryTx(ctx context.Context, owner faucet.Owner, seenAt time.Time, write func(*database.Queries) error) error {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return xerrors.Errorf("begin transaction: %w", err)
@@ -71,11 +62,20 @@ func (s *Store) inRepositoryTx(ctx context.Context, owner faucet.Owner, seenAt t
 	if err := q.RecordOwner(ctx, database.RecordOwnerParams{OwnerID: owner.ID, Login: owner.Login, SeenAt: seenAt}); err != nil {
 		return xerrors.Errorf("record owner: %w", err)
 	}
-	if err := write(q); err != nil {
-		return err
-	}
 	if err := tx.Commit(); err != nil {
 		return xerrors.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
+// AddOwner implements faucet.Store.
+func (s *Store) AddOwner(ctx context.Context, owner faucet.Owner, seenAt time.Time) (err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	if err := owner.Validate(); err != nil {
+		return xerrors.Errorf("validate owner: %w", err)
+	}
+	if err := s.q.AddOwner(ctx, database.AddOwnerParams{OwnerID: owner.ID, Login: owner.Login, SeenAt: seenAt}); err != nil {
+		return xerrors.Errorf("add owner: %w", err)
 	}
 	return nil
 }

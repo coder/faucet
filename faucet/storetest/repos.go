@@ -22,12 +22,29 @@ var repositorySubtests = []subtest{
 	{"OwnerByLoginOfAnUnseenLoginIsUnknown", ownerByLoginOfAnUnseenLoginIsUnknown},
 	{"AnOwnerKeepsOnlyTheLoginOfItsLatestDelivery", anOwnerKeepsOnlyTheLoginOfItsLatestDelivery},
 	{"RecordOwnerNamesAnAccountWithoutARepository", recordOwnerNamesAnAccountWithoutARepository},
+	{"AddOwnerAddsAnAccountAndMovesNoLogin", addOwnerAddsAnAccountAndMovesNoLogin},
 }
 
 var repositoryTime = time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 
 func repositoryNamed(id int64, fullName string) faucet.Repository {
 	return faucet.Repository{ID: id, OwnerID: 7, OwnerLogin: "coder", FullName: fullName}
+}
+
+// recordDelivered records repo and the login of its owner, as a delivery
+// that names repo does.
+func recordDelivered(t *testing.T, s faucet.Store, repo faucet.Repository, at time.Time) {
+	t.Helper()
+	require.NoError(t, s.RecordOwner(context.Background(), faucet.Owner{ID: repo.OwnerID, Login: repo.OwnerLogin}, at))
+	require.NoError(t, s.RecordRepository(context.Background(), repo, at))
+}
+
+// renameDelivered renames repo from from and records the login of its owner,
+// as a repository event that renamed it does.
+func renameDelivered(t *testing.T, s faucet.Store, repo faucet.Repository, from string, at time.Time) {
+	t.Helper()
+	require.NoError(t, s.RecordOwner(context.Background(), faucet.Owner{ID: repo.OwnerID, Login: repo.OwnerLogin}, at))
+	require.NoError(t, s.RenameRepository(context.Background(), repo, from, at))
 }
 
 func requireRepositoryNamed(t *testing.T, s faucet.Store, fullName string, want faucet.Repository) {
@@ -46,27 +63,25 @@ func requireUnknownName(t *testing.T, s faucet.Store, fullName string) {
 // A replayed or late delivery names a repository as it was then. Recording it
 // must not move a name back to the repository.
 func recordRepositoryKeepsTheNamesAnIDWasFirstSeenUnder(t *testing.T, s faucet.Store) {
-	ctx := context.Background()
-	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(1, "coder/faucet"), repositoryTime))
+	recordDelivered(t, s, repositoryNamed(1, "coder/faucet"), repositoryTime)
 	requireRepositoryNamed(t, s, "coder/faucet", repositoryNamed(1, "coder/faucet"))
 
-	require.NoError(t, s.RecordRepository(ctx, faucet.Repository{ID: 1, OwnerID: 8, OwnerLogin: "acme", FullName: "acme/old"}, repositoryTime.Add(time.Hour)))
+	recordDelivered(t, s, faucet.Repository{ID: 1, OwnerID: 8, OwnerLogin: "acme", FullName: "acme/old"}, repositoryTime.Add(time.Hour))
 	requireRepositoryNamed(t, s, "coder/faucet", repositoryNamed(1, "coder/faucet"))
 	requireUnknownName(t, s, "acme/old")
 }
 
 func renameRepositoryMovesANameAndANewRepositoryCanTakeTheOldOne(t *testing.T, s faucet.Store) {
-	ctx := context.Background()
-	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(1, "coder/faucet"), repositoryTime))
+	recordDelivered(t, s, repositoryNamed(1, "coder/faucet"), repositoryTime)
 	renamed := faucet.Repository{ID: 1, OwnerID: 8, OwnerLogin: "acme", FullName: "acme/tap"}
-	require.NoError(t, s.RenameRepository(ctx, renamed, "Coder/Faucet", repositoryTime.Add(time.Minute)))
+	renameDelivered(t, s, renamed, "Coder/Faucet", repositoryTime.Add(time.Minute))
 	requireRepositoryNamed(t, s, "acme/tap", renamed)
 	requireUnknownName(t, s, "coder/faucet")
 
 	// A new repository takes the old name, and then a replayed delivery of
 	// the first repository names it under the old name too.
-	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(2, "coder/faucet"), repositoryTime.Add(2*time.Minute)))
-	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(1, "coder/faucet"), repositoryTime.Add(3*time.Minute)))
+	recordDelivered(t, s, repositoryNamed(2, "coder/faucet"), repositoryTime.Add(2*time.Minute))
+	recordDelivered(t, s, repositoryNamed(1, "coder/faucet"), repositoryTime.Add(3*time.Minute))
 	requireRepositoryNamed(t, s, "coder/faucet", repositoryNamed(2, "coder/faucet"))
 	requireRepositoryNamed(t, s, "acme/tap", renamed)
 }
@@ -74,35 +89,31 @@ func renameRepositoryMovesANameAndANewRepositoryCanTakeTheOldOne(t *testing.T, s
 // GitHub can deliver an older rename again after a newer one. Its from
 // names a name that the row no longer holds, so it changes nothing.
 func renameRepositoryFromANameTheRowDoesNotHoldChangesNothing(t *testing.T, s faucet.Store) {
-	ctx := context.Background()
-	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(1, "coder/x"), repositoryTime))
-	require.NoError(t, s.RenameRepository(ctx, repositoryNamed(1, "coder/y"), "coder/x", repositoryTime.Add(time.Minute)))
-	require.NoError(t, s.RenameRepository(ctx, repositoryNamed(1, "coder/z"), "coder/y", repositoryTime.Add(2*time.Minute)))
-	require.NoError(t, s.RenameRepository(ctx, repositoryNamed(1, "coder/y"), "coder/x", repositoryTime.Add(3*time.Minute)))
+	recordDelivered(t, s, repositoryNamed(1, "coder/x"), repositoryTime)
+	renameDelivered(t, s, repositoryNamed(1, "coder/y"), "coder/x", repositoryTime.Add(time.Minute))
+	renameDelivered(t, s, repositoryNamed(1, "coder/z"), "coder/y", repositoryTime.Add(2*time.Minute))
+	renameDelivered(t, s, repositoryNamed(1, "coder/y"), "coder/x", repositoryTime.Add(3*time.Minute))
 	requireRepositoryNamed(t, s, "coder/z", repositoryNamed(1, "coder/z"))
 	requireUnknownName(t, s, "coder/y")
 }
 
 func renameRepositoryOfAnUnknownIDRecordsIt(t *testing.T, s faucet.Store) {
-	ctx := context.Background()
-	require.NoError(t, s.RenameRepository(ctx, repositoryNamed(3, "coder/new"), "coder/old", repositoryTime))
+	renameDelivered(t, s, repositoryNamed(3, "coder/new"), "coder/old", repositoryTime)
 	requireRepositoryNamed(t, s, "coder/new", repositoryNamed(3, "coder/new"))
 }
 
 func repositoryByNameIgnoresCaseAndTakesTheLatestHolderOfAName(t *testing.T, s faucet.Store) {
-	ctx := context.Background()
-	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(1, "coder/faucet"), repositoryTime))
+	recordDelivered(t, s, repositoryNamed(1, "coder/faucet"), repositoryTime)
 	requireRepositoryNamed(t, s, "Coder/Faucet", repositoryNamed(1, "coder/faucet"))
 
 	// The first repository was deleted with no event that says so, and a new
 	// one took its name.
-	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(2, "coder/Faucet"), repositoryTime.Add(time.Hour)))
+	recordDelivered(t, s, repositoryNamed(2, "coder/Faucet"), repositoryTime.Add(time.Hour))
 	requireRepositoryNamed(t, s, "coder/faucet", repositoryNamed(2, "coder/Faucet"))
 }
 
 func repositoryByNameOfAnUnseenNameIsUnknown(t *testing.T, s faucet.Store) {
-	ctx := context.Background()
-	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(1, "coder/faucet"), repositoryTime))
+	recordDelivered(t, s, repositoryNamed(1, "coder/faucet"), repositoryTime)
 	for _, name := range []string{"coder/fauce", "coder/faucet2", "other/faucet", "coder/%", "coder/_aucet"} {
 		requireUnknownName(t, s, name)
 	}
@@ -132,14 +143,14 @@ func recordAndRenameRepositoryValidateInput(t *testing.T, s faucet.Store) {
 // delivery that names it so again.
 func ownerByLoginIgnoresCaseAndTakesTheOwnerSeenLatest(t *testing.T, s faucet.Store) {
 	ctx := context.Background()
-	require.NoError(t, s.RecordRepository(ctx, faucet.Repository{ID: 1, OwnerID: 7, OwnerLogin: "Coder", FullName: "Coder/faucet"}, repositoryTime))
-	require.NoError(t, s.RecordRepository(ctx, faucet.Repository{ID: 2, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/tap"}, repositoryTime.Add(time.Minute)))
+	recordDelivered(t, s, faucet.Repository{ID: 1, OwnerID: 7, OwnerLogin: "Coder", FullName: "Coder/faucet"}, repositoryTime)
+	recordDelivered(t, s, faucet.Repository{ID: 2, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/tap"}, repositoryTime.Add(time.Minute))
 
 	got, err := s.OwnerByLogin(ctx, "CODER")
 	require.NoError(t, err)
 	require.Equal(t, faucet.Owner{ID: 7, Login: "coder"}, got, "the login matches in any case, and the latest delivery gives the written login")
 
-	require.NoError(t, s.RecordRepository(ctx, faucet.Repository{ID: 3, OwnerID: 9, OwnerLogin: "coder", FullName: "coder/new"}, repositoryTime.Add(time.Hour)))
+	recordDelivered(t, s, faucet.Repository{ID: 3, OwnerID: 9, OwnerLogin: "coder", FullName: "coder/new"}, repositoryTime.Add(time.Hour))
 	got, err = s.OwnerByLogin(ctx, "coder")
 	require.NoError(t, err)
 	require.Equal(t, faucet.Owner{ID: 9, Login: "coder"}, got, "the account seen latest under the login holds it")
@@ -174,7 +185,7 @@ func recordOwnerNamesAnAccountWithoutARepository(t *testing.T, s faucet.Store) {
 
 func ownerByLoginOfAnUnseenLoginIsUnknown(t *testing.T, s faucet.Store) {
 	ctx := context.Background()
-	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(1, "coder/faucet"), repositoryTime))
+	recordDelivered(t, s, repositoryNamed(1, "coder/faucet"), repositoryTime)
 	for _, login := range []string{"code", "coder2", "faucet", "c%", "_oder", ""} {
 		_, err := s.OwnerByLogin(ctx, login)
 		require.ErrorIs(t, err, faucet.ErrUnknownOwner, login)
@@ -187,9 +198,9 @@ func ownerByLoginOfAnUnseenLoginIsUnknown(t *testing.T, s faucet.Store) {
 // none of the renamed account's repositories, by an org grant or by name.
 func anOwnerKeepsOnlyTheLoginOfItsLatestDelivery(t *testing.T, s faucet.Store) {
 	ctx := context.Background()
-	require.NoError(t, s.RecordRepository(ctx, faucet.Repository{ID: 100, OwnerID: 7, OwnerLogin: "acme", FullName: "acme/private"}, repositoryTime))
+	recordDelivered(t, s, faucet.Repository{ID: 100, OwnerID: 7, OwnerLogin: "acme", FullName: "acme/private"}, repositoryTime)
 	renamed := faucet.Repository{ID: 100, OwnerID: 7, OwnerLogin: "acme-legacy", FullName: "acme-legacy/private"}
-	require.NoError(t, s.RecordRepository(ctx, renamed, repositoryTime.Add(time.Hour)))
+	recordDelivered(t, s, renamed, repositoryTime.Add(time.Hour))
 
 	_, err := s.OwnerByLogin(ctx, "acme")
 	require.ErrorIs(t, err, faucet.ErrUnknownOwner, "the old login names no account")
@@ -198,4 +209,24 @@ func anOwnerKeepsOnlyTheLoginOfItsLatestDelivery(t *testing.T, s faucet.Store) {
 	require.Equal(t, faucet.Owner{ID: 7, Login: "acme-legacy"}, got)
 	requireUnknownName(t, s, "acme/private")
 	requireRepositoryNamed(t, s, "ACME-legacy/private", renamed)
+}
+
+// A delivery that GitHub sent again names an account as it was then: it may
+// add an account that the store lacks, but it moves no login.
+func addOwnerAddsAnAccountAndMovesNoLogin(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	require.NoError(t, s.RecordOwner(ctx, faucet.Owner{ID: 7, Login: "acme"}, repositoryTime))
+	require.NoError(t, s.AddOwner(ctx, faucet.Owner{ID: 7, Login: "acme-old"}, repositoryTime.Add(time.Minute)))
+	require.NoError(t, s.AddOwner(ctx, faucet.Owner{ID: 9, Login: "ACME"}, repositoryTime.Add(time.Minute)))
+	got, err := s.OwnerByLogin(ctx, "acme")
+	require.NoError(t, err)
+	require.Equal(t, faucet.Owner{ID: 7, Login: "acme"}, got, "an account with a row keeps its login, and a login that one holds stays with it")
+	_, err = s.OwnerByLogin(ctx, "acme-old")
+	require.ErrorIs(t, err, faucet.ErrUnknownOwner)
+
+	require.NoError(t, s.AddOwner(ctx, faucet.Owner{ID: 9, Login: "octo"}, repositoryTime.Add(time.Minute)))
+	got, err = s.OwnerByLogin(ctx, "octo")
+	require.NoError(t, err)
+	require.Equal(t, faucet.Owner{ID: 9, Login: "octo"}, got, "an account that the store lacks is added")
+	require.Error(t, s.AddOwner(ctx, faucet.Owner{ID: 5, Login: "ac/me"}, repositoryTime))
 }

@@ -247,15 +247,14 @@ type Store interface {
 	// RecordRepository records repo, which a signed delivery named, at
 	// seenAt, the time of record, when the store holds no row of its ID. A
 	// row that exists keeps its names, so a replayed or late delivery cannot
-	// move a name back to it. It records the login of repo's owner as
-	// RecordOwner does. It calls repo.Validate.
+	// move a name back to it. The login of repo's owner is RecordOwner's or
+	// AddOwner's to record. It calls repo.Validate.
 	RecordRepository(ctx context.Context, repo Repository, seenAt time.Time) error
 	// RenameRepository gives the row of repo.ID the names of repo at seenAt
 	// when its FullName is from, ignoring case, and inserts it when there is
 	// no row. A repository event that renamed or transferred the repository
 	// from that name calls it, so a replayed older rename, whose from the row
-	// no longer holds, changes nothing. It records the login of repo's owner
-	// as RecordOwner does. It calls repo.Validate.
+	// no longer holds, changes nothing. It calls repo.Validate.
 	RenameRepository(ctx context.Context, repo Repository, from string, seenAt time.Time) error
 	// RecordOwner records that a signed delivery named the account owner.ID
 	// with owner.Login at seenAt. The account keeps the login of its latest
@@ -264,6 +263,12 @@ type Store interface {
 	// another account that held the login gives it up, and holds no login
 	// until a delivery names it again. It calls owner.Validate.
 	RecordOwner(ctx context.Context, owner Owner, seenAt time.Time) error
+	// AddOwner records owner as RecordOwner does when the store holds no row
+	// of the account and no account holds its login, and writes nothing
+	// otherwise. A delivery that GitHub sent again names an account as it was
+	// then, so it may add an account but must move no login. It calls
+	// owner.Validate.
+	AddOwner(ctx context.Context, owner Owner, seenAt time.Time) error
 	// RepositoryByName returns the repository written fullName, ignoring case
 	// as GitHub does: a repository whose name, as it was first seen or renamed
 	// to, is the name part, of the account that holds the owner part as its

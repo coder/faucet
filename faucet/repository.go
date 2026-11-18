@@ -68,20 +68,29 @@ func (r Repository) Validate() error {
 // recordRepository records the repository and the organization that a
 // signed delivery names, so a service can be granted them by name before
 // faucet stores an event of them, and so the login of each account follows
-// its latest delivery. Only a repository event that renames or transfers it,
-// from the name that the store holds, changes the names of a repository the
-// store knows. A failed write is logged, and the delivery goes on: the next
-// one that names them writes them.
-func (s *Service) recordRepository(ctx context.Context, logger slog.Logger, eventName string, payload []byte) {
+// its latest delivery. A delivery that redelivery asked GitHub to send again
+// names the accounts as they were when it first came, so it adds an account
+// that the store lacks and moves no login. Only a repository event that
+// renames or transfers a repository, from the name that the store holds,
+// changes the names of a repository the store knows. A failed write is
+// logged, and the delivery goes on: the next one that names them writes them.
+func (s *Service) recordRepository(ctx context.Context, logger slog.Logger, eventName, deliveryID string, payload []byte) {
 	now := s.clock.Now()
+	recordOwner := s.store.RecordOwner
+	if s.replayed(ctx, logger, deliveryID) {
+		recordOwner = s.store.AddOwner
+	}
 	if org, ok := organizationOf(payload); ok {
-		if err := s.store.RecordOwner(ctx, org, now); err != nil {
+		if err := recordOwner(ctx, org, now); err != nil {
 			logger.Warn(ctx, "could not record the organization", slog.Error(err))
 		}
 	}
 	named, ok := repositoryOf(eventName, payload)
 	if !ok {
 		return
+	}
+	if err := recordOwner(ctx, Owner{ID: named.repo.OwnerID, Login: named.repo.OwnerLogin}, now); err != nil {
+		logger.Warn(ctx, "could not record the owner of the repository", slog.Error(err))
 	}
 	var err error
 	if named.previous != "" {
@@ -92,6 +101,22 @@ func (s *Service) recordRepository(ctx context.Context, logger slog.Logger, even
 	if err != nil {
 		logger.Warn(ctx, "could not record the repository", slog.Error(err))
 	}
+}
+
+// replayed reports whether redelivery asked GitHub to send the delivery of
+// deliveryID again. When it cannot tell, it says yes, so that the delivery
+// moves no login: a login that stays stale until the next delivery is safer
+// than one that a replay gives back.
+func (s *Service) replayed(ctx context.Context, logger slog.Logger, deliveryID string) bool {
+	if s.redelivered == nil {
+		return false
+	}
+	replay, err := s.redelivered(ctx, deliveryID)
+	if err != nil {
+		logger.Warn(ctx, "could not tell whether the delivery is a redelivery, so it moves no login", slog.Error(err))
+		return true
+	}
+	return replay
 }
 
 // organizationOf returns the organization that a delivery's payload names,

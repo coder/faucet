@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -36,6 +37,7 @@ import (
 // server's own URL, over a scratch database.
 type loginServer struct {
 	*httptest.Server
+	db     *sql.DB
 	store  *pgstore.Store
 	svc    *faucet.Service
 	github *githubStub
@@ -88,7 +90,7 @@ func newLoginServer(t *testing.T, configure ...func(*loginConfig)) *loginServer 
 	srv.Config.Handler = newRouter(svc, tokens, login, cron, logger)
 	srv.Start()
 	t.Cleanup(srv.Close)
-	return &loginServer{Server: srv, store: store, svc: svc, github: github, logs: logs}
+	return &loginServer{Server: srv, db: db, store: store, svc: svc, github: github, logs: logs}
 }
 
 // client stores a client that an operator made for the endpoint at path,

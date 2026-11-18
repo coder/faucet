@@ -31,6 +31,13 @@ INSERT INTO faucet_owners (owner_id, login, seen_at)
 VALUES (@owner_id, @login, @seen_at)
 ON CONFLICT (owner_id) DO UPDATE SET login = excluded.login, seen_at = excluded.seen_at;
 
+-- name: AddOwner :exec
+-- An account that holds a row, or a login that another account holds, makes
+-- it write nothing.
+INSERT INTO faucet_owners (owner_id, login, seen_at)
+VALUES (@owner_id, @login, @seen_at)
+ON CONFLICT DO NOTHING;
+
 -- name: GetOwnerByLogin :one
 SELECT owner_id, login
 FROM faucet_owners

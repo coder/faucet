@@ -35,7 +35,7 @@ type fakeRepoOwner struct {
 }
 
 func (s *fakeStore) RecordRepository(_ context.Context, repo faucet.Repository, seenAt time.Time) error {
-	return s.writeRepository(repo, seenAt, func() {
+	return s.writeRepository(repo, func() {
 		if !slices.ContainsFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID }) {
 			s.repos = append(s.repos, fakeRepo{repo: repo, seenAt: seenAt})
 		}
@@ -43,7 +43,7 @@ func (s *fakeStore) RecordRepository(_ context.Context, repo faucet.Repository, 
 }
 
 func (s *fakeStore) RenameRepository(_ context.Context, repo faucet.Repository, from string, seenAt time.Time) error {
-	return s.writeRepository(repo, seenAt, func() {
+	return s.writeRepository(repo, func() {
 		i := slices.IndexFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID })
 		switch {
 		case i < 0:
@@ -52,6 +52,26 @@ func (s *fakeStore) RenameRepository(_ context.Context, repo faucet.Repository, 
 			s.repos[i] = fakeRepo{repo: repo, seenAt: seenAt}
 		}
 	})
+}
+
+func (s *fakeStore) AddOwner(_ context.Context, owner faucet.Owner, seenAt time.Time) error {
+	if err := owner.Validate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.repoWrites++
+	if s.repoErr != nil {
+		return s.repoErr
+	}
+	if _, held := s.owners[owner.ID]; held {
+		return nil
+	}
+	if _, _, taken := s.ownerLocked(owner.Login); taken {
+		return nil
+	}
+	s.recordOwnerLocked(owner, seenAt)
+	return nil
 }
 
 func (s *fakeStore) RecordOwner(_ context.Context, owner faucet.Owner, seenAt time.Time) error {
@@ -80,9 +100,9 @@ func (s *fakeStore) recordOwnerLocked(owner faucet.Owner, seenAt time.Time) {
 	s.owners[owner.ID] = fakeRepoOwner{login: owner.Login, seenAt: seenAt}
 }
 
-// writeRepository counts a write of repo and, unless it fails, records its
-// owner and runs write under the lock.
-func (s *fakeStore) writeRepository(repo faucet.Repository, seenAt time.Time, write func()) error {
+// writeRepository counts a write of repo and, unless it fails, runs write
+// under the lock.
+func (s *fakeStore) writeRepository(repo faucet.Repository, write func()) error {
 	if err := repo.Validate(); err != nil {
 		return err
 	}
@@ -92,7 +112,6 @@ func (s *fakeStore) writeRepository(repo faucet.Repository, seenAt time.Time, wr
 	if s.repoErr != nil {
 		return s.repoErr
 	}
-	s.recordOwnerLocked(faucet.Owner{ID: repo.OwnerID, Login: repo.OwnerLogin}, seenAt)
 	write()
 	return nil
 }

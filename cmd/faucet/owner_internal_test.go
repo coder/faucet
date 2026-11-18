@@ -297,7 +297,9 @@ func waitError(ctx context.Context, t *testing.T, session *mcp.ClientSession, ar
 // An organization that GitHub renamed gives up its old login, and whoever
 // takes the login next at GitHub must not read the renamed organization's
 // repositories through an org grant of it, by owner or by name. The
-// renamed organization's own deliveries tell faucet the new login.
+// renamed organization's own deliveries tell faucet the new login, and a
+// delivery from before the rename that redelivery asked for again does not
+// give the old login back.
 func TestAnOrgGrantOfALoginThatItsAccountGaveUpReadsNothing(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -312,6 +314,10 @@ func TestAnOrgGrantOfALoginThatItsAccountGaveUpReadsNothing(t *testing.T) {
 	})
 	require.NoError(t, err)
 	srv.postAnswered(t, "organization", "renamed-1", renamed, http.StatusAccepted)
+	_, err = srv.db.ExecContext(ctx, `INSERT INTO faucet_redeliveries (guid, hook, last_attempt_id, last_attempt_at, first_attempt_at, next_ask_at)
+		VALUES ('existing-1', '/orgs/coder/hooks/1', 1, now(), now(), now())`)
+	require.NoError(t, err)
+	srv.deliverRunOf(t, "existing-1", coderExisting)
 
 	old := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, srv.token(t, "old-login", oldSecret))
 	require.Contains(t, waitError(ctx, t, old, map[string]any{"owner": "coder"}), "faucet has received no webhook delivery from a repository of coder yet")

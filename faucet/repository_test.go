@@ -1,6 +1,7 @@
 package faucet_test
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -186,4 +187,50 @@ func TestWebhookRenamesARepositoryOnlyFromTheNameItHolds(t *testing.T) {
 	require.Equal(t, named("acme/spout", "acme", movedAt), store.repos)
 	deliver("repository", "transferred", "acme/spout", "acme", movedFrom("coder"))
 	require.Equal(t, named("acme/spout", "acme", movedAt), store.repos, "a replayed transfer finds the new name and changes nothing")
+}
+
+// A delivery that faucet's redelivery asked GitHub to send again names an
+// account as it was when the delivery first came. It adds an account that
+// faucet has not seen and moves no login, so a replay from before a rename
+// never gives the old login back. When faucet cannot tell whether a delivery
+// is such a replay, it moves no login either.
+func TestARedeliveredDeliveryMovesNoLogin(t *testing.T) {
+	t.Parallel()
+	redelivered := map[string]bool{"before-rename": true, "first-of-octo": true}
+	store, _, handler := newRepositoryHarness(t, func(d *faucet.Deps) {
+		d.Redelivered = func(_ context.Context, id string) (bool, error) {
+			if id == "unknown" {
+				return false, xerrors.New("read redeliveries: connection reset")
+			}
+			return redelivered[id], nil
+		}
+	})
+	deliver := func(event, delivery, body string) {
+		t.Helper()
+		rec := serveWebhook(handler, newRequest(http.MethodPost, []byte(body), event, delivery))
+		require.Less(t, rec.Code, 300, delivery)
+	}
+	push := func(delivery string, ownerID int64, login string) {
+		t.Helper()
+		deliver("push", delivery, fmt.Sprintf(`{"ref":"refs/heads/main","repository":{"id":%d,"full_name":%q,"owner":{"id":%d,"login":%q}}}`, ownerID*10, login+"/private", ownerID, login))
+	}
+	owner := func(login string) (faucet.Owner, error) {
+		t.Helper()
+		return store.OwnerByLogin(context.Background(), login)
+	}
+
+	push("first", 7, "acme")
+	deliver("organization", "renamed", `{"action":"renamed","organization":{"id":7,"login":"acme-legacy"},"changes":{"login":{"from":"acme"}}}`)
+	push("before-rename", 7, "acme")
+	push("unknown", 7, "acme")
+	_, err := owner("acme")
+	require.ErrorIs(t, err, faucet.ErrUnknownOwner, "a replay from before the rename does not give the old login back")
+	got, err := owner("acme-legacy")
+	require.NoError(t, err)
+	require.Equal(t, faucet.Owner{ID: 7, Login: "acme-legacy"}, got)
+
+	push("first-of-octo", 9, "octo")
+	got, err = owner("octo")
+	require.NoError(t, err)
+	require.Equal(t, faucet.Owner{ID: 9, Login: "octo"}, got, "a replay adds an account that faucet has not seen")
 }

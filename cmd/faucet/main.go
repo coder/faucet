@@ -400,6 +400,7 @@ func newServices(cfg config, store *pgstore.Store, checks access, clock quartz.C
 		// The grants of services name repositories and owners, which the
 		// login server finds by the deliveries that named them.
 		RecordRepositories: cfg.publicURL != nil,
+		Redelivered:        store.Redelivered,
 	})
 	if err != nil {
 		return nil, nil, xerrors.Errorf("create service: %w", err)

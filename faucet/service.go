@@ -51,6 +51,10 @@ type Deps struct {
 	// services by repo grants can find a granted repository's ID without
 	// GitHub. A failed write is logged, and the delivery goes on.
 	RecordRepositories bool
+	// Redelivered reports whether faucet's redelivery asked GitHub to send
+	// the delivery of this ID again. Such a replay names accounts as they
+	// were when it first came, so it moves no login. Nil knows no replay.
+	Redelivered func(ctx context.Context, deliveryID string) (bool, error)
 	// MaxWaitsPerLogin caps how many wait_for_github_events calls one login
 	// holds open at once in this process, so a client that opens waits and
 	// drops its connection cannot pile them up. Zero means 10. A negative value
@@ -93,6 +97,7 @@ type Service struct {
 	clock         quartz.Clock
 	webhook       *webhookState
 	recordRepos   bool
+	redelivered   func(ctx context.Context, deliveryID string) (bool, error)
 	waits         *waitLimiter
 	listed        []eventDescriptor
 }
@@ -128,6 +133,7 @@ func New(d Deps) (*Service, error) {
 		principalFrom: d.PrincipalFrom,
 		clock:         d.Clock,
 		recordRepos:   d.RecordRepositories,
+		redelivered:   d.Redelivered,
 		waits:         newWaitLimiter(d.MaxWaitsPerLogin),
 	}
 	delivery := []string{deliveryPoll}
