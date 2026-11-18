@@ -55,7 +55,7 @@ describe('browser login', () => {
       const hidden = await started.loginAgent('/github/mcp', clientId, { repo: `hidden/r${repoId}`, types: ['ci.run_completed'] });
 
       const asked = (await hooks.requests()).filter((r) => r.path === `/repos/${repo}`);
-      const checks = JSON.parse(await started.sql(`select json_agg(t) from (select connection_id, repo, repo_id from faucet_access_checks) t`));
+      const checks = JSON.parse(await started.sql(`select json_agg(t) from (select connection_id, repo, repo_id from faucet_access_checks order by repo) t`));
       const known = [...waited.tokens, ...hidden.tokens, ...(await started.appLog()).tokens];
       expect(waited.code, waited.stderr).toBe(0);
       expect(waited.result?.isError, JSON.stringify(waited.result?.content)).not.toBe(true);
@@ -65,7 +65,8 @@ describe('browser login', () => {
       expect(hidden.code, hidden.stderr).toBe(0);
       expect(hidden.result?.isError, 'a repository that the person cannot read is refused').toBe(true);
       expect(hidden.result?.content?.[0]?.text).toContain('repository not found or not accessible');
-      expect(checks, 'faucet stored the check that passed, and nothing for the denial').toEqual([
+      expect(checks, 'faucet stored the check that passed, and the denial as a marker with no repository ID').toEqual([
+        { connection_id: 'github:4242', repo: `hidden/r${repoId}`, repo_id: null },
         { connection_id: 'github:4242', repo: repo.toLowerCase(), repo_id: repoId },
       ]);
       expect(output()).toMatch(/wait denied.*login=verify-person/);
