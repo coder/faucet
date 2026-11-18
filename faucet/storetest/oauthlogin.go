@@ -44,6 +44,7 @@ var loginSubtests = []struct {
 	{"RotateRefusesATokenUsedBeforeItsGraceAnEndedSessionAndAnUnknownToken", rotateRefusesATokenUsedBeforeItsGraceAnEndedSessionAndAnUnknownToken},
 	{"RotateRefusesAnAccessTokenWithAScopeThatTheSessionLacks", rotateRefusesAnAccessTokenWithAScopeThatTheSessionLacks},
 	{"EveryRotationOfOneTokenAtOnceTradesIt", everyRotationOfOneTokenAtOnceTradesIt},
+	{"SiblingTokensRotatedAtOnceTradeOrAreRefused", siblingTokensRotatedAtOnceTradeOrAreRefused},
 	{"EndSessionKeepsTheFirstTime", endSessionKeepsTheFirstTime},
 	{"DeleteEndedSessionsDeletesTheEndedAndTheIdleWithTheirTokens", deleteEndedSessionsDeletesTheEndedAndTheIdleWithTheirTokens},
 	{"DeleteUnusedConnectionsDeletesTheOnesThatNothingNames", deleteUnusedConnectionsDeletesTheOnesThatNothingNames},
@@ -1025,6 +1026,55 @@ func everyRotationOfOneTokenAtOnceTradesIt(t *testing.T, s oauth.Store) {
 	_, token, err := s.SessionByRefreshToken(ctx, refreshOf(session.ID))
 	require.NoError(t, err)
 	require.True(t, slices.ContainsFunc(rots, func(r oauth.Rotation) bool { return r.Now.Equal(token.UsedAt) }), "the first use keeps its time")
+}
+
+// Two unused tokens of one session that come at once, long after a client
+// got both, have two holders, and the rotation of each retires the other.
+// Each rotation trades its token, or answers ErrUnknownSession and changes
+// nothing, and at least one of the two trades.
+func siblingTokensRotatedAtOnceTradeOrAreRefused(t *testing.T, s oauth.Store) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	now := loginNow()
+	c := connectionAt(1, now)
+	const sessions = 16
+	rots := make([][2]oauth.Rotation, sessions)
+	for i := range sessions {
+		id := fmt.Sprintf("req-%d", i)
+		newSession(t, s, id, c, now)
+		for j, name := range []string{"older", "younger"} {
+			_, err := s.RotateSession(ctx, rotationOf(refreshOf(id), fmt.Sprintf("%s %s", id, name), now.Add(time.Minute)))
+			require.NoError(t, err)
+			rots[i][j] = rotationOf(refreshOf(fmt.Sprintf("%s %s", id, name)), fmt.Sprintf("%s %s next", id, name), now.Add(time.Hour))
+		}
+	}
+
+	errs := make([][2]error, sessions)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range sessions {
+		for j := range 2 {
+			wg.Go(func() {
+				<-start
+				_, errs[i][j] = s.RotateSession(ctx, rots[i][j])
+			})
+		}
+	}
+	close(start)
+	wg.Wait()
+
+	for i := range sessions {
+		traded := 0
+		for j, err := range errs[i] {
+			if err == nil {
+				traded++
+				continue
+			}
+			require.ErrorIs(t, err, oauth.ErrUnknownSession, "session %d, rotation %d", i, j)
+			requireNoTokens(t, s, rots[i][j].Next, rots[i][j].Access, "session %d, rotation %d", i, j)
+		}
+		require.NotZero(t, traded, "session %d: one of the two trades", i)
+	}
 }
 
 func endSessionKeepsTheFirstTime(t *testing.T, s oauth.Store) {
