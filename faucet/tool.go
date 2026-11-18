@@ -119,18 +119,19 @@ func (in waitInput) parse() (waitRequest, error) {
 	if err := in.check(); err != nil {
 		return waitRequest{}, err
 	}
-	if len(in.Types) == 0 {
+	names, actions := sortedSet(in.Types), sortedSet(in.Actions)
+	if len(names) == 0 {
 		return waitRequest{}, xerrors.Errorf("types must name at least one of: %s", strings.Join(catalogNames(), ", "))
 	}
-	entries := make([]*catalogEntry, len(in.Types))
-	for i, name := range in.Types {
+	entries := make([]*catalogEntry, len(names))
+	for i, name := range names {
 		entry, ok := lookupEntry(name)
 		if !ok {
 			return waitRequest{}, xerrors.Errorf("unknown type %q, the types are: %s", name, strings.Join(catalogNames(), ", "))
 		}
 		entries[i] = entry
 	}
-	for _, action := range in.Actions {
+	for _, action := range actions {
 		if !slices.ContainsFunc(entries, func(e *catalogEntry) bool { return e.hasAction(action) }) {
 			return waitRequest{}, xerrors.Errorf("action %q is not an action of any family in types", action)
 		}
@@ -138,7 +139,7 @@ func (in waitInput) parse() (waitRequest, error) {
 	entryTypes := make([][]string, len(entries))
 	var types []string
 	for i, entry := range entries {
-		entryTypes[i] = entry.types(in.Actions)
+		entryTypes[i] = entry.types(actions)
 		types = append(types, entryTypes[i]...)
 	}
 	values := in.byName()
