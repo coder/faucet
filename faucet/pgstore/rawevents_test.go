@@ -147,3 +147,117 @@ func TestOpenRawLeaseKeepsItsLimitsWhileEveryLeaseIsPolled(t *testing.T) {
 		})
 	}
 }
+
+func TestRawStoreCallThatItsContextCutShortWrapsTheContextError(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	lockTables(t, db, "faucet_subscriptions", "faucet_raw_events", "faucet_raw_deliveries", "faucet_raw_gaps", "faucet_raw_leases", "faucet_raw_unread")
+
+	now := time.Now().UTC()
+	sub := rawTestSubscription(1, "octocat", now.Add(time.Hour))
+	lease := rawTestLease(1, "octocat", now.Add(time.Hour))
+	for name, call := range map[string]func(context.Context) error{
+		"IngestRaw": func(ctx context.Context) error {
+			_, err := store.IngestRaw(ctx, faucet.RawDelivery{DeliveryID: "d", Event: "push", RepoID: rawTestRepo}, now, serveEvery)
+			return err
+		},
+		"RawHead": func(ctx context.Context) error {
+			_, err := store.RawHead(ctx)
+			return err
+		},
+		"UpsertRawSubscription": func(ctx context.Context) error {
+			_, err := store.UpsertRawSubscription(ctx, sub, now, rawTestLimits)
+			return err
+		},
+		"OpenRawLease": func(ctx context.Context) error {
+			_, err := store.OpenRawLease(ctx, lease, now, rawTestLimits)
+			return err
+		},
+		"ReadRawLease": func(ctx context.Context) error {
+			_, _, err := store.ReadRawLease(ctx, faucet.RawRead{
+				Lease: lease.ID, Key: lease.Key, RepoID: rawTestRepo, Limit: 10, MaxBytes: 1 << 20, Now: now, ExpiresAt: now.Add(time.Hour),
+			})
+			return err
+		},
+		"ClaimRawDelivery": func(ctx context.Context) error {
+			_, _, err := store.ClaimRawDelivery(ctx, now, time.Minute, nil)
+			return err
+		},
+		"FinishRawDelivery": func(ctx context.Context) error {
+			_, err := store.FinishRawDelivery(ctx, faucet.DeliveryRef{Key: sub.KeyHash, EventID: 1, Attempt: 1, Incarnation: now}, now, faucet.Finish{Kind: faucet.FinishDelivered})
+			return err
+		},
+		"ClaimRawGap": func(ctx context.Context) error {
+			_, _, err := store.ClaimRawGap(ctx, now, time.Minute, nil)
+			return err
+		},
+		"FinishRawGap": func(ctx context.Context) error {
+			return store.FinishRawGap(ctx, faucet.GapRef{Key: sub.KeyHash, Incarnation: now, Through: 1})
+		},
+		"ExpireRawDeliveries": func(ctx context.Context) error {
+			_, err := store.ExpireRawDeliveries(ctx, now)
+			return err
+		},
+		"PurgeRawEvents": func(ctx context.Context) error {
+			_, err := store.PurgeRawEvents(ctx, faucet.RawPurge{Now: now})
+			return err
+		},
+		"RawWants": func(ctx context.Context) error {
+			_, err := store.RawWants(ctx, now)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			require.ErrorIs(t, call(ctx), context.DeadlineExceeded, "the statement waits on the lock until the context ends it")
+		})
+	}
+}
+
+// Raw IDs become visible in commit order, and the received_at of a raw event
+// is taken at its insert, under the lock, so a higher ID never carries an
+// earlier time even when its ingest waited for the lock.
+func TestIngestRawIsStampedWhenItIsWrittenNotWhenItsTransactionStarts(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	now := time.Now().UTC()
+	_, err := store.OpenRawLease(ctx, rawTestLease(1, "octocat", now.Add(time.Hour)), now, rawTestLimits)
+	require.NoError(t, err)
+
+	blocker := lockTables(t, db, "faucet_raw_events")
+	ingested := make(chan error, 2)
+	for _, delivery := range []string{"first", "second"} {
+		go func() {
+			_, err := store.IngestRaw(ctx, faucet.RawDelivery{DeliveryID: delivery, Event: "push", RepoID: rawTestRepo}, now, serveEvery)
+			ingested <- err
+		}()
+	}
+	time.Sleep(400 * time.Millisecond)
+	released := time.Now()
+	require.NoError(t, blocker.Commit())
+	for range 2 {
+		require.NoError(t, <-ingested)
+	}
+
+	rows, err := db.QueryContext(ctx, `SELECT id, received_at FROM faucet_raw_events ORDER BY id`)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	var stamps []time.Time
+	for rows.Next() {
+		var id int64
+		var at time.Time
+		require.NoError(t, rows.Scan(&id, &at))
+		require.True(t, at.After(released.Add(-100*time.Millisecond)),
+			"received_at %s of raw event %d is from before the insert could run, which was released at %s", at, id, released)
+		stamps = append(stamps, at)
+	}
+	require.NoError(t, rows.Err())
+	require.Len(t, stamps, 2)
+	require.False(t, stamps[1].Before(stamps[0]), "the higher raw ID carries the later time")
+}
