@@ -68,14 +68,16 @@ VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (repo_id) DO UPDATE
 SET owner_id = excluded.owner_id, owner_login = excluded.owner_login,
     full_name = excluded.full_name, seen_at = excluded.seen_at
+WHERE lower(faucet_repos.full_name) = lower($6::text)
 `
 
 type RenameRepositoryParams struct {
-	RepoID     int64
-	OwnerID    int64
-	OwnerLogin string
-	FullName   string
-	SeenAt     time.Time
+	RepoID           int64
+	OwnerID          int64
+	OwnerLogin       string
+	FullName         string
+	SeenAt           time.Time
+	PreviousFullName string
 }
 
 func (q *Queries) RenameRepository(ctx context.Context, arg RenameRepositoryParams) error {
@@ -85,6 +87,7 @@ func (q *Queries) RenameRepository(ctx context.Context, arg RenameRepositoryPara
 		arg.OwnerLogin,
 		arg.FullName,
 		arg.SeenAt,
+		arg.PreviousFullName,
 	)
 	return err
 }

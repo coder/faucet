@@ -232,10 +232,12 @@ type Store interface {
 	// row that exists keeps its names, so a replayed or late delivery cannot
 	// move a name back to it. It calls repo.Validate.
 	RecordRepository(ctx context.Context, repo Repository, seenAt time.Time) error
-	// RenameRepository gives the row of repo.ID the names of repo at seenAt,
-	// and inserts it when there is none. A repository event that renames or
-	// transfers the repository calls it. It calls repo.Validate.
-	RenameRepository(ctx context.Context, repo Repository, seenAt time.Time) error
+	// RenameRepository gives the row of repo.ID the names of repo at seenAt
+	// when its FullName is from, ignoring case, and inserts it when there is
+	// no row. A repository event that renamed or transferred the repository
+	// from that name calls it, so a replayed older rename, whose from the row
+	// no longer holds, changes nothing. It calls repo.Validate.
+	RenameRepository(ctx context.Context, repo Repository, from string, seenAt time.Time) error
 	// RepositoryByName returns the repository whose FullName equals fullName,
 	// ignoring case as GitHub does. When more than one row holds the name,
 	// as when a repository was deleted with no event that says so and another

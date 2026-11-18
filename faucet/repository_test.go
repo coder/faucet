@@ -1,8 +1,10 @@
 package faucet_test
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -138,32 +140,48 @@ func TestWebhookRecordsNoRepositoryUnlessTheHostAsks(t *testing.T) {
 
 // A repository keeps the names it was first seen under, so a replayed or late
 // delivery cannot move a name back to it. Only a repository event that
-// renames or transfers it gives it new names.
-func TestWebhookRenamesARepositoryOnlyOnARenameOrTransfer(t *testing.T) {
+// renames or transfers it from the name that faucet holds gives it new
+// names, so a replayed old rename cannot either.
+func TestWebhookRenamesARepositoryOnlyFromTheNameItHolds(t *testing.T) {
 	t.Parallel()
 	store, clock, handler := newRepositoryHarness(t)
 	first := clock.Now()
-	deliver := func(event, action, fullName, owner string) {
+	n := 0
+	deliver := func(event, action, fullName, owner, changes string) {
 		t.Helper()
-		body := `{"action":"` + action + `","ref":"refs/heads/main","repository":{"id":5,"full_name":"` + fullName + `","owner":{"id":9,"login":"` + owner + `"}}}`
-		serveWebhook(handler, newRequest(http.MethodPost, []byte(body), event, "d-"+action+fullName))
+		body := `{"action":"` + action + `","ref":"refs/heads/main",` + changes +
+			`"repository":{"id":5,"name":"` + fullName[strings.Index(fullName, "/")+1:] + `","full_name":"` + fullName + `","owner":{"id":9,"login":"` + owner + `"}}}`
+		n++
+		serveWebhook(handler, newRequest(http.MethodPost, []byte(body), event, fmt.Sprintf("d-%d", n)))
 		clock.Advance(time.Minute)
 	}
+	renamedFrom := func(name string) string { return `"changes":{"repository":{"name":{"from":"` + name + `"}}},` }
+	movedFrom := func(org string) string { return `"changes":{"owner":{"from":{"organization":{"login":"` + org + `"}}}},` }
 	named := func(fullName, owner string, at time.Time) []fakeRepo {
 		return []fakeRepo{{repo: faucet.Repository{ID: 5, OwnerID: 9, OwnerLogin: owner, FullName: fullName}, seenAt: at}}
 	}
 
-	deliver("push", "", "coder/faucet", "coder")
+	deliver("push", "", "coder/faucet", "coder", "")
 	require.Equal(t, named("coder/faucet", "coder", first), store.repos)
-	deliver("push", "", "coder/old-name", "coder")
+	deliver("push", "", "coder/old-name", "coder", "")
 	require.Equal(t, named("coder/faucet", "coder", first), store.repos, "a replayed delivery leaves the names alone")
-	deliver("repository", "edited", "coder/other", "coder")
+	deliver("repository", "edited", "coder/other", "coder", "")
 	require.Equal(t, named("coder/faucet", "coder", first), store.repos, "a repository event that neither renames nor transfers leaves them too")
+	deliver("repository", "renamed", "coder/tap", "coder", "")
+	require.Equal(t, named("coder/faucet", "coder", first), store.repos, "a rename that does not say from what changes nothing")
 
 	renamedAt := clock.Now()
-	deliver("repository", "renamed", "coder/tap", "coder")
+	deliver("repository", "renamed", "coder/tap", "coder", renamedFrom("Faucet"))
 	require.Equal(t, named("coder/tap", "coder", renamedAt), store.repos)
+	secondAt := clock.Now()
+	deliver("repository", "renamed", "coder/spout", "coder", renamedFrom("tap"))
+	require.Equal(t, named("coder/spout", "coder", secondAt), store.repos)
+	deliver("repository", "renamed", "coder/tap", "coder", renamedFrom("faucet"))
+	require.Equal(t, named("coder/spout", "coder", secondAt), store.repos, "a redelivered older rename does not revert the newer one")
+
 	movedAt := clock.Now()
-	deliver("repository", "transferred", "acme/tap", "acme")
-	require.Equal(t, named("acme/tap", "acme", movedAt), store.repos)
+	deliver("repository", "transferred", "acme/spout", "acme", movedFrom("coder"))
+	require.Equal(t, named("acme/spout", "acme", movedAt), store.repos)
+	deliver("repository", "transferred", "acme/spout", "acme", movedFrom("coder"))
+	require.Equal(t, named("acme/spout", "acme", movedAt), store.repos, "a replayed transfer finds the new name and changes nothing")
 }

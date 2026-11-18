@@ -13,6 +13,7 @@ import (
 var repositorySubtests = []subtest{
 	{"RecordRepositoryKeepsTheNamesAnIDWasFirstSeenUnder", recordRepositoryKeepsTheNamesAnIDWasFirstSeenUnder},
 	{"RenameRepositoryMovesANameAndANewRepositoryCanTakeTheOldOne", renameRepositoryMovesANameAndANewRepositoryCanTakeTheOldOne},
+	{"RenameRepositoryFromANameTheRowDoesNotHoldChangesNothing", renameRepositoryFromANameTheRowDoesNotHoldChangesNothing},
 	{"RenameRepositoryOfAnUnknownIDRecordsIt", renameRepositoryOfAnUnknownIDRecordsIt},
 	{"RepositoryByNameIgnoresCaseAndTakesTheLatestHolderOfAName", repositoryByNameIgnoresCaseAndTakesTheLatestHolderOfAName},
 	{"RepositoryByNameOfAnUnseenNameIsUnknown", repositoryByNameOfAnUnseenNameIsUnknown},
@@ -54,7 +55,7 @@ func renameRepositoryMovesANameAndANewRepositoryCanTakeTheOldOne(t *testing.T, s
 	ctx := context.Background()
 	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(1, "coder/faucet"), repositoryTime))
 	renamed := faucet.Repository{ID: 1, OwnerID: 8, OwnerLogin: "acme", FullName: "acme/tap"}
-	require.NoError(t, s.RenameRepository(ctx, renamed, repositoryTime.Add(time.Minute)))
+	require.NoError(t, s.RenameRepository(ctx, renamed, "Coder/Faucet", repositoryTime.Add(time.Minute)))
 	requireRepositoryNamed(t, s, "acme/tap", renamed)
 	requireUnknownName(t, s, "coder/faucet")
 
@@ -66,9 +67,21 @@ func renameRepositoryMovesANameAndANewRepositoryCanTakeTheOldOne(t *testing.T, s
 	requireRepositoryNamed(t, s, "acme/tap", renamed)
 }
 
+// GitHub can deliver an older rename again after a newer one. Its from
+// names a name that the row no longer holds, so it changes nothing.
+func renameRepositoryFromANameTheRowDoesNotHoldChangesNothing(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(1, "coder/x"), repositoryTime))
+	require.NoError(t, s.RenameRepository(ctx, repositoryNamed(1, "coder/y"), "coder/x", repositoryTime.Add(time.Minute)))
+	require.NoError(t, s.RenameRepository(ctx, repositoryNamed(1, "coder/z"), "coder/y", repositoryTime.Add(2*time.Minute)))
+	require.NoError(t, s.RenameRepository(ctx, repositoryNamed(1, "coder/y"), "coder/x", repositoryTime.Add(3*time.Minute)))
+	requireRepositoryNamed(t, s, "coder/z", repositoryNamed(1, "coder/z"))
+	requireUnknownName(t, s, "coder/y")
+}
+
 func renameRepositoryOfAnUnknownIDRecordsIt(t *testing.T, s faucet.Store) {
 	ctx := context.Background()
-	require.NoError(t, s.RenameRepository(ctx, repositoryNamed(3, "coder/new"), repositoryTime))
+	require.NoError(t, s.RenameRepository(ctx, repositoryNamed(3, "coder/new"), "coder/old", repositoryTime))
 	requireRepositoryNamed(t, s, "coder/new", repositoryNamed(3, "coder/new"))
 }
 
@@ -104,7 +117,7 @@ func recordAndRenameRepositoryValidateInput(t *testing.T, s faucet.Store) {
 		{ID: 1, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/fau\x00cet"},
 	} {
 		require.Error(t, s.RecordRepository(ctx, bad, repositoryTime), "%+v", bad)
-		require.Error(t, s.RenameRepository(ctx, bad, repositoryTime), "%+v", bad)
+		require.Error(t, s.RenameRepository(ctx, bad, "coder/faucet", repositoryTime), "%+v", bad)
 	}
 	requireUnknownName(t, s, "coder/faucet")
 }

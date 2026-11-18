@@ -18,28 +18,27 @@ func (s *Store) RecordRepository(ctx context.Context, repo faucet.Repository, se
 	if err := repo.Validate(); err != nil {
 		return xerrors.Errorf("validate repository: %w", err)
 	}
-	if err := s.q.RecordRepository(ctx, database.RecordRepositoryParams(repositoryRow(repo, seenAt))); err != nil {
+	if err := s.q.RecordRepository(ctx, database.RecordRepositoryParams{
+		RepoID: repo.ID, OwnerID: repo.OwnerID, OwnerLogin: repo.OwnerLogin, FullName: repo.FullName, SeenAt: seenAt,
+	}); err != nil {
 		return xerrors.Errorf("record repository: %w", err)
 	}
 	return nil
 }
 
 // RenameRepository implements faucet.Store.
-func (s *Store) RenameRepository(ctx context.Context, repo faucet.Repository, seenAt time.Time) (err error) {
+func (s *Store) RenameRepository(ctx context.Context, repo faucet.Repository, from string, seenAt time.Time) (err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if err := repo.Validate(); err != nil {
 		return xerrors.Errorf("validate repository: %w", err)
 	}
-	if err := s.q.RenameRepository(ctx, repositoryRow(repo, seenAt)); err != nil {
+	if err := s.q.RenameRepository(ctx, database.RenameRepositoryParams{
+		RepoID: repo.ID, OwnerID: repo.OwnerID, OwnerLogin: repo.OwnerLogin, FullName: repo.FullName, SeenAt: seenAt,
+		PreviousFullName: from,
+	}); err != nil {
 		return xerrors.Errorf("rename repository: %w", err)
 	}
 	return nil
-}
-
-func repositoryRow(repo faucet.Repository, seenAt time.Time) database.RenameRepositoryParams {
-	return database.RenameRepositoryParams{
-		RepoID: repo.ID, OwnerID: repo.OwnerID, OwnerLogin: repo.OwnerLogin, FullName: repo.FullName, SeenAt: seenAt,
-	}
 }
 
 // RepositoryByName implements faucet.Store.

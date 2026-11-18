@@ -37,10 +37,15 @@ func (s *fakeStore) RecordRepository(_ context.Context, repo faucet.Repository, 
 	})
 }
 
-func (s *fakeStore) RenameRepository(_ context.Context, repo faucet.Repository, seenAt time.Time) error {
+func (s *fakeStore) RenameRepository(_ context.Context, repo faucet.Repository, from string, seenAt time.Time) error {
 	return s.writeRepository(repo, func() {
-		s.repos = slices.DeleteFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID })
-		s.repos = append(s.repos, fakeRepo{repo: repo, seenAt: seenAt})
+		i := slices.IndexFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID })
+		switch {
+		case i < 0:
+			s.repos = append(s.repos, fakeRepo{repo: repo, seenAt: seenAt})
+		case strings.EqualFold(s.repos[i].repo.FullName, from):
+			s.repos[i] = fakeRepo{repo: repo, seenAt: seenAt}
+		}
 	})
 }
 

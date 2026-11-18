@@ -50,6 +50,6 @@ sequenceDiagram
 
 A service may read a repository that one of its grants names, matched by name and ignoring case, as GitHub does. Faucet learns a repository's ID from the signed deliveries that name it, stored or ignored, so a granted repository is readable once GitHub has sent one delivery from it. Until then, the wait tool says so.
 
-A repository keeps the name under which faucet first saw it until a Repositories delivery says that it was renamed or transferred, so a replayed or late delivery cannot move a name back to an old repository. Without that event on the hook, a renamed repository stays under its old name: the old grant keeps working, and a grant of the new name finds nothing. After a rename, grant the new name.
+A repository keeps the name under which faucet first saw it until a Repositories delivery says that it was renamed or transferred from that name. So neither a replayed delivery nor a redelivered older rename can move a name back. Without that event on the hook, or when faucet missed one rename of several, a renamed repository stays under the name faucet holds: the old grant keeps working, and a grant of the new name finds nothing. After a rename, grant the new name.
 
 Grants of a whole organization, or of every repository, come in a later release.

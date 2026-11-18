@@ -42,27 +42,42 @@ func (r Repository) Validate() error {
 
 // recordRepository records the repository that a signed delivery names, so a
 // service can be granted it by name before faucet stores an event of it.
-// Only a repository event that renames or transfers it changes the names of
-// a repository the store knows. A failed write is logged, and the delivery
-// goes on: the next one that names the repository writes it.
+// Only a repository event that renames or transfers it, from the name that
+// the store holds, changes the names of a repository the store knows. A
+// failed write is logged, and the delivery goes on: the next one that names
+// the repository writes it.
 func (s *Service) recordRepository(ctx context.Context, logger slog.Logger, eventName string, payload []byte) {
-	repo, action, ok := repositoryOf(payload)
+	named, ok := repositoryOf(eventName, payload)
 	if !ok {
 		return
 	}
-	record := s.store.RecordRepository
-	if eventName == "repository" && (action == "renamed" || action == "transferred") {
-		record = s.store.RenameRepository
+	var err error
+	if named.previous != "" {
+		err = s.store.RenameRepository(ctx, named.repo, named.previous, s.clock.Now())
+	} else {
+		err = s.store.RecordRepository(ctx, named.repo, s.clock.Now())
 	}
-	if err := record(ctx, repo, s.clock.Now()); err != nil {
+	if err != nil {
 		logger.Warn(ctx, "could not record the repository", slog.Error(err))
 	}
 }
 
-// repositoryOf returns the repository that a delivery's payload names and
-// the payload's action, and false when it names none or names it in a form
-// that Validate refuses.
-func repositoryOf(payload []byte) (Repository, string, bool) {
+// namedRepository is the repository that a delivery names, and the full
+// name that it had before when the delivery renamed or transferred it.
+type namedRepository struct {
+	repo     Repository
+	previous string
+}
+
+// repositoryOf returns the repository that a delivery's payload names, and
+// false when it names none or names it in a form that Validate refuses. The
+// previous name comes from the changes of a repository event that renamed
+// it (changes.repository.name.from) or transferred it (changes.owner.from),
+// and is empty for any other delivery.
+func repositoryOf(eventName string, payload []byte) (namedRepository, bool) {
+	type login struct {
+		Login string `json:"login"`
+	}
 	var body struct {
 		Action     string `json:"action"`
 		Repository *struct {
@@ -73,10 +88,39 @@ func repositoryOf(payload []byte) (Repository, string, bool) {
 				Login string `json:"login"`
 			} `json:"owner"`
 		} `json:"repository"`
+		Changes struct {
+			Repository struct {
+				Name struct {
+					From string `json:"from"`
+				} `json:"name"`
+			} `json:"repository"`
+			Owner struct {
+				From struct {
+					User         *login `json:"user"`
+					Organization *login `json:"organization"`
+				} `json:"from"`
+			} `json:"owner"`
+		} `json:"changes"`
 	}
 	if err := json.Unmarshal(payload, &body); err != nil || body.Repository == nil {
-		return Repository{}, "", false
+		return namedRepository{}, false
 	}
 	r := Repository{ID: body.Repository.ID, OwnerID: body.Repository.Owner.ID, OwnerLogin: body.Repository.Owner.Login, FullName: body.Repository.FullName}
-	return r, body.Action, r.Validate() == nil
+	if r.Validate() != nil {
+		return namedRepository{}, false
+	}
+	named := namedRepository{repo: r}
+	if eventName != "repository" {
+		return named, true
+	}
+	owner, name, _ := strings.Cut(r.FullName, "/")
+	switch from := body.Changes.Owner.From; {
+	case body.Action == "renamed" && body.Changes.Repository.Name.From != "":
+		named.previous = owner + "/" + body.Changes.Repository.Name.From
+	case body.Action == "transferred" && from.Organization != nil && from.Organization.Login != "":
+		named.previous = from.Organization.Login + "/" + name
+	case body.Action == "transferred" && from.User != nil && from.User.Login != "":
+		named.previous = from.User.Login + "/" + name
+	}
+	return named, true
 }
