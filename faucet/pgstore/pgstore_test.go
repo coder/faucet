@@ -216,7 +216,7 @@ func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {
 	require.EqualValues(t, 400, hostVersion)
 	var faucetVersion int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM `+pq.QuoteIdentifier(pgstore.MigrationsTable)).Scan(&faucetVersion))
-	require.EqualValues(t, 12, faucetVersion)
+	require.EqualValues(t, 13, faucetVersion)
 }
 
 // The raw events migration adds tables of its own and one index. A down

@@ -90,12 +90,17 @@ func (c cronRoutes) purge(w http.ResponseWriter, r *http.Request) {
 		RawEventsDeleted     int64 `json:"raw_events_deleted"`
 		ExpiredLeases        int64 `json:"expired_leases"`
 		RawFailures          int64 `json:"raw_failures"`
-		// ExpiredAccessTokens is left out without the login server, which
-		// keeps no access token.
+		// The counts of the login server are left out without it, since
+		// it keeps none of these.
 		ExpiredAccessTokens *int64 `json:"expired_access_tokens,omitempty"`
+		ExpiredAuthRequests *int64 `json:"expired_auth_requests,omitempty"`
+		EndedSessions       *int64 `json:"ended_sessions,omitempty"`
+		UnusedConnections   *int64 `json:"unused_connections,omitempty"`
 	}{
 		res.Deleted, res.PurgedThrough, res.ExpiredSubscriptions, res.EndedDeliveries,
-		res.Raw.Cleared, res.Raw.Deleted, res.Raw.ExpiredLeases, res.RawFailures, c.loginCount(tokens.ExpiredAccessTokens),
+		res.Raw.Cleared, res.Raw.Deleted, res.Raw.ExpiredLeases, res.RawFailures,
+		c.loginCount(tokens.ExpiredAccessTokens), c.loginCount(tokens.ExpiredAuthRequests),
+		c.loginCount(tokens.EndedSessions), c.loginCount(tokens.UnusedConnections),
 	})
 }
 

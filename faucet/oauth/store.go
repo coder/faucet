@@ -80,9 +80,11 @@ func (t AccessToken) Validate() error {
 	return nil
 }
 
-// Store keeps faucet's access tokens and service clients. storetest.RunOAuth
-// checks an implementation.
+// Store keeps faucet's access tokens, its service clients and the browser
+// logins of its users. storetest.RunOAuth checks an implementation.
 type Store interface {
+	LoginStore
+
 	// InsertAccessToken stores t. It fails when t is not valid, or when the
 	// store holds a token with the same hash.
 	InsertAccessToken(ctx context.Context, t AccessToken) error
@@ -90,6 +92,9 @@ type Store interface {
 	// expired or not, or ErrUnknownToken. A stored token need not pass
 	// Validate: a later build can write a scope that this one does not know.
 	AccessToken(ctx context.Context, hash TokenHash) (AccessToken, error)
+	// DeleteAccessToken deletes the access token whose hash is hash. An
+	// unknown hash is no error.
+	DeleteAccessToken(ctx context.Context, hash TokenHash) error
 	// DeleteExpiredAccessTokens deletes every access token that expired at or
 	// before now and returns how many it deleted.
 	DeleteExpiredAccessTokens(ctx context.Context, now time.Time) (int64, error)

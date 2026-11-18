@@ -19,6 +19,37 @@ type FaucetAccessToken struct {
 	Subject     string
 }
 
+type FaucetAuthRequest struct {
+	ID              string
+	State           string
+	ClientID        string
+	ClientName      string
+	RedirectUri     string
+	ClientState     string
+	Resource        string
+	Scopes          []string
+	CodeChallenge   string
+	BrowserHash     []byte
+	GithubStateHash []byte
+	CodeHash        []byte
+	ConnectionID    sql.NullString
+	CreatedAt       time.Time
+	ExpiresAt       time.Time
+}
+
+type FaucetConnection struct {
+	ID               string
+	Provider         string
+	UpstreamUserID   int64
+	Login            string
+	AccessTokenEnc   []byte
+	RefreshTokenEnc  []byte
+	KeyID            string
+	AccessExpiresAt  time.Time
+	RefreshExpiresAt time.Time
+	UpdatedAt        time.Time
+}
+
 type FaucetDelivery struct {
 	KeyHash       []byte
 	EventID       int64
@@ -125,6 +156,14 @@ type FaucetRedeliveryScan struct {
 	ClearAt      sql.NullTime
 }
 
+type FaucetRefreshToken struct {
+	TokenHash []byte
+	SessionID string
+	IssuedAt  time.Time
+	UsedAt    sql.NullTime
+	RetiredAt sql.NullTime
+}
+
 type FaucetRepo struct {
 	RepoID     int64
 	OwnerID    int64
@@ -164,4 +203,15 @@ type FaucetSubscription struct {
 	GapThrough          int64
 	GapLeaseUntil       sql.NullTime
 	EventTypes          []string
+}
+
+type FaucetUserSession struct {
+	ID           string
+	ClientID     string
+	ClientName   string
+	ConnectionID string
+	Resource     string
+	Scopes       []string
+	RefreshedAt  time.Time
+	EndedAt      sql.NullTime
 }

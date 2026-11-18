@@ -1,6 +1,8 @@
 import { execFile, spawn } from 'node:child_process';
 import { createDecipheriv, createHmac, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import { createServer } from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
@@ -28,6 +30,18 @@ interface ReceiverState {
   control: string;
 }
 
+// TlsState names the certificate for 127.0.0.1 and localhost that app.mjs wrote, and its key.
+interface TlsState {
+  cert: string;
+  key: string;
+}
+
+// GitHubAppState is faucet's GitHub App, as the stub knows it.
+interface GitHubAppState {
+  clientId: string;
+  clientSecret: string;
+}
+
 interface RunState {
   dbHost: string;
   dbPort: number;
@@ -39,6 +53,9 @@ interface RunState {
   binary: string;
   e2eBinary: string;
   agentBinary: string;
+  loginAgentBinary: string;
+  tls: TlsState;
+  githubApp: GitHubAppState;
   cron: CronState;
   receiver: ReceiverState;
 }
@@ -50,6 +67,8 @@ interface Target {
   database: string;
   // The FAUCET_WEBHOOK_KEY this process runs with, or null when it has none.
   webhookKey: string | null;
+  // The FAUCET_TOKEN_KEY this process runs with, or null when its browser login is off.
+  tokenKey: string | null;
 }
 
 // StubDelivery is one attempt of GitHub to deliver a webhook, as the stub in app.mjs lists it. ageMs is how long ago it
@@ -67,7 +86,14 @@ export interface StubRequest {
   method: string;
   path: string;
   query: string;
-  auth: 'hook' | 'user' | 'other' | 'none';
+  // person is an access token that the stub issued to the person of the browser login.
+  auth: 'hook' | 'user' | 'person' | 'other' | 'none';
+}
+
+// StubExchange is a request to the token endpoint of the stub's GitHub App: the grant, and issued or GitHub's error code.
+export interface StubExchange {
+  grant: 'authorization_code' | 'refresh_token';
+  answer: string;
 }
 
 export interface StubAttempt {
@@ -121,6 +147,13 @@ export interface WaitOutcome extends Reply {
   events: WaitedEvent[] | null;
   cursor: number | null;
   truncated: boolean | null;
+}
+
+// ToolResult is the result of a tools/call of wait_for_github_events, as an MCP client returns it.
+export interface ToolResult {
+  isError?: boolean;
+  content?: { type: string; text: string }[];
+  structuredContent?: { events: WaitedEvent[]; cursor: number };
 }
 
 export interface McpError {
@@ -207,6 +240,18 @@ function readCronState(value: unknown): CronState {
   return { port, db, webhookSecret, cronSecret, hookToken, stubControl, stubUrl };
 }
 
+function readTlsState(value: unknown): TlsState {
+  const { cert, key } = (value ?? {}) as Partial<TlsState>;
+  if (typeof cert !== 'string' || typeof key !== 'string') throw new Error('the run state written by app.mjs is malformed');
+  return { cert, key };
+}
+
+function readGitHubAppState(value: unknown): GitHubAppState {
+  const { clientId, clientSecret } = (value ?? {}) as Partial<GitHubAppState>;
+  if (typeof clientId !== 'string' || !isSecret(clientSecret)) throw new Error('the run state written by app.mjs is malformed');
+  return { clientId, clientSecret };
+}
+
 function readReceiverState(value: unknown): ReceiverState {
   const { url, control } = (value ?? {}) as Partial<ReceiverState>;
   if (typeof url !== 'string' || !isSecret(control)) throw new Error('the run state written by app.mjs is malformed');
@@ -216,7 +261,9 @@ function readReceiverState(value: unknown): ReceiverState {
 function readState(baseUrl: string): RunState {
   const port = Number(new URL(baseUrl).port);
   const state: unknown = JSON.parse(readFileSync(stateFile(port), 'utf8'));
-  const { dbHost, dbPort, psql, secret, githubToken, otherToken, webhookKey, binary, e2eBinary, agentBinary, cron, receiver } = state as Partial<RunState>;
+  const {
+    dbHost, dbPort, psql, secret, githubToken, otherToken, webhookKey, binary, e2eBinary, agentBinary, loginAgentBinary, tls, githubApp, cron, receiver,
+  } = state as Partial<RunState>;
   if (
     typeof dbHost !== 'string' ||
     typeof dbPort !== 'number' ||
@@ -227,13 +274,14 @@ function readState(baseUrl: string): RunState {
     !isSecret(webhookKey) ||
     typeof binary !== 'string' ||
     typeof e2eBinary !== 'string' ||
-    typeof agentBinary !== 'string'
+    typeof agentBinary !== 'string' ||
+    typeof loginAgentBinary !== 'string'
   ) {
     throw new Error('the run state written by app.mjs is malformed');
   }
   return {
-    dbHost, dbPort, psql, secret, githubToken, otherToken, webhookKey, binary, e2eBinary, agentBinary,
-    cron: readCronState(cron), receiver: readReceiverState(receiver),
+    dbHost, dbPort, psql, secret, githubToken, otherToken, webhookKey, binary, e2eBinary, agentBinary, loginAgentBinary,
+    tls: readTlsState(tls), githubApp: readGitHubAppState(githubApp), cron: readCronState(cron), receiver: readReceiverState(receiver),
   };
 }
 
@@ -264,7 +312,7 @@ export class Faucet {
   // main is the server that has no CRON_SECRET. It has webhook mode on, with the key in the run state.
   static main(appUrl: string): Faucet {
     const state = readState(appUrl);
-    const target = { baseUrl: appUrl, webhookSecret: state.secret, database: 'postgres', webhookKey: state.webhookKey };
+    const target = { baseUrl: appUrl, webhookSecret: state.secret, database: 'postgres', webhookKey: state.webhookKey, tokenKey: null };
     return new Faucet(state, target, state.cron.cronSecret);
   }
 
@@ -276,6 +324,7 @@ export class Faucet {
       webhookSecret: state.cron.webhookSecret,
       database: state.cron.db,
       webhookKey: null,
+      tokenKey: null,
     };
     return new Faucet(state, target, state.cron.cronSecret);
   }
@@ -299,17 +348,21 @@ export class Faucet {
   // CRON_SECRET, webhook mode off and the raw events of RAW_EVENTS. env adds the rest, and FAUCET_RAW_EVENTS: '' offers none. fn gets the faucet and a function that returns its
   // output so far. opts.e2eBuild runs the binary that was built with -tags faucet_e2e, whose callback client reaches loopback
   // over http. opts.publicUrl sets FAUCET_PUBLIC_URL to the new faucet's own URL, which turns on its login server.
+  // opts.browserLogin also turns on its browser login, with the stub as GitHub and its GitHub App, and a random token key. It
+  // runs the e2e build, whose document client fetches from loopback, and trusts the certificate of Documents.
   async withFaucet<T>(
     env: Record<string, string>,
     fn: (started: Faucet, output: () => string) => Promise<T>,
-    opts: { e2eBuild?: boolean; publicUrl?: boolean } = {},
+    opts: { e2eBuild?: boolean; publicUrl?: boolean; browserLogin?: boolean } = {},
   ): Promise<T> {
     const database = `faucet_${randomBytes(6).toString('hex')}`;
     const port = await freePort();
     const webhookSecret = randomBytes(32).toString('hex');
     const cronSecret = randomBytes(32).toString('hex');
-    const { dbHost, dbPort, cron } = this.#state;
-    const binary = opts.e2eBuild === true ? this.#state.e2eBinary : this.#state.binary;
+    const { dbHost, dbPort, cron, githubApp, tls } = this.#state;
+    const login = opts.browserLogin === true;
+    const binary = opts.e2eBuild === true || login ? this.#state.e2eBinary : this.#state.binary;
+    const tokenKey = login ? `e2e:${randomBytes(32).toString('base64')}` : null;
     const databaseUrl = `postgres://postgres@/${database}?${new URLSearchParams({ host: dbHost, port: String(dbPort), sslmode: 'disable' })}`;
 
     await this.sql(`create database ${database}`);
@@ -321,7 +374,17 @@ export class Faucet {
         FAUCET_GITHUB_API_URL: cron.stubUrl,
         CRON_SECRET: cronSecret,
         FAUCET_RAW_EVENTS: RAW_EVENTS,
-        ...(opts.publicUrl === true ? { FAUCET_PUBLIC_URL: `http://127.0.0.1:${port}` } : {}),
+        ...(opts.publicUrl === true || login ? { FAUCET_PUBLIC_URL: `http://127.0.0.1:${port}` } : {}),
+        ...(tokenKey !== null
+          ? {
+              FAUCET_GITHUB_APP_CLIENT_ID: githubApp.clientId,
+              FAUCET_GITHUB_APP_CLIENT_SECRET: githubApp.clientSecret,
+              FAUCET_TOKEN_KEY: tokenKey,
+              FAUCET_GITHUB_URL: cron.stubUrl,
+              // Go reads its roots from SSL_CERT_FILE in place of the system's.
+              SSL_CERT_FILE: tls.cert,
+            }
+          : {}),
         ...env,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -338,7 +401,7 @@ export class Faucet {
         if (!running() || waited > 20_000) throw new Error(`the started faucet did not become healthy:\n${output}`);
         await sleep(100);
       }
-      const target = { baseUrl, webhookSecret, database, webhookKey: env.FAUCET_WEBHOOK_KEY ?? null };
+      const target = { baseUrl, webhookSecret, database, webhookKey: env.FAUCET_WEBHOOK_KEY ?? null, tokenKey };
       return await fn(new Faucet(this.#state, target, cronSecret), () => output);
     } finally {
       if (running()) child.kill('SIGTERM');
@@ -567,6 +630,24 @@ export class Faucet {
     return openSealedSecret(Buffer.from(this.#target.webhookKey, 'base64'), row.previous_secret_enc, row.key_hash);
   }
 
+  // connectionToken opens the sealed access or refresh token of the faucet_connections row with the ID id, with this server's
+  // token key. It is an independent reading of the layout: the version byte 0x01, a 12-byte nonce, then the AES-256-GCM
+  // ciphertext and tag, with "faucet connection token v1", the provider, the connection ID and the field joined by NUL bytes
+  // as additional data. It throws when the key or the row's key_id is not the one that sealed it.
+  async connectionToken(id: string, field: 'access' | 'refresh'): Promise<string> {
+    if (!/^github:\d+$/.test(id)) throw new Error('id must be github:<user id>');
+    const { tokenKey } = this.#target;
+    if (tokenKey === null) throw new Error('this faucet has no token key');
+    const [keyId, key] = tokenKey.split(':');
+    const query = `select row_to_json(t) from (select provider, key_id, encode(${field}_token_enc, 'hex') as sealed
+      from faucet_connections where id = '${id}') t`;
+    const row = JSON.parse((await this.sql(query)) || 'null') as { provider: string; key_id: string; sealed: string } | null;
+    if (row === null) throw new Error(`no connection has the ID ${id}`);
+    if (row.key_id !== keyId) throw new Error(`the row is sealed under key ${row.key_id}`);
+    const aad = Buffer.from(['faucet connection token v1', row.provider, id, field].join('\0'));
+    return openSealedSecret(Buffer.from(key, 'base64'), row.sealed, aad.toString('hex'));
+  }
+
   // clients runs `faucet clients` with args against this faucet's database, as an operator does.
   async clients(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
     const { dbHost, dbPort } = this.#state;
@@ -601,6 +682,42 @@ export class Faucet {
     }
   }
 
+  // loginAgent runs the go-sdk login agent once: it logs in to the endpoint at path as the client whose document is at
+  // clientId, with its person going through the consent page and the stub's GitHub, and calls the wait tool with args.
+  // args.refresh then refreshes its token, calls again and presents the refresh token that the refresh replaced.
+  async loginAgent(
+    path: McpPath,
+    clientId: string,
+    args: { repo: string; types: string[]; cursor?: number; timeout?: number; refresh?: boolean },
+  ): Promise<LoginAgentRun> {
+    const argv = [
+      '-url', `${this.baseUrl}${path}`, '-client-id', clientId, '-repo', args.repo, '-types', args.types.join(','),
+      '-cursor', String(args.cursor ?? 0), '-timeout', String(args.timeout ?? 1), ...(args.refresh === true ? ['-refresh'] : []),
+    ];
+    let code = 0;
+    let stdout = '';
+    let stderr = '';
+    try {
+      ({ stdout, stderr } = await execFileAsync(this.#state.loginAgentBinary, argv, { env: {} }));
+    } catch (err) {
+      const failure = err as { code?: unknown; stdout?: string; stderr?: string };
+      code = typeof failure.code === 'number' ? failure.code : -1;
+      stdout = failure.stdout ?? '';
+      stderr = failure.stderr ?? '';
+    }
+    const run: LoginAgentRun = { code, stderr, result: null, refreshed: null, reused: null, logins: 0, tokens: [] };
+    if (code !== 0) return run;
+    const printed = JSON.parse(stdout) as { result: ToolResult; refreshed?: ToolResult; reused?: string; logins: number; tokens: string[] };
+    return { ...run, result: printed.result, refreshed: printed.refreshed ?? null, reused: printed.reused ?? null, logins: printed.logins, tokens: printed.tokens };
+  }
+
+  // appLog lists the tokens that the stub's GitHub App issued and the token requests that it answered, in order.
+  async appLog(): Promise<{ tokens: string[]; exchanges: StubExchange[] }> {
+    const response = await fetch(`${this.#state.cron.stubUrl}/__stub/app`, { headers: { 'X-Stub-Control': this.#state.cron.stubControl } });
+    if (response.status !== 200) throw new Error(`the stub answered GET /__stub/app with ${response.status}`);
+    return (await response.json()) as { tokens: string[]; exchanges: StubExchange[] };
+  }
+
   async sql(query: string): Promise<string> {
     const { stdout } = await execFileAsync(this.#state.psql, [
       '-X', '-A', '-t', '-q',
@@ -615,9 +732,16 @@ export class Faucet {
   }
 
   leaksSecret(text: string): boolean {
-    const { secret, githubToken, otherToken, webhookKey, cron, receiver } = this.#state;
-    const secrets = [secret, githubToken, otherToken, webhookKey, cron.webhookSecret, cron.cronSecret, cron.hookToken, cron.stubControl, receiver.control];
-    const own = [this.#target.webhookSecret, this.#cronSecret, ...(this.#target.webhookKey === null ? [] : [this.#target.webhookKey])];
+    const { secret, githubToken, otherToken, webhookKey, cron, receiver, githubApp } = this.#state;
+    const secrets = [
+      secret, githubToken, otherToken, webhookKey, cron.webhookSecret, cron.cronSecret, cron.hookToken, cron.stubControl, receiver.control,
+      githubApp.clientSecret,
+    ];
+    const { webhookKey: ownWebhookKey, tokenKey } = this.#target;
+    const own = [
+      this.#target.webhookSecret, this.#cronSecret, ...(ownWebhookKey === null ? [] : [ownWebhookKey]),
+      ...(tokenKey === null ? [] : [tokenKey, tokenKey.slice(tokenKey.indexOf(':') + 1)]),
+    ];
     return [...secrets, ...own].some((value) => text.includes(value));
   }
 }
@@ -716,6 +840,128 @@ export class Receiver {
   }
 }
 
+// LoginAgentRun is what one run of the login agent printed. result, refreshed and reused are null when the agent failed.
+export interface LoginAgentRun {
+  code: number;
+  stderr: string;
+  result: ToolResult | null;
+  // refreshed is the result of the call after the refresh, and reused what the token endpoint answered to the refresh token
+  // that the refresh replaced: 'issued', or its OAuth error code. Both are null without args.refresh.
+  refreshed: ToolResult | null;
+  reused: string | null;
+  // logins counts the consent pages that the agent's person went through.
+  logins: number;
+  // tokens are the faucet tokens that the agent held, for a test to look for in other text and never to print.
+  tokens: string[];
+}
+
+// ClientDocument is what a client ID metadata document says beyond its client_id.
+export interface ClientDocument {
+  client_name?: string;
+  redirect_uris: string[];
+}
+
+// Documents serves client ID metadata documents over https on 127.0.0.1 with the certificate that app.mjs wrote, which a
+// faucet that withFaucet starts with { browserLogin: true } trusts.
+export class Documents {
+  readonly #server: Server;
+  readonly #documents: Map<string, object>;
+
+  private constructor(server: Server, documents: Map<string, object>) {
+    this.#server = server;
+    this.#documents = documents;
+  }
+
+  static async start(appUrl: string): Promise<Documents> {
+    const { tls } = readState(appUrl);
+    const documents = new Map<string, object>();
+    const server = createHttpsServer({ cert: readFileSync(tls.cert), key: readFileSync(tls.key) }, (req, res) => {
+      const document = documents.get(req.url ?? '');
+      if (document === undefined) return void res.writeHead(404).end();
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(document));
+    });
+    await listen(server, '127.0.0.1');
+    return new Documents(server, documents);
+  }
+
+  // add serves a document at /<name>.json and returns its URL, which is the client's ID.
+  add(name: string, document: ClientDocument): string {
+    const clientId = `https://127.0.0.1:${portOf(this.#server)}/${name}.json`;
+    this.#documents.set(`/${name}.json`, {
+      client_id: clientId, token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'],
+      ...document,
+    });
+    return clientId;
+  }
+
+  async close(): Promise<void> {
+    await close(this.#server);
+  }
+}
+
+// Site is a web server on 127.0.0.1 that a test serves pages from, such as a redirect URI or a page of another site, and that
+// records the path and query of every request. A browser reaches it as http://127.0.0.1:<port>, and as another site than
+// faucet's as http://localhost:<port>.
+export class Site {
+  readonly #server: Server;
+  readonly #pages: Map<string, string>;
+  readonly #requests: { path: string; query: string }[];
+
+  private constructor(server: Server, pages: Map<string, string>, requests: { path: string; query: string }[]) {
+    this.#server = server;
+    this.#pages = pages;
+    this.#requests = requests;
+  }
+
+  static async start(): Promise<Site> {
+    const pages = new Map<string, string>();
+    const requests: { path: string; query: string }[] = [];
+    const server = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
+      const url = new URL(req.url ?? '/', 'http://site');
+      requests.push({ path: url.pathname, query: url.search });
+      const page = pages.get(url.pathname);
+      if (page === undefined) return void res.writeHead(404).end();
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(page);
+    });
+    await listen(server, '127.0.0.1');
+    return new Site(server, pages, requests);
+  }
+
+  url(path: string, host: '127.0.0.1' | 'localhost' = '127.0.0.1'): string {
+    return `http://${host}:${portOf(this.#server)}${path}`;
+  }
+
+  serve(path: string, html: string): void {
+    this.#pages.set(path, html);
+  }
+
+  requests(path: string): { path: string; query: string }[] {
+    return this.#requests.filter((r) => r.path === path);
+  }
+
+  async close(): Promise<void> {
+    this.#server.closeAllConnections();
+    await close(this.#server);
+  }
+}
+
+async function listen(server: Server, host: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, host, () => resolve());
+  });
+}
+
+function portOf(server: Server): number {
+  const address = server.address();
+  if (address === null || typeof address !== 'object') throw new Error('the server does not listen');
+  return address.port;
+}
+
+function close(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+}
+
 // HookStub sets and reads what the GitHub stub in app.mjs serves for the webhook that redelivery manages. It plays GitHub's
 // redelivery too: it posts the stored payload, signed, to the faucet that the test armed it with.
 export class HookStub {
@@ -762,7 +1008,7 @@ export class HookStub {
   }
 }
 
-export const test = base.extend<{ faucet: Faucet; cron: Faucet; receiver: Receiver; hooks: HookStub }>({
+export const test = base.extend<{ faucet: Faucet; cron: Faucet; receiver: Receiver; hooks: HookStub; documents: Documents; site: Site }>({
   faucet: async ({ app }, use) => {
     await use(Faucet.main(app.baseUrl));
   },
@@ -774,6 +1020,22 @@ export const test = base.extend<{ faucet: Faucet; cron: Faucet; receiver: Receiv
   },
   hooks: async ({ app }, use) => {
     await use(new HookStub(app.baseUrl));
+  },
+  documents: async ({ app }, use) => {
+    const documents = await Documents.start(app.baseUrl);
+    try {
+      await use(documents);
+    } finally {
+      await documents.close();
+    }
+  },
+  site: async ({}, use) => {
+    const site = await Site.start();
+    try {
+      await use(site);
+    } finally {
+      await site.close();
+    }
   },
 });
 
