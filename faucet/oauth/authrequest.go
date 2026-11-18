@@ -32,8 +32,8 @@ const (
 
 	// maxPendingPerClientHost bounds the logins in progress of the clients
 	// of one host. One client, such as an editor's, serves every user of an
-	// organization, so it is far above what one organization starts in the
-	// 10 minutes that a login stays pending.
+	// organization, so the limit is far above what one organization starts
+	// in the 10 minutes that a login stays pending.
 	maxPendingPerClientHost = 100
 	// maxPendingAuthRequests bounds all logins in progress, so that the
 	// requests that anyone can send grow the store by a bounded amount.
