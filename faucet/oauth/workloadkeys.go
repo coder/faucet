@@ -35,7 +35,7 @@ const (
 	discoveryPath    = "/.well-known/openid-configuration"
 )
 
-var errIssuerKeys = xerrors.New("faucet holds no key of the subject token's issuer for it yet")
+var errIssuerKeys = xerrors.New("faucet could not fetch the keys of the subject token's issuer")
 
 type issuerKeysError struct {
 	issuer   string

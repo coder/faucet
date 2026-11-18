@@ -24,7 +24,9 @@ import (
 
 // ../../faucet/oauth/testdata/k8s-* hold a token that a k3s v1.33.5 cluster
 // minted for the service account apps/digest-bot with the audience
-// https://faucet.example.com, and the cluster's key set. The cluster is gone.
+// https://faucet.example.com, and the cluster's key set. The trust rule pastes
+// that key set, so the test needs no cluster, and the one that minted the
+// token may be gone.
 const (
 	k8sTestdata = "../../faucet/oauth/testdata/"
 	k8sIssuer   = "https://k8s.wi-test.invalid"

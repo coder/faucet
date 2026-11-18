@@ -163,7 +163,8 @@ func TestATokenExchangeWaitsWhileTheKeysOfItsIssuerFail(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, reply.status, reply.rawBody)
 	require.Equal(t, "60", reply.header.Get("Retry-After"))
 	require.Equal(t, waitForKeys, reply.body)
-	require.True(t, logged(h.logs.String(), "[warn]", "a workload's token waits for the keys of its issuer", "client_id=digest-bot", "404"), h.logs.String())
+	require.True(t, logged(h.logs.String(), "[warn]", "a workload's token waits for the keys of its issuer", "client_id=digest-bot",
+		"faucet could not fetch the keys of the subject token's issuer https://oidc.vercel.com/codercom: the key set: it must be served with status 200 and no redirect, not 404"), h.logs.String())
 
 	h.clock.Advance(15*time.Second + time.Millisecond)
 	reply = h.post("", exchange(h.vercelToken()))
