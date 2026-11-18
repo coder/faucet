@@ -77,7 +77,7 @@ describe('events list', () => {
       expect(event.delivery, `${event.name} delivery`).toEqual(['poll', 'webhook']);
       expect(event.inputSchema.type, `${event.name} inputSchema`).toBe('object');
       const hasHeadCommit = !noHeadCommit.includes(event.name);
-      const properties = ['pr', 'repo', 'sha'].filter(
+      const properties = ['all', 'owner', 'pr', 'repo', 'repos', 'sha'].filter(
         (p) => (p !== 'sha' || hasHeadCommit) && (p !== 'pr' || !noPullRequest.includes(event.name)),
       );
       const filters = fieldFilters[event.name] ?? [];
@@ -85,7 +85,7 @@ describe('events list', () => {
         (families.includes(event.name) ? ['actions', ...properties, ...filters] : properties).sort(),
       );
       expect(Object.keys(event.payloadSchema.properties), `${event.name} filters fields of its data`).toEqual(expect.arrayContaining(filters));
-      expect(event.inputSchema.required, `${event.name} inputSchema required`).toEqual(['repo']);
+      expect(event.inputSchema.required, `${event.name} names its target with repo, owner or all, so it requires none`).toBeUndefined();
       expect(event.payloadSchema.type, `${event.name} payloadSchema`).toBe('object');
       expect(Object.keys(event.payloadSchema.properties).includes('head_sha'), `${event.name} payloadSchema head_sha`).toBe(hasHeadCommit);
       expect(Object.keys(event.payloadSchema.properties), `${event.name} payloadSchema properties`).toEqual(
@@ -101,7 +101,7 @@ describe('events list', () => {
     }
   });
 
-  test('events/list returns the raw GitHub event names after the typed ones, each with repo, actions and fields', async ({ faucet }) => {
+  test('events/list returns the raw GitHub event names after the typed ones, each with a target, actions and fields', async ({ faucet }) => {
     const reply = await faucet.mcp<ListResult>('events/list');
 
     expect(reply.status).toBe(200);
@@ -109,8 +109,8 @@ describe('events list', () => {
       expect(event.description, `${event.name} description`).not.toBe('');
       expect(event.delivery, `${event.name} delivery`).toEqual(['poll', 'webhook']);
       expect(event.inputSchema.type, `${event.name} inputSchema`).toBe('object');
-      expect(Object.keys(event.inputSchema.properties).sort(), `${event.name} inputSchema properties`).toEqual(['actions', 'fields', 'repo']);
-      expect(event.inputSchema.required, `${event.name} inputSchema required`).toEqual(['repo']);
+      expect(Object.keys(event.inputSchema.properties).sort(), `${event.name} inputSchema properties`).toEqual(['actions', 'all', 'fields', 'owner', 'repo', 'repos']);
+      expect(event.inputSchema.required, `${event.name} names its target with repo, owner or all, so it requires none`).toBeUndefined();
       expect(event.payloadSchema.type, `${event.name} payloadSchema`).toBe('object');
     }
   });
