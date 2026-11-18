@@ -806,6 +806,24 @@ func TestADiscoveryDocumentCannotSendFaucetToAPrivateAddress(t *testing.T) {
 	require.ErrorContains(t, err, "the discovery document: it must be served with status 200 and no redirect, not 302")
 }
 
+// A document whose body stalls past the deadline gets the same answer as one
+// whose headers do.
+func TestADocumentMustArriveWhole(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"issuer":`))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := newKeySource(srv.Client(), quartz.NewMock(t)).get(ctx, srv.URL+discoveryPath)
+	require.EqualError(t, err, "it must arrive within 5s")
+	require.NotErrorIs(t, err, context.DeadlineExceeded)
+}
+
 type testResolver map[string][]netip.Addr
 
 func (r testResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.Addr, error) {

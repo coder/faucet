@@ -185,10 +185,7 @@ func (s *keySource) get(ctx context.Context, rawURL string) ([]byte, error) {
 	req.Header.Set("Accept", "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {
-		if xerrors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return nil, xerrors.Errorf("it must arrive within %s", keyFetchTimeout)
-		}
-		return nil, err
+		return nil, lateOr(ctx, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -197,9 +194,18 @@ func (s *keySource) get(ctx context.Context, rawURL string) ([]byte, error) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxKeyDocumentBytes+1))
 	switch {
 	case err != nil:
-		return nil, err
+		return nil, lateOr(ctx, err)
 	case len(body) > maxKeyDocumentBytes:
 		return nil, xerrors.Errorf("it must be at most %d bytes", maxKeyDocumentBytes)
 	}
 	return body, nil
+}
+
+// lateOr is the error of a document that did not arrive before the deadline
+// of ctx, or else err.
+func lateOr(ctx context.Context, err error) error {
+	if xerrors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return xerrors.Errorf("it must arrive within %s", keyFetchTimeout)
+	}
+	return err
 }
