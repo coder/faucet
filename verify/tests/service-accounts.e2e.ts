@@ -1,5 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { ClientCredentialsProvider } from '@modelcontextprotocol/sdk/client/auth-extensions.js';
+import { ClientCredentialsProvider, StaticPrivateKeyJwtProvider } from '@modelcontextprotocol/sdk/client/auth-extensions.js';
+import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { accessToken, createClient, deliverRun } from './services';
 import { describe, expect, newDeliveryId, newRepoId, test } from './support';
@@ -12,6 +13,24 @@ interface WaitResult {
 
 function waited(stdout: string): WaitResult {
   return JSON.parse(stdout) as WaitResult;
+}
+
+// tokenExchangeProvider logs a workload in through the SDK's own auth flow with RFC 8693 token exchange: client_id in the form,
+// and a fresh token from the workload's platform as subject_token at each login. The SDK has no provider for this grant, so this
+// is its provider for a static client assertion with the assertion swapped for the subject token.
+function tokenExchangeProvider(clientId: string, expectedIssuer: string, subjectToken: () => Promise<string>): OAuthClientProvider {
+  return Object.assign(new StaticPrivateKeyJwtProvider({ clientId, expectedIssuer, jwtBearerAssertion: '' }), {
+    addClientAuthentication: (_headers: Headers, params: URLSearchParams): void => params.set('client_id', clientId),
+    prepareTokenRequest: async (scope?: string): Promise<URLSearchParams> => {
+      const params = new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+        subject_token: await subjectToken(),
+        subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+      });
+      if (scope !== undefined) params.set('scope', scope);
+      return params;
+    },
+  });
 }
 
 interface RawPoll {
@@ -72,6 +91,75 @@ describe('service accounts', () => {
         await client.close();
       }
     }, { publicUrl: true });
+  });
+
+  // A pod logs in with its projected service account token: no secret, the issuer's keys come from its discovery document, and
+  // the token that the SDK gets works on /github/mcp.
+  test('a workload logs in through the TypeScript SDK with its platform token, waits for an event and lists events', async ({ faucet, issuer }) => {
+    await faucet.withFaucet({}, async (started, output) => {
+      const repoId = newRepoId();
+      const repo = `verify/r${repoId}`;
+      const made = await started.clients(['create', '-no-secret', '-resource', `${started.baseUrl}/github/mcp`, '-grant', `repo:${repo}`, 'pod-agent']);
+      expect(made.code, made.stderr).toBe(0);
+      expect(made.stdout, 'no secret to keep').toBe('client_id: pod-agent\n');
+      const sub = 'system:serviceaccount:apps:pod-agent';
+      const trusted = await started.clients(['trust', 'pod-agent', '-issuer', issuer.url, '-claim', `sub=${sub}`]);
+      expect(trusted.code, trusted.stderr).toBe(0);
+      const ruleId = /^rule_id: (?<id>\d+)\n$/.exec(trusted.stdout)?.groups?.id;
+      expect(ruleId, trusted.stdout).toBeDefined();
+      await deliverRun(started, repoId);
+
+      const subjects: string[] = [];
+      const provider = tokenExchangeProvider('pod-agent', started.baseUrl, async () => {
+        subjects.push(issuer.sign({ sub, aud: [started.baseUrl] }));
+        return subjects[subjects.length - 1] as string;
+      });
+      const transport = new StreamableHTTPClientTransport(new URL(`${started.baseUrl}/github/mcp`), { authProvider: provider });
+      const client = new Client({ name: 'ts-workload', version: '0' });
+      await client.connect(transport);
+      let token: string;
+      try {
+        const result = (await client.callTool({
+          name: 'wait_for_github_events',
+          arguments: { repo, types: ['ci.run_completed'], cursor: 0, timeout_s: 1 },
+        })) as WaitResult;
+        expect(result.isError, JSON.stringify(result)).not.toBe(true);
+        expect(result.structuredContent?.events).toEqual([expect.objectContaining({ type: 'ci.run_completed', repo_id: repoId })]);
+        token = (await provider.tokens())?.access_token as string;
+        expect(token).toMatch(/^fct_[A-Za-z0-9_-]{43}$/);
+      } finally {
+        await client.close();
+      }
+      expect(subjects, 'the SDK asked for one subject token for its one login').toHaveLength(1);
+      expect(issuer.hits('/.well-known/openid-configuration'), 'faucet read the keys from the discovery document').toBe(1);
+      expect(issuer.hits('/openid/v1/jwks')).toBe(1);
+
+      const list = await started.mcp<{ events: { name: string }[] }>('events/list', {}, { token });
+      expect(list.error, list.body).toBeNull();
+      expect(list.result?.events.map((e) => e.name)).toContain('ci.run_completed');
+
+      const untrusted = await started.clients(['untrust', 'pod-agent', ruleId as string]);
+      expect(untrusted.code, untrusted.stderr).toBe(0);
+      subjects.push(issuer.sign({ sub, aud: [started.baseUrl] }));
+      const refused = await started.request('/oauth/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+          client_id: 'pod-agent',
+          subject_token: subjects[subjects.length - 1] as string,
+          subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+        }).toString(),
+      });
+      expect(refused.status, refused.body).toBe(401);
+      expect(JSON.parse(refused.body)).toEqual({
+        error: 'invalid_client',
+        error_description: 'the client trusts no workload issuer: add one with faucet clients trust',
+      });
+
+      for (const secret of [...subjects, token]) expect(output()).not.toContain(secret);
+      expect(started.leaksSecret(output())).toBe(false);
+    }, { publicUrl: true, e2eBuild: true });
   });
 
   // A service that reads only raw events can start. The push that nobody wants is not stored, and it still names the
