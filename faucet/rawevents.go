@@ -34,9 +34,9 @@ type rawEvent struct {
 // full and that a host may offer raw, sorted by event. issue_comment is here
 // because pr.comments stores only the comments on pull requests. Each payload
 // names a repository, or for some events of an organization, such as
-// project, project_card, project_column, package, registry_package and
-// repository_ruleset, only the organization: such a delivery reaches an
-// owner or all interest and no repository's.
+// project, project_card, project_column, package and registry_package, only
+// the organization: such a delivery reaches an owner or all interest and no
+// repository's.
 var rawEvents = []rawEvent{
 	{"commit_comment", "Comments that were posted on a commit."},
 	{"create", "Git branches and tags that were created."},
