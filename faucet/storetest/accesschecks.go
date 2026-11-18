@@ -33,6 +33,7 @@ var accessCheckSubtests = []struct {
 	{"ADenialTakesAwayThatCheckOnly", aDenialTakesAwayThatCheckOnly},
 	{"ADenialTakesAwayTheOlderChecksOfTheOtherNamesOfTheRepository", aDenialTakesAwayTheOlderChecksOfTheOtherNamesOfTheRepository},
 	{"RecentAccessChecksAreTheMostRecentlyUsedOfTheConnection", recentAccessChecksAreTheMostRecentlyUsedOfTheConnection},
+	{"RecentAccessChecksBreakATieByTheBytesOfTheName", recentAccessChecksBreakATieByTheBytesOfTheName},
 	{"RecentAccessChecksLeaveOutTheChecksUsedBeforeTheBound", recentAccessChecksLeaveOutTheChecksUsedBeforeTheBound},
 	{"DeleteUnusedAccessChecksDeletesTheChecksUsedBeforeTheBound", deleteUnusedAccessChecksDeletesTheChecksUsedBeforeTheBound},
 	{"DeleteUnusedAccessChecksDeletesTheDenialsMadeBeforeTheirBound", deleteUnusedAccessChecksDeletesTheDenialsMadeBeforeTheirBound},
@@ -401,6 +402,24 @@ func recentAccessChecksAreTheMostRecentlyUsedOfTheConnection(t *testing.T, s oau
 	got, err = s.RecentAccessChecks(ctx, c.ID, time.Time{}, 0)
 	require.NoError(t, err)
 	require.Empty(t, got)
+}
+
+// The order of names that tie does not depend on the collation of a
+// database: a database in en_US puts org/new before o/x, which bytes order
+// the other way.
+func recentAccessChecksBreakATieByTheBytesOfTheName(t *testing.T, s oauth.Store) {
+	now := loginNow()
+	c := connectionAt(1, now)
+	approvedRequest(t, s, "req-1", c, now)
+	var checks []oauth.AccessCheck
+	for i, repo := range []string{"org/new", "o/x", "o-z/a", "o.y/b"} {
+		checks = append(checks, checkOf(c, repo, int64(11+i), now))
+	}
+	for _, check := range checks {
+		storeCheck(t, s, check)
+	}
+
+	requireChecks(t, s, c.ID, []oauth.AccessCheck{checks[2], checks[3], checks[1], checks[0]}, "ties come in the order of the bytes of their names")
 }
 
 func recentAccessChecksLeaveOutTheChecksUsedBeforeTheBound(t *testing.T, s oauth.Store) {

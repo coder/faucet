@@ -66,8 +66,8 @@ type AccessCheckStore interface {
 	StoreAccessCheck(ctx context.Context, c AccessCheck) error
 	// RecentAccessChecks returns up to limit passes of the connection whose
 	// last use came at or after usedSince, the most recently used first,
-	// and those used at the same time by repository. It leaves the denials
-	// out.
+	// and those used at the same time in the order of the bytes of their
+	// repository. It leaves the denials out.
 	RecentAccessChecks(ctx context.Context, connectionID string, usedSince time.Time, limit int) ([]AccessCheck, error)
 	// DeleteUnusedAccessChecks deletes every check, of every connection,
 	// whose last use came before usedBefore, and every denial whose lookup
