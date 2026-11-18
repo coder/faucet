@@ -137,3 +137,43 @@ func (c connections) renew(ctx context.Context, current Connection) (Connection,
 	c.logger.Debug(ctx, "refreshed the GitHub token of a connection", slog.F("connection_id", current.ID))
 	return next, tokens.access, nil
 }
+
+// UserResolver returns the SubjectResolver of users who logged in through a
+// browser.
+func UserResolver(_ Store) SubjectResolver {
+	return func(context.Context, string, []faucet.Scope) (faucet.Principal, error) {
+		return faucet.Principal{}, xerrors.New("not built yet")
+	}
+}
+
+// RepoChecker asks GitHub whether the principal's own token can read a
+// repository. faucet.TokenAuthorizer is one.
+type RepoChecker interface {
+	RepoID(ctx context.Context, p faucet.Principal, repo string) (int64, error)
+}
+
+// UserAccessDeps are what a UserAccess needs.
+type UserAccessDeps struct {
+	Store  Store
+	Clock  quartz.Clock
+	Logger slog.Logger
+	Login  BrowserLogin
+	Repos  RepoChecker
+}
+
+// UserAccess is the faucet.Authorizer of users who logged in through a
+// browser.
+type UserAccess struct{}
+
+// NewUserAccess returns the UserAccess for d.
+func NewUserAccess(UserAccessDeps) (UserAccess, error) { return UserAccess{}, nil }
+
+// RepoID implements faucet.Authorizer.
+func (UserAccess) RepoID(context.Context, faucet.Principal, string) (int64, error) {
+	return 0, xerrors.New("not built yet")
+}
+
+// RepoIDFresh implements faucet.Authorizer.
+func (UserAccess) RepoIDFresh(context.Context, faucet.Principal, string) (int64, error) {
+	return 0, xerrors.New("not built yet")
+}
