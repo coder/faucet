@@ -80,6 +80,13 @@ const (
 	// endpoint. It must outlast the longest wait the tool allows, which is 50
 	// seconds.
 	mcpWriteTimeout = 75 * time.Second
+	// serverWriteTimeout is the server's write deadline, from the end of the
+	// request's headers.
+	serverWriteTimeout = 30 * time.Second
+	// tokenTimeout keeps a request to the token endpoint inside the server's
+	// write deadline, so that a slow GitHub or store fails a refresh before
+	// its rotation, rather than rotating after the client got no answer.
+	tokenTimeout = 25 * time.Second
 )
 
 type config struct {
@@ -511,13 +518,22 @@ func newRouter(svc *faucet.Service, tokens bearers, login *oauth.Server, cron cr
 		r.Handle("/.well-known/oauth-authorization-server", login.MetadataHandler())
 		r.Handle("/oauth/authorize", login.AuthorizeHandler())
 		r.Handle("/oauth/github/callback", login.GitHubCallbackHandler())
-		r.Handle("/oauth/token", login.TokenHandler())
+		r.Handle("/oauth/token", within(tokenTimeout, login.TokenHandler()))
 		r.Handle("/oauth/revoke", login.RevokeHandler())
 	}
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok\n")
 	})
 	return r
+}
+
+// within runs next with a request context that ends after d.
+func within(d time.Duration, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), d)
+		defer cancel()
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // protectedResource serves the metadata (RFC 9728) of the MCP endpoint at
@@ -540,7 +556,7 @@ func serve(ctx context.Context, logger slog.Logger, port string, handler http.Ha
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		WriteTimeout:      serverWriteTimeout,
 		IdleTimeout:       2 * time.Minute,
 	}
 	errCh := make(chan error, 1)

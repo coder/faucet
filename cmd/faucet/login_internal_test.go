@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -513,6 +514,51 @@ type countingClients struct {
 func (c *countingClients) Client(ctx context.Context, id string) (oauth.Client, error) {
 	c.reads.Add(1)
 	return c.Store.Client(ctx, id)
+}
+
+// deadlineClients records the deadline of each read of a client, which the
+// token endpoint makes for a client credentials grant. The zero time is no
+// deadline.
+type deadlineClients struct {
+	*pgstore.Store
+	mu        sync.Mutex
+	deadlines []time.Time
+}
+
+func (c *deadlineClients) Client(ctx context.Context, id string) (oauth.Client, error) {
+	deadline, _ := ctx.Deadline()
+	c.mu.Lock()
+	c.deadlines = append(c.deadlines, deadline)
+	c.mu.Unlock()
+	return c.Store.Client(ctx, id)
+}
+
+// The token endpoint ends a request before the server's write deadline, so
+// that a refresh which runs long fails before its rotation instead of
+// rotating after the client got no answer.
+func TestTheTokenEndpointEndsARequestBeforeTheWriteDeadline(t *testing.T) {
+	t.Parallel()
+	require.Less(t, tokenTimeout, serverWriteTimeout)
+	clients := &deadlineClients{}
+	srv := newLoginServer(t, func(c *loginConfig) {
+		c.logins = func(store *pgstore.Store) loginStore {
+			clients.Store = store
+			return clients
+		}
+	})
+	secret := srv.client(t, "ci-watcher", "/github/mcp", bothScopes, "repo:octo-org/octo-repo")
+
+	start := time.Now()
+	srv.token(t, "ci-watcher", secret)
+	end := time.Now()
+	clients.mu.Lock()
+	defer clients.mu.Unlock()
+	require.Len(t, clients.deadlines, 1)
+	deadline := clients.deadlines[0]
+	require.False(t, deadline.IsZero(), "the token endpoint runs under a deadline")
+	require.True(t, deadline.Before(start.Add(serverWriteTimeout)), "the deadline %v comes before the write deadline", deadline.Sub(start))
+	require.False(t, deadline.Before(start.Add(tokenTimeout)), "the deadline %v is the token endpoint's", deadline.Sub(start))
+	require.False(t, deadline.After(end.Add(tokenTimeout)), "the deadline %v is the token endpoint's", deadline.Sub(start))
 }
 
 // token asks the token endpoint for a token of the client, as a client
