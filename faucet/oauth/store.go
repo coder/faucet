@@ -142,4 +142,7 @@ type Store interface {
 	// with this ID. It returns ErrUnknownTrustRule when the client holds no
 	// such rule, as when another client holds it.
 	RemoveTrustRule(ctx context.Context, clientID string, id int64) error
+	// CountTrustRules returns how many trust rules each client holds, by
+	// client ID, with no entry for a client that holds none.
+	CountTrustRules(ctx context.Context) (map[string]int, error)
 }

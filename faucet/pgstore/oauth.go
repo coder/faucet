@@ -214,6 +214,20 @@ func (s *Store) RemoveTrustRule(ctx context.Context, clientID string, id int64) 
 	return nil
 }
 
+// CountTrustRules implements oauth.Store.
+func (s *Store) CountTrustRules(ctx context.Context) (_ map[string]int, err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	rows, err := s.q.CountTrustRules(ctx)
+	if err != nil {
+		return nil, xerrors.Errorf("count trust rules: %w", err)
+	}
+	counts := make(map[string]int, len(rows))
+	for _, row := range rows {
+		counts[row.ClientID] = int(row.Rules)
+	}
+	return counts, nil
+}
+
 func clientOf(row database.FaucetServiceClient) (oauth.Client, error) {
 	c := oauth.Client{
 		ID: row.ClientID, Resource: row.Resource,

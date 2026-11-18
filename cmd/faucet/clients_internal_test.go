@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/xerrors"
 
 	"github.com/coder/faucet/cmd/faucet/internal/dbconn"
 	"github.com/coder/faucet/faucet"
@@ -534,6 +535,32 @@ func TestTheClientsCommandRemovesATrustRuleOfThatClientOnly(t *testing.T) {
 	rules, err := store.TrustRules(ctx, "digest-bot")
 	require.NoError(t, err)
 	require.Len(t, rules, 1, "the rule stays")
+}
+
+// rulesUnread is a store whose TrustRules fails.
+type rulesUnread struct{ clientStore }
+
+func (rulesUnread) TrustRules(context.Context, string) ([]oauth.StoredTrustRule, error) {
+	return nil, xerrors.New("the command read the rules of a client")
+}
+
+// list counts the rules of every client in one query, and reads no rule: a
+// key set can be 32 KiB, and the database can be far away.
+func TestListCountsTheTrustRulesWithoutReadingThem(t *testing.T) {
+	t.Parallel()
+	getenv, store := newClientsDatabase(t)
+	for _, id := range []string{"digest-bot", "ci-watcher"} {
+		_, _, err := clients(t, getenv, "create", "-resource", "https://faucet.example.com/github/mcp", "-no-secret", "-grant", "repo:coder/faucet", id)
+		require.NoError(t, err)
+	}
+	for _, pins := range [][]string{vercelPins, {"owner_id=" + codercomTeam, "project_id=prj_other", "environment=production"}} {
+		_, _, err := clients(t, getenv, trustVercel("digest-bot", pins...)...)
+		require.NoError(t, err)
+	}
+	var out, notice bytes.Buffer
+	require.NoError(t, clientsCommand(context.Background(), []string{"list"}, rulesUnread{store}, nil, nil, time.Now(), &out, &notice))
+	require.Regexp(t, `(?m)^digest-bot\s+.*\s-\s+no\s+2$`, out.String())
+	require.Regexp(t, `(?m)^ci-watcher\s+.*\s-\s+no\s+0$`, out.String())
 }
 
 func TestTheTrustCommandsPrintTheirUsageForHelp(t *testing.T) {

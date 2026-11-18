@@ -49,6 +49,40 @@ func (q *Queries) AddTrustRule(ctx context.Context, arg AddTrustRuleParams) (int
 	return id, err
 }
 
+const countTrustRules = `-- name: CountTrustRules :many
+SELECT client_id, count(*)::integer AS rules
+FROM faucet_workload_trusts
+GROUP BY client_id
+`
+
+type CountTrustRulesRow struct {
+	ClientID string
+	Rules    int32
+}
+
+func (q *Queries) CountTrustRules(ctx context.Context) ([]CountTrustRulesRow, error) {
+	rows, err := q.db.QueryContext(ctx, countTrustRules)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountTrustRulesRow
+	for rows.Next() {
+		var i CountTrustRulesRow
+		if err := rows.Scan(&i.ClientID, &i.Rules); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTrustRules = `-- name: ListTrustRules :many
 SELECT id, issuer, claims::text AS claims, coalesce(jwks::text, '')::text AS jwks, created_at
 FROM faucet_workload_trusts

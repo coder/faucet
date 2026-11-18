@@ -909,6 +909,10 @@ func TestOAuthStoreCallThatItsContextCutShortWrapsTheContextError(t *testing.T) 
 			return err
 		},
 		"RemoveTrustRule": func(ctx context.Context) error { return store.RemoveTrustRule(ctx, client.ID, 1) },
+		"CountTrustRules": func(ctx context.Context) error {
+			_, err := store.CountTrustRules(ctx)
+			return err
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

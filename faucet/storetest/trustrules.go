@@ -27,6 +27,7 @@ var trustRuleSubtests = []struct {
 	{"ACompactKeySetOf32KiBReadsBackWithinTheLimit", aCompactKeySetOf32KiBReadsBackWithinTheLimit},
 	{"AddTrustRuleOfAnUnknownClientIsUnknown", addTrustRuleOfAnUnknownClientIsUnknown},
 	{"RemoveTrustRuleRemovesThatRuleOfThatClientOnly", removeTrustRuleRemovesThatRuleOfThatClientOnly},
+	{"CountTrustRulesCountsTheRulesOfEachClient", countTrustRulesCountsTheRulesOfEachClient},
 	{"TrustRuleSharesNoMapWithItsCaller", trustRuleSharesNoMapWithItsCaller},
 }
 
@@ -247,6 +248,32 @@ func removeTrustRuleRemovesThatRuleOfThatClientOnly(t *testing.T, s oauth.Store)
 	again, err := s.AddTrustRule(ctx, "digest-bot", clusterRule(), now)
 	require.NoError(t, err)
 	require.NotContains(t, []int64{cluster, vercel, others}, again, "a rule added again gets an ID that no rule had")
+}
+
+func countTrustRulesCountsTheRulesOfEachClient(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	counts, err := s.CountTrustRules(ctx)
+	require.NoError(t, err)
+	require.Empty(t, counts)
+	addClients(t, s, "digest-bot", "ci-watcher", "triage")
+	now := time.Now()
+	cluster, err := s.AddTrustRule(ctx, "digest-bot", clusterRule(), now)
+	require.NoError(t, err)
+	for _, add := range []struct {
+		clientID string
+		rule     oauth.TrustRule
+	}{{"digest-bot", vercelRule()}, {"digest-bot", clusterRule()}, {"ci-watcher", clusterRule()}} {
+		_, err := s.AddTrustRule(ctx, add.clientID, add.rule, now)
+		require.NoError(t, err)
+	}
+	counts, err = s.CountTrustRules(ctx)
+	require.NoError(t, err)
+	require.Equal(t, map[string]int{"digest-bot": 2, "ci-watcher": 1}, counts, "a rule added again is one rule, and a client with none has no entry")
+
+	require.NoError(t, s.RemoveTrustRule(ctx, "digest-bot", cluster))
+	counts, err = s.CountTrustRules(ctx)
+	require.NoError(t, err)
+	require.Equal(t, map[string]int{"digest-bot": 1, "ci-watcher": 1}, counts)
 }
 
 func trustRuleSharesNoMapWithItsCaller(t *testing.T, s oauth.Store) {

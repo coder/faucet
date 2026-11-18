@@ -259,6 +259,10 @@ func listClients(ctx context.Context, store oauth.Store, stdout io.Writer) error
 	if err != nil {
 		return err
 	}
+	rules, err := store.CountTrustRules(ctx)
+	if err != nil {
+		return err
+	}
 	w := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(w, "CLIENT ID\tRESOURCE\tSCOPES\tGRANTS\tCREATED\tDISABLED\tSECRET\tTRUST RULES")
 	for _, c := range clients {
@@ -270,12 +274,8 @@ func listClients(ctx context.Context, store oauth.Store, stdout io.Writer) error
 		if c.SecretHash == nil {
 			secret = "no"
 		}
-		rules, err := store.TrustRules(ctx, c.ID)
-		if err != nil {
-			return err
-		}
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n", c.ID, c.Resource, strings.Join(scopeNames(c.Scopes), ","),
-			strings.Join(c.Grants, ","), c.CreatedAt.UTC().Format(time.RFC3339), disabled, secret, len(rules))
+			strings.Join(c.Grants, ","), c.CreatedAt.UTC().Format(time.RFC3339), disabled, secret, rules[c.ID])
 	}
 	return w.Flush()
 }

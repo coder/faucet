@@ -207,6 +207,16 @@ func (s *fakeStore) RemoveTrustRule(_ context.Context, clientID string, id int64
 	return nil
 }
 
+func (s *fakeStore) CountTrustRules(context.Context) (map[string]int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	counts := map[string]int{}
+	for _, held := range s.trustRules {
+		counts[held.clientID]++
+	}
+	return counts, nil
+}
+
 // sameTrustRule reports whether a and b hold the same issuer and the same
 // JSON values, as Postgres compares jsonb.
 func sameTrustRule(a, b oauth.TrustRule) bool {

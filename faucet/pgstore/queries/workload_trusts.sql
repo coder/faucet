@@ -21,6 +21,11 @@ FROM faucet_workload_trusts
 WHERE client_id = @client_id
 ORDER BY id;
 
+-- name: CountTrustRules :many
+SELECT client_id, count(*)::integer AS rules
+FROM faucet_workload_trusts
+GROUP BY client_id;
+
 -- name: RemoveTrustRule :execrows
 DELETE FROM faucet_workload_trusts
 WHERE client_id = @client_id AND id = @id;
