@@ -2,6 +2,12 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## To stored repository checks (migration `000015_access_checks`)
+
+Faucet stores the repository checks of browser logins, so a poll or a wait of a browser login asks GitHub only when no check newer than its session's last refresh answers (see [browser-login.md](browser-login.md#how-faucet-checks-a-repository)). Each refresh of a browser login asks GitHub again about up to 50 repositories, which can make the refresh take up to 5 seconds longer. The migration adds `faucet_access_checks`, which stays empty until a browser login checks a repository.
+
+A host that embeds faucet: an `oauth.Store` of your own must also implement `oauth.AccessCheckStore` and pass the new `storetest.RunOAuth` subtests, and an `oauth.ServerDeps` with a `Login` now needs `Repos`. The down migration drops every stored check, and faucet then asks GitHub at the next use of each repository.
+
 ## To the browser login (migration `000013_browser_login`)
 
 This came in [#54](https://github.com/coder/faucet/pull/54). Nothing that a client sees changes until you set `FAUCET_GITHUB_APP_CLIENT_ID`, `FAUCET_GITHUB_APP_CLIENT_SECRET` and `FAUCET_TOKEN_KEY` next to `FAUCET_PUBLIC_URL` (see [browser-login.md](browser-login.md)). With only some of them set, the server refuses to start and names the missing ones. Then:
