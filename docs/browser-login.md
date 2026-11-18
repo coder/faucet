@@ -2,7 +2,7 @@
 
 A coding agent can connect to `https://<your host>/github/mcp` with no token. Faucet answers 401, the agent opens a browser, and its user logs in to GitHub through faucet. Nobody makes a GitHub token by hand.
 
-For this way in, faucet keeps the user's GitHub App token. It seals the token under `FAUCET_TOKEN_KEY` and gives the agent only faucet's own tokens, an access token for 15 minutes and a refresh token. The [security model](security.md#three-kinds-of-caller) compares this with a pasted token and a service.
+For this way in, faucet keeps the user's GitHub App token. It seals the token under `FAUCET_TOKEN_KEY` and gives the agent only faucet's own tokens, an access token for 15 minutes and a refresh token. The [security model](security.md#four-kinds-of-caller) compares this with a pasted token, a service and a workload.
 
 ## Turn it on
 

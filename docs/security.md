@@ -1,16 +1,17 @@
 # Security model
 
-## Three kinds of caller
+## Four kinds of caller
 
-Faucet returns events only for repositories that the caller may read. A caller of `/github/mcp` is one of three kinds:
+Faucet returns events only for repositories that the caller may read. A caller of `/github/mcp` is one of four kinds:
 
 | Caller | Its bearer token | Who decides what it may read | GitHub token that faucet keeps for it |
 | --- | --- | --- | --- |
 | A pasted GitHub token | The caller's GitHub token | GitHub, asked with that token | None. The token lives only for the request. |
 | A [browser login](browser-login.md) | A faucet access token | GitHub, asked with the user's GitHub App token | The user's access token and refresh token, sealed |
 | A [service](service-accounts.md) | A faucet access token | The operator's grants. Faucet asks GitHub nothing. | None |
+| A [workload](service-accounts.md#log-in-with-a-workload-identity) | A faucet access token, for a token that its platform signed | The operator's grants, as for a service, since it logs in as one | None |
 
-For a pasted token and for a service, faucet holds no GitHub token of the caller. For a browser login, faucet keeps the user's GitHub App token, sealed with AES-256-GCM under `FAUCET_TOKEN_KEY`, and gives the client its own short-lived token. The client never sees the GitHub token. Whoever holds both faucet's database and `FAUCET_TOKEN_KEY` can open those tokens and act as each of those users within the App's permissions, and with the App's client secret can also refresh them. That is why the App gets read-only permissions.
+For a pasted token, a service and a workload, faucet holds no GitHub token of the caller. For a browser login, faucet keeps the user's GitHub App token, sealed with AES-256-GCM under `FAUCET_TOKEN_KEY`, and gives the client its own short-lived token. The client never sees the GitHub token. Whoever holds both faucet's database and `FAUCET_TOKEN_KEY` can open those tokens and act as each of those users within the App's permissions, and with the App's client secret can also refresh them. That is why the App gets read-only permissions.
 
 ## Access to events
 
@@ -51,6 +52,16 @@ These checks keep another site, another browser and another client from finishin
 - **The pages load nothing and run one script,** the wait of Continue, which their Content-Security-Policy allows by its hash. No other site can frame them.
 
 Anyone who serves a valid document can open `/oauth/authorize`, so faucet bounds what that costs. It keeps up to 64 documents, each for as long as its cache headers let a shared cache keep it and 5 minutes at most, and fetches no client ID on its own host. The consent page stores nothing: its form carries the request, sealed with AES-256-GCM for the cookie of the browser that got the page, under a key that HKDF-SHA256 derives from `FAUCET_TOKEN_KEY` for consent forms alone, and faucet stores the request only when that browser presses Continue. So no number of requests uses up anything that another user's login needs. A script can still store rows, one for each GET and POST pair, because it can keep the cookie and send faucet's `Origin` itself. Put a per-IP rate limit on `POST /oauth/authorize` at the edge, such as a Vercel Firewall rule ([deploy.md](deploy.md#setup) has the step); `/cron/purge` deletes such a row once it expires, 10 minutes after the GET. Faucet keeps the failure of a fetch for 1 minute, so a client ID whose fetch failed costs one fetch a minute however often it comes, and logins that start at once share one fetch. A client ID with a new path, or a document sent with `no-store`, still costs one fetch per request. Faucet sets no limit per host, because bad client IDs on a host could use it up and lock out that host's real client.
+
+## Workload identities
+
+A workload logs in as a service client with a token that its platform signed, so faucet trusts the platform's issuer to say which workload holds the token. A trust rule names that issuer and pins claims that only the one workload's tokens hold. Faucet takes a token whose signature verifies with the issuer's key, whose `aud` is faucet's public URL alone, so that a token that the platform made for another service does not log in, and that has not expired. It then mints its own token, which lasts 15 minutes and never past the platform's token. Faucet remembers no platform token, so a copy of one logs in as the client, again and again, until its `exp`. Vercel documents 2 hours for the token of a production function, and a Kubernetes token lasts its `expirationSeconds`.
+
+- **An issuer that serves many tenants is pinned to one tenant by ID.** Vercel signs the tokens of every team with the same keys, and GitHub Actions and gitlab.com serve every account from one issuer. Faucet requires a rule for such an issuer to pin the tenant's ID, never only a name that a tenant can rename and another can take, and it never trusts an issuer that every tenant shares (see the [Vercel warning](service-accounts.md#example-a-vercel-function)). A rule for any other issuer must pin `sub`.
+- **A platform's token logs in only through the token exchange** (RFC 8693), never as a client assertion (RFC 7523): no grant of faucet's takes one. The platform's token proves which workload calls, and the operator's trust rule, not the token, says which client it may act as.
+- **Keys come through the guarded client** of [callback URLs](#callback-urls), which faucet builds itself: `https` and public addresses only, and no redirects. The discovery document and the key set that it names must arrive within 5 seconds together, and each must be 32 KiB at most. Faucet fetches only the issuers that an operator trusted, for a token that names one, so a request cannot make faucet fetch from anywhere else. Pasted keys are never fetched.
+- **Faucet keeps an issuer's keys for 5 minutes**, so a key that the issuer drops stops working within 5 minutes. It fetches sooner only for a token whose `kid` the keys lack, and at most once a minute per issuer, so tokens with made-up `kid`s cost one fetch a minute. It keeps the keys of up to 64 issuers.
+- **A failed fetch keeps the keys that faucet holds** until their 5 minutes end. Faucet keeps the failure for a minute, so while an issuer fails after its keys ran out, faucet answers each login of that issuer 503 `temporarily_unavailable` with `Retry-After: 60`, and fetches again at the first login a minute after the failure. The answer names no cause, and the log has it.
 
 ## Callback URLs
 

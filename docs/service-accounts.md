@@ -1,6 +1,6 @@
 # Service accounts
 
-A service agent, such as one that analyzes GitHub events, logs in to faucet with a client ID and secret that an operator made ahead of time. It holds no GitHub token: faucet checks its access against the repositories that the operator granted it, and never asks GitHub about them.
+A service agent, such as one that analyzes GitHub events, logs in to faucet with a client ID and secret that an operator made ahead of time, or, when it runs as a Vercel function or a Kubernetes pod, with the token that its platform signs for it (see [Log in with a workload identity](#log-in-with-a-workload-identity)). It holds no GitHub token: faucet checks its access against the repositories that the operator granted it, and never asks GitHub about them.
 
 ## Turn it on
 
@@ -78,3 +78,164 @@ A delivery that GitHub sends again names the accounts as they were when it first
 - an `org:` grant still reads only its own account, but a service whose grant names the account that holds the login now cannot name that account by the login: its polls and waits of the `owner` target are refused, and so are the renewals of its subscriptions, which expire if the window outlasts them.
 
 The name part of a repository is the one under which faucet first saw it until a Repositories delivery says that it was renamed or transferred from that name. So neither a replayed delivery nor a redelivered older rename can move a name back. Without that event on the hook, or when faucet missed one rename of several, a renamed repository stays under the name faucet holds: the old `repo:` grant keeps working, and a grant of the new name finds nothing. After a rename, grant the new name. An `org:` grant covers a repository by its owner's ID, so a rename inside the owner changes nothing for it.
+
+## Log in with a workload identity
+
+A workload whose platform signs OpenID Connect tokens for it, such as a Vercel function or a Kubernetes pod, can log in with such a token instead of a secret that someone must store and rotate. The operator makes a client with no secret and gives it a trust rule: the issuer of the platform's tokens, and the claims that only this workload's tokens hold. The workload asks its platform for a token whose audience is faucet's public URL, and trades it at `POST /oauth/token` for a token of the client, with the token exchange of RFC 8693. The client's grants and scopes decide what the workload may read, as for any service.
+
+```mermaid
+sequenceDiagram
+    participant W as Workload
+    participant P as Its platform
+    participant F as faucet
+    W->>P: a token for the audience https://faucet.example.com
+    P-->>W: a JWT that names the workload, signed by the platform's issuer
+    W->>F: POST /oauth/token, token exchange, client_id and the JWT
+    F->>P: the issuer's discovery document and key set, unless the rule holds the keys
+    F-->>W: an fct_ access token for 15 minutes at most, no refresh token
+    W->>F: POST /github/mcp with Bearer fct_...
+```
+
+### Make the client
+
+| Command | What it does |
+| --- | --- |
+| `faucet clients create -no-secret -grant <grant> <client-id>` | Makes a client with no secret, which only its trust rules let in. It takes the flags of any `create`. |
+| `faucet clients trust <client-id> -issuer <url> -claim <name>=<value> [-claim ...] [-jwks-file <path>]` | Adds a trust rule and prints its `rule_id`. It refuses a rule that pins too little for its issuer, and says what to pin. |
+| `faucet clients trusts <client-id>` | Lists the client's rules with their IDs, claims and where their keys come from. |
+| `faucet clients untrust <client-id> <rule-id>` | Removes one rule. |
+| `faucet clients disable <client-id>` | Ends the client, as for every client. |
+
+Without `-jwks-file`, faucet fetches the issuer's keys from its OpenID discovery document, `<issuer>/.well-known/openid-configuration`, over `https` at public addresses only. Pass `-jwks-file` with the issuer's JWK Set for an issuer that faucet cannot reach. Faucet never fetches pasted keys, so when the issuer rotates its key, add a rule with the new set, then remove the old one. A client with a secret can hold trust rules too, and then logs in both ways.
+
+Each issuer that faucet knows needs more pins than `sub`, because all of its tenants share it:
+
+| Issuer | The rule must pin |
+| --- | --- |
+| `https://oidc.vercel.com/<team slug>` | `owner_id`, `project_id`, and `environment=production`. Faucet never trusts `https://oidc.vercel.com`, the issuer that every team shares. |
+| `https://token.actions.githubusercontent.com` | `repository_owner_id`, `repository_id` and `ref` |
+| `https://gitlab.com` | `namespace_id`, `project_id`, and `ref_protected=true` |
+| Any other, such as a Kubernetes cluster | `sub` |
+
+Faucet enforces the rows for GitHub Actions and gitlab.com, but neither is a supported way in yet: this page gives no example for them, and no test has logged in with a token of either.
+
+### What faucet checks
+
+A token matches a rule when all of these hold:
+
+- It is a JWT in compact form, signed with RS256 or ES256, whose header names its key in `kid`.
+- Its signature verifies with the issuer's key of that `kid`. A discovery document must name the rule's issuer byte for byte.
+- Its `iss` is the rule's issuer, byte for byte, and its `aud` is faucet's public URL alone, such as `https://faucet.example.com`, as a string or an array of one. That is faucet's issuer, not the `/github/mcp` endpoint.
+- Its `exp` is at least a second away, and its `nbf` and `iat`, when it has them, are at most a minute ahead of faucet's clock.
+- Each claim that the rule pins holds that value as a JSON string, byte for byte.
+
+Faucet tries the client's rules in the order they were added, and the first that matches wins.
+
+### The request and the answers
+
+The workload posts a form to `/oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, `client_id`, the platform's token as `subject_token`, and `subject_token_type=urn:ietf:params:oauth:token-type:jwt` (`urn:ietf:params:oauth:token-type:id_token` works too). `scope` and `resource` work as for client credentials, and `audience`, when sent, must be the client's endpoint. The request carries no secret, no Authorization header and no `actor_token`: the workload acts as the client, for no one else.
+
+| Answer | When |
+| --- | --- |
+| 200 with `access_token`, `token_type` `Bearer`, `expires_in`, `scope`, and `issued_token_type` `urn:ietf:params:oauth:token-type:access_token` | The token matches a rule. Faucet's token lasts 15 minutes, or until the platform's token expires when that is sooner. There is no refresh token: get a fresh token from the platform and trade it again. |
+| 400 `invalid_request` | The form is wrong, or faucet refused the platform's token. The description says why, and names no value that a rule pins. |
+| 400 `invalid_target` or `invalid_scope` | `resource` or `audience` names another endpoint, or the client holds none of the scopes asked for. |
+| 401 `invalid_client` | No live client has that ID, the client is for another server's endpoint, or it has no trust rule. |
+| 503 `temporarily_unavailable` with `Retry-After: 60` | Faucet could not fetch the keys of the token's issuer. Faucet logs the cause. Ask again after a minute. |
+
+`faucet clients untrust` stops new logins through that rule, and a token that a workload already got works until it expires, 15 minutes at most. `faucet clients disable` also ends the tokens that the client holds, on their next request.
+
+### Example: a Vercel function
+
+> [!WARNING]
+> **A Vercel trust rule must name your team and your project by their IDs.** Vercel signs the tokens of every team with the same keys: on 2026-11-18 the key sets of a real team's issuer, of the issuer that every team shares and of a slug that no team holds were the same. So any Vercel team can get a token for faucet's audience whose signature faucet accepts, and only the claims tell the teams apart.
+>
+> - **Pin `owner_id` (`team_...`) and `project_id` (`prj_...`), never `owner` or `project`.** `iss`, `owner`, `project` and `sub` hold only names, and a renamed team frees its slug for another team. Faucet refuses a rule without both IDs.
+> - **Only production logs in.** Faucet refuses the issuer that every team shares and every environment but `production`: a preview deployment runs the code of any branch, and a development token sits on a laptop for 12 hours.
+> - **A production build logs in too.** A token from a production build of the project holds the same `owner_id`, `project_id` and `environment` as a token of its production functions, and Vercel documents no claim that tells them apart. So code that runs while the project builds, such as an install script of a dependency, can log in as the client while its build token lasts, an hour. Grant the client only what a build of the project may read.
+
+1. Make the client and trust the project, with the IDs that the team's and the project's settings show:
+
+   ```sh
+   export DATABASE_URL='<the production database URL>' FAUCET_PUBLIC_URL='https://faucet.example.com'
+   go run ./cmd/faucet clients create -no-secret -grant repo:coder/faucet digest-bot
+   go run ./cmd/faucet clients trust digest-bot -issuer https://oidc.vercel.com/<team slug> \
+     -claim owner_id=team_... -claim project_id=prj_... -claim environment=production
+   ```
+
+2. In the function, ask Vercel for a token with faucet's public URL as its audience. Vercel names the team's issuer in a token with a custom audience whatever the project's issuer mode. `getVercelOidcToken` reads the token of the request, so the login must happen while the function serves one. The TypeScript MCP SDK has no provider for the token exchange, so this one changes the SDK's provider of a static client assertion, and asks for a fresh token at each login:
+
+   ```ts
+   import { getVercelOidcToken } from '@vercel/oidc';
+   import { StaticPrivateKeyJwtProvider } from '@modelcontextprotocol/sdk/client/auth-extensions.js';
+   import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
+   import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+   import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+
+   function tokenExchangeProvider(clientId: string, expectedIssuer: string, subjectToken: () => Promise<string>): OAuthClientProvider {
+     return Object.assign(new StaticPrivateKeyJwtProvider({ clientId, expectedIssuer, jwtBearerAssertion: '' }), {
+       addClientAuthentication: (_headers: Headers, params: URLSearchParams): void => params.set('client_id', clientId),
+       prepareTokenRequest: async (scope?: string): Promise<URLSearchParams> => {
+         const params = new URLSearchParams({
+           grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+           subject_token: await subjectToken(),
+           subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+         });
+         if (scope !== undefined) params.set('scope', scope);
+         return params;
+       },
+     });
+   }
+
+   const faucet = 'https://faucet.example.com';
+   const authProvider = tokenExchangeProvider('digest-bot', faucet, () => getVercelOidcToken({ audience: faucet }));
+   const client = new Client({ name: 'digest-bot', version: '1' });
+   await client.connect(new StreamableHTTPClientTransport(new URL(`${faucet}/github/mcp`), { authProvider }));
+   ```
+
+   The end-to-end tests run this provider with `@modelcontextprotocol/sdk` 1.32.2.
+
+After the team is renamed, its tokens name a new issuer, and the rule matches none of them. Trust the new issuer, then remove the old rule.
+
+### Example: a Kubernetes pod
+
+1. Mount a token of the pod's service account for faucet's audience. The kubelet replaces it before it expires, so read the file at each login:
+
+   ```yaml
+   apiVersion: v1
+   kind: Pod
+   metadata:
+     name: digest-bot
+     namespace: apps
+   spec:
+     serviceAccountName: digest-bot
+     containers:
+       - name: agent
+         image: <your image>
+         volumeMounts:
+           - name: faucet-token
+             mountPath: /var/run/secrets/faucet
+             readOnly: true
+     volumes:
+       - name: faucet-token
+         projected:
+           sources:
+             - serviceAccountToken:
+                 path: token
+                 audience: https://faucet.example.com
+                 expirationSeconds: 3600
+   ```
+
+2. Trust the service account. The issuer is the cluster's `--service-account-issuer`, which the cluster's discovery document names. Faucet fetches the keys that the document names when they are at a public `https` address. A private cluster names a private one, so paste its keys instead:
+
+   ```sh
+   kubectl get --raw /.well-known/openid-configuration
+   kubectl get --raw /openid/v1/jwks > cluster-jwks.json
+   go run ./cmd/faucet clients create -no-secret -grant repo:coder/faucet digest-bot
+   go run ./cmd/faucet clients trust digest-bot -issuer <the issuer> \
+     -claim sub=system:serviceaccount:apps:digest-bot -jwks-file cluster-jwks.json
+   ```
+
+   Anyone who can run a pod as that service account in that namespace can log in as the client.
+
+3. Log in with the provider of the Vercel example, with `() => readFile('/var/run/secrets/faucet/token', 'utf8')` from `node:fs/promises` as the token, or post the form with any other client.
