@@ -2,7 +2,6 @@ package oauth
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -63,8 +62,10 @@ func (m workloadMatch) lifetime(now time.Time) time.Duration {
 // check returns the first of rules, in their order, that token matches at
 // now. audience is faucet's issuer, which the token's aud must hold as its
 // only value. It fetches keys only for the issuer of a rule that names the
-// token's iss. Its error wraps errSubjectToken, or errIssuerKeys when the
-// keys could not be fetched, unless ctx ended.
+// token's iss. When ctx ends, it stops with ctx's error. Its other errors
+// wrap errIssuerKeys when the keys of a rule could not be fetched, or else
+// errSubjectToken, and then give the reason of a rule that the token's
+// signature passed over the reason of one that it did not.
 func (c *workloadChecker) check(ctx context.Context, rules []TrustRule, token, audience string, now time.Time) (workloadMatch, error) {
 	jws, err := jose.ParseSignedCompact(token, workloadAlgorithms)
 	if err != nil {
@@ -94,10 +95,12 @@ func (c *workloadChecker) check(ctx context.Context, rules []TrustRule, token, a
 			continue
 		}
 		expires, err := c.match(ctx, rule, jws, header, audience, now)
-		if err == nil {
+		switch {
+		case err == nil:
 			return workloadMatch{Rule: r, Expires: expires}, nil
-		}
-		if refused == nil {
+		case ctx.Err() != nil:
+			return workloadMatch{}, ctx.Err()
+		case refused == nil || rank(err) > rank(refused):
 			refused = err
 		}
 	}
@@ -119,23 +122,23 @@ func (c *workloadChecker) match(ctx context.Context, rule trustRule, jws *jose.J
 	var registered jwt.Claims
 	var claims map[string]any
 	if json.Unmarshal(payload, &registered) != nil || json.Unmarshal(payload, &claims) != nil {
-		return time.Time{}, refuseToken("its claims must be a JSON object, with the registered claims of RFC 7519 in their types")
+		return time.Time{}, refuseSigned("its claims must be a JSON object, with the registered claims of RFC 7519 in their types")
 	}
 	switch {
 	case len(registered.Audience) != 1 || registered.Audience[0] != audience:
-		return time.Time{}, refuseToken("its aud must be " + audience + " alone")
+		return time.Time{}, refuseSigned("its aud must be " + audience + " alone")
 	case registered.Expiry == nil:
-		return time.Time{}, refuseToken("it must have an exp")
+		return time.Time{}, refuseSigned("it must have an exp")
 	case registered.Expiry.Time().Sub(now) < minWorkloadTokenLifetime:
-		return time.Time{}, refuseToken("it has expired, or expires in less than a second")
+		return time.Time{}, refuseSigned("it has expired, or expires in less than a second")
 	case registered.NotBefore != nil && registered.NotBefore.Time().After(now.Add(workloadClockLeeway)):
-		return time.Time{}, refuseToken("its nbf is in the future")
+		return time.Time{}, refuseSigned("its nbf is in the future")
 	case registered.IssuedAt != nil && registered.IssuedAt.Time().After(now.Add(workloadClockLeeway)):
-		return time.Time{}, refuseToken("its iat is in the future")
+		return time.Time{}, refuseSigned("its iat is in the future")
 	}
 	for name, want := range rule.Claims {
 		if got, ok := claims[name].(string); !ok || got != want {
-			return time.Time{}, refuseToken("it matches no trust rule of the client")
+			return time.Time{}, refuseSigned("it matches no trust rule of the client")
 		}
 	}
 	return registered.Expiry.Time(), nil
@@ -158,6 +161,32 @@ func (c *workloadChecker) key(ctx context.Context, rule trustRule, header jose.H
 	return nil, refuseToken("its kid and alg name no key of its issuer")
 }
 
-func refuseToken(why string) error {
-	return fmt.Errorf("%w: %s", errSubjectToken, why)
+// tokenRefusal is the error of a subject token that faucet refuses. It wraps
+// errSubjectToken, and signed tells a refusal after the token's signature
+// verified.
+type tokenRefusal struct {
+	why    string
+	signed bool
+}
+
+func (r tokenRefusal) Error() string { return errSubjectToken.Error() + ": " + r.why }
+
+func (tokenRefusal) Unwrap() error { return errSubjectToken }
+
+func refuseToken(why string) error { return tokenRefusal{why: why} }
+
+func refuseSigned(why string) error { return tokenRefusal{why: why, signed: true} }
+
+// rank orders the failures of the rules that a token fails: keys that faucet
+// could not fetch first, as the token may match once they come, then a
+// refusal after the token's signature verified, then any other refusal.
+func rank(err error) int {
+	var r tokenRefusal
+	switch {
+	case xerrors.Is(err, errIssuerKeys):
+		return 2
+	case xerrors.As(err, &r) && r.signed:
+		return 1
+	}
+	return 0
 }

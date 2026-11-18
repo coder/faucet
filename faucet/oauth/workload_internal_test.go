@@ -701,6 +701,62 @@ func TestTheFirstRuleThatMatchesWins(t *testing.T) {
 	}
 }
 
+// Of the rules that a token fails, check answers for the one that tells the
+// most: keys that faucet could not fetch, as the token may match once they
+// come, then a refusal after the token's signature verified.
+func TestCheckAnswersTheFailureOfTheRuleThatTellsTheMost(t *testing.T) {
+	t.Parallel()
+	s := newIssuerServer(t)
+	clock := quartz.NewMock(t)
+	now := clock.Now()
+	c := newWorkloadChecker(s.client, clock)
+	otherProject := testVercelRule()
+	otherProject.Claims["project_id"] = "prj_other"
+	otherProject.JWKS = must(json.Marshal(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{publicJWK(testRSAKey(), testKID)}}))
+	vercel := signVercel(t, vercelClaims(now))
+	for _, rules := range [][]TrustRule{{otherProject, testVercelRule()}, {testVercelRule(), otherProject}} {
+		_, err := checkAt(t, c, now, vercel, rules...)
+		require.ErrorIs(t, err, errIssuerKeys, "the keys of one rule could not be fetched")
+	}
+
+	claims := kubernetesClaims(now)
+	claims["aud"] = "https://vault.example.com"
+	wrongAudience := signToken(t, jose.RS256, testRSAKey(), testKID, claims)
+	signed := testKubernetesRule(t, publicJWK(testRSAKey(), testKID))
+	for name, unsigned := range map[string]TrustRule{
+		"another kid":          testKubernetesRule(t, publicJWK(testRSAKey(), "another")),
+		"another key":          testKubernetesRule(t, publicJWK(otherRSAKey(), testKID)),
+		"a key of another alg": testKubernetesRule(t, publicJWK(testECDSAKey(), testKID)),
+	} {
+		for _, rules := range [][]TrustRule{{unsigned, signed}, {signed, unsigned}} {
+			_, err := checkAt(t, c, now, wrongAudience, rules...)
+			requireTokenRefused(t, err, "its aud must be https://faucet.example.com alone", name)
+		}
+	}
+}
+
+// check stops when ctx ends, also between rules.
+func TestCheckStopsWhenTheContextEnds(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int64
+	offline := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return nil, net.ErrClosed
+	})}
+	clock := quartz.NewMock(t)
+	now := clock.Now()
+	c := newWorkloadChecker(offline, clock)
+	otherProject := testVercelRule()
+	otherProject.Claims["project_id"] = "prj_other"
+	otherProject.JWKS = must(json.Marshal(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{publicJWK(testRSAKey(), testKID)}}))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := c.check(ctx, []TrustRule{otherProject, testVercelRule()}, signVercel(t, vercelClaims(now)), testAudience, now)
+	require.ErrorIs(t, err, context.Canceled)
+	require.NotErrorIs(t, err, errSubjectToken)
+	require.Zero(t, requests.Load())
+}
+
 // A rule that a store kept before its issuer's profile refused it matches
 // nothing, and costs no fetch.
 func TestARuleThatTheProfilesRefuseMatchesNothing(t *testing.T) {
