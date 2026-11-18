@@ -98,6 +98,8 @@ type config struct {
 	webhook   *faucet.WebhookDeps
 	// publicURL is nil when faucet's login server is off.
 	publicURL *url.URL
+	// browserLogin is nil when the browser login is off.
+	browserLogin *oauth.BrowserLogin
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -143,6 +145,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 			return config{}, xerrors.Errorf("%s: %w", envPublicURL, err)
 		}
 		cfg.publicURL = u
+	}
+	if err := loadBrowserLoginConfig(getenv, &cfg); err != nil {
+		return config{}, err
 	}
 	return cfg, nil
 }

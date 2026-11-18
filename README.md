@@ -84,6 +84,10 @@ Point any MCP client at `https://<your host>/github/mcp` with a GitHub token as 
 | `FAUCET_HOOK_ORG` | for an org hook | The organization that owns the hook. Set this or `FAUCET_HOOK_REPO`, not both. |
 | `FAUCET_HOOK_REPO` | for a repo hook | The repository that owns the hook, as `owner/name`. |
 | `FAUCET_PUBLIC_URL` | for service accounts | Faucet's public URL, such as `https://faucet.example.com`, with no path or trailing slash. Turns on faucet's login server for service clients (see [docs/service-accounts.md](docs/service-accounts.md)). |
+| `FAUCET_GITHUB_APP_CLIENT_ID` | for the browser login | The client ID of faucet's GitHub App. With the secret and the token key it turns on the browser login of coding agents, and needs `FAUCET_PUBLIC_URL`. |
+| `FAUCET_GITHUB_APP_CLIENT_SECRET` | for the browser login | A client secret of faucet's GitHub App. |
+| `FAUCET_TOKEN_KEY` | for the browser login | The keys that seal the GitHub tokens of users at rest: one or more `<key_id>:<32 random bytes, base64>`, comma-separated. The first seals, every one opens. |
+| `FAUCET_GITHUB_URL` | no | GitHub's web host, which serves the App's login page. Default `https://github.com`. |
 | `VERCEL` | set by Vercel | Marks a Vercel deployment. There the server never migrates without `VERCEL_ENV`. |
 | `VERCEL_ENV` | set by Vercel | When set, the server migrates only if it is `production`, and otherwise starts only on a current schema. |
 <!-- END generated:settings -->
