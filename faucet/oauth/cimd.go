@@ -15,6 +15,8 @@ import (
 	"unicode"
 
 	"golang.org/x/xerrors"
+
+	"github.com/coder/quartz"
 )
 
 const (
@@ -56,28 +58,40 @@ type clientDocument struct {
 	RedirectURIs []string
 }
 
-// documentFetcher reads client ID metadata documents.
+// documentFetcher reads client ID metadata documents. Its copies share one
+// cache.
 type documentFetcher struct {
 	// client is the guarded client of faucet.NewHTTPClient, which reaches
 	// public https addresses only and follows no redirect.
 	client *http.Client
+	cache  *documentCache
 	// timeout bounds a whole fetch. Zero is documentTimeout.
 	timeout time.Duration
 }
 
-// fetch reads the document of the client whose ID is clientID. Every error
-// wraps errClientDocument.
+func newDocumentFetcher(client *http.Client, clock quartz.Clock) documentFetcher {
+	return documentFetcher{client: client, cache: newDocumentCache(clock)}
+}
+
+// fetch returns the document of the client whose ID is clientID, from the
+// cache while it is fresh. Every error wraps errClientDocument.
 func (f documentFetcher) fetch(ctx context.Context, clientID string) (clientDocument, error) {
-	doc, err := f.read(ctx, clientID)
+	if doc, ok := f.cache.get(clientID); ok {
+		return doc, nil
+	}
+	doc, header, err := f.read(ctx, clientID)
 	if err != nil {
 		return clientDocument{}, fmt.Errorf("%w: %w", errClientDocument, err)
 	}
+	f.cache.put(clientID, doc, header)
 	return doc, nil
 }
 
-func (f documentFetcher) read(ctx context.Context, clientID string) (clientDocument, error) {
+// read fetches the document of clientID and checks it. It returns the
+// header of the response with the document.
+func (f documentFetcher) read(ctx context.Context, clientID string) (clientDocument, http.Header, error) {
 	if err := checkClientID(clientID); err != nil {
-		return clientDocument{}, err
+		return clientDocument{}, nil, err
 	}
 	timeout := f.timeout
 	if timeout == 0 {
@@ -87,29 +101,30 @@ func (f documentFetcher) read(ctx context.Context, clientID string) (clientDocum
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, clientID, nil)
 	if err != nil {
-		return clientDocument{}, xerrors.New("the client ID must be a URL")
+		return clientDocument{}, nil, xerrors.New("the client ID must be a URL")
 	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return clientDocument{}, fetchFailure(ctx, timeout, err)
+		return clientDocument{}, nil, fetchFailure(ctx, timeout, err)
 	}
 	defer resp.Body.Close()
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	switch {
 	case resp.StatusCode != http.StatusOK:
-		return clientDocument{}, xerrors.Errorf("the document must be served with status 200 and no redirect, not %d", resp.StatusCode)
+		return clientDocument{}, nil, xerrors.Errorf("the document must be served with status 200 and no redirect, not %d", resp.StatusCode)
 	case err != nil || mediaType != "application/json":
-		return clientDocument{}, xerrors.New("the document must be served as application/json")
+		return clientDocument{}, nil, xerrors.New("the document must be served as application/json")
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDocumentBytes+1))
 	if err != nil {
-		return clientDocument{}, fetchFailure(ctx, timeout, err)
+		return clientDocument{}, nil, fetchFailure(ctx, timeout, err)
 	}
 	if len(body) > maxDocumentBytes {
-		return clientDocument{}, xerrors.Errorf("the document must be at most %d bytes", maxDocumentBytes)
+		return clientDocument{}, nil, xerrors.Errorf("the document must be at most %d bytes", maxDocumentBytes)
 	}
-	return parseClientDocument(clientID, body)
+	doc, err := parseClientDocument(clientID, body)
+	return doc, resp.Header, err
 }
 
 func fetchFailure(ctx context.Context, timeout time.Duration, err error) error {

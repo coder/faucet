@@ -104,7 +104,7 @@ func NewServer(d ServerDeps) (*Server, error) {
 		resources: slices.Clone(d.Resources), grants: maps.Clone(grants),
 	}
 	if d.Login != nil {
-		login, err := newBrowserLogin(*d.Login)
+		login, err := newBrowserLogin(*d.Login, d.Clock)
 		if err != nil {
 			return nil, xerrors.Errorf("the browser login: %w", err)
 		}

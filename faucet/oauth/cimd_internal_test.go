@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/quartz"
 )
 
 // documentServer serves client ID metadata documents over TLS on loopback
@@ -45,7 +46,7 @@ func (s *documentServer) client(allowLoopback bool) *http.Client {
 }
 
 func (s *documentServer) fetch(clientID string) (clientDocument, error) {
-	return documentFetcher{client: s.client(true)}.fetch(context.Background(), clientID)
+	return newDocumentFetcher(s.client(true), quartz.NewReal()).fetch(context.Background(), clientID)
 }
 
 // requestedURL is the URL that r asked for, which is what its document must
@@ -212,7 +213,8 @@ func TestASlowDocumentIsCutAtTheDeadline(t *testing.T) {
 		case <-time.After(30 * time.Second):
 		}
 	})
-	f := documentFetcher{client: s.client(true), timeout: 100 * time.Millisecond}
+	f := newDocumentFetcher(s.client(true), quartz.NewReal())
+	f.timeout = 100 * time.Millisecond
 	start := time.Now()
 	doc, err := f.fetch(context.Background(), s.URL+"/client.json")
 	requireRefused(t, doc, err, "a body that never ends")
@@ -247,11 +249,11 @@ func TestAClientIDThatIsNotAPublicHTTPSAddressIsNeverFetched(t *testing.T) {
 	t.Cleanup(plain.Close)
 	s := newDocumentServer(t, serve("application/json", validDocument))
 
-	doc, err := documentFetcher{client: s.client(true)}.fetch(context.Background(), plain.URL+"/client.json")
+	doc, err := newDocumentFetcher(s.client(true), quartz.NewReal()).fetch(context.Background(), plain.URL+"/client.json")
 	requireRefused(t, doc, err, "http, even through a client that may reach loopback over http")
 	require.Zero(t, plainRequests.Load())
 
-	doc, err = documentFetcher{client: s.client(false)}.fetch(context.Background(), s.URL+"/client.json")
+	doc, err = newDocumentFetcher(s.client(false), quartz.NewReal()).fetch(context.Background(), s.URL+"/client.json")
 	requireRefused(t, doc, err, "a loopback host through the production client")
 	require.Zero(t, s.requests.Load())
 }
@@ -260,10 +262,10 @@ func TestAMalformedClientIDIsRefusedBeforeAnyRequest(t *testing.T) {
 	t.Parallel()
 
 	var requests atomic.Int64
-	f := documentFetcher{client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+	f := newDocumentFetcher(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		requests.Add(1)
 		return nil, io.ErrUnexpectedEOF
-	})}}
+	})}, quartz.NewReal())
 	for _, clientID := range []string{
 		"",
 		"client.json",

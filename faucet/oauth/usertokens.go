@@ -203,7 +203,7 @@ func NewUserAccess(d UserAccessDeps) (UserAccess, error) {
 	case d.Repos == nil:
 		return UserAccess{}, xerrors.New("the repository checker is required")
 	}
-	login, err := newBrowserLogin(d.Login)
+	login, err := newBrowserLogin(d.Login, d.Clock)
 	if err != nil {
 		return UserAccess{}, xerrors.Errorf("the browser login: %w", err)
 	}

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"golang.org/x/xerrors"
+
+	"github.com/coder/quartz"
 )
 
 const (
@@ -45,7 +47,7 @@ type browserLogin struct {
 	documents documentFetcher
 }
 
-func newBrowserLogin(d BrowserLogin) (*browserLogin, error) {
+func newBrowserLogin(d BrowserLogin, clock quartz.Clock) (*browserLogin, error) {
 	if err := d.GitHub.Validate(); err != nil {
 		return nil, err
 	}
@@ -55,7 +57,7 @@ func newBrowserLogin(d BrowserLogin) (*browserLogin, error) {
 	case d.Documents == nil:
 		return nil, xerrors.New("the client that fetches client documents is required")
 	}
-	return &browserLogin{github: d.GitHub, keys: d.Keys, documents: documentFetcher{client: d.Documents}}, nil
+	return &browserLogin{github: d.GitHub, keys: d.Keys, documents: newDocumentFetcher(d.Documents, clock)}, nil
 }
 
 // newID returns the ID of a new authorization request: 16 random bytes in
