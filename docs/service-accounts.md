@@ -113,11 +113,9 @@ Each issuer that faucet knows needs more pins than `sub`, because all of its ten
 | Issuer | The rule must pin |
 | --- | --- |
 | `https://oidc.vercel.com/<team slug>` | `owner_id`, `project_id`, and `environment=production`. Faucet never trusts `https://oidc.vercel.com`, the issuer that every team shares. |
-| `https://token.actions.githubusercontent.com` | `repository_owner_id`, `repository_id` and `ref` |
-| `https://gitlab.com` | `namespace_id`, `project_id`, and `ref_protected=true` |
 | Any other, such as a Kubernetes cluster | `sub` |
 
-Faucet enforces the rows for GitHub Actions and gitlab.com, but neither is a supported way in yet: this page gives no example for them, and no test has logged in with a token of either.
+Faucet refuses a rule for GitHub Actions (`https://token.actions.githubusercontent.com`) or `https://gitlab.com` for now, as no test has logged in with their tokens yet.
 
 ### What faucet checks
 

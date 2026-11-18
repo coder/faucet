@@ -93,53 +93,26 @@ func TestFaucetTrustsOnlyTheIssuerOfOneVercelTeam(t *testing.T) {
 	}
 }
 
-// A rule for GitHub Actions or gitlab.com names the owner and the repository
-// by their IDs, and the code that may log in: any ref of GitHub's, or a
-// protected ref of gitlab.com.
-func TestARuleForGitHubActionsOrGitLabMustPinTheOwnerTheRepositoryAndTheCode(t *testing.T) {
+// Faucet takes no token of GitHub Actions or gitlab.com yet, whatever the
+// rule pins.
+func TestFaucetRefusesARuleForGitHubActionsOrGitLab(t *testing.T) {
 	t.Parallel()
-	github := map[string]string{"repository_owner_id": "65", "repository_id": "74", "ref": "refs/heads/main"}
+	github := map[string]string{"repository_owner_id": "65", "repository_id": "74", "ref": "refs/heads/main", "event_name": "push", "job_workflow_ref": "octo-org/octo-repo/.github/workflows/digest.yml@refs/heads/main"}
 	gitlab := map[string]string{"namespace_id": "65", "project_id": "74", "ref_protected": "true"}
-	for issuer, pins := range map[string]map[string]string{
-		"https://token.actions.githubusercontent.com":               github,
-		"https://token.actions.githubusercontent.com/octo-business": github,
-		"https://gitlab.com": gitlab,
+	for issuer, c := range map[string]struct {
+		pins map[string]string
+		host string
+	}{
+		"https://token.actions.githubusercontent.com":               {github, "token.actions.githubusercontent.com"},
+		"https://token.actions.githubusercontent.com/octo-business": {github, "token.actions.githubusercontent.com"},
+		"https://gitlab.com": {gitlab, "gitlab.com"},
+		"https://GitLab.com": {gitlab, "gitlab.com"},
 	} {
-		rule := func(claims map[string]string) oauth.TrustRule { return oauth.TrustRule{Issuer: issuer, Claims: claims} }
-		require.NoError(t, oauth.ValidateTrustRule(rule(pins)), issuer)
-		for claim, value := range pins {
-			without := maps.Clone(pins)
-			delete(without, claim)
-			want := claim
-			if claim == "ref_protected" {
-				want += "=" + value
-			}
-			err := oauth.ValidateTrustRule(rule(without))
-			require.ErrorContains(t, err, "a trust rule for "+issuer+" must pin "+want+": ", "%s without %s", issuer, claim)
+		for _, claims := range []map[string]string{c.pins, {"sub": "repo:octo-org/octo-repo:ref:refs/heads/main"}} {
+			err := oauth.ValidateTrustRule(oauth.TrustRule{Issuer: issuer, Claims: claims})
+			require.ErrorContains(t, err, "faucet does not take tokens of "+c.host+" yet; it takes those of a Vercel team", "%s %v", issuer, claims)
 		}
-		err := oauth.ValidateTrustRule(rule(map[string]string{"sub": "repo:octo-org/octo-repo:ref:refs/heads/main"}))
-		require.ErrorContains(t, err, "a trust rule for "+issuer+" must pin ", "sub alone names no owner: %s", issuer)
 	}
-
-	const actions = "https://token.actions.githubusercontent.com"
-	tag := maps.Clone(github)
-	tag["ref"] = "refs/tags/v1"
-	require.NoError(t, oauth.ValidateTrustRule(oauth.TrustRule{Issuer: actions, Claims: tag}), "a GitHub rule names any ref")
-	delete(tag, "ref")
-	err := oauth.ValidateTrustRule(oauth.TrustRule{Issuer: actions, Claims: tag})
-	require.ErrorContains(t, err, "must pin ref: a workflow on any branch of the repository, or on a pull request from one, can get a token for faucet")
-
-	for _, ref := range []string{"refs/pull/12/merge", "refs/pull/12/head"} {
-		pull := maps.Clone(github)
-		pull["ref"] = ref
-		err := oauth.ValidateTrustRule(oauth.TrustRule{Issuer: actions, Claims: pull})
-		require.ErrorContains(t, err, "a trust rule for "+actions+" cannot pin ref="+ref+": a workflow on a pull request's ref runs the code of the pull request", ref)
-	}
-
-	unprotected := maps.Clone(gitlab)
-	unprotected["ref_protected"] = "false"
-	err = oauth.ValidateTrustRule(oauth.TrustRule{Issuer: "https://gitlab.com", Claims: unprotected})
-	require.ErrorContains(t, err, "must pin ref_protected=true: a developer of the project can run a job on any branch that is not protected")
 }
 
 func TestARuleOfAnyOtherIssuerMustPinSub(t *testing.T) {

@@ -6,6 +6,7 @@ The server applies every schema change at start (on Vercel, in production only, 
 
 This came in [#63](https://github.com/coder/faucet/pull/63) and the token exchange after it. A Vercel function or a Kubernetes pod can now log in as a service client with the token that its platform signs for it (see [service-accounts.md](service-accounts.md#log-in-with-a-workload-identity)). Nothing changes until an operator runs `faucet clients trust`.
 
+- **`faucet clients trust`** refuses the issuers of GitHub Actions and gitlab.com, which the build of #63 took. A rule for them that it stored matches no token: remove it with `faucet clients untrust`.
 - **The migration** lets a client have no secret and adds `faucet_workload_trusts`, which holds the trust rules. The down file drops the rules, and gives each client without a secret the hash of a random value that nobody holds, so the build before gives it no token.
 - **The metadata** lists `urn:ietf:params:oauth:grant-type:token-exchange` in `grant_types_supported` and `none` in `token_endpoint_auth_methods_supported`, also with the browser login off. A service client logs in with its secret as before, and the revocation endpoint takes the same methods as before.
 - **A rolling deploy:** until every instance runs this build, an instance of the build before answers a token exchange `unsupported_grant_type`.
