@@ -23,6 +23,7 @@ var repositorySubtests = []subtest{
 	{"AnOwnerKeepsOnlyTheLoginOfItsLatestDelivery", anOwnerKeepsOnlyTheLoginOfItsLatestDelivery},
 	{"RecordOwnerNamesAnAccountWithoutARepository", recordOwnerNamesAnAccountWithoutARepository},
 	{"AddOwnerAddsAnAccountAndMovesNoLogin", addOwnerAddsAnAccountAndMovesNoLogin},
+	{"ARepositoryOfARenamedAccountIsFoundAndRenamedUnderItsNewLogin", aRepositoryOfARenamedAccountIsFoundAndRenamedUnderItsNewLogin},
 }
 
 var repositoryTime = time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
@@ -236,4 +237,24 @@ func addOwnerAddsAnAccountAndMovesNoLogin(t *testing.T, s faucet.Store) {
 	require.NoError(t, err)
 	require.Equal(t, faucet.Owner{ID: 9, Login: "octo"}, got, "an account that the store lacks is added")
 	require.Error(t, s.AddOwner(ctx, faucet.Owner{ID: 5, Login: "ac/me"}))
+}
+
+// GitHub sends no repository event when it renames an account, so the row of
+// a repository keeps the old login. The account's next delivery gives it the
+// new login, a lookup finds the repository under the new login, and a later
+// rename of the repository, whose from GitHub writes under the new login,
+// moves it.
+func aRepositoryOfARenamedAccountIsFoundAndRenamedUnderItsNewLogin(t *testing.T, s faucet.Store) {
+	recordDelivered(t, s, faucet.Repository{ID: 5, OwnerID: 7, OwnerLogin: "old-coder", FullName: "old-coder/faucet"}, repositoryTime)
+	recordDelivered(t, s, faucet.Repository{ID: 5, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/faucet"}, repositoryTime.Add(time.Hour))
+	requireRepositoryNamed(t, s, "coder/faucet", faucet.Repository{ID: 5, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/faucet"})
+	requireUnknownName(t, s, "old-coder/faucet")
+
+	tap := faucet.Repository{ID: 5, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/tap"}
+	renameDelivered(t, s, tap, "coder/faucet", repositoryTime.Add(2*time.Hour))
+	requireRepositoryNamed(t, s, "coder/tap", tap)
+	requireUnknownName(t, s, "coder/faucet")
+
+	renameDelivered(t, s, faucet.Repository{ID: 5, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/faucet"}, "old-coder/x", repositoryTime.Add(3*time.Hour))
+	requireRepositoryNamed(t, s, "coder/tap", tap)
 }

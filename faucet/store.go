@@ -251,8 +251,10 @@ type Store interface {
 	// AddOwner's to record. It calls repo.Validate.
 	RecordRepository(ctx context.Context, repo Repository, seenAt time.Time) error
 	// RenameRepository gives the row of repo.ID the names of repo at seenAt
-	// when its FullName is from, ignoring case, and inserts it when there is
-	// no row. A repository event that renamed or transferred the repository
+	// when its FullName is from, ignoring case, either as the row holds it or
+	// under the login that the row's owner holds now, and inserts it when
+	// there is no row. GitHub writes from under the owner's current login,
+	// which the row lacks when the owner was renamed after it was seen. A repository event that renamed or transferred the repository
 	// from that name calls it, so a replayed older rename, whose from the row
 	// no longer holds, changes nothing. It calls repo.Validate.
 	RenameRepository(ctx context.Context, repo Repository, from string, seenAt time.Time) error

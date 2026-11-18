@@ -153,6 +153,13 @@ ON CONFLICT (repo_id) DO UPDATE
 SET owner_id = excluded.owner_id, owner_login = excluded.owner_login,
     full_name = excluded.full_name, seen_at = excluded.seen_at
 WHERE lower(faucet_repos.full_name) = lower($6::text)
+   -- GitHub writes from under the owner's login now, which the row lacks when
+   -- the owner was renamed after the row was first seen.
+   OR EXISTS (
+     SELECT 1 FROM faucet_owners o
+     WHERE o.owner_id = faucet_repos.owner_id
+       AND lower(o.login || '/' || split_part(faucet_repos.full_name, '/', 2)) = lower($6::text)
+   )
 `
 
 type RenameRepositoryParams struct {

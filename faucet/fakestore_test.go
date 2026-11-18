@@ -47,7 +47,7 @@ func (s *fakeStore) RenameRepository(_ context.Context, repo faucet.Repository, 
 		switch {
 		case i < 0:
 			s.repos = append(s.repos, fakeRepo{repo: repo, seenAt: seenAt})
-		case strings.EqualFold(s.repos[i].repo.FullName, from):
+		case strings.EqualFold(s.repos[i].repo.FullName, from) || strings.EqualFold(s.currentNameLocked(s.repos[i].repo), from):
 			s.repos[i] = fakeRepo{repo: repo, seenAt: seenAt}
 		}
 	})
@@ -172,6 +172,17 @@ func (s *fakeStore) OwnerByID(_ context.Context, id int64) (faucet.Owner, error)
 		return faucet.Owner{}, faucet.ErrUnknownOwner
 	}
 	return faucet.Owner{ID: id, Login: o.login}, nil
+}
+
+// currentNameLocked is the full name of repo under the login that its owner
+// holds now, and "" when the owner holds none.
+func (s *fakeStore) currentNameLocked(repo faucet.Repository) string {
+	o, ok := s.owners[repo.OwnerID]
+	if !ok {
+		return ""
+	}
+	_, name, _ := strings.Cut(repo.FullName, "/")
+	return o.login + "/" + name
 }
 
 // ownerLocked returns the account that holds login, which is at most one.

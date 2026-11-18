@@ -387,3 +387,35 @@ func TestAnOrgGrantNeverSnapsBackToTheAccountThatGaveItsLoginUp(t *testing.T) {
 	require.Empty(t, hooks.runsOf("/taker"), "the renewed subscription gets no event of that account")
 	require.Contains(t, waitError(ctx, t, session, map[string]any{"repo": "old-coder/tool"}), "faucet has received no webhook delivery from old-coder/tool yet")
 }
+
+// GitHub sends no repository event when it renames an organization, so the
+// rows of its repositories keep the old login. The organization's next
+// delivery gives faucet the new login: an org grant and a repo grant of it
+// work, and a later rename of the repository, which GitHub writes under the
+// new login, moves the repository.
+func TestARepositoryOfARenamedOrganizationIsGrantedAndRenamedUnderItsNewLogin(t *testing.T) {
+	t.Parallel()
+	srv := newLoginServer(t)
+	orgSecret := srv.client(t, "org-grant", "/github/mcp", bothScopes, "org:coder")
+	repoSecret := srv.client(t, "repo-grant", "/github/mcp", bothScopes, "repo:coder/faucet", "repo:coder/tap")
+	srv.deliverRunOwnedBy(t, "old-1", deliveredRepo{id: 5, fullName: "old-coder/faucet"}, 7, "old-coder")
+	srv.deliverRunOwnedBy(t, "new-1", deliveredRepo{id: 5, fullName: "coder/faucet"}, 7, "coder")
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	org := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, srv.token(t, "org-grant", orgSecret))
+	repos, _ := waitFor(ctx, t, org, map[string]any{"owner": "coder", "cursor": 0})
+	require.Equal(t, []int64{5, 5}, repos, "the org grant covers the repository of both deliveries")
+	repo := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, srv.token(t, "repo-grant", repoSecret))
+	waitFor(ctx, t, repo, map[string]any{"repo": "coder/faucet"})
+
+	renamed, err := json.Marshal(map[string]any{
+		"action":     "renamed",
+		"repository": map[string]any{"id": 5, "full_name": "coder/tap", "owner": map[string]any{"id": 7, "login": "coder"}},
+		"changes":    map[string]any{"repository": map[string]any{"name": map[string]any{"from": "faucet"}}},
+	})
+	require.NoError(t, err)
+	srv.postAnswered(t, "repository", "renamed-1", renamed, http.StatusAccepted)
+	waitFor(ctx, t, repo, map[string]any{"repo": "coder/tap"})
+	require.Contains(t, waitError(ctx, t, repo, map[string]any{"repo": "coder/faucet"}), "faucet has received no webhook delivery from coder/faucet yet")
+}
