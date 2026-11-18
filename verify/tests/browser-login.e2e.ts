@@ -154,10 +154,20 @@ describe('browser login', () => {
       });
 
       await browser.goto(`${started.baseUrl}${authorizationPath(started, clientId, redirectUri, state, verifier)}`);
+      const pressed = await browser.evaluate(() => {
+        const button = document.querySelector('button');
+        const box = button?.getBoundingClientRect();
+        return { disabled: button?.disabled ?? null, x: (box?.x ?? 0) + (box?.width ?? 0) / 2, y: (box?.y ?? 0) + (box?.height ?? 0) / 2 };
+      });
+      await browser.mouse.move(pressed.x, pressed.y);
+      await browser.mouse.down();
       await expect(screen.getByRole('heading', { name: new URL(clientId).host })).toBeVisible();
       await expect(screen.getByText('Coding Agent', { exact: true })).toBeVisible();
       const continueButton = screen.getByRole('button', { name: 'Continue with GitHub' });
       await expect(continueButton).toBeEnabled();
+      await browser.mouse.up();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const afterEarlyPress = await browser.url();
       const times = await browser.evaluate(() => {
         const { disabledAtLoad, added, enabled } = (globalThis as unknown as { continueTimes: ContinueTimes }).continueTimes;
         return { disabledAtLoad: disabledAtLoad ?? null, waited: added === undefined || enabled === undefined ? null : enabled - added };
@@ -175,6 +185,8 @@ describe('browser login', () => {
       });
       const answer = JSON.parse(redeemed.body) as Record<string, unknown>;
       expect(times.disabledAtLoad, 'Continue is off when the page has loaded').toBe(true);
+      expect(pressed.disabled, 'the first press began while Continue was off').toBe(true);
+      expect(afterEarlyPress, 'a press that began while Continue was off did not post the form when it ended').toContain('/oauth/authorize?');
       expect(times.waited, 'Continue turns on about 500 ms after it appears in a visible, focused page').toBeGreaterThanOrEqual(490);
       expect(landed.searchParams.get('state')).toBe(state);
       expect(landed.searchParams.get('iss')).toBe(started.baseUrl);
