@@ -93,9 +93,6 @@ func TestFaucetTrustsOnlyTheIssuerOfOneVercelTeam(t *testing.T) {
 	}
 }
 
-// Every GitHub account and every gitlab.com namespace gets its tokens from
-// the same issuer, and both let a repository choose the parts of sub, so a
-// rule pins the IDs of the owner and of the repository.
 func TestARuleForGitHubActionsOrGitLabMustPinTheOwnerAndRepositoryIDs(t *testing.T) {
 	t.Parallel()
 	for issuer, ids := range map[string][2]string{
@@ -154,8 +151,6 @@ func TestARuleNamesAnHTTPSIssuerAndPinsAClaimToAValue(t *testing.T) {
 	require.NoError(t, oauth.ValidateTrustRule(oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: claimsOfSize(16, 256)}))
 }
 
-// claimsOfSize pins sub and n-1 other claims, each name and value of size
-// bytes.
 func claimsOfSize(n, size int) map[string]string {
 	claims := map[string]string{"sub": strings.Repeat("s", size)}
 	for i := range n - 1 {
@@ -164,9 +159,7 @@ func claimsOfSize(n, size int) map[string]string {
 	return claims
 }
 
-// Faucet checks the registered claims of a token itself, and a pin of one
-// matches no token, or one token at most.
-func TestARuleCannotPinARegisteredClaim(t *testing.T) {
+func TestARuleCannotPinIssAudExpNbfIatOrJti(t *testing.T) {
 	t.Parallel()
 	sub := map[string]string{"sub": "system:serviceaccount:ns:sa"}
 	for _, claim := range []string{"iss", "aud", "exp", "nbf", "iat", "jti"} {

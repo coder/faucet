@@ -749,8 +749,6 @@ func TestTheFirstRuleThatMatchesWins(t *testing.T) {
 	}
 }
 
-// match takes a token only when its verified iss is the rule's issuer,
-// whatever picked the rule.
 func TestAMatchNeedsTheVerifiedIssToBeTheRulesIssuer(t *testing.T) {
 	t.Parallel()
 	clock := quartz.NewMock(t)
@@ -805,7 +803,6 @@ func TestCheckAnswersTheFailureOfTheRuleThatTellsTheMost(t *testing.T) {
 	}
 }
 
-// check stops when ctx ends, also between rules.
 func TestCheckStopsWhenTheContextEnds(t *testing.T) {
 	t.Parallel()
 	var requests atomic.Int64
@@ -877,9 +874,7 @@ func TestADiscoveryDocumentCannotSendFaucetToAPrivateAddress(t *testing.T) {
 	require.ErrorContains(t, err, "the discovery document: it must be served with status 200 and no redirect, not 302")
 }
 
-// A document whose body stalls past the deadline gets the same answer as one
-// whose headers do.
-func TestADocumentMustArriveWhole(t *testing.T) {
+func TestABodyThatStallsPastTheDeadlineArrivesLate(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
