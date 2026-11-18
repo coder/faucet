@@ -11,9 +11,14 @@ import (
 	"github.com/coder/quartz"
 )
 
-// githubRefreshTimeout bounds a refresh at GitHub, which holds the lock of
-// the connection while it runs.
-const githubRefreshTimeout = 30 * time.Second
+const (
+	// githubRefreshTimeout bounds a refresh at GitHub, which holds the lock
+	// of the connection while it runs.
+	githubRefreshTimeout = 30 * time.Second
+	// userTokenMargin is how long the GitHub token of a user must last when
+	// the access check sends it, so that it does not expire on the way.
+	userTokenMargin = time.Minute
+)
 
 // staleToken reports whether the stored GitHub access token of a connection
 // will not do, so that the connection needs a new pair.
@@ -68,9 +73,10 @@ func (c connections) accessToken(ctx context.Context, id string, stale staleToke
 // refresh gives the connection a new pair under its lock, unless the pair
 // that it finds there will do.
 func (c connections) refresh(ctx context.Context, id string, stale staleToken) (string, error) {
-	// GitHub's refresh token works once. Once GitHub has answered, the new
-	// pair must reach the store even when the caller gives up, or the
-	// user's next refresh fails and ends every session.
+	// GitHub's refresh token works once, and GitHub can spend it even when
+	// the caller gives up during the call. The refresh runs to its end and
+	// stores the new pair however the caller's request ends, or the user's
+	// next refresh fails and ends every session.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), githubRefreshTimeout)
 	defer cancel()
 	var access string
@@ -137,10 +143,6 @@ func (c connections) renew(ctx context.Context, current Connection) (Connection,
 	c.logger.Debug(ctx, "refreshed the GitHub token of a connection", slog.F("connection_id", current.ID))
 	return next, tokens.access, nil
 }
-
-// userTokenMargin is how long the GitHub token of a user must last when the
-// access check sends it, so that it does not expire on the way.
-const userTokenMargin = time.Minute
 
 // UserResolver returns the SubjectResolver of users who logged in through a
 // browser. The subject is a session ID, and the principal is an OAuth user
