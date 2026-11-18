@@ -190,7 +190,7 @@ func TestRawStoreCallThatItsContextCutShortWrapsTheContextError(t *testing.T) {
 		},
 		"ReadRawLease": func(ctx context.Context) error {
 			_, _, err := store.ReadRawLease(ctx, faucet.RawRead{
-				Lease: lease.ID, Key: lease.Key, RepoID: rawTestRepo, Limit: 10, MaxBytes: 1 << 20, Now: now, ExpiresAt: now.Add(time.Hour),
+				Lease: lease.ID, Key: lease.Key, Target: faucet.RepoTarget(rawTestRepo), Limit: 10, MaxBytes: 1 << 20, Now: now, ExpiresAt: now.Add(time.Hour),
 			})
 			return err
 		},
