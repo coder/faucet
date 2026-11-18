@@ -449,6 +449,9 @@ func (s *Server) authenticateClient(ctx context.Context, r *http.Request, form u
 	case err != nil:
 		return Client{}, xerrors.Errorf("read the client: %w", err)
 	}
+	if c.SecretHash == nil {
+		return Client{}, errClientAuth
+	}
 	hash := HashToken(secret)
 	if subtle.ConstantTimeCompare(hash[:], c.SecretHash[:]) != 1 || !c.Live() {
 		return Client{}, errClientAuth

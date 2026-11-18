@@ -236,3 +236,13 @@ type FaucetUserSession struct {
 	RefreshedAt  time.Time
 	EndedAt      sql.NullTime
 }
+
+type FaucetWorkloadTrust struct {
+	ID        int64
+	ClientID  string
+	Issuer    string
+	Claims    json.RawMessage
+	Jwks      []byte
+	RuleHash  []byte
+	CreatedAt time.Time
+}

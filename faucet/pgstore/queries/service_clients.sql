@@ -1,6 +1,6 @@
 -- name: InsertServiceClient :execrows
 INSERT INTO faucet_service_clients (client_id, secret_hash, resource, grants, scopes, created_at)
-VALUES (@client_id, @secret_hash, @resource, @grants::text[], @scopes::text[], @created_at)
+VALUES (@client_id, nullif(@secret_hash::bytea, ''), @resource, @grants::text[], @scopes::text[], @created_at)
 ON CONFLICT (client_id) DO NOTHING;
 
 -- name: GetServiceClient :one

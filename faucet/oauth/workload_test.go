@@ -93,28 +93,53 @@ func TestFaucetTrustsOnlyTheIssuerOfOneVercelTeam(t *testing.T) {
 	}
 }
 
-func TestARuleForGitHubActionsOrGitLabMustPinTheOwnerAndRepositoryIDs(t *testing.T) {
+// A rule for GitHub Actions or gitlab.com names the owner and the repository
+// by their IDs, and the code that may log in: any ref of GitHub's, or a
+// protected ref of gitlab.com.
+func TestARuleForGitHubActionsOrGitLabMustPinTheOwnerTheRepositoryAndTheCode(t *testing.T) {
 	t.Parallel()
-	for issuer, ids := range map[string][2]string{
-		"https://token.actions.githubusercontent.com":               {"repository_owner_id", "repository_id"},
-		"https://token.actions.githubusercontent.com/octo-business": {"repository_owner_id", "repository_id"},
-		"https://gitlab.com": {"namespace_id", "project_id"},
+	github := map[string]string{"repository_owner_id": "65", "repository_id": "74", "ref": "refs/heads/main"}
+	gitlab := map[string]string{"namespace_id": "65", "project_id": "74", "ref_protected": "true"}
+	for issuer, pins := range map[string]map[string]string{
+		"https://token.actions.githubusercontent.com":               github,
+		"https://token.actions.githubusercontent.com/octo-business": github,
+		"https://gitlab.com": gitlab,
 	} {
-		owner, repository := ids[0], ids[1]
 		rule := func(claims map[string]string) oauth.TrustRule { return oauth.TrustRule{Issuer: issuer, Claims: claims} }
-		require.NoError(t, oauth.ValidateTrustRule(rule(map[string]string{owner: "65", repository: "74"})), issuer)
-		for _, c := range []struct {
-			claims map[string]string
-			want   string
-		}{
-			{map[string]string{"sub": "environment:production"}, owner},
-			{map[string]string{owner: "65"}, repository},
-			{map[string]string{repository: "74", "sub": "repo:octo-org/octo-repo:ref:refs/heads/main"}, owner},
-		} {
-			err := oauth.ValidateTrustRule(rule(c.claims))
-			require.ErrorContains(t, err, "a trust rule for "+issuer+" must pin "+c.want+": ", issuer)
+		require.NoError(t, oauth.ValidateTrustRule(rule(pins)), issuer)
+		for claim, value := range pins {
+			without := maps.Clone(pins)
+			delete(without, claim)
+			want := claim
+			if claim == "ref_protected" {
+				want += "=" + value
+			}
+			err := oauth.ValidateTrustRule(rule(without))
+			require.ErrorContains(t, err, "a trust rule for "+issuer+" must pin "+want+": ", "%s without %s", issuer, claim)
 		}
+		err := oauth.ValidateTrustRule(rule(map[string]string{"sub": "repo:octo-org/octo-repo:ref:refs/heads/main"}))
+		require.ErrorContains(t, err, "a trust rule for "+issuer+" must pin ", "sub alone names no owner: %s", issuer)
 	}
+
+	const actions = "https://token.actions.githubusercontent.com"
+	tag := maps.Clone(github)
+	tag["ref"] = "refs/tags/v1"
+	require.NoError(t, oauth.ValidateTrustRule(oauth.TrustRule{Issuer: actions, Claims: tag}), "a GitHub rule names any ref")
+	delete(tag, "ref")
+	err := oauth.ValidateTrustRule(oauth.TrustRule{Issuer: actions, Claims: tag})
+	require.ErrorContains(t, err, "must pin ref: a workflow on any branch of the repository, or on a pull request from one, can get a token for faucet")
+
+	for _, ref := range []string{"refs/pull/12/merge", "refs/pull/12/head"} {
+		pull := maps.Clone(github)
+		pull["ref"] = ref
+		err := oauth.ValidateTrustRule(oauth.TrustRule{Issuer: actions, Claims: pull})
+		require.ErrorContains(t, err, "a trust rule for "+actions+" cannot pin ref="+ref+": a workflow on a pull request's ref runs the code of the pull request", ref)
+	}
+
+	unprotected := maps.Clone(gitlab)
+	unprotected["ref_protected"] = "false"
+	err = oauth.ValidateTrustRule(oauth.TrustRule{Issuer: "https://gitlab.com", Claims: unprotected})
+	require.ErrorContains(t, err, "must pin ref_protected=true: a developer of the project can run a job on any branch that is not protected")
 }
 
 func TestARuleOfAnyOtherIssuerMustPinSub(t *testing.T) {
@@ -128,6 +153,7 @@ func TestARuleOfAnyOtherIssuerMustPinSub(t *testing.T) {
 func TestARuleNamesAnHTTPSIssuerAndPinsAClaimToAValue(t *testing.T) {
 	t.Parallel()
 	sub := map[string]string{"sub": "system:serviceaccount:ns:sa"}
+	pinsWith := func(name string) map[string]string { return map[string]string{"sub": "a", name: "b"} }
 	for name, c := range map[string]struct {
 		rule oauth.TrustRule
 		want string
@@ -145,6 +171,17 @@ func TestARuleNamesAnHTTPSIssuerAndPinsAClaimToAValue(t *testing.T) {
 		"17 claims":      {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: claimsOfSize(17, 8)}, "a trust rule pins at most 16 claims"},
 		"a long name":    {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a", strings.Repeat("n", 257): "b"}}, "a trust rule's claim names and values must be at most 256 bytes"},
 		"a long value":   {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": strings.Repeat("v", 257)}}, "must be at most 256 bytes"},
+
+		"a C1 control in the issuer":  {oauth.TrustRule{Issuer: "https://issuer.example.com/\u0085", Claims: sub}, "a trust rule's issuer must be valid UTF-8 with no control character"},
+		"a space in the issuer":       {oauth.TrustRule{Issuer: "https://issuer.example.com/a b", Claims: sub}, "a trust rule's issuer must be valid UTF-8 with no control character or white space"},
+		"invalid UTF-8 in the issuer": {oauth.TrustRule{Issuer: "https://issuer.example.com/\xff", Claims: sub}, "a trust rule's issuer must be valid UTF-8 with no control character"},
+		"a NUL in a value":            {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a\x00b"}}, "a trust rule's claim names and values must be valid UTF-8 with no control character"},
+		"an escape code in a value":   {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a\x1b[2K"}}, "must be valid UTF-8 with no control character"},
+		"a bidi override in a value":  {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a\u202eb"}}, "must be valid UTF-8 with no control character"},
+		"invalid UTF-8 in a value":    {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "\xff"}}, "must be valid UTF-8 with no control character"},
+		"a newline in a name":         {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: pinsWith("x\ny")}, "must be valid UTF-8 with no control character"},
+		"a name that ends in a space": {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: pinsWith("ref ")}, `a trust rule's claim names cannot start or end with white space, as "ref " does`},
+		"a name after a space":        {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"\u00a0sub": "a"}}, "cannot start or end with white space"},
 	} {
 		require.ErrorContains(t, oauth.ValidateTrustRule(c.rule), c.want, name)
 	}
@@ -208,8 +245,65 @@ func TestAPastedKeySetHoldsAPublicKeyForSignatures(t *testing.T) {
 		"a key to encrypt": {trustKeySet(t, jose.JSONWebKey{Key: &rsaKey.PublicKey, KeyID: "a", Use: "enc"}), "must hold an RSA key"},
 		"another alg":      {trustKeySet(t, jose.JSONWebKey{Key: &rsaKey.PublicKey, KeyID: "a", Algorithm: "PS256"}), "must hold an RSA key"},
 		"too long":         {json.RawMessage(`{"keys":[],"x":"` + strings.Repeat("a", 32<<10) + `"}`), "a trust rule's JWKS must be at most 32768 bytes"},
+		// Postgres refuses the first two in jsonb, and encoding/json reads the
+		// last as U+FFFD.
+		"a NUL escape":     {json.RawMessage(`{"keys":[` + string(public) + `],"comment":"\u0000"}`), "a trust rule's JWKS must be valid UTF-8, with no \\u0000, lone surrogate or U+FFFD in a string"},
+		"a lone surrogate": {json.RawMessage(`{"keys":[` + string(public) + `],"comment":"\ud800"}`), "must be valid UTF-8, with no \\u0000"},
+		"invalid UTF-8":    {json.RawMessage("{\"keys\":[" + string(public) + "],\"comment\":\"\xff\"}"), "must be valid UTF-8, with no \\u0000"},
 	} {
 		err := oauth.ValidateTrustRule(oauth.TrustRule{Issuer: "https://kubernetes.default.svc", Claims: sub, JWKS: c.jwks})
 		require.ErrorContains(t, err, c.want, name)
 	}
+}
+
+func TestAPastedKeySetNamesItsKeysOnceInLowerCase(t *testing.T) {
+	t.Parallel()
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	public, err := jose.JSONWebKey{Key: &rsaKey.PublicKey, KeyID: "a", Use: "sig"}.MarshalJSON()
+	require.NoError(t, err)
+	keys := `[` + string(public) + `]`
+	rule := oauth.TrustRule{Issuer: "https://kubernetes.default.svc", Claims: map[string]string{"sub": "system:serviceaccount:ns:sa"}}
+	for name, jwks := range map[string]string{
+		"twice":                  `{"keys":` + keys + `,"keys":` + keys + `}`,
+		"a secret, then KEYS":    `{"keys":[{"kty":"oct","kid":"s","k":"c2VjcmV0"}],"KEYS":` + keys + `}`,
+		"in another case":        `{"Keys":` + keys + `}`,
+		"with a long s, escaped": `{"key\u017f":` + keys + `,"keys":` + keys + `}`,
+		"with a long s":          "{\"keys\":" + keys + ",\"key\u017f\":" + keys + "}",
+	} {
+		rule.JWKS = json.RawMessage(jwks)
+		require.ErrorContains(t, oauth.ValidateTrustRule(rule), "a trust rule's JWKS must name its keys array once, as keys in lower case", name)
+	}
+	rule.JWKS = json.RawMessage(`{"comment":"rotated","keys":` + keys + `}`)
+	require.NoError(t, oauth.ValidateTrustRule(rule), "a member of another name is no keys array")
+}
+
+// The store keeps what ValidateTrustRule read: the entries of keys, and no
+// other member or white space, which could take the set past its limit once
+// a store reformats it.
+func TestCanonicalTrustRuleKeepsTheKeysOfAPastedKeySetCompact(t *testing.T) {
+	t.Parallel()
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	public, err := jose.JSONWebKey{Key: &rsaKey.PublicKey, KeyID: "a", Use: "sig"}.MarshalJSON()
+	require.NoError(t, err)
+	rule := oauth.TrustRule{
+		Issuer: "https://kubernetes.default.svc",
+		Claims: map[string]string{"sub": "system:serviceaccount:ns:sa"},
+		JWKS:   json.RawMessage("{\n  \"comment\": \"rotated\",\n  \"keys\": [\n    " + string(public) + ",\n    { \"kty\": \"XYZ\", \"kid\": \"b\" }\n  ]\n}\n"),
+	}
+	canonical, err := oauth.CanonicalTrustRule(rule)
+	require.NoError(t, err)
+	require.Equal(t, `{"keys":[`+string(public)+`,{"kty":"XYZ","kid":"b"}]}`, string(canonical.JWKS), "a key that faucet cannot read stays, as ValidateTrustRule read it")
+	require.Equal(t, rule.Issuer, canonical.Issuer)
+	require.Equal(t, rule.Claims, canonical.Claims)
+	require.NoError(t, oauth.ValidateTrustRule(canonical))
+
+	rule.JWKS = nil
+	canonical, err = oauth.CanonicalTrustRule(rule)
+	require.NoError(t, err)
+	require.Empty(t, canonical.JWKS, "a rule whose keys come from discovery has none")
+	rule.JWKS = json.RawMessage(`{"keys":[]}`)
+	_, err = oauth.CanonicalTrustRule(rule)
+	require.ErrorContains(t, err, "a trust rule's JWKS must hold an RSA key", "it refuses what ValidateTrustRule refuses")
 }

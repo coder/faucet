@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"slices"
@@ -17,6 +19,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 
+	"cdr.dev/slog/v3"
 	"github.com/coder/faucet/faucet"
 	"github.com/coder/faucet/faucet/oauth"
 	"github.com/coder/faucet/faucet/pgstore"
@@ -217,7 +220,7 @@ func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {
 	require.EqualValues(t, 400, hostVersion)
 	var faucetVersion int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM `+pq.QuoteIdentifier(pgstore.MigrationsTable)).Scan(&faucetVersion))
-	require.EqualValues(t, 16, faucetVersion)
+	require.EqualValues(t, 17, faucetVersion)
 }
 
 // The raw events migration adds tables of its own and one index. A down
@@ -434,6 +437,103 @@ func TestTheOrgGrantsMigrationBindsEachLoginToTheAccountThatHoldsItAndBack(t *te
 	runMigrationFile(t, db, "000016_org_grant_accounts.down.sql")
 	require.Equal(t, []string{"repo:coder/faucet", "org:coder-legacy", "all", "org:octo#9", "org:gone"}, grantsOf("orgs"),
 		"a renamed account's grant takes its new login, not the old one that account 99 holds now, and account 9 lost its login to 10")
+}
+
+// The workload trusts migration lets a client have no secret. Its down drops
+// the trust rules and gives each client with no secret an all-zero hash,
+// which no known secret hashes to, as the build before needs a hash, and its
+// up takes that hash back to no secret. No secret logs such a client in at
+// any step.
+func TestTheWorkloadTrustsMigrationKeepsAClientWithNoSecretWithoutOneDownAndUp(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	ctx := context.Background()
+	const resource = "https://faucet.example.com/github/mcp"
+	server, err := oauth.NewServer(oauth.ServerDeps{Store: store, Clock: quartz.NewReal(), Logger: slog.Make(), Issuer: "https://faucet.example.com", Resources: []string{resource}})
+	require.NoError(t, err)
+	logIn := func(id, secret string) int {
+		t.Helper()
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost, oauth.TokenPath, strings.NewReader(url.Values{"grant_type": {"client_credentials"}}.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.SetBasicAuth(url.QueryEscape(id), url.QueryEscape(secret))
+		reply := httptest.NewRecorder()
+		server.TokenHandler().ServeHTTP(reply, req)
+		return reply.Code
+	}
+	secretHashOf := func(id string) (hash []byte) {
+		t.Helper()
+		require.NoError(t, db.QueryRowContext(ctx, `SELECT secret_hash FROM faucet_service_clients WHERE client_id = $1`, id).Scan(&hash))
+		return hash
+	}
+	scopes, grants, now := []faucet.Scope{faucet.ScopeEventsRead}, []string{"repo:coder/faucet"}, time.Now()
+	withSecret, secret, err := oauth.NewClient("with-secret", resource, scopes, grants, now)
+	require.NoError(t, err)
+	require.NoError(t, store.InsertClient(ctx, withSecret))
+	workloads := []string{"workload-a", "workload-b"}
+	for _, id := range workloads {
+		c, err := oauth.NewSecretlessClient(id, resource, scopes, grants, now)
+		require.NoError(t, err)
+		require.NoError(t, store.InsertClient(ctx, c))
+	}
+	_, err = store.AddTrustRule(ctx, "workload-a", oauth.TrustRule{Issuer: "https://k8s.wi-test.invalid", Claims: map[string]string{"sub": "system:serviceaccount:apps:digest-bot"}}, now)
+	require.NoError(t, err)
+	requireNoLogIn := func(step string) {
+		t.Helper()
+		require.Equal(t, http.StatusOK, logIn("with-secret", secret), "%s: the client with a secret logs in", step)
+		for _, id := range workloads {
+			for _, attempt := range []string{"", secret, "fcs_" + strings.Repeat("A", 43)} {
+				require.Equal(t, http.StatusUnauthorized, logIn(id, attempt), "%s: %s logs in with %q", step, id, attempt)
+			}
+		}
+	}
+	requireNoLogIn("before the down")
+
+	runMigrationFile(t, db, "000017_workload_trusts.down.sql")
+	requireNoLogIn("after the down")
+	require.Equal(t, withSecret.SecretHash[:], secretHashOf("with-secret"))
+	for _, id := range workloads {
+		require.Equal(t, make([]byte, 32), secretHashOf(id), "%s gets an all-zero hash", id)
+	}
+	_, err = db.ExecContext(ctx, `UPDATE faucet_service_clients SET secret_hash = NULL WHERE client_id = 'workload-a'`)
+	require.Error(t, err, "a client needs a secret hash again")
+	var trusts *string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT to_regclass('faucet_workload_trusts')::text`).Scan(&trusts))
+	require.Nil(t, trusts, "the trust rules are gone")
+
+	runMigrationFile(t, db, "000017_workload_trusts.up.sql")
+	requireNoLogIn("after the up")
+	for _, id := range workloads {
+		c, err := store.Client(ctx, id)
+		require.NoError(t, err)
+		require.Nil(t, c.SecretHash, "%s has no secret again", id)
+	}
+	c, err := store.Client(ctx, "with-secret")
+	require.NoError(t, err)
+	require.Equal(t, withSecret.SecretHash, c.SecretHash)
+	workload, err := oauth.NewSecretlessClient("workload-c", resource, scopes, grants, now)
+	require.NoError(t, err)
+	require.NoError(t, store.InsertClient(ctx, workload), "a client with no secret is taken again")
+}
+
+// The claims of a trust rule are an object of strings, as oauth.TrustRule
+// holds them. A lax path would unwrap an array and pass it.
+func TestATrustRuleHoldsClaimsOfStringsOnly(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	ctx := context.Background()
+	_, err := db.ExecContext(ctx, `INSERT INTO faucet_service_clients (client_id, secret_hash, resource, grants, scopes, created_at)
+		VALUES ('digest-bot', NULL, 'https://faucet.example.com/github/mcp', '{repo:coder/faucet}', '{events:read}', now())`)
+	require.NoError(t, err)
+	insert := func(claims string) error {
+		_, err := db.ExecContext(ctx, `INSERT INTO faucet_workload_trusts (client_id, issuer, claims, rule_hash, created_at)
+			VALUES ('digest-bot', 'https://k8s.wi-test.invalid', $1::text::jsonb, sha256(convert_to($1::text, 'UTF8')), now())`, claims)
+		return err
+	}
+	for _, claims := range []string{`{"sub":["x"]}`, `{"sub":[]}`, `{"sub":1}`, `{"sub":null}`, `{"sub":{"a":"x"}}`, `{}`, `["x"]`} {
+		require.Error(t, insert(claims), claims)
+	}
+	require.NoError(t, insert(`{"sub":"system:serviceaccount:apps:digest-bot","kubernetes.io/namespace":"apps"}`))
 }
 
 func TestTheClearMigrationMovesTheOldTopToTheClearAndBack(t *testing.T) {
@@ -766,7 +866,7 @@ func TestOAuthStoreCallThatItsContextCutShortWrapsTheContextError(t *testing.T) 
 	tx, err := db.BeginTx(context.Background(), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = tx.Rollback() })
-	for _, table := range []string{"faucet_access_tokens", "faucet_service_clients"} {
+	for _, table := range []string{"faucet_access_tokens", "faucet_service_clients", "faucet_workload_trusts"} {
 		_, err = tx.Exec("LOCK TABLE " + table + " IN ACCESS EXCLUSIVE MODE") //nolint:gosec // The names are constants.
 		require.NoError(t, err)
 	}
@@ -798,6 +898,19 @@ func TestOAuthStoreCallThatItsContextCutShortWrapsTheContextError(t *testing.T) 
 		},
 		"DisableClient": func(ctx context.Context) error {
 			_, err := store.DisableClient(ctx, client.ID, time.Now())
+			return err
+		},
+		"AddTrustRule": func(ctx context.Context) error {
+			_, err := store.AddTrustRule(ctx, client.ID, oauth.TrustRule{Issuer: "https://k8s.wi-test.invalid", Claims: map[string]string{"sub": "system:serviceaccount:apps:digest-bot"}}, time.Now())
+			return err
+		},
+		"TrustRules": func(ctx context.Context) error {
+			_, err := store.TrustRules(ctx, client.ID)
+			return err
+		},
+		"RemoveTrustRule": func(ctx context.Context) error { return store.RemoveTrustRule(ctx, client.ID, 1) },
+		"CountTrustRules": func(ctx context.Context) error {
+			_, err := store.CountTrustRules(ctx)
 			return err
 		},
 	} {

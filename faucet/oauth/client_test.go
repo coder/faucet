@@ -30,7 +30,8 @@ func TestNewClientMintsASecretThatBasicEncodingLeavesAlone(t *testing.T) {
 		require.NoError(t, err)
 		require.Regexp(t, form, secret)
 		require.Equal(t, secret, url.QueryEscape(secret))
-		require.Equal(t, oauth.HashToken(secret), c.SecretHash, "the client keeps the hash of the secret")
+		hash := oauth.HashToken(secret)
+		require.Equal(t, &hash, c.SecretHash, "the client keeps the hash of the secret")
 		require.False(t, seen[secret])
 		seen[secret] = true
 	}
@@ -99,6 +100,23 @@ func TestNewClientRefusesAClientThatCannotWork(t *testing.T) {
 	c, _, err := oauth.NewClient("ci", resource, bothScopes, []string{"repo:coder/faucet", "org:coder#7", "all"}, time.Now())
 	require.NoError(t, err, "a grant names a repository, an account or every repository")
 	require.Equal(t, []string{"repo:coder/faucet", "org:coder#7", "all"}, c.Grants)
+}
+
+func TestNewSecretlessClientMakesAClientWithNoSecret(t *testing.T) {
+	t.Parallel()
+	const resource = "https://faucet.example.com/github/mcp"
+	c, err := oauth.NewSecretlessClient("digest-bot", resource, bothScopes, []string{"repo:coder/faucet"}, time.Now())
+	require.NoError(t, err)
+	require.Nil(t, c.SecretHash)
+	require.NoError(t, c.Validate())
+	require.Equal(t, []string{"repo:coder/faucet"}, c.Grants)
+
+	_, err = oauth.NewSecretlessClient("digest-bot", resource, bothScopes, nil, time.Now())
+	require.ErrorContains(t, err, "a client needs at least one grant")
+	_, err = oauth.NewSecretlessClient("Digest-Bot", resource, bothScopes, []string{"repo:coder/faucet"}, time.Now())
+	require.ErrorContains(t, err, "a client ID is")
+	c.SecretHash = &oauth.TokenHash{}
+	require.ErrorContains(t, c.Validate(), "a client's secret hash cannot be zero")
 }
 
 // An operator writes an org grant by login, and the client holds it for the

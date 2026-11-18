@@ -3,7 +3,9 @@ package oauth_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -38,8 +40,15 @@ type fakeStore struct {
 	// lock does in Postgres. A caller takes it before mu, never while it
 	// holds mu.
 	connectionLocks map[string]*sync.Mutex
+	trustRules      []fakeTrustRule
+	lastTrustRuleID int64
 	err             error
 	reads           int
+}
+
+type fakeTrustRule struct {
+	clientID string
+	oauth.StoredTrustRule
 }
 
 func newFakeStore() *fakeStore {
@@ -100,6 +109,10 @@ func (s *fakeStore) callErr(ctx context.Context, method string) error {
 
 func cloneClient(c oauth.Client) oauth.Client {
 	c.Grants, c.Scopes = slices.Clone(c.Grants), slices.Clone(c.Scopes)
+	if c.SecretHash != nil {
+		hash := *c.SecretHash
+		c.SecretHash = &hash
+	}
 	return c
 }
 
@@ -151,6 +164,84 @@ func (s *fakeStore) DisableClient(_ context.Context, id string, now time.Time) (
 		s.clients[i].DisabledAt = now
 	}
 	return cloneClient(s.clients[i]), nil
+}
+
+func (s *fakeStore) AddTrustRule(_ context.Context, clientID string, r oauth.TrustRule, now time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !slices.ContainsFunc(s.clients, func(c oauth.Client) bool { return c.ID == clientID }) {
+		return 0, oauth.ErrUnknownClient
+	}
+	for _, held := range s.trustRules {
+		if held.clientID == clientID && sameTrustRule(held.Rule, r) {
+			return held.ID, nil
+		}
+	}
+	s.lastTrustRuleID++
+	s.trustRules = append(s.trustRules, fakeTrustRule{clientID, oauth.StoredTrustRule{ID: s.lastTrustRuleID, Rule: cloneTrustRule(r), CreatedAt: now}})
+	return s.lastTrustRuleID, nil
+}
+
+func (s *fakeStore) TrustRules(_ context.Context, clientID string) ([]oauth.StoredTrustRule, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rules := []oauth.StoredTrustRule{}
+	for _, held := range s.trustRules {
+		if held.clientID == clientID {
+			stored := held.StoredTrustRule
+			stored.Rule = cloneTrustRule(stored.Rule)
+			rules = append(rules, stored)
+		}
+	}
+	return rules, nil
+}
+
+func (s *fakeStore) RemoveTrustRule(_ context.Context, clientID string, id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := slices.IndexFunc(s.trustRules, func(r fakeTrustRule) bool { return r.clientID == clientID && r.ID == id })
+	if i < 0 {
+		return oauth.ErrUnknownTrustRule
+	}
+	s.trustRules = slices.Delete(s.trustRules, i, i+1)
+	return nil
+}
+
+func (s *fakeStore) CountTrustRules(context.Context) (map[string]int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	counts := map[string]int{}
+	for _, held := range s.trustRules {
+		counts[held.clientID]++
+	}
+	return counts, nil
+}
+
+// It compares numbers by their text, so 1 and 1.0 differ as in jsonb, but so
+// do 1e2 and 100, which jsonb holds as one.
+func sameTrustRule(a, b oauth.TrustRule) bool {
+	return a.Issuer == b.Issuer && maps.Equal(a.Claims, b.Claims) && sameJSON(a.JWKS, b.JWKS)
+}
+
+func sameJSON(a, b json.RawMessage) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return len(a) == len(b)
+	}
+	x, xOK := decodeJSON(a)
+	y, yOK := decodeJSON(b)
+	return xOK && yOK && reflect.DeepEqual(x, y)
+}
+
+func decodeJSON(text json.RawMessage) (any, bool) {
+	d := json.NewDecoder(bytes.NewReader(text))
+	d.UseNumber()
+	var v any
+	return v, d.Decode(&v) == nil
+}
+
+func cloneTrustRule(r oauth.TrustRule) oauth.TrustRule {
+	r.Claims, r.JWKS = maps.Clone(r.Claims), bytes.Clone(r.JWKS)
+	return r
 }
 
 func (s *fakeStore) InsertAccessToken(_ context.Context, t oauth.AccessToken) error {

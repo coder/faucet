@@ -170,7 +170,7 @@ func (s *keySource) fetch(ctx context.Context, issuer string) (jose.JSONWebKeySe
 	if body, err = s.get(ctx, doc.JWKSURI); err != nil {
 		return jose.JSONWebKeySet{}, xerrors.Errorf("the key set: %w", err)
 	}
-	keys, err := parseKeySet(body)
+	keys, _, err := parseKeySet(body)
 	if err != nil {
 		return jose.JSONWebKeySet{}, xerrors.Errorf("the key set %w", err)
 	}
@@ -191,12 +191,12 @@ func (s *keySource) get(ctx context.Context, rawURL string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, xerrors.Errorf("it must be served with status 200 and no redirect, not %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxKeyDocumentBytes+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxKeyDocumentBytes+1))
 	switch {
 	case err != nil:
 		return nil, lateOr(ctx, err)
-	case len(body) > maxKeyDocumentBytes:
-		return nil, xerrors.Errorf("it must be at most %d bytes", maxKeyDocumentBytes)
+	case len(body) > MaxKeyDocumentBytes:
+		return nil, xerrors.Errorf("it must be at most %d bytes", MaxKeyDocumentBytes)
 	}
 	return body, nil
 }

@@ -27,13 +27,15 @@ const (
 
 // Client is a service client as a store keeps it. An operator makes it with
 // NewClient, and the service logs in with its ID and secret under the client
-// credentials grant.
+// credentials grant. NewSecretlessClient makes a client for workloads, which
+// has no secret.
 type Client struct {
 	// ID is lower-case letters, digits and inner hyphens. The service's
 	// login is "svc:" and the ID.
 	ID string
-	// SecretHash is the hash of the client secret, never the secret.
-	SecretHash TokenHash
+	// SecretHash is the hash of the client secret, never the secret, and nil
+	// for a client that has no secret.
+	SecretHash *TokenHash
 	// Resource is the one endpoint that the client's tokens are for, such as
 	// https://faucet.example.com/github/mcp.
 	Resource string
@@ -60,8 +62,8 @@ func (c Client) Validate() error {
 		return err
 	}
 	switch {
-	case c.SecretHash == TokenHash{}:
-		return xerrors.New("a client needs the hash of its secret")
+	case c.SecretHash != nil && *c.SecretHash == TokenHash{}:
+		return xerrors.New("a client's secret hash cannot be zero: a client with no secret has no hash")
 	case c.Resource == "":
 		return xerrors.New("a client needs a resource")
 	case len(c.Scopes) == 0:
@@ -85,21 +87,30 @@ func (c Client) Validate() error {
 // NewClient returns a live client created at now, and its secret, which the
 // caller must show to the operator once: the client keeps only its hash.
 func NewClient(id, resource string, scopes []faucet.Scope, grants []string, now time.Time) (Client, string, error) {
-	if len(grants) == 0 {
-		return Client{}, "", xerrors.New("a client needs at least one grant, or it can read nothing")
+	c, err := NewSecretlessClient(id, resource, scopes, grants, now)
+	if err != nil {
+		return Client{}, "", err
 	}
 	secret, err := newSecret(clientSecretPrefix)
 	if err != nil {
 		return Client{}, "", err
 	}
-	c := Client{
-		ID: id, SecretHash: HashToken(secret), Resource: resource,
-		Grants: slices.Clone(grants), Scopes: slices.Clone(scopes), CreatedAt: now,
-	}
-	if err := c.Validate(); err != nil {
-		return Client{}, "", err
-	}
+	hash := HashToken(secret)
+	c.SecretHash = &hash
 	return c, secret, nil
+}
+
+// NewSecretlessClient returns a live client created at now that has no
+// secret, so the client credentials grant refuses it.
+func NewSecretlessClient(id, resource string, scopes []faucet.Scope, grants []string, now time.Time) (Client, error) {
+	if len(grants) == 0 {
+		return Client{}, xerrors.New("a client needs at least one grant, or it can read nothing")
+	}
+	c := Client{ID: id, Resource: resource, Grants: slices.Clone(grants), Scopes: slices.Clone(scopes), CreatedAt: now}
+	if err := c.Validate(); err != nil {
+		return Client{}, err
+	}
+	return c, nil
 }
 
 // errClientID is the error of an ID that ValidateClientID refuses.
