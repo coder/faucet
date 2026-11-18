@@ -19,6 +19,7 @@ import (
 	"golang.org/x/oauth2/clientcredentials"
 
 	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/sloghuman"
 	"github.com/coder/faucet/faucet"
 	"github.com/coder/faucet/faucet/oauth"
 	"github.com/coder/quartz"
@@ -33,6 +34,7 @@ type tokenHarness struct {
 	srv    *httptest.Server
 	server *oauth.Server
 	secret string
+	logs   *loginLogs
 }
 
 // newTokenHarness serves the authorization server over a store that holds
@@ -45,7 +47,8 @@ func newTokenHarness(t *testing.T) *tokenHarness {
 	c, secret, err := oauth.NewClient("ci-watcher", resource, bothScopes, []string{"repo:coder/faucet"}, clock.Now())
 	require.NoError(t, err)
 	require.NoError(t, store.InsertClient(context.Background(), c))
-	server, err := oauth.NewServer(oauth.ServerDeps{Store: store, Clock: clock, Logger: slog.Make(), Issuer: issuer, Resources: []string{resource, issuer + "/mcp"}})
+	logs := &loginLogs{}
+	server, err := oauth.NewServer(oauth.ServerDeps{Store: store, Clock: clock, Logger: slog.Make(sloghuman.Sink(logs)), Issuer: issuer, Resources: []string{resource, issuer + "/mcp"}})
 	require.NoError(t, err)
 	mux := http.NewServeMux()
 	mux.Handle("GET "+oauth.MetadataPath, server.MetadataHandler())
@@ -53,7 +56,7 @@ func newTokenHarness(t *testing.T) *tokenHarness {
 	mux.Handle(oauth.AuthorizePath, server.AuthorizeHandler())
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return &tokenHarness{t: t, store: store, clock: clock, srv: srv, server: server, secret: secret}
+	return &tokenHarness{t: t, store: store, clock: clock, srv: srv, server: server, secret: secret, logs: logs}
 }
 
 type tokenReply struct {

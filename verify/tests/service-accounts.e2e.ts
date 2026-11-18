@@ -150,11 +150,13 @@ describe('service accounts', () => {
           subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
         }).toString(),
       });
-      expect(refused.status, refused.body).toBe(401);
-      expect(JSON.parse(refused.body)).toEqual({
+      expect(refused.status, refused.body).toBe(400);
+      expect(refused.headers.get('www-authenticate'), 'the client sends no Authorization header').toBeNull();
+      expect(JSON.parse(refused.body), 'the answer tells the caller nothing about the client').toEqual({
         error: 'invalid_client',
-        error_description: 'the client trusts no workload issuer: add one with faucet clients trust',
+        error_description: "the client takes no such subject token: check client_id and the token, and faucet's log for the reason",
       });
+      expect(output()).toContain('the client trusts no workload issuer: add one with faucet clients trust');
 
       for (const secret of [...subjects, token]) expect(output()).not.toContain(secret);
       expect(started.leaksSecret(output())).toBe(false);

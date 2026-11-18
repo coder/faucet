@@ -147,7 +147,7 @@ func TestARealKubernetesTokenLogsInAndReadsEvents(t *testing.T) {
 	require.Equal(t, "the subject token is refused: it has expired, or expires in less than a second", body["error_description"])
 
 	logs := srv.logs.String()
-	require.Contains(t, logs, "a workload's token was refused")
+	require.Contains(t, logs, "a token exchange was refused")
 	require.NotContains(t, logs, subject)
 	require.NotContains(t, logs, strings.Split(subject, ".")[2], "no log holds the subject token's signature")
 	require.NotContains(t, logs, token)

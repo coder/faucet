@@ -2,12 +2,16 @@ package oauth_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
 
 	"cdr.dev/slog/v3"
@@ -160,28 +164,43 @@ func TestATokenExchangeCarriesNoSecretAndNoActor(t *testing.T) {
 	}
 }
 
+// The answers about the endpoint and the scopes come only after the subject
+// token's signature verified, so that they tell an unverified caller nothing
+// about the client.
 func TestATokenExchangeIsForTheClientsEndpoint(t *testing.T) {
 	t.Parallel()
 	h, _ := newWorkloadHarness(t)
 	token := h.vercelToken()
 
 	for name, c := range map[string]struct {
-		form       url.Values
+		extra      []string
 		code, want string
 	}{
-		"another audience":         {exchange(token, "audience", issuer+"/mcp"), "invalid_target", "the tokens of this client are for " + resource},
-		"faucet as the audience":   {exchange(token, "audience", issuer), "invalid_target", "the tokens of this client are for " + resource},
-		"another resource":         {exchange(token, "resource", issuer+"/mcp"), "invalid_target", "the tokens of this client are for " + resource},
-		"a scope the client lacks": {exchange(token, "scope", "repo"), "invalid_scope", "the client holds none of the scopes asked for"},
+		"another audience":         {[]string{"audience", issuer + "/mcp"}, "invalid_target", "the tokens of this client are for " + resource},
+		"faucet as the audience":   {[]string{"audience", issuer}, "invalid_target", "the tokens of this client are for " + resource},
+		"another resource":         {[]string{"resource", issuer + "/mcp"}, "invalid_target", "the tokens of this client are for " + resource},
+		"a scope the client lacks": {[]string{"scope", "repo"}, "invalid_scope", "the client holds none of the scopes asked for"},
 	} {
-		reply := h.post("", c.form)
+		reply := h.post("", exchange(token, c.extra...))
 		require.Equal(t, http.StatusBadRequest, reply.status, "%s: %s", name, reply.rawBody)
 		require.Equal(t, map[string]any{"error": c.code, "error_description": c.want}, reply.body, name)
+		reply = h.post("", exchange("not-a-jwt", c.extra...))
+		require.Equal(t, refusedExchange, reply.body, "%s with a token that does not verify", name)
 	}
 	reply := h.post("", exchange(token, "audience", resource, "resource", resource))
 	require.Equal(t, http.StatusOK, reply.status, reply.rawBody)
 }
 
+// refusedExchange is the one answer to a token exchange that faucet refuses
+// before the subject token's signature verified under a rule of the client.
+var refusedExchange = map[string]any{
+	"error": "invalid_client", "error_description": "the client takes no such subject token: check client_id and the token, and faucet's log for the reason",
+}
+
+// Before the subject token's signature verifies under a rule of the client,
+// every refusal gets one answer, so that no caller learns which clients
+// exist, which endpoint they are for or which issuers they trust. The log
+// says why. After it verifies, the answer says why.
 func TestATokenExchangeNeedsALiveClientThatTrustsTheToken(t *testing.T) {
 	t.Parallel()
 	h, _ := newWorkloadHarness(t)
@@ -193,24 +212,50 @@ func TestATokenExchangeNeedsALiveClientThatTrustsTheToken(t *testing.T) {
 	h.addWorkloadClient("retired", resource, oauth.VercelRule())
 	_, err := h.store.DisableClient(context.Background(), "retired", h.clock.Now())
 	require.NoError(t, err)
+	h.addWorkloadClient("cluster-bot", resource, oauth.TrustRule{Issuer: "https://kubernetes.example.com", Claims: map[string]string{"sub": "system:serviceaccount:apps:cluster-bot"}})
+	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	otherKeys := oauth.VercelRule()
+	otherKeys.JWKS = trustKeySet(t, jose.JSONWebKey{Key: otherKey.Public(), KeyID: oauth.VercelKeyID, Use: "sig"})
+	h.addWorkloadClient("other-keys", resource, otherKeys)
 
-	for id, want := range map[string]struct {
-		status      int
-		code, about string
+	for name, c := range map[string]struct {
+		client, subject, reason string
 	}{
-		"nobody":     {http.StatusUnauthorized, "invalid_client", "client authentication failed"},
-		"Not_An_ID":  {http.StatusUnauthorized, "invalid_client", "client authentication failed"},
-		"retired":    {http.StatusUnauthorized, "invalid_client", "client authentication failed"},
-		"ci-watcher": {http.StatusUnauthorized, "invalid_client", "the client trusts no workload issuer: add one with faucet clients trust"},
-		"elsewhere":  {http.StatusUnauthorized, "invalid_client", "which this server does not serve"},
-		"other-team": {http.StatusBadRequest, "invalid_request", "the subject token is refused: it matches no trust rule of the client"},
+		"no client ID":                       {"Not_An_ID", token, "client_id is not a client ID"},
+		"an unknown client":                  {"nobody", token, "no client has this ID"},
+		"a disabled client":                  {"retired", token, "the client is disabled"},
+		"a client of another server":         {"elsewhere", token, "the client is for https://faucet.other.example.com/github/mcp, which this server does not serve"},
+		"a client with no rule":              {"ci-watcher", token, "the client trusts no workload issuer: add one with faucet clients trust"},
+		"a client that trusts other issuers": {"cluster-bot", token, "the subject token is refused: it matches no trust rule of the client"},
+		"a client that trusts other keys":    {"other-keys", token, "the subject token is refused: its signature does not verify with its issuer's key"},
+		"a token that is no JWT":             {"digest-bot", "not-a-jwt", "the subject token is refused: it must be a JWT in compact form, signed with RS256 or ES256"},
 	} {
-		reply := h.post("", exchange(token, "client_id", id))
-		require.Equal(t, want.status, reply.status, "%s: %s", id, reply.rawBody)
-		require.Equal(t, want.code, reply.body["error"], id)
-		require.Contains(t, reply.body["error_description"], want.about, id)
-		require.NotContains(t, reply.rawBody, "team_other", "%s: no answer names a value that a rule pins", id)
+		reply := h.post("", exchange(c.subject, "client_id", c.client))
+		require.Equal(t, http.StatusBadRequest, reply.status, "%s: %s", name, reply.rawBody)
+		require.Empty(t, reply.header.Values("WWW-Authenticate"), "%s: the client sends no Authorization header", name)
+		require.Equal(t, refusedExchange, reply.body, name)
+		require.True(t, logged(h.logs.String(), "[info]", "a token exchange was refused", "client_id="+c.client, c.reason), "%s: %s", name, h.logs.String())
 	}
+
+	reply := h.post("", exchange(token, "client_id", "other-team"))
+	require.Equal(t, http.StatusBadRequest, reply.status, reply.rawBody)
+	require.Equal(t, map[string]any{
+		"error": "invalid_request", "error_description": "the subject token is refused: it matches no trust rule of the client",
+	}, reply.body, "the token's signature verified under the client's rule")
+	require.NotContains(t, reply.rawBody, "team_other", "no answer names a value that a rule pins")
+	require.True(t, logged(h.logs.String(), "[info]", "a token exchange was refused", "client_id=other-team", "it matches no trust rule of the client"), h.logs.String())
+	require.NotContains(t, h.logs.String(), token)
+}
+
+// logged reports whether a line of logs holds each of parts.
+func logged(logs string, parts ...string) bool {
+	for line := range strings.Lines(logs) {
+		if !slices.ContainsFunc(parts, func(p string) bool { return !strings.Contains(line, p) }) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestNewServerWarnsOfAWorkloadKeyClientThatReachesLoopback(t *testing.T) {

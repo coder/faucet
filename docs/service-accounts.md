@@ -138,9 +138,9 @@ The workload posts a form to `/oauth/token` with `grant_type=urn:ietf:params:oau
 | Answer | When |
 | --- | --- |
 | 200 with `access_token`, `token_type` `Bearer`, `expires_in`, `scope`, and `issued_token_type` `urn:ietf:params:oauth:token-type:access_token` | The token matches a rule. Faucet's token lasts 15 minutes, or until the platform's token expires when that is sooner. There is no refresh token: get a fresh token from the platform and trade it again. |
-| 400 `invalid_request` | The form is wrong, or faucet refused the platform's token. The description says why, and names no value that a rule pins. |
-| 400 `invalid_target` or `invalid_scope` | `resource` or `audience` names another endpoint, or the client holds none of the scopes asked for. |
-| 401 `invalid_client` | No live client has that ID, the client is for another server's endpoint, or it has no trust rule. |
+| 400 `invalid_request` | The form is wrong, or the platform's token verified with the keys of a rule of the client and faucet refused it. The description says why, and names no value that a rule pins. |
+| 400 `invalid_target` or `invalid_scope` | The token verified, and `resource` or `audience` names another endpoint, or the client holds none of the scopes asked for. |
+| 400 `invalid_client` | Every other refusal: no live client of this server has that ID, the client has no trust rule, no rule names the token's `iss`, or the token is not a JWT whose signature verifies with the keys of such a rule. Each gets the same answer, so that a caller learns nothing about a client until it holds a token that the client trusts. Faucet logs the reason with the `client_id`. |
 | 503 `temporarily_unavailable` with `Retry-After: 60` | Faucet could not fetch the keys of the token's issuer. Faucet logs the cause. Ask again after a minute. |
 
 `faucet clients untrust` stops new logins through that rule, and a token that a workload already got works until it expires, 15 minutes at most. `faucet clients disable` also ends the tokens that the client holds, on their next request.

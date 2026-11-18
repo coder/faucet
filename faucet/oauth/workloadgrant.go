@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"slices"
@@ -17,8 +18,23 @@ const (
 
 var subjectTokenTypes = []string{"urn:ietf:params:oauth:token-type:jwt", "urn:ietf:params:oauth:token-type:id_token"}
 
+// errWorkloadRefused is the one answer to a token exchange that faucet
+// refuses before the subject token's signature verified under a rule of the
+// client, so that it tells no caller which clients exist or what they
+// trust. The client sends no Authorization header, so the answer is a 400
+// with no challenge (RFC 6749 section 5.2).
+var errWorkloadRefused = &tokenError{
+	status: http.StatusBadRequest, code: "invalid_client",
+	description: "the client takes no such subject token: check client_id and the token, and faucet's log for the reason",
+}
+
+// workloadClientError says why a client takes no token exchange. It is for
+// the log: the caller gets errWorkloadRefused.
+type workloadClientError string
+
+func (e workloadClientError) Error() string { return string(e) }
+
 func (s *Server) tokenExchange(r *http.Request, form url.Values) (tokenResponse, error) {
-	ctx := r.Context()
 	switch {
 	case r.Header.Get("Authorization") != "" || form.Has("client_secret"):
 		return tokenResponse{}, badRequest("invalid_request", "a token exchange carries no client secret: send client_id in the form, and the workload's token as subject_token")
@@ -33,7 +49,23 @@ func (s *Server) tokenExchange(r *http.Request, form url.Values) (tokenResponse,
 	case form.Has("requested_token_type") && form.Get("requested_token_type") != accessTokenType:
 		return tokenResponse{}, badRequest("invalid_request", "requested_token_type can only be "+accessTokenType)
 	}
-	c, err := s.workloadClient(r, form.Get("client_id"))
+	resp, err := s.exchange(r.Context(), form)
+	if err != nil {
+		return tokenResponse{}, s.exchangeAnswer(r.Context(), form.Get("client_id"), err)
+	}
+	return resp, nil
+}
+
+// exchange trades the subject token of form for a token of its client. It
+// checks what the form asks for only after the token's signature verified
+// under a rule of the client, so that no answer tells an unverified caller
+// the client's endpoint or scopes.
+func (s *Server) exchange(ctx context.Context, form url.Values) (tokenResponse, error) {
+	c, rules, err := s.workloadClient(ctx, form.Get("client_id"))
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	match, err := s.workloads.check(ctx, rules, form.Get("subject_token"), s.issuer, s.clock.Now())
 	if err != nil {
 		return tokenResponse{}, err
 	}
@@ -47,36 +79,7 @@ func (s *Server) tokenExchange(r *http.Request, form url.Values) (tokenResponse,
 	if form.Has("audience") && form.Get("audience") != c.Resource {
 		return tokenResponse{}, badRequest("invalid_target", "the tokens of this client are for "+c.Resource)
 	}
-	stored, err := s.store.TrustRules(ctx, c.ID)
-	if err != nil {
-		return tokenResponse{}, xerrors.Errorf("read the trust rules of the client: %w", err)
-	}
-	if len(stored) == 0 {
-		s.logger.Info(ctx, "a workload asked for a token of a client that trusts no issuer", slog.F("client_id", c.ID))
-		return tokenResponse{}, &tokenError{
-			status: http.StatusUnauthorized, code: "invalid_client",
-			description: "the client trusts no workload issuer: add one with faucet clients trust",
-		}
-	}
-	rules := make([]TrustRule, len(stored))
-	for i, st := range stored {
-		rules[i] = st.Rule
-	}
 	now := s.clock.Now()
-	match, err := s.workloads.check(ctx, rules, form.Get("subject_token"), s.issuer, now)
-	switch {
-	case xerrors.Is(err, errIssuerKeys):
-		s.logger.Warn(ctx, "a workload's token waits for the keys of its issuer", slog.F("client_id", c.ID), slog.Error(err))
-		return tokenResponse{}, &tokenError{
-			status: http.StatusServiceUnavailable, code: "temporarily_unavailable", retryAfter: keyFetchInterval,
-			description: "faucet could not fetch the keys of the subject token's issuer: try again in a minute",
-		}
-	case xerrors.Is(err, errSubjectToken):
-		s.logger.Info(ctx, "a workload's token was refused", slog.F("client_id", c.ID), slog.F("reason", err.Error()))
-		return tokenResponse{}, badRequest("invalid_request", err.Error())
-	case err != nil:
-		return tokenResponse{}, xerrors.Errorf("check the subject token: %w", err)
-	}
 	resp, err := s.mintServiceToken(ctx, c, scopes, now, match.lifetime(now))
 	if err != nil {
 		return tokenResponse{}, err
@@ -86,21 +89,58 @@ func (s *Server) tokenExchange(r *http.Request, form url.Values) (tokenResponse,
 	return resp, nil
 }
 
-func (s *Server) workloadClient(r *http.Request, id string) (Client, error) {
-	if ValidateClientID(id) != nil {
-		return Client{}, errClientAuth
+// exchangeAnswer is the answer to a token exchange of clientID that failed
+// with err, which it logs with its reason.
+func (s *Server) exchangeAnswer(ctx context.Context, clientID string, err error) error {
+	var refusal workloadClientError
+	var token subjectTokenError
+	var answer *tokenError
+	switch {
+	case xerrors.Is(err, errIssuerKeys):
+		s.logger.Warn(ctx, "a workload's token waits for the keys of its issuer", slog.F("client_id", clientID), slog.Error(err))
+		return &tokenError{
+			status: http.StatusServiceUnavailable, code: "temporarily_unavailable", retryAfter: keyFetchInterval,
+			description: "faucet could not fetch the keys of the subject token's issuer: try again in a minute",
+		}
+	case xerrors.As(err, &refusal), xerrors.As(err, &token) && !token.signed:
+		s.logger.Info(ctx, "a token exchange was refused", slog.F("client_id", clientID), slog.F("reason", err.Error()))
+		return errWorkloadRefused
+	case xerrors.As(err, &token):
+		answer = badRequest("invalid_request", err.Error())
+	case !xerrors.As(err, &answer):
+		return err
 	}
-	c, err := s.store.Client(r.Context(), id)
+	s.logger.Info(ctx, "a token exchange was refused", slog.F("client_id", clientID), slog.F("reason", answer.description))
+	return answer
+}
+
+// workloadClient returns the client that id names and its trust rules, or a
+// workloadClientError when the client takes no token exchange.
+func (s *Server) workloadClient(ctx context.Context, id string) (Client, []TrustRule, error) {
+	if ValidateClientID(id) != nil {
+		return Client{}, nil, workloadClientError("client_id is not a client ID")
+	}
+	c, err := s.store.Client(ctx, id)
 	switch {
 	case xerrors.Is(err, ErrUnknownClient):
-		return Client{}, errClientAuth
+		return Client{}, nil, workloadClientError("no client has this ID")
 	case err != nil:
-		return Client{}, xerrors.Errorf("read the client: %w", err)
+		return Client{}, nil, xerrors.Errorf("read the client: %w", err)
 	case !c.Live():
-		return Client{}, errClientAuth
+		return Client{}, nil, workloadClientError("the client is disabled")
+	case !slices.Contains(s.resources, c.Resource):
+		return Client{}, nil, workloadClientError("the client is for " + c.Resource + ", which this server does not serve")
 	}
-	if err := s.checkServed(r.Context(), c); err != nil {
-		return Client{}, err
+	stored, err := s.store.TrustRules(ctx, c.ID)
+	switch {
+	case err != nil:
+		return Client{}, nil, xerrors.Errorf("read the trust rules of the client: %w", err)
+	case len(stored) == 0:
+		return Client{}, nil, workloadClientError("the client trusts no workload issuer: add one with faucet clients trust")
 	}
-	return c, nil
+	rules := make([]TrustRule, len(stored))
+	for i, st := range stored {
+		rules[i] = st.Rule
+	}
+	return c, rules, nil
 }

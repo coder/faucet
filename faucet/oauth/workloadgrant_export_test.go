@@ -32,3 +32,6 @@ func SignAsVercel(t *testing.T, claims map[string]any) string { return signVerce
 
 // VercelRule is a trust rule that VercelFunctionClaims match.
 func VercelRule() TrustRule { return testVercelRule() }
+
+// VercelKeyID is the kid of the key that SignAsVercel signs with.
+const VercelKeyID = testKID
