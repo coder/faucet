@@ -276,20 +276,24 @@ func TestTheRawEventsMigrationGoesDownAndUpAroundTheEventLog(t *testing.T) {
 	for _, relation := range relations {
 		require.False(t, exists(relation), "%s is gone", relation)
 	}
-	_, inserted, err := store.InsertEvent(ctx, faucet.Event{Source: "github", DeliveryID: "run-1", Type: "ci.run_completed", RepoID: 42, Data: json.RawMessage(`{}`)})
-	require.NoError(t, err)
-	require.True(t, inserted, "the event log stores as before")
-	targets, err := store.ScanTargets(ctx, now, 100, 100)
-	require.NoError(t, err)
-	require.Empty(t, targets, "the raw subscription is a row that the event log never scans")
-	renewed, err := store.UpsertSubscription(ctx, subscription, now.Add(time.Minute), 100)
-	require.NoError(t, err)
-	require.True(t, row.CreatedAt.Equal(renewed.CreatedAt), "and its subscriber can still renew it")
+	// This build reads the columns of later migrations, so the build before
+	// the raw events is played by its own statements.
+	_, err = db.ExecContext(ctx, `INSERT INTO faucet_events (source, delivery_id, type, repo_id, data) VALUES ('github', 'run-1', 'ci.run_completed', 42, '{}')`)
+	require.NoError(t, err, "the event log stores as before")
+	var scanned int64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT scanned_through FROM faucet_subscriptions WHERE key_hash = $1`, row.KeyHash[:]).Scan(&scanned))
+	require.EqualValues(t, math.MaxInt64, scanned, "the raw subscription is a row that the event log never scans")
 
 	migrate("up")
 	for _, relation := range relations {
 		require.True(t, exists(relation), "%s is back", relation)
 	}
+	targets, err := store.ScanTargets(ctx, now, 100, 100)
+	require.NoError(t, err)
+	require.Empty(t, targets, "the raw subscription is still no scan target")
+	renewed, err := store.UpsertSubscription(ctx, subscription, now.Add(time.Minute), 100)
+	require.NoError(t, err)
+	require.True(t, row.CreatedAt.Equal(renewed.CreatedAt), "and its subscriber can still renew it")
 	head, err := store.RawHead(ctx)
 	require.NoError(t, err)
 	require.Zero(t, head, "raw events start empty")
