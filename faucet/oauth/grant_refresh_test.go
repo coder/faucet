@@ -43,6 +43,39 @@ func TestARefreshTokenTradesAgainFor30SecondsThenEndsItsSession(t *testing.T) {
 	}
 }
 
+// A thief who trades a stolen refresh token, and trades on later, leaves
+// the stolen token known: when its holder presents it, however late, the
+// session ends, and with it the thief's tokens.
+func TestAStolenRefreshTokenEndsTheSessionWhenItsHolderComesBackAfterLaterRefreshes(t *testing.T) {
+	t.Parallel()
+	h := newGrantHarness(t, newFakeStore())
+	victim := h.redeem(h.approve("login-1", 1))
+	thief := h.refresh(victim)
+	for range 3 {
+		h.clock.Advance(15 * time.Minute)
+		thief = h.refresh(thief)
+	}
+
+	grantRequireRefused(t, h.post("", grantRefreshForm(victim.refresh)), http.StatusBadRequest, "invalid_grant", "the stolen token")
+	require.False(t, h.session("login-1").Live(), "the session ended")
+	grantRequireRefused(t, h.post("", grantRefreshForm(thief.refresh)), http.StatusBadRequest, "invalid_grant", "the thief's token")
+}
+
+// Of the tokens that refreshes at once give, the client keeps one. A later
+// refresh retires the others unused, and a retired token that comes again
+// ends the session, since the client no longer holds it.
+func TestARetiredRefreshTokenEndsTheSession(t *testing.T) {
+	t.Parallel()
+	h := newGrantHarness(t, newFakeStore())
+	got := h.raceRefreshes(h.redeem(h.approve("login-1", 1)), 2)
+	h.clock.Advance(15 * time.Minute)
+	h.refresh(got[1])
+
+	h.clock.Advance(time.Hour)
+	grantRequireRefused(t, h.post("", grantRefreshForm(got[0].refresh)), http.StatusBadRequest, "invalid_grant", "the retired token")
+	require.False(t, h.session("login-1").Live(), "the session ended")
+}
+
 // grantCountingStore counts the reads of a session by its refresh token.
 type grantCountingStore struct {
 	oauth.Store
