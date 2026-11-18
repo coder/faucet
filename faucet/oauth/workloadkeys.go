@@ -36,8 +36,6 @@ const (
 )
 
 // errIssuerKeys is the error of an issuer whose keys faucet could not fetch.
-// An error that wraps it names the issuer and holds the cause, which are for
-// the log only.
 var errIssuerKeys = xerrors.New("faucet could not fetch the keys of the subject token's issuer")
 
 // keySource fetches the keys of issuers through their OpenID discovery

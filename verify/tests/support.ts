@@ -921,9 +921,9 @@ export class Issuer {
     const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
     const jwk = { ...publicKey.export({ format: 'jwk' }), kid: Issuer.kid, use: 'sig', alg: 'RS256' };
     const hits = new Map<string, number>();
-    let url = '';
     const server = createHttpsServer({ cert: readFileSync(tls.cert), key: readFileSync(tls.key) }, (req, res) => {
       const path = req.url ?? '';
+      const url = `https://127.0.0.1:${portOf(server)}`;
       hits.set(path, (hits.get(path) ?? 0) + 1);
       const documents: Record<string, object> = {
         '/.well-known/openid-configuration': { issuer: url, jwks_uri: `${url}/openid/v1/jwks`, id_token_signing_alg_values_supported: ['RS256'] },
@@ -934,7 +934,6 @@ export class Issuer {
       res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(document));
     });
     await listen(server, '127.0.0.1');
-    url = `https://127.0.0.1:${portOf(server)}`;
     return new Issuer(server, privateKey, hits);
   }
 

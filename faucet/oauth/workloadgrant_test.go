@@ -18,16 +18,11 @@ import (
 )
 
 const (
-	tokenExchange   = "urn:ietf:params:oauth:grant-type:token-exchange"
-	jwtTokenType    = "urn:ietf:params:oauth:token-type:jwt"
-	accessTokenType = "urn:ietf:params:oauth:token-type:access_token"
+	tokenExchange   = "urn:ietf:params:oauth:grant-type:token-exchange" //nolint:gosec // A URN, not a credential.
+	jwtTokenType    = "urn:ietf:params:oauth:token-type:jwt"            //nolint:gosec // A URN, not a credential.
+	accessTokenType = "urn:ietf:params:oauth:token-type:access_token"   //nolint:gosec // A URN, not a credential.
 )
 
-// newWorkloadHarness serves the authorization server with the client
-// digest-bot, which has no secret, holds both scopes, and trusts the tokens
-// of one production project of the Vercel team codercom. Faucet fetches
-// Vercel's keys from a stub at their real URLs, and failKeys makes the key
-// set fail.
 func newWorkloadHarness(t *testing.T) (h *tokenHarness, failKeys func()) {
 	t.Helper()
 	h = newTokenHarness(t)
@@ -37,8 +32,6 @@ func newWorkloadHarness(t *testing.T) (h *tokenHarness, failKeys func()) {
 	return h, failKeys
 }
 
-// addWorkloadClient adds a live client with no secret that holds both
-// scopes and rules.
 func (h *tokenHarness) addWorkloadClient(id, endpoint string, rules ...oauth.TrustRule) {
 	h.t.Helper()
 	c, err := oauth.NewSecretlessClient(id, endpoint, bothScopes, []string{"repo:coder/faucet"}, h.clock.Now())
@@ -50,15 +43,11 @@ func (h *tokenHarness) addWorkloadClient(id, endpoint string, rules ...oauth.Tru
 	}
 }
 
-// vercelToken is a token of the production function that digest-bot
-// trusts, issued now for faucet.
 func (h *tokenHarness) vercelToken() string {
 	h.t.Helper()
-	return oauth.SignVercel(h.t, oauth.VercelClaims(h.clock.Now()))
+	return oauth.SignAsVercel(h.t, oauth.VercelFunctionClaims(h.clock.Now()))
 }
 
-// exchange is the token exchange of digest-bot for subjectToken, with each
-// pair of extra set in the form.
 func exchange(subjectToken string, extra ...string) url.Values {
 	form := url.Values{"grant_type": {tokenExchange}, "client_id": {"digest-bot"}, "subject_token": {subjectToken}, "subject_token_type": {jwtTokenType}}
 	for i := 0; i < len(extra); i += 2 {
@@ -67,9 +56,6 @@ func exchange(subjectToken string, extra ...string) url.Values {
 	return form
 }
 
-// A Vercel function trades its OIDC token for a token of its client. Faucet
-// reads the keys from Vercel's real documents, and the token lasts 15
-// minutes, or less when the subject token ends sooner.
 func TestAVercelFunctionTradesItsOIDCTokenForATokenOfItsClient(t *testing.T) {
 	t.Parallel()
 	h, _ := newWorkloadHarness(t)
@@ -93,9 +79,9 @@ func TestAVercelFunctionTradesItsOIDCTokenForATokenOfItsClient(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "svc:digest-bot", p.Login)
 
-	claims := oauth.VercelClaims(now)
+	claims := oauth.VercelFunctionClaims(now)
 	claims["exp"] = now.Add(90 * time.Second).Unix()
-	reply = h.post("", exchange(oauth.SignVercel(t, claims)))
+	reply = h.post("", exchange(oauth.SignAsVercel(t, claims)))
 	require.Equal(t, http.StatusOK, reply.status, reply.rawBody)
 	require.Equal(t, float64(90), reply.body["expires_in"])
 	stored, err = h.store.AccessToken(context.Background(), oauth.HashToken(reply.body["access_token"].(string)))
@@ -109,9 +95,9 @@ func TestAVercelFunctionTradesItsOIDCTokenForATokenOfItsClient(t *testing.T) {
 func TestAWorkloadTokenLastsAtLeastASecond(t *testing.T) {
 	t.Parallel()
 	h, _ := newWorkloadHarness(t)
-	claims := oauth.VercelClaims(h.clock.Now())
+	claims := oauth.VercelFunctionClaims(h.clock.Now())
 	claims["exp"] = h.clock.Now().Add(time.Second).Unix()
-	form := exchange(oauth.SignVercel(t, claims))
+	form := exchange(oauth.SignAsVercel(t, claims))
 
 	reply := h.post("", form)
 	require.Equal(t, http.StatusOK, reply.status, reply.rawBody)
@@ -125,9 +111,6 @@ func TestAWorkloadTokenLastsAtLeastASecond(t *testing.T) {
 	}, reply.body)
 }
 
-// A failed fetch of the issuer's keys is no fault of the workload's, so it
-// may ask again once faucet fetches again, a minute after the fetch that
-// failed. The answer names no cause.
 func TestATokenExchangeWaitsWhileTheKeysOfItsIssuerFail(t *testing.T) {
 	t.Parallel()
 	h, failKeys := newWorkloadHarness(t)
@@ -141,8 +124,6 @@ func TestATokenExchangeWaitsWhileTheKeysOfItsIssuerFail(t *testing.T) {
 	}, reply.body)
 }
 
-// A token exchange carries no secret and acts for no other party. Each
-// request here changes one thing of one that passes.
 func TestATokenExchangeCarriesNoSecretAndNoActor(t *testing.T) {
 	t.Parallel()
 	h, _ := newWorkloadHarness(t)
@@ -179,7 +160,6 @@ func TestATokenExchangeCarriesNoSecretAndNoActor(t *testing.T) {
 	}
 }
 
-// A workload's token is for its client's endpoint, as a service's is.
 func TestATokenExchangeIsForTheClientsEndpoint(t *testing.T) {
 	t.Parallel()
 	h, _ := newWorkloadHarness(t)
@@ -202,9 +182,6 @@ func TestATokenExchangeIsForTheClientsEndpoint(t *testing.T) {
 	require.Equal(t, http.StatusOK, reply.status, reply.rawBody)
 }
 
-// Only a live client that trusts an issuer, for an endpoint that this server
-// serves, gets a token. An unknown or a disabled client gets the answer of a
-// failed client authentication.
 func TestATokenExchangeNeedsALiveClientThatTrustsTheToken(t *testing.T) {
 	t.Parallel()
 	h, _ := newWorkloadHarness(t)
@@ -236,8 +213,6 @@ func TestATokenExchangeNeedsALiveClientThatTrustsTheToken(t *testing.T) {
 	}
 }
 
-// A key client that reaches loopback is for tests, so a server that has one
-// says so in its log, and a server for production says nothing.
 func TestNewServerWarnsOfAWorkloadKeyClientThatReachesLoopback(t *testing.T) {
 	t.Parallel()
 	const warning = "the client that fetches the keys of workload issuers reaches loopback over http, which is for tests only"

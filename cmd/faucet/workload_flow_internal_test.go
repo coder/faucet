@@ -32,9 +32,6 @@ const (
 	k8sEXP      = 1795009007
 )
 
-// k8sServer is faucet as run() builds it with a login server at
-// https://faucet.example.com and no browser login, over a scratch database,
-// with its clock between the iat and the exp of the cluster's token.
 type k8sServer struct {
 	*testServer
 	store *pgstore.Store
@@ -72,8 +69,6 @@ func newK8sServer(t *testing.T) *k8sServer {
 	return &k8sServer{testServer: &testServer{Server: srv, clock: clock, logs: logs, mcpPath: clientEndpoint}, store: store}
 }
 
-// operator runs faucet clients against the server's database, as an
-// operator with FAUCET_PUBLIC_URL=https://faucet.example.com does.
 func (s *k8sServer) operator(t *testing.T, args ...string) string {
 	t.Helper()
 	publicURL, err := parseOrigin("https://faucet.example.com")
@@ -84,8 +79,6 @@ func (s *k8sServer) operator(t *testing.T, args ...string) string {
 	return stdout.String()
 }
 
-// exchange posts a token exchange for the client to the token endpoint, with
-// each pair of extra set in the form.
 func (s *k8sServer) exchange(t *testing.T, clientID, subjectToken string, extra ...string) (int, map[string]any) {
 	t.Helper()
 	form := url.Values{
@@ -108,10 +101,6 @@ func (s *k8sServer) exchange(t *testing.T, clientID, subjectToken string, extra 
 	return resp.StatusCode, body
 }
 
-// A pod's projected service account token, which a real cluster minted,
-// logs in as the client whose trust rule names its service account, and the
-// token that it gets works on /github/mcp. The cluster's keys are pasted,
-// because faucet cannot reach a private cluster.
 func TestARealKubernetesTokenLogsInAndReadsEvents(t *testing.T) {
 	t.Parallel()
 	srv := newK8sServer(t)

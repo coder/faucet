@@ -11,22 +11,12 @@ import (
 )
 
 const (
-	tokenExchangeGrant = "urn:ietf:params:oauth:grant-type:token-exchange"
-	accessTokenType    = "urn:ietf:params:oauth:token-type:access_token" //nolint:gosec // A URN, not a credential.
+	tokenExchangeGrant = "urn:ietf:params:oauth:grant-type:token-exchange" //nolint:gosec // A URN, not a credential.
+	accessTokenType    = "urn:ietf:params:oauth:token-type:access_token"   //nolint:gosec // A URN, not a credential.
 )
 
-// subjectTokenTypes are the types of subject token that the token exchange
-// takes. Both are a JWT: Vercel and Kubernetes give an OpenID Connect ID
-// token.
 var subjectTokenTypes = []string{"urn:ietf:params:oauth:token-type:jwt", "urn:ietf:params:oauth:token-type:id_token"}
 
-// tokenExchange is the token exchange grant (RFC 8693) of a workload, such as
-// a Vercel function or a Kubernetes pod. The workload names the client by
-// client_id, and its subject token, a JWT that its platform signed for
-// faucet, is the proof: it gets a token of the client when the subject token
-// matches a trust rule of the client. It carries no secret, asks for no
-// delegation and gets no refresh token, and its token ends no later than the
-// subject token.
 func (s *Server) tokenExchange(r *http.Request, form url.Values) (tokenResponse, error) {
 	ctx := r.Context()
 	switch {
@@ -96,9 +86,6 @@ func (s *Server) tokenExchange(r *http.Request, form url.Values) (tokenResponse,
 	return resp, nil
 }
 
-// workloadClient reads the live client that a workload names, which this
-// server serves. An unknown or a disabled client gets the answer of a failed
-// client authentication.
 func (s *Server) workloadClient(r *http.Request, id string) (Client, error) {
 	if ValidateClientID(id) != nil {
 		return Client{}, errClientAuth
@@ -112,7 +99,7 @@ func (s *Server) workloadClient(r *http.Request, id string) (Client, error) {
 	case !c.Live():
 		return Client{}, errClientAuth
 	}
-	if err := s.servedClient(r.Context(), c); err != nil {
+	if err := s.checkServed(r.Context(), c); err != nil {
 		return Client{}, err
 	}
 	return c, nil

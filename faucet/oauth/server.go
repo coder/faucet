@@ -41,9 +41,7 @@ type grant struct {
 	// authMethods are the ways a client authenticates for the grant, as
 	// token_endpoint_auth_methods_supported names them.
 	authMethods []string
-	// revokes is set for a grant whose clients the revocation endpoint takes,
-	// authenticated as authMethods says.
-	revokes bool
+	revokes     bool
 	// responseType is what the grant asks the authorization endpoint for,
 	// empty for a grant that does not use that endpoint.
 	responseType string
@@ -52,9 +50,7 @@ type grant struct {
 
 var grants = map[string]grant{
 	"client_credentials": {authMethods: []string{"client_secret_basic"}, revokes: true, issue: (*Server).clientCredentials},
-	// A workload has no secret, so the revocation endpoint cannot tell it
-	// from anyone who names its client ID.
-	tokenExchangeGrant: {authMethods: []string{"none"}, issue: (*Server).tokenExchange},
+	tokenExchangeGrant:   {authMethods: []string{"none"}, issue: (*Server).tokenExchange},
 }
 
 // loginGrants are the rows that the browser login adds to the grant table
@@ -290,8 +286,7 @@ type tokenError struct {
 	status      int
 	code        string
 	description string
-	// retryAfter, when set, tells the client when to ask again.
-	retryAfter time.Duration
+	retryAfter  time.Duration
 }
 
 func (e *tokenError) Error() string { return e.code + ": " + e.description }
@@ -410,7 +405,7 @@ func (s *Server) clientCredentials(r *http.Request, form url.Values) (tokenRespo
 	if err != nil {
 		return tokenResponse{}, err
 	}
-	if err := s.servedClient(ctx, c); err != nil {
+	if err := s.checkServed(ctx, c); err != nil {
 		return tokenResponse{}, err
 	}
 	scopes, err := grantedScopes(form, c.Scopes)
@@ -428,8 +423,7 @@ func (s *Server) clientCredentials(r *http.Request, form url.Values) (tokenRespo
 	return resp, nil
 }
 
-// servedClient refuses a client whose resource this server does not serve.
-func (s *Server) servedClient(ctx context.Context, c Client) error {
+func (s *Server) checkServed(ctx context.Context, c Client) error {
 	if slices.Contains(s.resources, c.Resource) {
 		return nil
 	}
@@ -440,8 +434,6 @@ func (s *Server) servedClient(ctx context.Context, c Client) error {
 	}
 }
 
-// checkResources refuses a request that names another resource than the
-// client's (RFC 8707).
 func checkResources(form url.Values, c Client) error {
 	for _, resource := range form["resource"] {
 		if resource != c.Resource {
@@ -451,9 +443,6 @@ func checkResources(form url.Values, c Client) error {
 	return nil
 }
 
-// mintServiceToken stores a new access token of the service client c, made
-// at now, that lasts lifetime, and returns the answer that names it.
-// lifetime is a second or more.
 func (s *Server) mintServiceToken(ctx context.Context, c Client, scopes []faucet.Scope, now time.Time, lifetime time.Duration) (tokenResponse, error) {
 	token, err := newSecret(accessTokenPrefix)
 	if err != nil {

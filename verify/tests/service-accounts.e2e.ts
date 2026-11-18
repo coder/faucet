@@ -15,9 +15,8 @@ function waited(stdout: string): WaitResult {
   return JSON.parse(stdout) as WaitResult;
 }
 
-// tokenExchangeProvider logs a workload in through the SDK's own auth flow with RFC 8693 token exchange: client_id in the form,
-// and a fresh token from the workload's platform as subject_token at each login. The SDK has no provider for this grant, so this
-// is its provider for a static client assertion with the assertion swapped for the subject token.
+// The SDK has no provider for the RFC 8693 token exchange grant, so this is its provider for a static client assertion with the
+// assertion swapped for the subject token.
 function tokenExchangeProvider(clientId: string, expectedIssuer: string, subjectToken: () => Promise<string>): OAuthClientProvider {
   return Object.assign(new StaticPrivateKeyJwtProvider({ clientId, expectedIssuer, jwtBearerAssertion: '' }), {
     addClientAuthentication: (_headers: Headers, params: URLSearchParams): void => params.set('client_id', clientId),
@@ -93,8 +92,6 @@ describe('service accounts', () => {
     }, { publicUrl: true });
   });
 
-  // A pod logs in with its projected service account token: no secret, the issuer's keys come from its discovery document, and
-  // the token that the SDK gets works on /github/mcp.
   test('a workload logs in through the TypeScript SDK with its platform token, waits for an event and lists events', async ({ faucet, issuer }) => {
     await faucet.withFaucet({}, async (started, output) => {
       const repoId = newRepoId();
@@ -111,8 +108,9 @@ describe('service accounts', () => {
 
       const subjects: string[] = [];
       const provider = tokenExchangeProvider('pod-agent', started.baseUrl, async () => {
-        subjects.push(issuer.sign({ sub, aud: [started.baseUrl] }));
-        return subjects[subjects.length - 1] as string;
+        const subject = issuer.sign({ sub, aud: [started.baseUrl] });
+        subjects.push(subject);
+        return subject;
       });
       const transport = new StreamableHTTPClientTransport(new URL(`${started.baseUrl}/github/mcp`), { authProvider: provider });
       const client = new Client({ name: 'ts-workload', version: '0' });
@@ -140,14 +138,15 @@ describe('service accounts', () => {
 
       const untrusted = await started.clients(['untrust', 'pod-agent', ruleId as string]);
       expect(untrusted.code, untrusted.stderr).toBe(0);
-      subjects.push(issuer.sign({ sub, aud: [started.baseUrl] }));
+      const fresh = issuer.sign({ sub, aud: [started.baseUrl] });
+      subjects.push(fresh);
       const refused = await started.request('/oauth/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
           grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
           client_id: 'pod-agent',
-          subject_token: subjects[subjects.length - 1] as string,
+          subject_token: fresh,
           subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
         }).toString(),
       });
