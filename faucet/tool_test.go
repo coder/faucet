@@ -851,3 +851,40 @@ func TestAnAccessDenialThatSaysWhyReachesTheCaller(t *testing.T) {
 	plain.authz.err = faucet.ErrNoAccess
 	require.Equal(t, faucet.ErrNoAccess.Error(), plain.call(args("repo", testRepo, "types", allTypes, "cursor", 0)).failure(t))
 }
+
+// logLines returns the lines of logs that hold message, as the human sink
+// writes them.
+func logLines(logs, message string) []string {
+	var lines []string
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, "]  "+message) {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// A denial is logged at info, as the operator's record of who was refused,
+// on one line that carries its reason and no stack. A check that could not
+// run is a warning.
+func TestAnAccessDenialIsLoggedOnOneLine(t *testing.T) {
+	t.Parallel()
+
+	denied := newWaitHarness(t)
+	denied.authz.err = xerrors.Errorf("faucet has seen no delivery from %s yet: %w", testRepo, faucet.ErrNoAccess)
+	denied.call(args("repo", testRepo, "types", allTypes, "cursor", 0)).failure(t)
+	logs := denied.logs.String()
+	lines := logLines(logs, "wait denied")
+	require.Len(t, lines, 1, logs)
+	require.Contains(t, lines[0], "[info]")
+	require.Contains(t, lines[0], "faucet has seen no delivery from "+testRepo+" yet")
+	require.NotContains(t, logs, ".go:", "the log holds no stack frame")
+	require.Equal(t, 1, strings.Count(strings.TrimSpace(logs), "\n")+1, "the denial is the one line logged: %s", logs)
+
+	failing := newWaitHarness(t)
+	failing.authz.err = xerrors.New("GitHub took too long")
+	failing.call(args("repo", testRepo, "types", allTypes, "cursor", 0)).failure(t)
+	lines = logLines(failing.logs.String(), "could not verify repository access")
+	require.Len(t, lines, 1)
+	require.Contains(t, lines[0], "[warn]")
+}
