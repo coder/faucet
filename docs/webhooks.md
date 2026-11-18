@@ -21,7 +21,7 @@ sequenceDiagram
         F->>R: POST gap with a cursor
     end
     A->>F: events/subscribe again before refreshBefore
-    alt the token still reads the repository
+    alt the caller still reads the target
         F-->>A: same id, deliveryStatus
     else access revoked
         F->>R: POST terminated

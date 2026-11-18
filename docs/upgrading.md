@@ -2,6 +2,17 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## To owner and all targets
+
+A service can now read every repository of an owner or every repository (see [service-accounts.md](service-accounts.md#grants) and [events.md](events.md#targets)). A caller that names `repo` sees no change, and a subscription made before keeps its key.
+
+- **Grant a service an owner or all repositories** with `faucet clients create -grant org:<login>` or `-grant all`. A client made before keeps its `repo:` grants.
+- **Migration `000013_owner_targets`** adds the owner and the name of the repository to each event, the kind of target to subscriptions and raw leases, and two indexes. It rewrites no row, but it builds `faucet_events_owner` over the events table, which blocks event writes while it runs. An event stored before it records no owner, so an `owner` target never reads it, while an `all` target does. Its down file deletes every owner and all subscription and lease, and the raw events of deliveries that named no repository.
+- **Make no owner or all subscription during a rolling deploy.** An instance of the build before cannot read one: its delivery runs fail on it, and its purge can move it past events it lost without a gap.
+- **Redelivery asks again for more.** An owner or all interest wants every failed delivery of its raw event, whatever the repository, because GitHub's list of deliveries names no owner.
+- **A host that embeds faucet** turns owner and all targets on for services with `Deps.ServiceGrants`, which `oauth.ServiceAccess` implements. Without it faucet refuses them. `Subscription`, `PollQuery`, `ScanTarget`, `DeliveryClaim` and the raw lease, read, claim and want types hold a `Target` in place of `RepoID`.
+- **A `Store` or `RawStore` of your own** must pass the new `storetest` subtests, `OwnerByLogin` among them.
+
 ## To raw events
 
 This came in [#51](https://github.com/coder/faucet/pull/51). The server offers no [raw event](events.md#raw-events) until you list it in `FAUCET_RAW_EVENTS`, and stores none until someone polls or subscribes to one.
