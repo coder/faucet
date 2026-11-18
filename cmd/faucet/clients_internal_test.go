@@ -372,7 +372,13 @@ func TestTheClientsCommandMakesAClientForWorkloadsAndManagesItsTrustRules(t *tes
 	again, _, err := clients(t, getenv, trustVercel("digest-bot", "environment=production", "project_id="+digestProject, "owner_id="+codercomTeam)...)
 	require.NoError(t, err)
 	require.Equal(t, out, again, "the same rule, its claims in another order, is the rule that the client holds")
-	out, _, err = clients(t, getenv, "trust", "digest-bot", "-issuer", clusterIssuer, "-claim", "sub="+clusterAccount, "-jwks-file", clusterJWKS)
+	pasted, err := os.ReadFile(clusterJWKS)
+	require.NoError(t, err)
+	var indented bytes.Buffer
+	require.NoError(t, json.Indent(&indented, pasted, "", "  "))
+	keysFile := filepath.Join(t.TempDir(), "jwks.json")
+	require.NoError(t, os.WriteFile(keysFile, []byte(strings.Replace(indented.String(), "{", `{"comment": "the cluster's keys",`, 1)), 0o600))
+	out, _, err = clients(t, getenv, "trust", "digest-bot", "-issuer", clusterIssuer, "-claim", "sub="+clusterAccount, "-jwks-file", keysFile)
 	require.NoError(t, err)
 	clusterID := strings.TrimSpace(strings.TrimPrefix(out, "rule_id: "))
 	require.NotEqual(t, vercelID, clusterID)
@@ -382,9 +388,7 @@ func TestTheClientsCommandMakesAClientForWorkloadsAndManagesItsTrustRules(t *tes
 	require.Len(t, rules, 2)
 	require.Equal(t, map[string]string{"owner_id": codercomTeam, "project_id": digestProject, "environment": "production"}, rules[0].Rule.Claims)
 	require.Empty(t, rules[0].Rule.JWKS)
-	pasted, err := os.ReadFile(clusterJWKS)
-	require.NoError(t, err)
-	require.JSONEq(t, string(pasted), string(rules[1].Rule.JWKS), "the store keeps the key set of the file")
+	require.JSONEq(t, string(pasted), string(rules[1].Rule.JWKS), "the store keeps the keys of the file, and no other member")
 	require.NoError(t, oauth.ValidateTrustRule(rules[1].Rule), "the stored rule is the one that trust checked")
 
 	out, _, err = clients(t, getenv, "trusts", "digest-bot")
@@ -427,6 +431,10 @@ func TestTheClientsCommandRefusesATrustRuleThatCannotWork(t *testing.T) {
 	require.NoError(t, os.WriteFile(empty, nil, 0o600))
 	private := filepath.Join(dir, "private.json")
 	require.NoError(t, os.WriteFile(private, []byte(`{"keys":[{"kty":"oct","kid":"k","k":"c2VjcmV0"}]}`), 0o600))
+	pasted, err := os.ReadFile(clusterJWKS)
+	require.NoError(t, err)
+	keysTwice := filepath.Join(dir, "keys-twice.json")
+	require.NoError(t, os.WriteFile(keysTwice, []byte(`{"keys":[{"kty":"oct","kid":"k","k":"c2VjcmV0"}],"KEYS":`+strings.TrimPrefix(string(pasted), `{"keys":`)), 0o600))
 	cluster := func(extra ...string) []string {
 		return append([]string{"trust", "digest-bot", "-issuer", clusterIssuer, "-claim", "sub=" + clusterAccount}, extra...)
 	}
@@ -451,6 +459,7 @@ func TestTheClientsCommandRefusesATrustRuleThatCannotWork(t *testing.T) {
 		"an empty key set":      {cluster("-jwks-file", empty), "-jwks-file " + empty + " is empty"},
 		"a key set of no path":  {cluster("-jwks-file", ""), `invalid value "" for flag -jwks-file: it names no file`},
 		"a private key":         {cluster("-jwks-file", private), "a trust rule's JWKS must hold no private key"},
+		"keys twice":            {cluster("-jwks-file", keysTwice), "a trust rule's JWKS must name its keys array once"},
 		"an unknown client":     {[]string{"trust", "nobody", "-issuer", clusterIssuer, "-claim", "sub=" + clusterAccount}, `there is no client "nobody"`},
 		"a disabled client":     {[]string{"trust", "retired", "-issuer", clusterIssuer, "-claim", "sub=" + clusterAccount}, `client "retired" is disabled, so no workload can act as it`},
 		"an upper-case ID":      {[]string{"trust", "Digest-Bot", "-issuer", clusterIssuer, "-claim", "sub=" + clusterAccount}, "a client ID is"},

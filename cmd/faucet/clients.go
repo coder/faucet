@@ -345,7 +345,8 @@ func trustClient(ctx context.Context, id string, args []string, store oauth.Stor
 		}
 		rule.JWKS = jwks
 	}
-	if err := oauth.ValidateTrustRule(rule); err != nil {
+	rule, err := oauth.CanonicalTrustRule(rule)
+	if err != nil {
 		return err
 	}
 	c, err := store.Client(ctx, id)

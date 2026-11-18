@@ -170,7 +170,7 @@ func (s *keySource) fetch(ctx context.Context, issuer string) (jose.JSONWebKeySe
 	if body, err = s.get(ctx, doc.JWKSURI); err != nil {
 		return jose.JSONWebKeySet{}, xerrors.Errorf("the key set: %w", err)
 	}
-	keys, err := parseKeySet(body)
+	keys, _, err := parseKeySet(body)
 	if err != nil {
 		return jose.JSONWebKeySet{}, xerrors.Errorf("the key set %w", err)
 	}

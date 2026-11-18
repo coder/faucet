@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rsa"
@@ -131,6 +132,14 @@ func ValidateTrustRule(r TrustRule) error {
 	return err
 }
 
+// CanonicalTrustRule returns r in the form to store: its pasted key set is
+// {"keys":[...]}, compact, with the entries of keys that ValidateTrustRule
+// read and no other member. It fails as ValidateTrustRule does.
+func CanonicalTrustRule(r TrustRule) (TrustRule, error) {
+	rule, err := parseTrustRule(r)
+	return rule.TrustRule, err
+}
+
 func parseTrustRule(r TrustRule) (trustRule, error) {
 	u, err := url.Parse(r.Issuer)
 	switch {
@@ -170,13 +179,33 @@ func parseTrustRule(r TrustRule) (trustRule, error) {
 	}
 	rule := trustRule{TrustRule: r}
 	if len(r.JWKS) > 0 {
-		keys, err := parseKeySet(r.JWKS)
+		keys, entries, err := parseKeySet(r.JWKS)
 		if err != nil {
 			return trustRule{}, xerrors.Errorf("a trust rule's JWKS %w", err)
 		}
 		rule.keys = &keys
+		if rule.JWKS, err = compactKeySet(entries); err != nil {
+			return trustRule{}, xerrors.Errorf("a trust rule's JWKS: %w", err)
+		}
 	}
 	return rule, nil
+}
+
+// compactKeySet is the key set {"keys":entries}, with no white space. It is
+// no longer than the set that entries came from.
+func compactKeySet(entries []json.RawMessage) (json.RawMessage, error) {
+	set := []byte(`{"keys":[`)
+	for i, entry := range entries {
+		if i > 0 {
+			set = append(set, ',')
+		}
+		set = append(set, entry...)
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, append(set, "]}"...)); err != nil {
+		return nil, err
+	}
+	return compact.Bytes(), nil
 }
 
 // keyAlgorithm is the alg that faucet takes a signature of k with, or empty
@@ -205,26 +234,25 @@ var secretKeyMembers = []string{"d", "p", "q", "dp", "dq", "qi", "oth", "k", "pr
 // that have a kid, for signatures with RS256 or ES256. It skips a key that it
 // cannot read, as section 5 says, and refuses a set in which a key has a
 // member of secretKeyMembers, read or not, or that holds no key that it
-// keeps. Its errors complete the sentence "the key set ...".
-func parseKeySet(body []byte) (jose.JSONWebKeySet, error) {
+// keeps. It returns the entries of keys too, each as it read it. Its errors
+// complete the sentence "the key set ...".
+func parseKeySet(body []byte) (jose.JSONWebKeySet, []json.RawMessage, error) {
 	if len(body) > maxKeyDocumentBytes {
-		return jose.JSONWebKeySet{}, xerrors.Errorf("must be at most %d bytes", maxKeyDocumentBytes)
+		return jose.JSONWebKeySet{}, nil, xerrors.Errorf("must be at most %d bytes", maxKeyDocumentBytes)
 	}
-	var raw struct {
-		Keys []json.RawMessage `json:"keys"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return jose.JSONWebKeySet{}, xerrors.New("must be a JSON object with a keys array")
+	entries, err := keySetEntries(body)
+	if err != nil {
+		return jose.JSONWebKeySet{}, nil, err
 	}
 	var set jose.JSONWebKeySet
-	for _, entry := range raw.Keys {
+	for _, entry := range entries {
 		var members map[string]json.RawMessage
 		if json.Unmarshal(entry, &members) != nil {
 			continue
 		}
 		for _, name := range secretKeyMembers {
 			if _, ok := members[name]; ok {
-				return jose.JSONWebKeySet{}, xerrors.New("must hold no private key")
+				return jose.JSONWebKeySet{}, nil, xerrors.New("must hold no private key")
 			}
 		}
 		var k jose.JSONWebKey
@@ -237,7 +265,50 @@ func parseKeySet(body []byte) (jose.JSONWebKeySet, error) {
 		}
 	}
 	if len(set.Keys) == 0 {
-		return jose.JSONWebKeySet{}, xerrors.New("must hold an RSA key of 2048 bits or more, or a P-256 key, for signatures, named by a kid")
+		return jose.JSONWebKeySet{}, nil, xerrors.New("must hold an RSA key of 2048 bits or more, or a P-256 key, for signatures, named by a kid")
 	}
-	return set, nil
+	return set, entries, nil
+}
+
+// keySetEntries returns the entries of the keys array of a key set. It
+// refuses a set with a second member named keys, or one whose name is keys
+// in another case: encoding/json takes the last member whose name folds to
+// keys, and jsonb sorts the members of an object, so such a set can read as
+// other keys once stored.
+func keySetEntries(body []byte) ([]json.RawMessage, error) {
+	notASet := xerrors.New("must be a JSON object with a keys array")
+	if !json.Valid(body) {
+		return nil, notASet
+	}
+	d := json.NewDecoder(bytes.NewReader(body))
+	if open, err := d.Token(); err != nil || open != json.Delim('{') {
+		return nil, notASet
+	}
+	var entries []json.RawMessage
+	found := false
+	for d.More() {
+		name, err := d.Token()
+		if err != nil {
+			return nil, notASet
+		}
+		var value json.RawMessage
+		if err := d.Decode(&value); err != nil {
+			return nil, notASet
+		}
+		member, _ := name.(string)
+		if !strings.EqualFold(member, "keys") {
+			continue
+		}
+		if found || member != "keys" {
+			return nil, xerrors.New("must name its keys array once, as keys in lower case")
+		}
+		found = true
+		if err := json.Unmarshal(value, &entries); err != nil {
+			return nil, notASet
+		}
+	}
+	if !found {
+		return nil, notASet
+	}
+	return entries, nil
 }

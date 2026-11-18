@@ -134,8 +134,9 @@ type Store interface {
 	AddTrustRule(ctx context.Context, clientID string, r TrustRule, now time.Time) (int64, error)
 	// TrustRules returns the trust rules of the client with this ID, in the
 	// order they were added, and none for an unknown client. A rule's JWKS
-	// holds the JSON value that was added, not always the same bytes, and is
-	// empty for a rule whose keys come from discovery.
+	// holds the JSON value that was added, not always the same bytes but with
+	// no white space, so a compact key set reads back no longer, and is empty
+	// for a rule whose keys come from discovery.
 	TrustRules(ctx context.Context, clientID string) ([]StoredTrustRule, error)
 	// RemoveTrustRule removes the trust rule with this ID from the client
 	// with this ID. It returns ErrUnknownTrustRule when the client holds no

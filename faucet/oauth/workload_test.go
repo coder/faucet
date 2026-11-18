@@ -231,3 +231,58 @@ func TestAPastedKeySetHoldsAPublicKeyForSignatures(t *testing.T) {
 		require.ErrorContains(t, err, c.want, name)
 	}
 }
+
+// encoding/json takes the last member whose name folds to keys, and jsonb
+// sorts the members of an object, so a set that names its keys twice could
+// read as other keys once stored.
+func TestAPastedKeySetNamesItsKeysOnceInLowerCase(t *testing.T) {
+	t.Parallel()
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	public, err := jose.JSONWebKey{Key: &rsaKey.PublicKey, KeyID: "a", Use: "sig"}.MarshalJSON()
+	require.NoError(t, err)
+	keys := `[` + string(public) + `]`
+	rule := oauth.TrustRule{Issuer: "https://kubernetes.default.svc", Claims: map[string]string{"sub": "system:serviceaccount:ns:sa"}}
+	for name, jwks := range map[string]string{
+		"twice":                  `{"keys":` + keys + `,"keys":` + keys + `}`,
+		"a secret, then KEYS":    `{"keys":[{"kty":"oct","kid":"s","k":"c2VjcmV0"}],"KEYS":` + keys + `}`,
+		"in another case":        `{"Keys":` + keys + `}`,
+		"with a long s, escaped": `{"key\u017f":` + keys + `,"keys":` + keys + `}`,
+		"with a long s":          "{\"keys\":" + keys + ",\"key\u017f\":" + keys + "}",
+	} {
+		rule.JWKS = json.RawMessage(jwks)
+		require.ErrorContains(t, oauth.ValidateTrustRule(rule), "a trust rule's JWKS must name its keys array once, as keys in lower case", name)
+	}
+	rule.JWKS = json.RawMessage(`{"comment":"rotated","keys":` + keys + `}`)
+	require.NoError(t, oauth.ValidateTrustRule(rule), "a member of another name is no keys array")
+}
+
+// The store keeps what ValidateTrustRule read: the entries of keys, and no
+// other member or white space, which could take the set past its limit once
+// a store reformats it.
+func TestCanonicalTrustRuleKeepsTheKeysOfAPastedKeySetCompact(t *testing.T) {
+	t.Parallel()
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	public, err := jose.JSONWebKey{Key: &rsaKey.PublicKey, KeyID: "a", Use: "sig"}.MarshalJSON()
+	require.NoError(t, err)
+	rule := oauth.TrustRule{
+		Issuer: "https://kubernetes.default.svc",
+		Claims: map[string]string{"sub": "system:serviceaccount:ns:sa"},
+		JWKS:   json.RawMessage("{\n  \"comment\": \"rotated\",\n  \"keys\": [\n    " + string(public) + ",\n    { \"kty\": \"XYZ\", \"kid\": \"b\" }\n  ]\n}\n"),
+	}
+	canonical, err := oauth.CanonicalTrustRule(rule)
+	require.NoError(t, err)
+	require.Equal(t, `{"keys":[`+string(public)+`,{"kty":"XYZ","kid":"b"}]}`, string(canonical.JWKS), "a key that faucet cannot read stays, as ValidateTrustRule read it")
+	require.Equal(t, rule.Issuer, canonical.Issuer)
+	require.Equal(t, rule.Claims, canonical.Claims)
+	require.NoError(t, oauth.ValidateTrustRule(canonical))
+
+	rule.JWKS = nil
+	canonical, err = oauth.CanonicalTrustRule(rule)
+	require.NoError(t, err)
+	require.Empty(t, canonical.JWKS, "a rule whose keys come from discovery has none")
+	rule.JWKS = json.RawMessage(`{"keys":[]}`)
+	_, err = oauth.CanonicalTrustRule(rule)
+	require.ErrorContains(t, err, "a trust rule's JWKS must hold an RSA key", "it refuses what ValidateTrustRule refuses")
+}

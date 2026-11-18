@@ -24,6 +24,7 @@ var trustRuleSubtests = []struct {
 	{"TrustRulesReadBackAsAddedInTheirOrder", trustRulesReadBackAsAddedInTheirOrder},
 	{"AddingARuleThatTheClientHoldsReturnsItsID", addingARuleThatTheClientHoldsReturnsItsID},
 	{"ARuleWithAKeySetOf30KBIsAddedOnce", aRuleWithAKeySetOf30KBIsAddedOnce},
+	{"ACompactKeySetOf32KiBReadsBackWithinTheLimit", aCompactKeySetOf32KiBReadsBackWithinTheLimit},
 	{"AddTrustRuleOfAnUnknownClientIsUnknown", addTrustRuleOfAnUnknownClientIsUnknown},
 	{"RemoveTrustRuleRemovesThatRuleOfThatClientOnly", removeTrustRuleRemovesThatRuleOfThatClientOnly},
 	{"TrustRuleSharesNoMapWithItsCaller", trustRuleSharesNoMapWithItsCaller},
@@ -141,27 +142,43 @@ func addingARuleThatTheClientHoldsReturnsItsID(t *testing.T, s oauth.Store) {
 	}
 }
 
+// keySetOfSize is a compact key set of RSA keys of 4096 bits and size bytes.
+func keySetOfSize(t *testing.T, size int) json.RawMessage {
+	t.Helper()
+	var keys []map[string]string
+	seed := sha256.Sum256([]byte("keys"))
+	for {
+		var n []byte
+		for range 16 {
+			seed = sha256.Sum256(seed[:])
+			n = append(n, seed[:]...)
+		}
+		key := map[string]string{"kty": "RSA", "kid": strconv.Itoa(len(keys)), "alg": "RS256", "use": "sig", "n": base64.RawURLEncoding.EncodeToString(n), "e": "AQAB"}
+		more, err := json.Marshal(map[string]any{"keys": append(keys, key)})
+		require.NoError(t, err)
+		if len(more) > size {
+			break
+		}
+		keys = append(keys, key)
+	}
+	jwks, err := json.Marshal(map[string]any{"keys": keys})
+	require.NoError(t, err)
+	keys[len(keys)-1]["kid"] += strings.Repeat("k", size-len(jwks))
+	jwks, err = json.Marshal(map[string]any{"keys": keys})
+	require.NoError(t, err)
+	require.Len(t, jwks, size)
+	return jwks
+}
+
 // A btree entry holds at most 2704 bytes, and random key bytes do not
 // compress, so a unique index on the values themselves would refuse this
 // rule.
 func aRuleWithAKeySetOf30KBIsAddedOnce(t *testing.T, s oauth.Store) {
 	ctx := context.Background()
 	addClients(t, s, "digest-bot")
-	var keys []map[string]string
-	seed := sha256.Sum256([]byte("keys"))
-	for i := range 42 {
-		var n strings.Builder
-		for range 16 {
-			seed = sha256.Sum256(seed[:])
-			_, _ = n.WriteString(base64.RawURLEncoding.EncodeToString(seed[:]))
-		}
-		keys = append(keys, map[string]string{"kty": "RSA", "kid": strconv.Itoa(i), "alg": "RS256", "use": "sig", "n": n.String(), "e": "AQAB"})
-	}
-	jwks, err := json.Marshal(map[string]any{"keys": keys})
-	require.NoError(t, err)
-	require.Greater(t, len(jwks), 30<<10)
 	r := clusterRule()
-	r.JWKS = jwks
+	r.JWKS = keySetOfSize(t, 30<<10)
+	require.NoError(t, oauth.ValidateTrustRule(r))
 
 	first, err := s.AddTrustRule(ctx, "digest-bot", r, time.Now())
 	require.NoError(t, err)
@@ -172,6 +189,25 @@ func aRuleWithAKeySetOf30KBIsAddedOnce(t *testing.T, s oauth.Store) {
 	require.NoError(t, err)
 	require.Len(t, rules, 1)
 	requireSameTrustRule(t, r, rules[0].Rule)
+	require.NoError(t, oauth.ValidateTrustRule(rules[0].Rule), "the checker takes the rule that the store keeps")
+}
+
+// 32 KiB is the most that a pasted key set holds. A store that reads the set
+// back with white space that the caller did not add takes it past that.
+func aCompactKeySetOf32KiBReadsBackWithinTheLimit(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	addClients(t, s, "digest-bot")
+	r := clusterRule()
+	r.JWKS = keySetOfSize(t, 32<<10)
+	require.NoError(t, oauth.ValidateTrustRule(r))
+
+	_, err := s.AddTrustRule(ctx, "digest-bot", r, time.Now())
+	require.NoError(t, err)
+	rules, err := s.TrustRules(ctx, "digest-bot")
+	require.NoError(t, err)
+	require.Len(t, rules, 1)
+	requireSameTrustRule(t, r, rules[0].Rule)
+	require.NoError(t, oauth.ValidateTrustRule(rules[0].Rule), "the checker takes the rule that the store keeps")
 }
 
 func addTrustRuleOfAnUnknownClientIsUnknown(t *testing.T, s oauth.Store) {

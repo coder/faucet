@@ -1,6 +1,7 @@
 package pgstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -187,7 +188,13 @@ func (s *Store) TrustRules(ctx context.Context, clientID string) (_ []oauth.Stor
 			return nil, xerrors.Errorf("read the claims of trust rule %d: %w", row.ID, err)
 		}
 		if row.Jwks != "" {
-			rule.Rule.JWKS = json.RawMessage(row.Jwks)
+			// jsonb's text puts a space after each colon and comma, which
+			// can take a key set past the size that the checker takes.
+			var jwks bytes.Buffer
+			if err := json.Compact(&jwks, []byte(row.Jwks)); err != nil {
+				return nil, xerrors.Errorf("read the key set of trust rule %d: %w", row.ID, err)
+			}
+			rule.Rule.JWKS = jwks.Bytes()
 		}
 		rules = append(rules, rule)
 	}
