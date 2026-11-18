@@ -93,28 +93,46 @@ func TestFaucetTrustsOnlyTheIssuerOfOneVercelTeam(t *testing.T) {
 	}
 }
 
-func TestARuleForGitHubActionsOrGitLabMustPinTheOwnerAndRepositoryIDs(t *testing.T) {
+// A rule for GitHub Actions or gitlab.com names the owner and the repository
+// by their IDs, and the code that may log in: any ref of GitHub's, or a
+// protected ref of gitlab.com.
+func TestARuleForGitHubActionsOrGitLabMustPinTheOwnerTheRepositoryAndTheCode(t *testing.T) {
 	t.Parallel()
-	for issuer, ids := range map[string][2]string{
-		"https://token.actions.githubusercontent.com":               {"repository_owner_id", "repository_id"},
-		"https://token.actions.githubusercontent.com/octo-business": {"repository_owner_id", "repository_id"},
-		"https://gitlab.com": {"namespace_id", "project_id"},
+	github := map[string]string{"repository_owner_id": "65", "repository_id": "74", "ref": "refs/heads/main"}
+	gitlab := map[string]string{"namespace_id": "65", "project_id": "74", "ref_protected": "true"}
+	for issuer, pins := range map[string]map[string]string{
+		"https://token.actions.githubusercontent.com":               github,
+		"https://token.actions.githubusercontent.com/octo-business": github,
+		"https://gitlab.com": gitlab,
 	} {
-		owner, repository := ids[0], ids[1]
 		rule := func(claims map[string]string) oauth.TrustRule { return oauth.TrustRule{Issuer: issuer, Claims: claims} }
-		require.NoError(t, oauth.ValidateTrustRule(rule(map[string]string{owner: "65", repository: "74"})), issuer)
-		for _, c := range []struct {
-			claims map[string]string
-			want   string
-		}{
-			{map[string]string{"sub": "environment:production"}, owner},
-			{map[string]string{owner: "65"}, repository},
-			{map[string]string{repository: "74", "sub": "repo:octo-org/octo-repo:ref:refs/heads/main"}, owner},
-		} {
-			err := oauth.ValidateTrustRule(rule(c.claims))
-			require.ErrorContains(t, err, "a trust rule for "+issuer+" must pin "+c.want+": ", issuer)
+		require.NoError(t, oauth.ValidateTrustRule(rule(pins)), issuer)
+		for claim, value := range pins {
+			without := maps.Clone(pins)
+			delete(without, claim)
+			want := claim
+			if claim == "ref_protected" {
+				want += "=" + value
+			}
+			err := oauth.ValidateTrustRule(rule(without))
+			require.ErrorContains(t, err, "a trust rule for "+issuer+" must pin "+want+": ", "%s without %s", issuer, claim)
 		}
+		err := oauth.ValidateTrustRule(rule(map[string]string{"sub": "repo:octo-org/octo-repo:ref:refs/heads/main"}))
+		require.ErrorContains(t, err, "a trust rule for "+issuer+" must pin ", "sub alone names no owner: %s", issuer)
 	}
+
+	const actions = "https://token.actions.githubusercontent.com"
+	tag := maps.Clone(github)
+	tag["ref"] = "refs/tags/v1"
+	require.NoError(t, oauth.ValidateTrustRule(oauth.TrustRule{Issuer: actions, Claims: tag}), "a GitHub rule names any ref")
+	delete(tag, "ref")
+	err := oauth.ValidateTrustRule(oauth.TrustRule{Issuer: actions, Claims: tag})
+	require.ErrorContains(t, err, "must pin ref: a workflow on any branch of the repository, or on a pull request from one, can get a token for faucet")
+
+	unprotected := maps.Clone(gitlab)
+	unprotected["ref_protected"] = "false"
+	err = oauth.ValidateTrustRule(oauth.TrustRule{Issuer: "https://gitlab.com", Claims: unprotected})
+	require.ErrorContains(t, err, "must pin ref_protected=true: a developer of the project can run a job on any branch that is not protected")
 }
 
 func TestARuleOfAnyOtherIssuerMustPinSub(t *testing.T) {

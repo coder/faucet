@@ -74,12 +74,14 @@ var issuerProfiles = map[string]issuerProfile{
 		pins: []requiredPin{
 			{claim: "repository_owner_id", why: "the workflows of every GitHub account get their tokens from this issuer, an owner can choose the parts of sub, and the name of a renamed or deleted account can pass to another, so only the owner ID tells the accounts apart"},
 			{claim: "repository_id", why: "every repository of the owner can get a token for faucet, and the name of a renamed or deleted repository can pass to another, so only the repository ID names one"},
+			{claim: "ref", why: "a workflow on any branch of the repository, or on a pull request from one, can get a token for faucet, so the rule names the ref whose code may act as the client, such as refs/heads/main"},
 		},
 	},
 	"gitlab.com": {
 		pins: []requiredPin{
 			{claim: "namespace_id", why: "the jobs of every group and user of gitlab.com get their tokens from this issuer, a project can choose the parts of sub, and the path of a renamed namespace can pass to another, so only the namespace ID tells the namespaces apart"},
 			{claim: "project_id", why: "every project of the namespace can get a token for faucet, and only the project ID names one project of gitlab.com"},
+			{claim: "ref_protected", value: "true", why: "a developer of the project can run a job on any branch that is not protected, and the project chooses who may push to a protected one"},
 		},
 	},
 }
