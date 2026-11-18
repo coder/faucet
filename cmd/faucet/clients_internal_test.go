@@ -433,6 +433,8 @@ func TestTheClientsCommandRefusesATrustRuleThatCannotWork(t *testing.T) {
 	require.NoError(t, os.WriteFile(private, []byte(`{"keys":[{"kty":"oct","kid":"k","k":"c2VjcmV0"}]}`), 0o600))
 	pasted, err := os.ReadFile(clusterJWKS)
 	require.NoError(t, err)
+	nulEscape := filepath.Join(dir, "nul.json")
+	require.NoError(t, os.WriteFile(nulEscape, []byte(strings.Replace(string(pasted), `{"use":"sig",`, `{"note":"\u0000","use":"sig",`, 1)), 0o600))
 	keysTwice := filepath.Join(dir, "keys-twice.json")
 	require.NoError(t, os.WriteFile(keysTwice, []byte(`{"keys":[{"kty":"oct","kid":"k","k":"c2VjcmV0"}],"KEYS":`+strings.TrimPrefix(string(pasted), `{"keys":`)), 0o600))
 	cluster := func(extra ...string) []string {
@@ -460,6 +462,9 @@ func TestTheClientsCommandRefusesATrustRuleThatCannotWork(t *testing.T) {
 		"a key set of no path":  {cluster("-jwks-file", ""), `invalid value "" for flag -jwks-file: it names no file`},
 		"a private key":         {cluster("-jwks-file", private), "a trust rule's JWKS must hold no private key"},
 		"keys twice":            {cluster("-jwks-file", keysTwice), "a trust rule's JWKS must name its keys array once"},
+		"a NUL escape":          {cluster("-jwks-file", nulEscape), "a trust rule's JWKS must be valid UTF-8, with no \\u0000"},
+		"a NUL in a claim":      {cluster("-claim", "kubernetes.io/namespace=a\x00b"), "a trust rule's claim names and values must be valid UTF-8 with no control character"},
+		"a name with a space":   {cluster("-claim", "ref =x"), `a trust rule's claim names cannot start or end with white space, as "ref " does`},
 		"an unknown client":     {[]string{"trust", "nobody", "-issuer", clusterIssuer, "-claim", "sub=" + clusterAccount}, `there is no client "nobody"`},
 		"a disabled client":     {[]string{"trust", "retired", "-issuer", clusterIssuer, "-claim", "sub=" + clusterAccount}, `client "retired" is disabled, so no workload can act as it`},
 		"an upper-case ID":      {[]string{"trust", "Digest-Bot", "-issuer", clusterIssuer, "-claim", "sub=" + clusterAccount}, "a client ID is"},

@@ -163,6 +163,16 @@ func TestARuleNamesAnHTTPSIssuerAndPinsAClaimToAValue(t *testing.T) {
 		"17 claims":      {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: claimsOfSize(17, 8)}, "a trust rule pins at most 16 claims"},
 		"a long name":    {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a", strings.Repeat("n", 257): "b"}}, "a trust rule's claim names and values must be at most 256 bytes"},
 		"a long value":   {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": strings.Repeat("v", 257)}}, "must be at most 256 bytes"},
+
+		"a C1 control in the issuer":  {oauth.TrustRule{Issuer: "https://issuer.example.com/\u0085", Claims: sub}, "a trust rule's issuer must be valid UTF-8 with no control character"},
+		"invalid UTF-8 in the issuer": {oauth.TrustRule{Issuer: "https://issuer.example.com/\xff", Claims: sub}, "a trust rule's issuer must be valid UTF-8 with no control character"},
+		"a NUL in a value":            {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a\x00b"}}, "a trust rule's claim names and values must be valid UTF-8 with no control character"},
+		"an escape code in a value":   {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a\x1b[2K"}}, "must be valid UTF-8 with no control character"},
+		"a bidi override in a value":  {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a\u202eb"}}, "must be valid UTF-8 with no control character"},
+		"invalid UTF-8 in a value":    {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "\xff"}}, "must be valid UTF-8 with no control character"},
+		"a newline in a name":         {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a", "x\ny": "b"}}, "must be valid UTF-8 with no control character"},
+		"a name that ends in a space": {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a", "ref ": "b"}}, `a trust rule's claim names cannot start or end with white space, as "ref " does`},
+		"a name after a space":        {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"\u00a0sub": "a"}}, "cannot start or end with white space"},
 	} {
 		require.ErrorContains(t, oauth.ValidateTrustRule(c.rule), c.want, name)
 	}
@@ -226,6 +236,11 @@ func TestAPastedKeySetHoldsAPublicKeyForSignatures(t *testing.T) {
 		"a key to encrypt": {trustKeySet(t, jose.JSONWebKey{Key: &rsaKey.PublicKey, KeyID: "a", Use: "enc"}), "must hold an RSA key"},
 		"another alg":      {trustKeySet(t, jose.JSONWebKey{Key: &rsaKey.PublicKey, KeyID: "a", Algorithm: "PS256"}), "must hold an RSA key"},
 		"too long":         {json.RawMessage(`{"keys":[],"x":"` + strings.Repeat("a", 32<<10) + `"}`), "a trust rule's JWKS must be at most 32768 bytes"},
+		// Postgres refuses the first two in jsonb, and encoding/json reads the
+		// last as U+FFFD.
+		"a NUL escape":     {json.RawMessage(`{"keys":[` + string(public) + `],"comment":"\u0000"}`), "a trust rule's JWKS must be valid UTF-8, with no \\u0000, lone surrogate or U+FFFD in a string"},
+		"a lone surrogate": {json.RawMessage(`{"keys":[` + string(public) + `],"comment":"\ud800"}`), "must be valid UTF-8, with no \\u0000"},
+		"invalid UTF-8":    {json.RawMessage("{\"keys\":[" + string(public) + "],\"comment\":\"\xff\"}"), "must be valid UTF-8, with no \\u0000"},
 	} {
 		err := oauth.ValidateTrustRule(oauth.TrustRule{Issuer: "https://kubernetes.default.svc", Claims: sub, JWKS: c.jwks})
 		require.ErrorContains(t, err, c.want, name)

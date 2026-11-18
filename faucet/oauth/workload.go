@@ -6,8 +6,11 @@ import (
 	"crypto/elliptic"
 	"crypto/rsa"
 	"encoding/json"
+	"io"
 	"net/url"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/go-jose/go-jose/v4"
 	"golang.org/x/xerrors"
@@ -145,6 +148,8 @@ func parseTrustRule(r TrustRule) (trustRule, error) {
 	switch {
 	case len(r.Issuer) > maxURIBytes:
 		return trustRule{}, xerrors.Errorf("a trust rule's issuer must be at most %d bytes", maxURIBytes)
+	case !printable(r.Issuer):
+		return trustRule{}, xerrors.New("a trust rule's issuer must be valid UTF-8 with no control character")
 	case err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || strings.Contains(r.Issuer, "#"):
 		return trustRule{}, xerrors.New("a trust rule's issuer must be an https URL with a host, and no user info, query or fragment")
 	case len(r.Claims) == 0:
@@ -158,6 +163,10 @@ func parseTrustRule(r TrustRule) (trustRule, error) {
 			return trustRule{}, xerrors.New("a trust rule pins each claim to a value, and neither the name nor the value can be empty")
 		case len(name) > maxClaimBytes || len(value) > maxClaimBytes:
 			return trustRule{}, xerrors.Errorf("a trust rule's claim names and values must be at most %d bytes", maxClaimBytes)
+		case !printable(name) || !printable(value):
+			return trustRule{}, xerrors.New("a trust rule's claim names and values must be valid UTF-8 with no control character")
+		case strings.TrimSpace(name) != name:
+			return trustRule{}, xerrors.Errorf("a trust rule's claim names cannot start or end with white space, as %q does", name)
 		case unpinnable:
 			return trustRule{}, xerrors.Errorf("a trust rule cannot pin %s: %s", name, why)
 		}
@@ -183,12 +192,40 @@ func parseTrustRule(r TrustRule) (trustRule, error) {
 		if err != nil {
 			return trustRule{}, xerrors.Errorf("a trust rule's JWKS %w", err)
 		}
+		if !storableStrings(r.JWKS) {
+			return trustRule{}, xerrors.New(`a trust rule's JWKS must be valid UTF-8, with no \u0000, lone surrogate or U+FFFD in a string`)
+		}
 		rule.keys = &keys
 		if rule.JWKS, err = compactKeySet(entries); err != nil {
 			return trustRule{}, xerrors.Errorf("a trust rule's JWKS: %w", err)
 		}
 	}
 	return rule, nil
+}
+
+// printable reports whether s is valid UTF-8 with no control or format
+// character, which could hide or fake text in a terminal.
+func printable(s string) bool {
+	return utf8.ValidString(s) && !strings.ContainsFunc(s, func(r rune) bool { return unicode.In(r, unicode.Cc, unicode.Cf) })
+}
+
+// storableStrings reports whether no string of a JSON text holds NUL or
+// U+FFFD. Postgres refuses \u0000 in jsonb, and encoding/json reads a lone
+// surrogate, which Postgres refuses too, and invalid UTF-8 as U+FFFD.
+func storableStrings(text []byte) bool {
+	d := json.NewDecoder(bytes.NewReader(text))
+	for {
+		token, err := d.Token()
+		switch {
+		case xerrors.Is(err, io.EOF):
+			return true
+		case err != nil:
+			return false
+		}
+		if s, ok := token.(string); ok && strings.ContainsAny(s, "\x00\uFFFD") {
+			return false
+		}
+	}
 }
 
 // compactKeySet is the key set {"keys":entries}, with no white space. It is
