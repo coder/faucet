@@ -36,6 +36,7 @@ import (
 type loginServer struct {
 	*httptest.Server
 	store  *pgstore.Store
+	svc    *faucet.Service
 	github *githubStub
 	logs   *syncBuffer
 }
@@ -84,7 +85,7 @@ func newLoginServer(t *testing.T, configure ...func(*loginConfig)) *loginServer 
 	srv.Config.Handler = newRouter(svc, tokens, login, cron, logger)
 	srv.Start()
 	t.Cleanup(srv.Close)
-	return &loginServer{Server: srv, store: store, github: github, logs: logs}
+	return &loginServer{Server: srv, store: store, svc: svc, github: github, logs: logs}
 }
 
 // client stores a client that an operator made for the endpoint at path,
@@ -103,12 +104,19 @@ func (s *loginServer) deliver(t *testing.T, delivery string) {
 	t.Helper()
 	body, err := os.ReadFile("../../faucet/testdata/workflow_run_completed.json")
 	require.NoError(t, err)
+	s.post(t, "workflow_run", delivery, body)
+}
+
+// post posts body as a delivery of event, signed as GitHub does, and needs a
+// 200.
+func (s *loginServer) post(t *testing.T, event, delivery string, body []byte) {
+	t.Helper()
 	mac := hmac.New(sha256.New, []byte(testSecret))
 	_, _ = mac.Write(body)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, s.URL+"/webhook/github", bytes.NewReader(body))
 	require.NoError(t, err)
 	req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
-	req.Header.Set("X-GitHub-Event", "workflow_run")
+	req.Header.Set("X-GitHub-Event", event)
 	req.Header.Set("X-GitHub-Delivery", delivery)
 	resp, err := s.Client().Do(req)
 	require.NoError(t, err)
