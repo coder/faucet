@@ -9,7 +9,7 @@ For this way in, faucet keeps the user's GitHub App token. It seals the token un
 1. Make a GitHub App for faucet, under the organization's **Settings**, **Developer settings**, **GitHub Apps**:
    - **Callback URL:** the value of `FAUCET_PUBLIC_URL` followed by `/oauth/github/callback`.
    - **Expire user authorization tokens:** on. Faucet keeps no token that never expires. With this off, every login stops at a page that says "faucet cannot keep this login", and the log names the setting.
-   - **Repository permissions:** read-only. Metadata is enough, because faucet only asks GitHub whether the user can read a repository.
+   - **Repository permissions:** read-only. Metadata is enough, because faucet asks GitHub only whether the user can read a repository.
    - **Webhook:** off. Events still come from the hook of the [quick start](../README.md#quick-start). Faucet uses no installation token and no private key of the App.
 2. Make a client secret for the App.
 3. Install the App on each organization or repository that users want events from. A GitHub App user token reaches only the repositories where the App is installed and that the user can read. A user gets no events from a repository without the App.
@@ -54,9 +54,9 @@ sequenceDiagram
 ```
 
 1. The agent calls `/github/mcp` without a token. The 401 points to the endpoint's metadata, which names faucet as the authorization server. Faucet's own metadata says that it takes client ID metadata documents.
-2. The agent opens the consent page in the browser. The page shows the host of the agent's client ID in large text, the name that the agent gives with a note that faucet has not checked it, the endpoint, what each scope allows, and where the browser returns to. The page works for 10 minutes.
+2. The agent opens the consent page in the browser. The page shows the host of the agent's client ID in large text. Below it are the name that the agent gives, marked as unchecked, the endpoint, what each scope allows, and where the browser returns to. The page works for 10 minutes.
 3. The user presses **Continue with GitHub**. GitHub asks them to log in and, the first time, to authorize faucet's App.
-4. GitHub sends the browser back to faucet, and faucet sends it on to the agent with a code. The agent trades the code for faucet's tokens within 60 seconds. From then on it refreshes them without the browser.
+4. GitHub sends the browser back to faucet, and faucet sends it on to the agent with a code. The agent must trade the code for faucet's tokens within 60 seconds. From then on it refreshes them without the browser.
 
 When a step fails, the browser shows a page that says what happened and tells the user to start again from the agent. When the user refuses at GitHub, the agent gets `access_denied`.
 
@@ -80,7 +80,7 @@ A session lasts as long as its agent refreshes its tokens. It ends, and the agen
 - **A refresh token comes back after a refresh replaced it.** Faucet takes that as a token with two holders. So two processes that share one refresh token, such as two agents that copy one token file, log each other out.
 - **A code comes back after the agent redeemed it.** The session that the code made ends.
 - **The refresh token went unused for 180 days.** GitHub ends its own refresh tokens after six months, so faucet ends the session at its next refresh.
-- **GitHub refuses the user's refresh token,** because it expired, was revoked, or was used already. Then every session of that user ends. This also happens when faucet stops after GitHub gave a user a new pair and before faucet stored it. The stored refresh token is then spent, so that user must log in again.
+- **GitHub refuses the user's refresh token,** because it expired, was revoked, or was used already. Then every session of that user ends. The same happens when faucet stops after GitHub gave a user a new pair and before faucet stored that pair, because the stored refresh token is then spent.
 
 Faucet has no logout. When a user revokes faucet's App at GitHub, GitHub rejects the user's tokens at the next check, and faucet ends every session of that user. An operator can end every session of one user at once with `UPDATE faucet_user_sessions SET ended_at = now() WHERE connection_id = 'github:<GitHub user ID>' AND ended_at IS NULL`. The sealed pair stays in `faucet_connections` until the user's next login replaces it.
 
