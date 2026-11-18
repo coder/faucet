@@ -85,7 +85,7 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/service-accounts.md", "Faucet's token lasts %d minutes, or until the platform's token expires", []any{minutes(accessTokenLifetime)}},
 		{"docs/service-accounts.md", "works until it expires, %d minutes at most", []any{minutes(accessTokenLifetime)}},
 		{"docs/service-accounts.md", "`Retry-After` gives the seconds until faucet fetches again, %d at most.", []any{seconds(keyFetchInterval)}},
-		{"docs/service-accounts.md", "or it ended less than a minute ago and the issuer may have added the key since", nil},
+		{"docs/service-accounts.md", "also when its `kid` is missing from keys that faucet fetched less than a minute ago", nil},
 		{"docs/security.md", "It then mints its own token, which lasts %d minutes and never past the platform's token.", []any{minutes(accessTokenLifetime)}},
 		{"docs/security.md", "must arrive within %d seconds together, and each must be %d KiB at most", []any{seconds(keyFetchTimeout), MaxKeyDocumentBytes >> 10}},
 		{"docs/security.md", "Faucet keeps an issuer's keys for %d minutes**, so a key that the issuer drops stops working within %d minutes", []any{minutes(keySetLifetime), minutes(keySetLifetime)}},

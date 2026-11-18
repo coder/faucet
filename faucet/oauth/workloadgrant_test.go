@@ -171,23 +171,23 @@ func TestATokenExchangeWaitsWhileTheKeysOfItsIssuerFail(t *testing.T) {
 	require.Equal(t, "45", reply.header.Get("Retry-After"), "the failure is kept for a minute")
 }
 
-func TestATokenExchangeWaitsForTheNextFetchForAKidThatTheKeysLack(t *testing.T) {
+// A kid that keys fetched a moment ago lack gets the answer of a token that
+// no rule verifies, at every retry, so that only an issuer that fails tells
+// a caller without a trusted token that the client trusts it.
+func TestAKidThatFreshKeysLackIsRefusedAtEveryRetry(t *testing.T) {
 	t.Parallel()
 	h, _ := newWorkloadHarness(t)
 	reply := h.post("", exchange(h.vercelToken()))
 	require.Equal(t, http.StatusOK, reply.status, reply.rawBody)
 
-	h.clock.Advance(20 * time.Second)
-	rotated := oauth.SignAsVercelUnder(t, "rotated", oauth.VercelFunctionClaims(h.clock.Now()))
-	reply = h.post("", exchange(rotated))
-	require.Equal(t, http.StatusServiceUnavailable, reply.status, reply.rawBody)
-	require.Equal(t, "40", reply.header.Get("Retry-After"))
-	require.Equal(t, waitForKeys, reply.body)
-	require.True(t, logged(h.logs.String(), "[info]", "a workload's token waits for the keys of its issuer", "client_id=digest-bot"), h.logs.String())
-
-	h.clock.Advance(40 * time.Second)
-	reply = h.post("", exchange(rotated))
-	require.Equal(t, refusedExchange, reply.body, "the keys that faucet fetched for the kid lack it")
+	for range 8 {
+		h.clock.Advance(10 * time.Second)
+		reply = h.post("", exchange(oauth.SignAsVercelUnder(t, "made-up", oauth.VercelFunctionClaims(h.clock.Now()))))
+		require.Equal(t, http.StatusBadRequest, reply.status, reply.rawBody)
+		require.Equal(t, refusedExchange, reply.body)
+		require.Empty(t, reply.header.Get("Retry-After"))
+	}
+	require.True(t, logged(h.logs.String(), "[info]", "a token exchange was refused", "client_id=digest-bot", "its kid and alg name no key of its issuer"), h.logs.String())
 }
 
 func TestATokenExchangeCarriesNoSecretAndNoActor(t *testing.T) {

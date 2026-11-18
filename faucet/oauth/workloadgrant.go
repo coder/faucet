@@ -94,11 +94,7 @@ func (s *Server) exchangeAnswer(ctx context.Context, clientID string, err error)
 	var answer *tokenError
 	switch {
 	case xerrors.As(err, &keys):
-		log := s.logger.Info
-		if keys.fetchErr != nil {
-			log = s.logger.Warn
-		}
-		log(ctx, "a workload's token waits for the keys of its issuer", slog.F("client_id", clientID), slog.Error(err))
+		s.logger.Warn(ctx, "a workload's token waits for the keys of its issuer", slog.F("client_id", clientID), slog.Error(err))
 		return &tokenError{
 			status: http.StatusServiceUnavailable, code: "temporarily_unavailable", retryAfter: max(time.Second, keys.retryAt.Sub(s.clock.Now())),
 			description: "faucet cannot get the key of the subject token from its issuer yet: try again after Retry-After seconds",

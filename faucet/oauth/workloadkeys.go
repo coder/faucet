@@ -44,19 +44,10 @@ type issuerKeysError struct {
 }
 
 func (e issuerKeysError) Error() string {
-	why := "faucet fetched its keys less than a minute ago, and they lack the token's kid"
-	if e.fetchErr != nil {
-		why = e.fetchErr.Error()
-	}
-	return errIssuerKeys.Error() + " " + e.issuer + ": " + why
+	return errIssuerKeys.Error() + " " + e.issuer + ": " + e.fetchErr.Error()
 }
 
-func (e issuerKeysError) Unwrap() []error {
-	if e.fetchErr == nil {
-		return []error{errIssuerKeys}
-	}
-	return []error{errIssuerKeys, e.fetchErr}
-}
+func (e issuerKeysError) Unwrap() []error { return []error{errIssuerKeys, e.fetchErr} }
 
 // keySource fetches the keys of issuers through their OpenID discovery
 // documents, and keeps them. Callers that ask at once for an issuer whose
@@ -113,14 +104,14 @@ func (s *keySource) keySet(ctx context.Context, issuer, kid string) (jose.JSONWe
 	s.mu.Lock()
 	now := s.clock.Now()
 	f := s.sets[issuer]
-	keys := f.keysAt(now)
+	keys, retryAt := f.keysAt(now), f.triedAt.Add(keyFetchInterval)
 	switch {
-	case len(keys.Key(kid)) > 0:
+	case len(keys.Key(kid)) > 0, now.Before(retryAt) && f.err == nil:
 		s.mu.Unlock()
 		return keys, nil
-	case now.Before(f.triedAt.Add(keyFetchInterval)):
+	case now.Before(retryAt):
 		s.mu.Unlock()
-		return jose.JSONWebKeySet{}, issuerKeysError{issuer: issuer, retryAt: f.triedAt.Add(keyFetchInterval), fetchErr: f.err}
+		return jose.JSONWebKeySet{}, issuerKeysError{issuer: issuer, retryAt: retryAt, fetchErr: f.err}
 	case ctx.Err() != nil:
 		s.mu.Unlock()
 		return jose.JSONWebKeySet{}, ctx.Err()
