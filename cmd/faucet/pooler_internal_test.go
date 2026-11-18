@@ -12,12 +12,12 @@ import (
 )
 
 // startTransactionPooler starts a proxy in front of the Postgres at target,
-// host:port, that hands each transaction to the next of two server
-// connections, as a transaction-mode pooler such as Neon's does. A
-// statement that is parsed in one round trip and bound in the next fails
-// on it with "unnamed prepared statement does not exist". It returns the
-// proxy's host:port. It speaks only what lib/pq sends with sslmode=disable
-// to a server that trusts it.
+// host:port, that runs each transaction as if on a fresh server connection,
+// as a transaction-mode pooler such as Neon's does: before each transaction
+// it closes the unnamed prepared statement that the one before left. A
+// statement that is parsed in one round trip and bound in the next fails on
+// it with "unnamed prepared statement does not exist". It returns the
+// proxy's host:port. It speaks only what lib/pq sends with sslmode=disable.
 func startTransactionPooler(t *testing.T, target string) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -46,50 +46,84 @@ func startTransactionPooler(t *testing.T, target string) string {
 	return ln.Addr().String()
 }
 
+// closeUnnamed closes the unnamed prepared statement and ends the
+// transaction. Closing one that does not exist is no error.
+var closeUnnamed = []byte{'C', 0, 0, 0, 6, 'S', 0, 'S', 0, 0, 0, 4}
+
 func poolOne(client net.Conn, target string) error {
 	startup, err := readStartup(client)
 	if err != nil {
 		return err
 	}
-	var servers [2]net.Conn
-	defer func() {
-		for _, server := range servers {
-			if server != nil {
-				_ = server.Close()
-			}
-		}
-	}()
-	for i := range servers {
-		if servers[i], err = net.Dial("tcp", target); err != nil {
-			return err
-		}
-		if _, err := servers[i].Write(startup); err != nil {
-			return err
-		}
-		out := io.Discard
-		if i == 0 {
-			out = client
-		}
-		if err := relayUntilReady(servers[i], out); err != nil {
-			return err
-		}
+	server, err := net.Dial("tcp", target)
+	if err != nil {
+		return err
 	}
-	for current := 0; ; {
+	defer server.Close()
+	if _, err := server.Write(startup); err != nil {
+		return err
+	}
+	if err := authenticate(client, server); err != nil {
+		return err
+	}
+	for fresh := true; ; {
 		typ, msg, err := readMessage(client)
 		if err != nil {
 			return err
 		}
-		if _, err := servers[current].Write(msg); err != nil {
+		if typ == 'X' {
+			_, err := server.Write(msg)
 			return err
 		}
-		switch typ {
-		case 'X':
-			return nil
-		case 'S', 'Q':
-			if err := relayUntilReady(servers[current], client); err != nil {
+		if !fresh {
+			if _, err := server.Write(closeUnnamed); err != nil {
 				return err
 			}
-			current = 1 - current
+			if err := relayUntilReady(server, io.Discard); err != nil {
+				return err
+			}
+			fresh = true
+		}
+		if _, err := server.Write(msg); err != nil {
+			return err
+		}
+		if typ == 'S' || typ == 'Q' {
+			if err := relayUntilReady(server, client); err != nil {
+				return err
+			}
+			fresh = false
+		}
+	}
+}
+
+// authenticate relays the server's startup answers to the client up to
+// ReadyForQuery, and the client's answer to each authentication request
+// that wants one: a password, or a SASL message.
+func authenticate(client, server net.Conn) error {
+	for {
+		typ, msg, err := readMessage(server)
+		if err != nil {
+			return err
+		}
+		if _, err := client.Write(msg); err != nil {
+			return err
+		}
+		switch {
+		case typ == 'Z':
+			return nil
+		case typ == 'R' && len(msg) >= 9:
+			// 3 cleartext, 5 MD5, 10 SASL and 11 SASL continue each wait
+			// for the client's next message.
+			switch binary.BigEndian.Uint32(msg[5:9]) {
+			case 3, 5, 10, 11:
+				_, answer, err := readMessage(client)
+				if err != nil {
+					return err
+				}
+				if _, err := server.Write(answer); err != nil {
+					return err
+				}
+			}
 		}
 	}
 }
