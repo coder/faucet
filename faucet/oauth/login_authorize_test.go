@@ -263,9 +263,11 @@ func TestAConsentFormThatIsNotASmallFormIsRefused(t *testing.T) {
 		require.Empty(t, refused.header.Get("Location"), name)
 		loginRequirePage(t, refused)
 	}
-	consent := b.start(client)
-	b.post(url.Values{"request": {consent.id, consent.id}, "token": consent.form["token"]}, []string{h.issuer})
-	require.Equal(t, http.StatusForbidden, b.continueWith(consent).status, "a form with a field twice ends the requests that it names")
+	first, second := b.start(client), b.start(client)
+	b.post(url.Values{"request": {first.id, second.id}, "token": first.form["token"]}, []string{h.issuer})
+	for _, c := range []loginConsent{first, second} {
+		require.Equal(t, http.StatusForbidden, b.continueWith(c).status, "a form with a field twice ends every request that it names")
+	}
 	require.Zero(t, h.github.authorizeCount())
 }
 
