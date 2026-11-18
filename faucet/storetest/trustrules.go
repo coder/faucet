@@ -160,7 +160,7 @@ func aRuleWithAKeySetOf30KBIsAddedOnce(t *testing.T, s oauth.Store) {
 		var n strings.Builder
 		for range 16 {
 			seed = sha256.Sum256(seed[:])
-			n.WriteString(base64.RawURLEncoding.EncodeToString(seed[:]))
+			_, _ = n.WriteString(base64.RawURLEncoding.EncodeToString(seed[:]))
 		}
 		keys = append(keys, map[string]string{"kty": "RSA", "kid": strconv.Itoa(i), "alg": "RS256", "use": "sig", "n": n.String(), "e": "AQAB"})
 	}

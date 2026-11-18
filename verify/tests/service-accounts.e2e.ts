@@ -164,7 +164,7 @@ describe('service accounts', () => {
 
       const list = await started.clients(['list']);
       expect(list.code).toBe(0);
-      expect(list.stdout).toMatch(/^retired\s+\S+\/github\/mcp\s+events:read\s+repo:verify\/r\d+\s+\S+Z\s+\S+Z$/m);
+      expect(list.stdout).toMatch(/^retired\s+\S+\/github\/mcp\s+events:read\s+repo:verify\/r\d+\s+\S+Z\s+\S+Z\s+yes\s+0$/m);
       expect(list.stdout).not.toContain(secret);
       const again = await started.clients(['create', '-resource', `${started.baseUrl}/github/mcp`, '-grant', `repo:${repo}`, 'retired']);
       expect(again.code, 'a disabled client keeps its ID').toBe(1);

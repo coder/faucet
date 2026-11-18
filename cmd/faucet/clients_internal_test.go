@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -78,9 +79,9 @@ func TestTheClientsCommandMakesListsAndDisablesClients(t *testing.T) {
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	require.Len(t, lines, 3)
-	require.Regexp(t, `^CLIENT ID\s+RESOURCE\s+SCOPES\s+GRANTS\s+CREATED\s+DISABLED$`, lines[0])
-	require.Regexp(t, `^ci-watcher\s+https://faucet.example.com/github/mcp\s+events:read\s+repo:coder/faucet,repo:coder/coder\s+\S+Z\s+-$`, lines[1])
-	require.Regexp(t, `^triage\s+\S+\s+\S+\s+org:Coder#7,all\s+\S+Z\s+-$`, lines[2])
+	require.Regexp(t, `^CLIENT ID\s+RESOURCE\s+SCOPES\s+GRANTS\s+CREATED\s+DISABLED\s+SECRET\s+TRUST RULES$`, lines[0])
+	require.Regexp(t, `^ci-watcher\s+https://faucet.example.com/github/mcp\s+events:read\s+repo:coder/faucet,repo:coder/coder\s+\S+Z\s+-\s+yes\s+0$`, lines[1])
+	require.Regexp(t, `^triage\s+\S+\s+\S+\s+org:Coder#7,all\s+\S+Z\s+-\s+yes\s+0$`, lines[2])
 	require.NotContains(t, out, secret)
 
 	out, _, err = clients(t, getenv, "disable", "ci-watcher")
@@ -93,7 +94,7 @@ func TestTheClientsCommandMakesListsAndDisablesClients(t *testing.T) {
 	require.NoError(t, err, "disabling twice is no error")
 	out, _, err = clients(t, getenv, "list")
 	require.NoError(t, err)
-	require.NotRegexp(t, `(?m)^ci-watcher.*\s-$`, out, "the list shows when it was disabled")
+	require.NotRegexp(t, `(?m)^ci-watcher.*\s-\s+yes\s+0$`, out, "the list shows when it was disabled")
 
 	_, _, err = clients(t, getenv, "create", "-resource", "https://faucet.example.com/github/mcp", "-grant", "repo:coder/faucet", "ci-watcher")
 	require.ErrorContains(t, err, "an ID is never given to a second client")
@@ -328,4 +329,181 @@ func TestDisablingAnImpossibleClientIDIsRefused(t *testing.T) {
 		_, _, err := clients(t, getenv, "disable", id)
 		require.ErrorContains(t, err, "a client ID is", "%q", id)
 	}
+}
+
+// The rules that the trust tests take: a Vercel project of the codercom team
+// in production, whose keys come from discovery, and a service account of a
+// private cluster, whose keys the operator pastes.
+const (
+	codercomIssuer = "https://oidc.vercel.com/codercom"
+	codercomTeam   = "team_tGkWfhEGGelkkqUUm9nXq17r"
+	// The project ID of the example token on vercel.com/docs/oidc/reference.
+	digestProject  = "prj_7Gw5ZMBpQA8h9GF832KGp7nwbuh3"
+	clusterIssuer  = "https://k8s.wi-test.invalid"
+	clusterAccount = "system:serviceaccount:apps:digest-bot"
+	clusterJWKS    = "../../faucet/oauth/testdata/k8s-jwks.json"
+)
+
+func trustVercel(id string, claims ...string) []string {
+	args := []string{"trust", id, "-issuer", codercomIssuer}
+	for _, c := range claims {
+		args = append(args, "-claim", c)
+	}
+	return args
+}
+
+var vercelPins = []string{"owner_id=" + codercomTeam, "project_id=" + digestProject, "environment=production"}
+
+// A client for workloads has no secret, and gets trust rules that the
+// commands add, list and remove.
+func TestTheClientsCommandMakesAClientForWorkloadsAndManagesItsTrustRules(t *testing.T) {
+	t.Parallel()
+	getenv, store := newClientsDatabase(t)
+	ctx := context.Background()
+	const resource = "https://faucet.example.com/github/mcp"
+
+	out, notice, err := clients(t, getenv, "create", "-resource", resource, "-no-secret", "-grant", "repo:coder/faucet", "digest-bot")
+	require.NoError(t, err)
+	require.Equal(t, "client_id: digest-bot\n", out, "a client with no secret prints no secret")
+	require.Contains(t, notice, "The client has no secret: give it a trust rule with faucet clients trust digest-bot.")
+	c, err := store.Client(ctx, "digest-bot")
+	require.NoError(t, err)
+	require.Nil(t, c.SecretHash)
+
+	out, _, err = clients(t, getenv, trustVercel("digest-bot", vercelPins...)...)
+	require.NoError(t, err)
+	require.Regexp(t, `^rule_id: [1-9][0-9]*\n$`, out)
+	vercelID := strings.TrimSpace(strings.TrimPrefix(out, "rule_id: "))
+	again, _, err := clients(t, getenv, trustVercel("digest-bot", "environment=production", "project_id="+digestProject, "owner_id="+codercomTeam)...)
+	require.NoError(t, err)
+	require.Equal(t, out, again, "the same rule, its claims in another order, is the rule that the client holds")
+	out, _, err = clients(t, getenv, "trust", "digest-bot", "-issuer", clusterIssuer, "-claim", "sub="+clusterAccount, "-jwks-file", clusterJWKS)
+	require.NoError(t, err)
+	clusterID := strings.TrimSpace(strings.TrimPrefix(out, "rule_id: "))
+	require.NotEqual(t, vercelID, clusterID)
+
+	rules, err := store.TrustRules(ctx, "digest-bot")
+	require.NoError(t, err)
+	require.Len(t, rules, 2)
+	require.Equal(t, map[string]string{"owner_id": codercomTeam, "project_id": digestProject, "environment": "production"}, rules[0].Rule.Claims)
+	require.Empty(t, rules[0].Rule.JWKS)
+	pasted, err := os.ReadFile(clusterJWKS)
+	require.NoError(t, err)
+	require.JSONEq(t, string(pasted), string(rules[1].Rule.JWKS), "the store keeps the key set of the file")
+	require.NoError(t, oauth.ValidateTrustRule(rules[1].Rule), "the stored rule is the one that trust checked")
+
+	out, _, err = clients(t, getenv, "trusts", "digest-bot")
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	require.Len(t, lines, 3)
+	require.Regexp(t, `^RULE ID\s+ISSUER\s+CLAIMS\s+KEYS\s+CREATED$`, lines[0])
+	require.Regexp(t, `^`+vercelID+`\s+https://oidc\.vercel\.com/codercom\s+environment=production,owner_id=`+codercomTeam+`,project_id=`+digestProject+`\s+discovery\s+\S+Z$`, lines[1])
+	require.Regexp(t, `^`+clusterID+`\s+https://k8s\.wi-test\.invalid\s+sub=system:serviceaccount:apps:digest-bot\s+pasted\s+\S+Z$`, lines[2])
+	out, _, err = clients(t, getenv, "list")
+	require.NoError(t, err)
+	require.Regexp(t, `(?m)^digest-bot\s+.*\s-\s+no\s+2$`, out, "the list shows that the client has no secret and two rules")
+
+	out, _, err = clients(t, getenv, "untrust", "digest-bot", vercelID)
+	require.NoError(t, err)
+	require.Equal(t, "Trust rule "+vercelID+" of digest-bot is removed. A token that a workload got with it works until it expires.\n", out)
+	_, _, err = clients(t, getenv, "untrust", "digest-bot", vercelID)
+	require.ErrorContains(t, err, `client "digest-bot" has no trust rule `+vercelID)
+	rules, err = store.TrustRules(ctx, "digest-bot")
+	require.NoError(t, err)
+	require.Len(t, rules, 1)
+	require.Equal(t, clusterIssuer, rules[0].Rule.Issuer)
+}
+
+// trust runs ValidateTrustRule first, so its errors say what to pin and why,
+// and a rule that the store keeps is one that a workload could match.
+func TestTheClientsCommandRefusesATrustRuleThatCannotWork(t *testing.T) {
+	t.Parallel()
+	getenv, store := newClientsDatabase(t)
+	ctx := context.Background()
+	const resource = "https://faucet.example.com/github/mcp"
+	for _, id := range []string{"digest-bot", "retired"} {
+		_, _, err := clients(t, getenv, "create", "-resource", resource, "-no-secret", "-grant", "repo:coder/faucet", id)
+		require.NoError(t, err)
+	}
+	_, _, err := clients(t, getenv, "disable", "retired")
+	require.NoError(t, err)
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty.json")
+	require.NoError(t, os.WriteFile(empty, nil, 0o600))
+	private := filepath.Join(dir, "private.json")
+	require.NoError(t, os.WriteFile(private, []byte(`{"keys":[{"kty":"oct","kid":"k","k":"c2VjcmV0"}]}`), 0o600))
+	cluster := func(extra ...string) []string {
+		return append([]string{"trust", "digest-bot", "-issuer", clusterIssuer, "-claim", "sub=" + clusterAccount}, extra...)
+	}
+
+	for name, c := range map[string]struct {
+		args []string
+		want string
+	}{
+		"no production pin":     {trustVercel("digest-bot", vercelPins[:2]...), "a trust rule for https://oidc.vercel.com/codercom must pin environment=production: a preview deployment runs any branch"},
+		"a preview":             {trustVercel("digest-bot", vercelPins[0], vercelPins[1], "environment=preview"), "must pin environment=production"},
+		"no team":               {trustVercel("digest-bot", vercelPins[1:]...), "must pin owner_id: Vercel signs the tokens of every team with the same keys"},
+		"every team's issuer":   {[]string{"trust", "digest-bot", "-issuer", "https://oidc.vercel.com", "-claim", vercelPins[0]}, "faucet never trusts https://oidc.vercel.com, which every Vercel team shares"},
+		"no sub":                {[]string{"trust", "digest-bot", "-issuer", clusterIssuer, "-claim", "kubernetes.io/namespace=apps"}, "a trust rule for https://k8s.wi-test.invalid must pin sub"},
+		"an http issuer":        {[]string{"trust", "digest-bot", "-issuer", "http://k8s.wi-test.invalid", "-claim", "sub=" + clusterAccount}, "a trust rule's issuer must be an https URL"},
+		"no issuer":             {[]string{"trust", "digest-bot", "-claim", "sub=" + clusterAccount}, "a trust rule's issuer must be an https URL"},
+		"no claim":              {[]string{"trust", "digest-bot", "-issuer", clusterIssuer}, "a trust rule must pin at least one claim"},
+		"an empty value":        {[]string{"trust", "digest-bot", "-issuer", clusterIssuer, "-claim", "sub="}, "neither the name nor the value can be empty"},
+		"a claim with no value": {cluster("-claim", "aud"), "a claim is <name>=<value>"},
+		"a claim pinned twice":  {cluster("-claim", "sub=system:serviceaccount:apps:other"), "claim sub is pinned twice"},
+		"an aud pin":            {cluster("-claim", "aud=https://faucet.example.com"), "a trust rule cannot pin aud"},
+		"a key set of no file":  {cluster("-jwks-file", filepath.Join(dir, "missing.json")), "-jwks-file: "},
+		"an empty key set":      {cluster("-jwks-file", empty), "-jwks-file " + empty + " is empty"},
+		"a private key":         {cluster("-jwks-file", private), "a trust rule's JWKS must hold no private key"},
+		"an unknown client":     {[]string{"trust", "nobody", "-issuer", clusterIssuer, "-claim", "sub=" + clusterAccount}, `there is no client "nobody"`},
+		"a disabled client":     {[]string{"trust", "retired", "-issuer", clusterIssuer, "-claim", "sub=" + clusterAccount}, `client "retired" is disabled, so no workload can act as it`},
+		"an upper-case ID":      {[]string{"trust", "Digest-Bot", "-issuer", clusterIssuer, "-claim", "sub=" + clusterAccount}, "a client ID is"},
+		"the ID after flags":    {[]string{"trust", "-issuer", clusterIssuer, "-claim", "sub=" + clusterAccount, "digest-bot"}, "name the client ID before the flags"},
+		"an argument after":     {cluster("digest-bot"), "name the client ID before the flags"},
+		"no client ID":          {[]string{"trust"}, "usage:"},
+	} {
+		out, _, err := clients(t, getenv, c.args...)
+		require.ErrorContains(t, err, c.want, name)
+		require.Empty(t, out, name)
+	}
+	for _, id := range []string{"digest-bot", "retired"} {
+		rules, err := store.TrustRules(ctx, id)
+		require.NoError(t, err)
+		require.Empty(t, rules, "%s holds no rule", id)
+	}
+}
+
+// untrust and trusts name a client, so an operator who names the wrong one
+// removes nothing of another's.
+func TestTheClientsCommandRemovesATrustRuleOfThatClientOnly(t *testing.T) {
+	t.Parallel()
+	getenv, store := newClientsDatabase(t)
+	ctx := context.Background()
+	for _, id := range []string{"digest-bot", "ci-watcher"} {
+		_, _, err := clients(t, getenv, "create", "-resource", "https://faucet.example.com/github/mcp", "-no-secret", "-grant", "repo:coder/faucet", id)
+		require.NoError(t, err)
+	}
+	out, _, err := clients(t, getenv, trustVercel("digest-bot", vercelPins...)...)
+	require.NoError(t, err)
+	ruleID := strings.TrimSpace(strings.TrimPrefix(out, "rule_id: "))
+
+	_, _, err = clients(t, getenv, "untrust", "ci-watcher", ruleID)
+	require.ErrorContains(t, err, `client "ci-watcher" has no trust rule `+ruleID)
+	for name, args := range map[string][]string{
+		"no rule ID":       {"untrust", "digest-bot"},
+		"a rule ID of 0":   {"untrust", "digest-bot", "0"},
+		"a negative ID":    {"untrust", "digest-bot", "-" + ruleID},
+		"a name":           {"untrust", "digest-bot", "vercel"},
+		"an unknown ID":    {"untrust", "digest-bot", "999999"},
+		"an unknown owner": {"untrust", "nobody", ruleID},
+		"trusts of nobody": {"trusts", "nobody"},
+		"trusts of two":    {"trusts", "digest-bot", "ci-watcher"},
+	} {
+		out, _, err := clients(t, getenv, args...)
+		require.Error(t, err, name)
+		require.Empty(t, out, name)
+	}
+	rules, err := store.TrustRules(ctx, "digest-bot")
+	require.NoError(t, err)
+	require.Len(t, rules, 1, "the rule stays")
 }
