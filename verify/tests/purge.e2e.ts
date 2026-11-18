@@ -12,6 +12,10 @@ interface PurgeReply {
   purged_through: number;
   expired_subscriptions: number;
   ended_deliveries: number;
+  raw_events_cleared: number;
+  raw_events_deleted: number;
+  expired_leases: number;
+  raw_failures: number;
 }
 
 interface PollResult {
@@ -57,7 +61,19 @@ async function retentionOracle(faucet: Faucet): Promise<PurgeReply> {
   const ended = Number(await faucet.sql(
     'select count(*) from faucet_deliveries d join faucet_subscriptions s using (key_hash) where s.expires_at <= now()',
   ));
-  return { deleted, purged_through: Math.max(highest, await faucet.purgeMark()), expired_subscriptions: expired, ended_deliveries: ended };
+  // No test stores a raw event or opens a poll lease on this faucet, so a purge finds none. tests/raw-events.e2e.ts
+  // covers what a purge does to them, on a faucet of its own.
+  expect(await faucet.sql('select (select count(*) from faucet_raw_events) + (select count(*) from faucet_raw_leases)')).toBe('0');
+  return {
+    deleted,
+    purged_through: Math.max(highest, await faucet.purgeMark()),
+    expired_subscriptions: expired,
+    ended_deliveries: ended,
+    raw_events_cleared: 0,
+    raw_events_deleted: 0,
+    expired_leases: 0,
+    raw_failures: 0,
+  };
 }
 
 describe('purge', () => {
@@ -83,7 +99,16 @@ describe('purge', () => {
 
     const second = await purge(cron);
 
-    expect(second).toEqual({ deleted: 0, purged_through: first.purged_through, expired_subscriptions: 0, ended_deliveries: 0 });
+    expect(second).toEqual({
+      deleted: 0,
+      purged_through: first.purged_through,
+      expired_subscriptions: 0,
+      ended_deliveries: 0,
+      raw_events_cleared: 0,
+      raw_events_deleted: 0,
+      expired_leases: 0,
+      raw_failures: 0,
+    });
   });
 
   test('an events/poll from before the purge says events were lost, one from after does not', async ({ cron }) => {

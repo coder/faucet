@@ -641,6 +641,8 @@ func finishDeliveryValidatesInput(t *testing.T, s faucet.Store) {
 		"delivered with a failure":       {Kind: faucet.FinishDelivered, Failure: faucet.CallbackTimeout},
 		"give-up with a made-up failure": {Kind: faucet.FinishGiveUp, Failure: "boom"},
 		"dead without the secret":        {Kind: faucet.FinishDead},
+		"retry that owes a gap":          {Kind: faucet.FinishRetry, RetryAt: r.now, Failure: faucet.CallbackTimeout, Gap: true},
+		"give-up that owes a gap":        {Kind: faucet.FinishGiveUp, Gap: true},
 	}
 	for name, f := range bad {
 		res, err := s.FinishDelivery(r.ctx, claim.Ref, r.now, f)

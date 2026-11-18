@@ -17,7 +17,7 @@ DATABASE_URL='<the production database URL>' FAUCET_PUBLIC_URL='https://faucet.e
 
 The command prints `client_id` and `client_secret` once. Faucet keeps only a hash of the secret. Each `-grant repo:<owner>/<name>` names a repository that the client may read, and `-scope` narrows what its tokens can hold (both scopes by default). The client is for `https://<your host>/github/mcp`; pass `-resource` with that URL where `FAUCET_PUBLIC_URL` is not set. `/mcp`, the endpoint's old path, takes no new client. A client ID is never given to a second client, because the login `svc:<client-id>` owns the client's subscriptions.
 
-`faucet clients list` shows every client without its secret. `faucet clients disable <client-id>` ends one: it gets no new token, the token it holds fails on its next request, and faucet deletes its subscriptions with the deliveries they queued. A subscription that the service made in the moment before the disable can outlive it, so run the command again if that matters. The commands never migrate, so the database must be at the newest migration.
+`faucet clients list` shows every client without its secret. `faucet clients disable <client-id>` ends one: it gets no new token, the token it holds fails on its next request, and faucet deletes its subscriptions with the deliveries they queued. A subscription that the service made in the moment before the disable can outlive it, so run the command again if that matters. The command leaves a lease that the service holds on a [raw event](events.md#raw-events). The lease ends 60 minutes after the service's last poll. Until then, faucet stores the events that the lease asked for, and the service cannot read them. The commands never migrate, so the database must be at the newest migration.
 
 ## What the service's MCP client does
 
@@ -48,7 +48,7 @@ sequenceDiagram
 
 ## Grants
 
-A service may read a repository that one of its grants names, matched by name and ignoring case, as GitHub does. Faucet learns a repository's ID from the signed deliveries that name it, stored or ignored, so a granted repository is readable once GitHub has sent one delivery from it. Until then, the wait tool says so.
+A service may read a repository that one of its grants names, matched by name and ignoring case, as GitHub does. A grant covers every event of the repository that faucet offers, and that includes the [raw events](events.md#raw-events), whose data is GitHub's whole payload. Faucet learns a repository's ID from the signed deliveries that name it, stored or ignored, so a granted repository is readable once GitHub has sent one delivery from it. Until then, the wait tool says so.
 
 A repository keeps the name under which faucet first saw it until a Repositories delivery says that it was renamed or transferred from that name. So neither a replayed delivery nor a redelivered older rename can move a name back. Without that event on the hook, or when faucet missed one rename of several, a renamed repository stays under the name faucet holds: the old grant keeps working, and a grant of the new name finds nothing. After a rename, grant the new name.
 

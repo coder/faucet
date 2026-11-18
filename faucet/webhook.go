@@ -33,7 +33,8 @@ const (
 //	413 body over 25 MiB
 //	400 missing event or delivery header, or a malformed payload
 //	200 ping, a stored event, or a delivery that was already stored
-//	202 an event faucet ignores
+//	202 an event faucet ignores: no typed family stores it, and no live
+//	    interest in its raw event name wants it
 //	500 the store failed, so GitHub records a failed delivery
 //
 // With Deps.RecordRepositories, every signed delivery whose payload names a
@@ -91,8 +92,7 @@ func (s *Service) serveWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ev == nil {
-		logger.Debug(r.Context(), "webhook ignored")
-		reply(w, http.StatusAccepted, "ignored")
+		s.serveRawWebhook(w, r, logger, eventName, deliveryID, body)
 		return
 	}
 	stored, inserted, err := s.store.InsertEvent(r.Context(), *ev)

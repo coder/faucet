@@ -20,7 +20,7 @@ Schedule it every 10 minutes (`*/10 * * * *`) with `Authorization: Bearer <CRON_
 
 A run reads GitHub's deliveries, newest first, down to where the previous run stopped, less a 5 minute overlap for attempts that GitHub wrote late. A stretch that it can't read within its page limit is kept as an open range, with GitHub's cursor, and later runs read the ranges, newest first.
 
-A delivery qualifies when an attempt failed (any answer outside 200 to 299, or none), faucet stores its event and action, and faucet has no event with its GUID. A stored delivery, or one that later succeeded, is never asked for. Only one run works at a time: a second one answers `busy: true`.
+A delivery qualifies when an attempt failed (any answer outside 200 to 299, or none), faucet stores its event and action or someone wants it as a [raw event](events.md#raw-events) when the run starts, and faucet has no event with its GUID. A stored delivery, or one that later succeeded, is never asked for. Only one run works at a time: a second one answers `busy: true`.
 
 
 ## Final states
@@ -40,7 +40,7 @@ stateDiagram-v2
 
 Every failed delivery ends exactly once, in one of these states, except in the cases that [Known limits](#known-limits) lists. The run that ends it counts it in the reply and logs it:
 
-- **`recovered`**: faucet stored the event, or a later attempt succeeded.
+- **`recovered`**: faucet stored the event, or a later attempt succeeded. A raw delivery recovers only by a later attempt: faucet answers it 200 when it stores the event, and 202 when nobody wants the event any more.
 - **`gave_up` / `limit`**: every ask was spent. A delivery is asked for 7 times, at 0, 10, 30, 70, 150, 310 and 630 minutes after the run that first read it. The count goes up before the request is sent, so a crash costs an ask, and two runs never send the same one.
 - **`gave_up` / `expired`**: GitHub keeps a delivery for 72 hours, counted from its first attempt, and the event still wasn't stored. Deliveries of a hook that you replaced end here too, because a run only asks for the deliveries of the hook it's configured with.
 - **`gap`**: a time range of attempts that no run read before GitHub deleted them. It names no delivery, because none was read. The first run that reads an attempt reports `gaps: 1` for the part of GitHub's 72 hours before its lookback of 24 hours.
@@ -81,6 +81,8 @@ Redelivery trusts a `Date` up to 6 hours ahead of GitHub's list (the margin) and
 - **`Date` far ahead, then a long outage.** When a `Date` runs more than 6 hours and 5 minutes ahead of GitHub's list and the cron then stops for 72 hours or more, failures in the stretch between the last run and the start of the next gap are never read or counted. A position that a build from before migration `000008_redelivery_clear` took from such a `Date` carries the same risk. ([#26](https://github.com/coder/faucet/issues/26))
 - **`Date` far behind on a quiet hook.** When a `Date` is more than 1 hour behind the clock that deletes GitHub's attempts, and no listed attempt shows the lag, a gap can end too early, and failures above it aren't counted. On a busy hook the run sees the lag and fails instead. ([#26](https://github.com/coder/faucet/issues/26))
 - **Dense burst, then silence.** When a burst holds more attempts in the 5 minute overlap than a run has pages, every run reads the same newest pages again, and older ranges starve. Their failures end inside counted gaps. ([#37](https://github.com/coder/faucet/issues/37))
+- **A raw event without a repository in the list.** A run knows who wants a raw delivery by the repository that GitHub's delivery list names for it. A failed raw delivery that the list names no repository for is never asked for again or counted.
+- **A run that cannot read the raw interests.** When faucet cannot read who wants raw events, or the read takes more than a tenth of the run, the run logs it and asks again for every failed delivery of an event that faucet offers raw, wanted or not. The limit of asks per run bounds them, and a delivery that nobody wants is answered 202 and recovers.
 - **Replacing the hook.** Failures that the old hook listed after the last run are never read or counted, because the new hook can't read the old hook's list. ([#38](https://github.com/coder/faucet/issues/38))
 
 ## Embedding

@@ -44,6 +44,18 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/security.md", "and times out after %d seconds", []any{seconds(callbackRequestTimeout)}},
 		{"docs/security.md", "declares a body over %d KiB or that has headers over %d KiB", []any{kib(maxCallbackResponseBytes), kib(maxCallbackHeaderBytes)}},
 		{"docs/events.md", "the cursor and the %d deliveries that a subscription may hold", []any{MaxPendingDeliveries}},
+		{"docs/events.md", "starts a lease, which ends %d minutes after its last poll", []any{minutes(rawLeaseTTL)}},
+		{"docs/events.md", "A login can hold %d leases", []any{maxLiveRawLeases}},
+		{"docs/events.md", "One event of one repository has at most %d live subscriptions and leases, and one login at most %d leases and %d subscriptions of it", []any{maxRawInterestsPerTarget, maxRawInterestsPerLogin, maxRawInterestsPerLogin}},
+		{"docs/events.md", "and any payload older than %d minutes", []any{minutes(rawLeaseTTL)}},
+		{"docs/events.md", "A lease holds at most %d unread events", []any{maxUnreadPerLease}},
+		{"docs/events.md", "A poller left an event unread for over %d minutes", []any{minutes(rawLeaseTTL)}},
+		{"docs/events.md", "of it, is over %d KiB", []any{kib(maxEventBodyBytes)}},
+		{"docs/events.md", "of it, fits in %d KiB", []any{kib(maxEventBodyBytes)}},
+		{"docs/events.md", "A delivery waited for over %d minutes", []any{minutes(rawLeaseTTL)}},
+		{"docs/events.md", "A raw subscription holds %d unsent deliveries", []any{MaxPendingDeliveries}},
+		{"docs/webhooks.md", "while it held %d unsent deliveries", []any{MaxPendingDeliveries}},
+		{"docs/webhooks.md", "or the body that carries them, is over %d KiB", []any{kib(maxEventBodyBytes)}},
 		{"docs/webhooks.md", "url not verified here in the last %d minutes", []any{minutes(callbackVerificationTTL)}},
 		{"docs/webhooks.md", "verified that login and URL in the last %d minutes", []any{minutes(callbackVerificationTTL)}},
 		{"docs/webhooks.md", "remembers a success for that login and URL for %d minutes", []any{minutes(callbackVerificationTTL)}},
@@ -125,7 +137,7 @@ func TestWebhookDocSaysWhereEachCallbackReasonComesFrom(t *testing.T) {
 		xerrors.New("dial tcp: connect: connection refused"),
 	}
 	now := time.Now()
-	claim := DeliveryClaim{Ref: DeliveryRef{Attempt: 1}, EnqueuedAt: now}
+	claim := outbound{ref: DeliveryRef{Attempt: 1}, enqueuedAt: now}
 
 	lastError := map[CallbackReason]bool{}
 	for _, err := range transport {

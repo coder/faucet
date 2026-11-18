@@ -40,6 +40,9 @@ type HookDelivery struct {
 	// payload. Action is empty for an event that has none.
 	Event  string
 	Action string
+	// RepositoryID is GitHub's ID of the repository that the event belongs
+	// to. It is 0 when GitHub names none.
+	RepositoryID int64
 }
 
 // DeliveryPage is one page of HookAdmin.ListDeliveries.
@@ -162,12 +165,13 @@ func (a GitHubHookAdmin) Format(f fmt.State, _ rune) {
 // deliveryJSON has the fields of HookDelivery, in the same order, so that
 // HookDelivery(d) converts it.
 type deliveryJSON struct {
-	ID          int64     `json:"id"`
-	GUID        string    `json:"guid"`
-	DeliveredAt time.Time `json:"delivered_at"`
-	StatusCode  int       `json:"status_code"`
-	Event       string    `json:"event"`
-	Action      string    `json:"action"`
+	ID           int64     `json:"id"`
+	GUID         string    `json:"guid"`
+	DeliveredAt  time.Time `json:"delivered_at"`
+	StatusCode   int       `json:"status_code"`
+	Event        string    `json:"event"`
+	Action       string    `json:"action"`
+	RepositoryID int64     `json:"repository_id"`
 }
 
 // ListDeliveries implements HookAdmin. It reads the rel="next" cursor from the

@@ -41,6 +41,8 @@ An agent asks for events of one `repo` by name, optionally narrowed by `sha`, `p
 | `pr.review_threads` | `pull_request_review_thread` | none |
 <!-- END generated:events -->
 
+The operator can also offer other GitHub events of a repository, such as `push`, `release` and `issues`, raw as `github.<event>`, by listing them in `FAUCET_RAW_EVENTS`. Faucet stores one only while a subscription or a poller wants it (see [raw events](docs/events.md#raw-events)).
+
 Every `/github/mcp` request carries `Authorization: Bearer <GitHub token>`. Faucet reads with the caller's token: it only returns events for repositories that the token can read. The one GitHub token it holds, for redelivery, is optional. See [docs/security.md](docs/security.md). A service agent can log in with a client ID and secret instead, with no GitHub token (see [docs/service-accounts.md](docs/service-accounts.md)).
 
 Faucet also deletes events after a retention period, and it can ask GitHub to [redeliver webhooks that failed](docs/redelivery.md) while it was down.
@@ -84,6 +86,7 @@ Point any MCP client at `https://<your host>/github/mcp` with a GitHub token as 
 | `FAUCET_HOOK_ORG` | for an org hook | The organization that owns the hook. Set this or `FAUCET_HOOK_REPO`, not both. |
 | `FAUCET_HOOK_REPO` | for a repo hook | The repository that owns the hook, as `owner/name`. |
 | `FAUCET_PUBLIC_URL` | for service accounts | Faucet's public URL, such as `https://faucet.example.com`, with no path or trailing slash. Turns on faucet's login server for service clients (see [docs/service-accounts.md](docs/service-accounts.md)). |
+| `FAUCET_RAW_EVENTS` | for raw events | Comma-separated GitHub events, such as `push,release,issues`, that faucet offers raw as `github.<event>` (see [docs/events.md](docs/events.md#raw-events)). Unset offers none. The server refuses to start on an event whose payload GitHub shows only to people with more than read access. |
 | `VERCEL` | set by Vercel | Marks a Vercel deployment. There the server never migrates without `VERCEL_ENV`. |
 | `VERCEL_ENV` | set by Vercel | When set, the server migrates only if it is `production`, and otherwise starts only on a current schema. |
 <!-- END generated:settings -->
@@ -98,7 +101,7 @@ Faucet sends nothing on its own between requests. A scheduler calls these with `
 | --- | --- | --- |
 | `GET /cron/deliver` | every minute | Sends due webhooks to subscribers and retries failed ones. |
 | `GET /cron/redeliver` | every 10 minutes | Asks GitHub to resend webhooks that faucet failed to store. |
-| `GET /cron/purge` | hourly | Deletes events past retention, and expired subscriptions. |
+| `GET /cron/purge` | hourly | Deletes events past retention, expired subscriptions and leases, and the raw payloads that nobody waits for. |
 
 [`vercel.json`](vercel.json) sets these schedules for Vercel Cron.
 

@@ -35,6 +35,10 @@ func NewDB(t *testing.T, migrate func(context.Context, *sql.DB) error) *sql.DB {
 	name := "faucet_test_" + hex.EncodeToString(suffix)
 	admin, err := sql.Open("postgres", adminURL)
 	require.NoError(t, err)
+	// The handle creates the database and drops it, and keeps no connection
+	// in between. One idle connection for each test that runs can pass the
+	// server's 100 connections.
+	admin.SetMaxIdleConns(0)
 	t.Cleanup(func() { _ = admin.Close() })
 	_, err = admin.ExecContext(ctx, "CREATE DATABASE "+pq.QuoteIdentifier(name))
 	require.NoError(t, err)

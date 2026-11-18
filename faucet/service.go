@@ -32,6 +32,17 @@ type Deps struct {
 	// and the webhook mode in events/list. Nil leaves it off, and
 	// events/subscribe then answers Unsupported.
 	Webhook *WebhookDeps
+	// RawStore keeps the raw events, github.<event>: the GitHub events that
+	// no typed family stores, kept only while a live webhook subscription or
+	// poll lease wants them. It must be backed by the same database as Store.
+	// Nil leaves raw events off.
+	RawStore RawStore
+	// RawEvents are the GitHub events, such as "push", that the service offers
+	// raw. Each must be one of RawEventNames, and they need a RawStore. Empty
+	// offers none: events/list then offers the typed names only, and the
+	// webhook handler ignores the other events. A RawStore without RawEvents
+	// still delivers and purges what it holds.
+	RawEvents []string
 	// RecordRepositories makes every signed delivery that names a repository
 	// record it in the store (Store.RecordRepository), so a host that checks
 	// services by repo grants can find a granted repository's ID without
@@ -69,6 +80,8 @@ type WebhookDeps struct {
 // Service turns GitHub webhooks into stored events and serves them to waiters.
 type Service struct {
 	store         Store
+	raw           RawStore
+	rawOffered    []*rawEntry
 	secret        []byte
 	logger        slog.Logger
 	authorizer    Authorizer
@@ -93,9 +106,17 @@ func New(d Deps) (*Service, error) {
 		return nil, xerrors.New("principal source is required")
 	case d.Clock == nil:
 		return nil, xerrors.New("clock is required")
+	case len(d.RawEvents) > 0 && d.RawStore == nil:
+		return nil, xerrors.New("raw events need a RawStore")
+	}
+	offered, err := offeredRawEntries(d.RawEvents)
+	if err != nil {
+		return nil, xerrors.Errorf("raw events: %w", err)
 	}
 	svc := &Service{
 		store:         d.Store,
+		raw:           d.RawStore,
+		rawOffered:    offered,
 		secret:        bytes.Clone(d.Secret),
 		logger:        d.Logger,
 		authorizer:    d.Authorizer,
@@ -103,14 +124,14 @@ func New(d Deps) (*Service, error) {
 		clock:         d.Clock,
 		recordRepos:   d.RecordRepositories,
 		waits:         newWaitLimiter(d.MaxWaitsPerLogin),
-		listed:        describeEvents([]string{deliveryPoll}),
 	}
+	delivery := []string{deliveryPoll}
 	if d.Webhook != nil {
-		var err error
 		if svc.webhook, err = newWebhookState(*d.Webhook, d.Clock, d.Logger); err != nil {
 			return nil, xerrors.Errorf("webhook: %w", err)
 		}
-		svc.listed = describeEvents([]string{deliveryPoll, deliveryWebhook})
+		delivery = []string{deliveryPoll, deliveryWebhook}
 	}
+	svc.listed = append(describeEvents(delivery), describeRawEvents(offered, delivery)...)
 	return svc, nil
 }

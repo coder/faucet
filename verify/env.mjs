@@ -7,3 +7,6 @@ export function childEnv(source = process.env) {
   const allowed = new Set([...SYSTEM_ENV, ...GO_ENV]);
   return Object.fromEntries(Object.entries(source).filter(([name, value]) => allowed.has(name) && value !== undefined));
 }
+
+// RAW_EVENTS is the FAUCET_RAW_EVENTS of every faucet that the suite starts, unless a test sets its own.
+export const RAW_EVENTS = 'issue_comment,issues,push,release';
