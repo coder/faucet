@@ -35,7 +35,7 @@ A preview runs any branch's code, and the Neon integration gives previews the pr
    | `FAUCET_WEBHOOK_KEY` | `openssl rand -base64 32` |
    | `FAUCET_WEBHOOK_CALLBACK_VERIFICATION` | `handshake`, or unset it and set `FAUCET_WEBHOOK_ALLOWED_ORIGINS` instead. |
 
-   To turn on [redelivery](redelivery.md), also set `FAUCET_HOOK_TOKEN`, `FAUCET_HOOK_ID` and `FAUCET_HOOK_ORG` or `FAUCET_HOOK_REPO` once the GitHub webhook exists.
+   To turn on [redelivery](redelivery.md), also set `FAUCET_HOOK_TOKEN`, `FAUCET_HOOK_ID` and `FAUCET_HOOK_ORG` or `FAUCET_HOOK_REPO` once the GitHub webhook exists. To turn on the [browser login](browser-login.md), also set `FAUCET_PUBLIC_URL`, `FAUCET_GITHUB_APP_CLIENT_ID`, `FAUCET_GITHUB_APP_CLIENT_SECRET` and `FAUCET_TOKEN_KEY`, and keep a copy of the key outside Vercel, because a rotation needs it.
 
 3. **Deploy by pushing to `main`.** A variable change only applies to deployments built after it. Don't run `vercel deploy` by hand: on a project with no production deployment, it created one.
 
@@ -77,6 +77,10 @@ After a rotation, no deployment built before it can reach the database, so don't
 Rows sealed under the old key can't be opened. Each subscription's deliveries end with `secret_unreadable` and the subscription is deleted until its subscriber renews, which a live subscriber does within 10 minutes. A renewal that also rotates the secret signs with the new secret only, because the old one can't be opened, so give receivers the new secret first.
 
 `webhook-id` is an HMAC under the key, so after the change a replay of an event that a receiver already has, such as a subscribe after a lapse that sends an old cursor, arrives with a new ID, and a receiver that deduplicates on the ID gets it twice. Warn receivers to expect those duplicates once.
+
+### Rotating `FAUCET_TOKEN_KEY`
+
+The variable holds several keys, so a rotation loses no GitHub token of a user as long as you keep the old key until no row uses it. [browser-login.md](browser-login.md#rotate-the-token-key) has the steps.
 
 ### Restoring from a backup
 

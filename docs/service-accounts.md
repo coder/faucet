@@ -43,7 +43,7 @@ sequenceDiagram
 - The token holds the scopes that the request asks for and the client holds, and names them in `scope`. A request for none of them is `invalid_scope`.
 - There is no refresh token. When the token expires, the client asks again with its secret.
 - A client made for another server's endpoint gets `invalid_client`, which names the endpoint, and the server logs a warning.
-- The metadata names `/oauth/authorize` because the TypeScript SDK requires the field. That endpoint answers `unsupported_response_type` until a grant uses it.
+- The metadata names `/oauth/authorize` because the TypeScript SDK requires the field. That endpoint answers `unsupported_response_type` unless the [browser login](browser-login.md) is on.
 - `/mcp` has its own metadata document and is its own resource, so a client made for one path gets no access on the other.
 
 ## Grants

@@ -43,7 +43,7 @@ Keep `FAUCET_WEBHOOK_KEY` stable. Rows sealed under another key can't be read. T
 
 `events/subscribe` takes `name` (an [event name](events.md)), `arguments` (`repo`, optionally `sha` and `pr`, and for a family `actions` and the field filters it offers), `delivery` (`url` and `secret`) and optionally `cursor`, `maxAgeMs` and `ttlMs`. The HTTP request must carry an `Mcp-Name` header with the event name (see [the header rule](events.md#the-mcp-name-header)).
 
-- The token must be able to read the repository. Faucet checks again on every renewal, because it stores no token.
+- The caller must be able to read the repository. Faucet checks again on every renewal and at no other time, so a subscription whose caller lost access ends at its next renewal.
 - `delivery.secret` is `whsec_` followed by base64 of 24 to 64 random bytes. The client makes it. Faucet never returns or logs it.
 - `delivery.url` must be `https` with a public host, and it must pass the server's callback check.
 - A subscription is the tuple (login, URL, event name, arguments). Arguments that differ only in key order, or in the order or repeats of the values of `actions` or a field filter, are the same, and a family with `actions` and the same family without them are two subscriptions. Subscribing again with the same tuple renews it: same `id`, new expiry, and the secret is replaced (see [Secret rotation](#secret-rotation)).
