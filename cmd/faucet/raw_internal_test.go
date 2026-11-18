@@ -90,7 +90,7 @@ func newRawServer(t *testing.T) *rawServer {
 	github := newGitHubStub(t)
 	authz := faucet.TokenAuthorizer{BaseURL: github.URL, Client: github.Client()}
 	hooks := newRawHooks()
-	cfg := config{secret: testSecret, cronSecret: testCronSecret, retention: 30 * 24 * time.Hour, hookAdmin: hooks}
+	cfg := config{secret: testSecret, cronSecret: testCronSecret, retention: 30 * 24 * time.Hour, hookAdmin: hooks, rawEvents: []string{"push"}}
 	clock := quartz.NewReal()
 	logger := slog.Make(sloghuman.Sink(&syncBuffer{}))
 	svc, redeliverer, err := newServices(cfg, pgstore.New(db), authz, clock, logger)
@@ -185,9 +185,9 @@ func TestTheServerStoresARawEventOnlyWhileAPollerWantsIt(t *testing.T) {
 		Name string `json:"name"`
 	}
 	require.NoError(t, json.Unmarshal(list["events"], &events))
-	require.Len(t, events, 15+49, "the server offers the raw names after the typed ones")
+	require.Len(t, events, 15+1, "the server offers the raw names that FAUCET_RAW_EVENTS lists after the typed ones")
 	require.Equal(t, "pr.review_submitted", events[14].Name)
-	require.Equal(t, "github.branch_protection_configuration", events[15].Name)
+	require.Equal(t, "github.push", events[15].Name)
 
 	opened := pollRawPush(ctx, t, session, nil)
 	require.Empty(t, opened.Events)
@@ -308,4 +308,32 @@ func TestAServiceReadsRawEventsOnceAnIgnoredDeliveryNamedTheRepository(t *testin
 	paths, _ := srv.github.seen()
 	require.Empty(t, paths, "a service never reaches GitHub")
 	requireNoTokenPiece(t, srv.logs.String(), []string{secret})
+}
+
+func TestLoadConfigRawEvents(t *testing.T) {
+	t.Parallel()
+
+	load := func(events string) (config, error) {
+		return loadConfig(func(name string) string {
+			return map[string]string{envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret, envRawEvents: events}[name]
+		})
+	}
+	cfg, err := load("")
+	require.NoError(t, err)
+	require.Empty(t, cfg.rawEvents, "unset offers no raw event")
+
+	cfg, err = load("push, release,issues")
+	require.NoError(t, err)
+	require.Equal(t, []string{"push", "release", "issues"}, cfg.rawEvents)
+
+	for _, events := range []string{"push,repository_advisory", "secret_scanning_alert", "member"} {
+		_, err = load(events)
+		require.ErrorContains(t, err, envRawEvents, events)
+		require.ErrorContains(t, err, "more than read access", events)
+	}
+	for _, events := range []string{"pushes", "push,", "github.push", "pull_request"} {
+		_, err = load(events)
+		require.ErrorContains(t, err, envRawEvents, events)
+		require.ErrorContains(t, err, "not a GitHub event that faucet can offer raw", events)
+	}
 }

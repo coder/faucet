@@ -213,7 +213,7 @@ func parsePollArguments(input *jsonschema.Resolved, raw json.RawMessage) (pollAr
 }
 
 func (s *Service) pollEventsMethod(ctx context.Context, _ *mcp.ServerSession, p *eventsPollParams) (*eventsPollResult, error) {
-	if p != nil && p.Name != "" && s.raw != nil {
+	if p != nil && p.Name != "" && len(s.rawOffered) > 0 {
 		if entry, ok := s.rawEntry(p.Name); ok {
 			return s.pollRaw(ctx, entry, p)
 		}

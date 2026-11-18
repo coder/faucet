@@ -56,6 +56,9 @@ const (
 	// envPublicURL is faucet's public URL. Set, it turns on faucet's own
 	// login server and the discovery documents that lead clients to it.
 	envPublicURL = "FAUCET_PUBLIC_URL"
+	// envRawEvents lists the GitHub events, comma-separated, that faucet
+	// offers raw as github.<event>. Unset offers none.
+	envRawEvents = "FAUCET_RAW_EVENTS"
 
 	defaultRetentionDays = 30
 	maxRetentionDays     = 3650
@@ -98,6 +101,8 @@ type config struct {
 	webhook   *faucet.WebhookDeps
 	// publicURL is nil when faucet's login server is off.
 	publicURL *url.URL
+	// rawEvents are the GitHub events offered raw. Empty offers none.
+	rawEvents []string
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -143,6 +148,16 @@ func loadConfig(getenv func(string) string) (config, error) {
 			return config{}, xerrors.Errorf("%s: %w", envPublicURL, err)
 		}
 		cfg.publicURL = u
+	}
+	if raw := getenv(envRawEvents); raw != "" {
+		events := strings.Split(raw, ",")
+		for i := range events {
+			events[i] = strings.TrimSpace(events[i])
+		}
+		if err := faucet.CheckRawEvents(events); err != nil {
+			return config{}, xerrors.Errorf("%s: %w", envRawEvents, err)
+		}
+		cfg.rawEvents = events
 	}
 	return cfg, nil
 }
@@ -340,6 +355,7 @@ func newServices(cfg config, store *pgstore.Store, authorizer faucet.Authorizer,
 	svc, err := faucet.New(faucet.Deps{
 		Store:         store,
 		RawStore:      store,
+		RawEvents:     cfg.rawEvents,
 		Secret:        []byte(cfg.secret),
 		Logger:        logger,
 		Authorizer:    authorizer,

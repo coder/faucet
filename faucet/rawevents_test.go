@@ -13,26 +13,24 @@ import (
 )
 
 // rawNames are the raw event names in events/list order: the GitHub webhook
-// events whose payload names a repository and that no typed family stores in
-// full.
+// events whose payload names a repository, that no typed family stores in
+// full, and that GitHub shows to anyone who can read the repository.
 var rawNames = []string{
-	"github.branch_protection_configuration", "github.branch_protection_rule", "github.code_scanning_alert",
 	"github.commit_comment", "github.create", "github.custom_property_values", "github.delete",
-	"github.dependabot_alert", "github.deploy_key", "github.deployment", "github.deployment_protection_rule",
-	"github.deployment_review", "github.deployment_status", "github.discussion", "github.discussion_comment",
-	"github.fork", "github.gollum", "github.issue_comment", "github.issue_dependencies", "github.issue_relates_to",
-	"github.issues", "github.label", "github.member", "github.merge_group", "github.milestone", "github.package",
-	"github.page_build", "github.project", "github.project_card", "github.project_column", "github.public",
-	"github.push", "github.registry_package", "github.release", "github.repository", "github.repository_advisory",
-	"github.repository_dispatch", "github.repository_import", "github.repository_ruleset",
-	"github.repository_vulnerability_alert", "github.secret_scanning_alert", "github.secret_scanning_alert_location",
-	"github.secret_scanning_scan", "github.security_and_analysis", "github.star", "github.sub_issues",
-	"github.team_add", "github.watch", "github.workflow_dispatch",
+	"github.deployment", "github.deployment_protection_rule", "github.deployment_review", "github.deployment_status",
+	"github.discussion", "github.discussion_comment", "github.fork", "github.gollum", "github.issue_comment",
+	"github.issue_dependencies", "github.issue_relates_to", "github.issues", "github.label", "github.merge_group",
+	"github.milestone", "github.package", "github.page_build", "github.project", "github.project_card",
+	"github.project_column", "github.public", "github.push", "github.registry_package", "github.release",
+	"github.repository", "github.repository_dispatch", "github.repository_import", "github.repository_ruleset",
+	"github.star", "github.sub_issues", "github.team_add", "github.watch", "github.workflow_dispatch",
 }
 
-// withRawEvents turns raw events on. events/list calls no RawStore method,
-// so a store without methods is enough.
-func withRawEvents(d *faucet.Deps) { d.RawStore = struct{ faucet.RawStore }{} }
+// withRawEvents offers every raw event. events/list calls no RawStore
+// method, so a store without methods is enough.
+func withRawEvents(d *faucet.Deps) {
+	d.RawStore, d.RawEvents = struct{ faucet.RawStore }{}, faucet.RawEventNames()
+}
 
 type listedEvent struct {
 	Name          string          `json:"name"`

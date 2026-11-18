@@ -15,7 +15,9 @@ import (
 )
 
 // withRawStore turns raw event names on: the fake store is also the RawStore.
-func withRawStore(d *faucet.Deps) { d.RawStore = d.Store.(faucet.RawStore) }
+func withRawStore(d *faucet.Deps) {
+	d.RawStore, d.RawEvents = d.Store.(faucet.RawStore), faucet.RawEventNames()
+}
 
 func rawSubscribeTo(name string, arguments map[string]any, url, secret string) *rawParams {
 	return &rawParams{Name: name, Arguments: raw(arguments), Delivery: deliveryTo(url, secret)}

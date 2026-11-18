@@ -31,19 +31,15 @@ type rawEvent struct {
 	description string
 }
 
-// rawEvents are the GitHub webhook events whose payload names a repository
-// and that no typed family stores in full, sorted by event. issue_comment is
-// here because pr.comments stores only the comments on pull requests.
+// rawEvents are the GitHub webhook events whose payload names a repository,
+// that no typed family stores in full, and that a host may offer raw, sorted
+// by event. issue_comment is here because pr.comments stores only the
+// comments on pull requests.
 var rawEvents = []rawEvent{
-	{"branch_protection_configuration", "Branch protection that was turned on or off for a whole repository."},
-	{"branch_protection_rule", "Branch protection rules that were created, edited or deleted."},
-	{"code_scanning_alert", "Code scanning alerts that appeared, were fixed, were closed or reopened, or changed in another way."},
 	{"commit_comment", "Comments that were posted on a commit."},
 	{"create", "Git branches and tags that were created."},
 	{"custom_property_values", "Changes to the values of the custom properties of a repository."},
 	{"delete", "Git branches and tags that were deleted."},
-	{"dependabot_alert", "Dependabot alerts that were created, dismissed, fixed, reopened or changed in another way."},
-	{"deploy_key", "Deploy keys that were added to or removed from a repository."},
 	{"deployment", "Deployments that were created."},
 	{"deployment_protection_rule", "Requests that a custom deployment protection rule approve or reject a deployment."},
 	{"deployment_review", "Reviews of a deployment that waits for approval: requested, approved or rejected."},
@@ -57,7 +53,6 @@ var rawEvents = []rawEvent{
 	{"issue_relates_to", "Links that mark two issues as related that were added or removed."},
 	{"issues", "Issues that were opened, edited, labeled, assigned, closed or changed in another way."},
 	{"label", "Labels of a repository that were created, edited or deleted."},
-	{"member", "Collaborators that were added to a repository, removed from it, or given another permission."},
 	{"merge_group", "Merge groups of a merge queue that need their checks run or that were destroyed."},
 	{"milestone", "Milestones that were created, edited, opened, closed or deleted."},
 	{"package", "Packages in GitHub Packages that were published or updated."},
@@ -70,20 +65,64 @@ var rawEvents = []rawEvent{
 	{"registry_package", "Registry packages in GitHub Packages that were published or updated."},
 	{"release", "Releases that were created, published, edited, deleted or changed in another way."},
 	{"repository", "Changes to a repository itself, for example one that was renamed, archived, transferred or made public."},
-	{"repository_advisory", "Security advisories of a repository that were reported or published."},
 	{"repository_dispatch", "Custom events that a client sent to the repository dispatch endpoint of the REST API, with the event type it chose as the action."},
 	{"repository_import", "Imports of a repository into GitHub that succeeded, were canceled or failed."},
 	{"repository_ruleset", "Rulesets of a repository that were created, edited or deleted."},
-	{"repository_vulnerability_alert", "Vulnerability alerts of a repository that were created, dismissed, reopened or resolved."},
-	{"secret_scanning_alert", "Secret scanning alerts that were created, resolved, reopened or changed in another way."},
-	{"secret_scanning_alert_location", "New places where the secret of a secret scanning alert was found."},
-	{"secret_scanning_scan", "Secret scanning scans of a repository that completed."},
-	{"security_and_analysis", "Code security and analysis features that were turned on or off for a repository."},
 	{"star", "Stars that were added to or removed from a repository."},
 	{"sub_issues", "Sub-issues that were added to or removed from a parent issue."},
 	{"team_add", "Teams that were given access to a repository."},
 	{"watch", "Accounts that started to watch a repository."},
 	{"workflow_dispatch", "GitHub Actions workflows that someone started by hand."},
+}
+
+// refusedRawEvents are the GitHub events whose payload GitHub shows only to
+// people with more than read access to a repository: security alerts and
+// advisories, deploy keys, collaborators, and protection and security
+// settings. Faucet checks only that a caller can read the repository, so no
+// service offers them, whatever its host lists. Sorted.
+var refusedRawEvents = []string{
+	"branch_protection_configuration", "branch_protection_rule", "code_scanning_alert", "dependabot_alert",
+	"deploy_key", "member", "repository_advisory", "repository_vulnerability_alert", "secret_scanning_alert",
+	"secret_scanning_alert_location", "secret_scanning_scan", "security_and_analysis",
+}
+
+// RawEventNames returns the GitHub events, such as "push", that a service can
+// offer raw when its host lists them in Deps.RawEvents, sorted.
+func RawEventNames() []string {
+	names := make([]string, len(rawEvents))
+	for i, e := range rawEvents {
+		names[i] = e.event
+	}
+	return names
+}
+
+// RefusedRawEvents returns the GitHub events that no service offers raw,
+// because GitHub shows their payload only to people with more than read
+// access to a repository, sorted.
+func RefusedRawEvents() []string {
+	return slices.Clone(refusedRawEvents)
+}
+
+// CheckRawEvents returns an error for the first of events that a service
+// cannot offer raw: a refused event, or one that RawEventNames lacks.
+func CheckRawEvents(events []string) error {
+	for _, event := range events {
+		switch {
+		case slices.Contains(refusedRawEvents, event):
+			return xerrors.Errorf("%s is refused: GitHub shows its payload only to people with more than read access to a repository, and faucet checks only read access", event)
+		case !slices.ContainsFunc(rawEvents, func(e rawEvent) bool { return e.event == event }):
+			return xerrors.Errorf("%q is not a GitHub event that faucet can offer raw", event)
+		}
+	}
+	return nil
+}
+
+// offeredRawEntries returns the entries of events in catalog order.
+func offeredRawEntries(events []string) ([]*rawEntry, error) {
+	if err := CheckRawEvents(events); err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(slices.Clone(rawCatalog), func(e *rawEntry) bool { return !slices.Contains(events, e.event) }), nil
 }
 
 type rawEntry struct {
@@ -119,9 +158,15 @@ func init() {
 		"description": "The webhook payload that GitHub sent, or only the members that fields selects, nested as in the payload.",
 	})
 	mustResolve(string(payload))
+	if !slices.IsSorted(refusedRawEvents) {
+		panic("the refused raw events are not sorted")
+	}
 	for i, e := range rawEvents {
 		if i > 0 && rawEvents[i-1].event >= e.event {
 			panic(fmt.Sprintf("the raw events are not sorted or repeat one at %s", e.event))
+		}
+		if slices.Contains(refusedRawEvents, e.event) {
+			panic(fmt.Sprintf("the raw event %s is refused", e.event))
 		}
 		name := rawNamePrefix + e.event
 		if _, typed := lookupEntry(name); typed {
@@ -163,46 +208,30 @@ func rawArgumentsSchema() json.RawMessage {
 	})
 }
 
-func lookupRawEntry(name string) (*rawEntry, bool) {
-	i := slices.IndexFunc(rawCatalog, func(e *rawEntry) bool { return e.name == name })
+// rawEntry returns the entry of a raw event name that the service offers.
+func (s *Service) rawEntry(name string) (*rawEntry, bool) {
+	i := slices.IndexFunc(s.rawOffered, func(e *rawEntry) bool { return e.name == name })
 	if i < 0 {
 		return nil, false
 	}
-	return rawCatalog[i], true
-}
-
-// rawEntry returns the entry of a raw event name that the service offers. A
-// service without a RawStore offers none.
-func (s *Service) rawEntry(name string) (*rawEntry, bool) {
-	if s.raw == nil {
-		return nil, false
-	}
-	return lookupRawEntry(name)
+	return s.rawOffered[i], true
 }
 
 // unknownEvent is the error for a name that is no event name of the service.
-// It lists the raw names after the typed ones when the service offers them.
+// It lists the raw names that the service offers after the typed ones.
 func (s *Service) unknownEvent(name string) error {
 	names := catalogNames()
-	if s.raw != nil {
-		names = append(names, rawNames()...)
+	for _, e := range s.rawOffered {
+		names = append(names, e.name)
 	}
 	return rpcError(codeNotFound,
 		fmt.Sprintf("unknown event type %q, the types are: %s", name, strings.Join(names, ", ")),
 		map[string]string{"kind": "event"})
 }
 
-func rawNames() []string {
-	names := make([]string, len(rawCatalog))
-	for i, e := range rawCatalog {
-		names[i] = e.name
-	}
-	return names
-}
-
-func describeRawEvents(delivery []string) []eventDescriptor {
-	descriptors := make([]eventDescriptor, len(rawCatalog))
-	for i, e := range rawCatalog {
+func describeRawEvents(entries []*rawEntry, delivery []string) []eventDescriptor {
+	descriptors := make([]eventDescriptor, len(entries))
+	for i, e := range entries {
 		descriptors[i] = eventDescriptor{
 			Name:          e.name,
 			Description:   e.description,

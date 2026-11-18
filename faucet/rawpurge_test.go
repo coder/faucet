@@ -38,7 +38,7 @@ func (h *ingestHarness) push(n int) {
 	require.Equal(h.t, "stored", body)
 }
 
-func withoutRawStore(d *faucet.Deps) { d.RawStore = nil }
+func withoutRawStore(d *faucet.Deps) { d.RawStore, d.RawEvents = nil, nil }
 
 func TestPurgeClearsARawEventOnceItsLeaseHasReadIt(t *testing.T) {
 	t.Parallel()

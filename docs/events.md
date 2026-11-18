@@ -52,7 +52,16 @@ A typed event carries enough to route it and to fetch the rest from GitHub, and 
 
 ## Raw events
 
-Faucet offers the other GitHub events of a repository, such as `push`, `release` and `issues`, under the name `github.<event>`. `events/list` returns these names after the typed ones. The `data` of a raw event is GitHub's payload, so it can hold free text, which a typed event never does.
+Faucet can offer the other GitHub events of a repository, such as `push`, `release` and `issues`, under the name `github.<event>`. It offers only the events that the operator lists in `FAUCET_RAW_EVENTS`, and none while that is unset. `events/list` returns the offered names after the typed ones. The `data` of a raw event is GitHub's payload, so it can hold free text, which a typed event never does.
+
+<!-- BEGIN generated:raw-events -->
+| `FAUCET_RAW_EVENTS` | GitHub events |
+| --- | --- |
+| may list | `commit_comment`, `create`, `custom_property_values`, `delete`, `deployment`, `deployment_protection_rule`, `deployment_review`, `deployment_status`, `discussion`, `discussion_comment`, `fork`, `gollum`, `issue_comment`, `issue_dependencies`, `issue_relates_to`, `issues`, `label`, `merge_group`, `milestone`, `package`, `page_build`, `project`, `project_card`, `project_column`, `public`, `push`, `registry_package`, `release`, `repository`, `repository_dispatch`, `repository_import`, `repository_ruleset`, `star`, `sub_issues`, `team_add`, `watch`, `workflow_dispatch` |
+| refuses | `branch_protection_configuration`, `branch_protection_rule`, `code_scanning_alert`, `dependabot_alert`, `deploy_key`, `member`, `repository_advisory`, `repository_vulnerability_alert`, `secret_scanning_alert`, `secret_scanning_alert_location`, `secret_scanning_scan`, `security_and_analysis` |
+<!-- END generated:raw-events -->
+
+**Faucet refuses the events whose payload GitHub shows only to people with more than read access**, such as private vulnerability reports, secret scanning and Dependabot alerts, deploy keys and collaborators. Faucet checks only that a caller can read the repository, and anyone can read a public one, so the server does not start when `FAUCET_RAW_EVENTS` names one of them. An event that the operator removes from the list is not stored from the next deploy on: its subscriptions get nothing more, and its leases end.
 
 **Faucet stores a raw event only while someone wants it.** When a delivery arrives, faucet looks for a live subscription to its name and for a poller of it. With neither, it answers 202 and stores nothing, so nobody can read an event from before they first asked.
 

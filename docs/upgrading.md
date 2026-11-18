@@ -4,10 +4,10 @@ The server applies every schema change at start (on Vercel, in production only, 
 
 ## To raw events
 
-This came in [#51](https://github.com/coder/faucet/pull/51). The server offers [raw events](events.md#raw-events) as soon as it runs the new build, and stores none until someone polls or subscribes to one.
+This came in [#51](https://github.com/coder/faucet/pull/51). The server offers no [raw event](events.md#raw-events) until you list it in `FAUCET_RAW_EVENTS`, and stores none until someone polls or subscribes to one.
 
-- **Tick the events you want raw on the GitHub hook.** Faucet can only offer what the hook sends.
-- **A host that embeds faucet** turns raw events on with `Deps.RawStore`, which must be the same database as `Deps.Store`. `pgstore.Store` is both. Without it nothing changes. To have failed raw deliveries asked for again, give `Service.RawWants` to `redelivery.Deps.Wants`.
+- **List the events you want raw in `FAUCET_RAW_EVENTS`, and tick them on the GitHub hook.** Faucet can only offer what the hook sends. The server refuses to start on an event whose payload GitHub shows only to people with more than read access.
+- **A host that embeds faucet** turns raw events on with `Deps.RawStore`, which must be the same database as `Deps.Store`, and `Deps.RawEvents`, which lists the events. `pgstore.Store` is both stores. Without them nothing changes. To have failed raw deliveries asked for again, give `Service.RawWants` to `redelivery.Deps.Wants`.
 - **A `Store` of your own** needs no change. A `RawStore` of your own must pass `storetest.RunRaw`.
 - **Migration `000012_raw_events`** adds five tables and one index on `faucet_subscriptions`. An instance of the build before it never reads them, and an Instant Rollback past it cannot start (see [deploy.md](deploy.md#rolling-back)).
 - **A rolling deploy drops some raw events.** Until every instance runs the new build, an old instance answers 202 to a delivery that a new instance would have stored, and `NotFound` to a raw name.

@@ -1,12 +1,13 @@
+import { RAW_EVENTS } from '../env.mjs';
 import { describe, expect, newRepoId, test } from './support';
 import { newMarker, subscribe, subscribeParams, unsubscribe } from './subscriptions';
 
 const EVENTS_EXTENSION = 'io.modelcontextprotocol/events';
 const families = ['ci.runs', 'ci.jobs', 'ci.checks', 'ci.suites', 'ci.statuses', 'pr.activity', 'pr.reviews', 'pr.comments', 'pr.review_comments', 'pr.review_threads'];
 const eventNames = [...families, 'ci.check_completed', 'ci.run_completed', 'pr.closed', 'pr.comment_created', 'pr.review_submitted'];
-// RAW_NAMES is the number of raw GitHub event names that follow the typed ones. Go tests pin the names themselves.
-const RAW_NAMES = 49;
 const RAW_PREFIX = 'github.';
+// rawNames are the raw names that follow the typed ones: those of FAUCET_RAW_EVENTS, in rising order.
+const rawNames = RAW_EVENTS.split(',').map((e) => RAW_PREFIX + e).sort();
 const noHeadCommit = ['pr.comments', 'pr.comment_created'];
 const noPullRequest = ['ci.jobs', 'ci.statuses'];
 const fieldFilters: Record<string, string[]> = {
@@ -50,11 +51,7 @@ function expectRawNames(events: EventDescriptor[]): EventDescriptor[] {
   const raw = events.slice(eventNames.length);
   const names = raw.map((e) => e.name);
   expect(events.map((e) => e.name).slice(0, eventNames.length)).toEqual(eventNames);
-  expect(names).toHaveLength(RAW_NAMES);
-  for (const name of names) expect(name).toMatch(/^github\.[a-z_]+$/);
-  expect(names).toEqual([...new Set(names)].sort());
-  expect(names).toEqual(expect.arrayContaining(['github.push', 'github.issues', 'github.issue_comment', 'github.release']));
-  expect(names).not.toEqual(expect.arrayContaining(['github.pull_request']));
+  expect(names).toEqual(rawNames);
   return raw;
 }
 
@@ -118,6 +115,17 @@ describe('events list', () => {
     }
   });
 
+  test('without FAUCET_RAW_EVENTS events/list offers no raw name, and a raw name is unknown', async ({ faucet }) => {
+    await faucet.withFaucet({ FAUCET_RAW_EVENTS: '' }, async (off) => {
+      const list = await off.mcp<ListResult>('events/list');
+      const poll = await off.mcp('events/poll', { name: 'github.push', arguments: { repo: 'verify/raw' } });
+
+      expect(list.result?.events.map((e) => e.name)).toEqual(eventNames);
+      expect(poll.error?.code, poll.body).toBe(-32023);
+      expect(poll.error?.message).toContain('unknown event type "github.push"');
+    });
+  });
+
   test('with webhook mode off events/list offers poll only, and subscribe and unsubscribe are -32026 and write nothing', async ({ faucet }) => {
     await faucet.withFaucet({}, async (off) => {
       const params = subscribeParams(newRepoId(), newMarker());
@@ -144,7 +152,7 @@ describe('events list', () => {
 
     for (const reply of [without, stray]) {
       expect(reply.status).toBe(200);
-      expect(reply.result?.events).toHaveLength(eventNames.length + RAW_NAMES);
+      expect(reply.result?.events).toHaveLength(eventNames.length + rawNames.length);
     }
   });
 

@@ -19,6 +19,7 @@ var tables = map[string]table{
 	"give-up-reasons":  giveUpTable,
 	"callback-reasons": callbackTable,
 	"cron-replies":     cronRepliesTable,
+	"raw-events":       rawEventsTable,
 }
 
 func eventsTable(s source) ([]string, error) {
@@ -41,6 +42,17 @@ func eventActionsTable(s source) ([]string, error) {
 		rows = append(rows, fmt.Sprintf("| `%s` | %s | %s |", family.Name, codeList(family.Actions), codeList(family.Filters)))
 	}
 	return rows, nil
+}
+
+// rawEventsTable lists the GitHub events that FAUCET_RAW_EVENTS may name,
+// and the ones that faucet refuses.
+func rawEventsTable(source) ([]string, error) {
+	return []string{
+		"| `FAUCET_RAW_EVENTS` | GitHub events |",
+		"| --- | --- |",
+		"| may list | " + codeList(faucet.RawEventNames()) + " |",
+		"| refuses | " + codeList(faucet.RefusedRawEvents()) + " |",
+	}, nil
 }
 
 func families(events []faucet.EventName) []faucet.EventName {
@@ -79,6 +91,7 @@ var settings = []setting{
 	{"FAUCET_HOOK_ORG", "for an org hook", "The organization that owns the hook. Set this or `FAUCET_HOOK_REPO`, not both."},
 	{"FAUCET_HOOK_REPO", "for a repo hook", "The repository that owns the hook, as `owner/name`."},
 	{"FAUCET_PUBLIC_URL", "for service accounts", "Faucet's public URL, such as `https://faucet.example.com`, with no path or trailing slash. Turns on faucet's login server for service clients (see [docs/service-accounts.md](docs/service-accounts.md))."},
+	{"FAUCET_RAW_EVENTS", "for raw events", "Comma-separated GitHub events, such as `push,release,issues`, that faucet offers raw as `github.<event>` (see [docs/events.md](docs/events.md#raw-events)). Unset offers none. The server refuses to start on an event whose payload GitHub shows only to people with more than read access."},
 	{"VERCEL", "set by Vercel", "Marks a Vercel deployment. There the server never migrates without `VERCEL_ENV`."},
 	{"VERCEL_ENV", "set by Vercel", "When set, the server migrates only if it is `production`, and otherwise starts only on a current schema."},
 }

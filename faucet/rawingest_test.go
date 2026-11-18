@@ -38,7 +38,7 @@ func newIngestHarness(t *testing.T, mutate ...func(*faucet.Deps)) *ingestHarness
 	store := &fakeStore{now: func() time.Time { return clock.Now() }}
 	logs := &bytes.Buffer{}
 	deps := testDeps(store)
-	deps.RawStore = store
+	deps.RawStore, deps.RawEvents = store, faucet.RawEventNames()
 	deps.Clock = clock
 	deps.Logger = slog.Make(sloghuman.Sink(logs)).Leveled(slog.LevelDebug)
 	for _, m := range mutate {
@@ -249,7 +249,7 @@ func TestRawIngestMatchOrDrop(t *testing.T) {
 
 	t.Run("RawOff", func(t *testing.T) {
 		t.Parallel()
-		h := newIngestHarness(t, func(d *faucet.Deps) { d.RawStore = nil })
+		h := newIngestHarness(t, func(d *faucet.Deps) { d.RawStore, d.RawEvents = nil, nil })
 		h.openLease(ingestInterest{})
 		h.subscribe(ingestInterest{})
 		code, msg := h.post("push", "d-1", rawPayload(repoID, "", nil))

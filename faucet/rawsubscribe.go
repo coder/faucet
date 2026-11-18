@@ -16,7 +16,7 @@ import (
 // events/unsubscribe call on a service that offers raw names. ok is false for
 // a typed name, and for params that the typed path refuses in its own words.
 func (s *Service) rawSubscriptionEntry(p *subscriptionParams) (entry *rawEntry, ok bool, err error) {
-	if s.raw == nil || p == nil || p.malformed {
+	if len(s.rawOffered) == 0 || p == nil || p.malformed {
 		return nil, false, nil
 	}
 	var name string

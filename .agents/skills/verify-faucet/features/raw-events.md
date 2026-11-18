@@ -1,10 +1,12 @@
 # Raw events
 
-faucet stores a GitHub event that has no typed family only while a live interest wants it: a webhook subscription to its raw name, or a poll lease. The raw name is `github.<event>`, for example `github.push`. With no interest the delivery is acknowledged with 202 and nothing is stored.
+faucet stores a GitHub event that has no typed family only while a live interest wants it: a webhook subscription to its raw name, or a poll lease. The raw name is `github.<event>`, for example `github.push`. With no interest the delivery is acknowledged with 202 and nothing is stored. faucet offers only the events that `FAUCET_RAW_EVENTS` lists, and none while it is unset.
 
 ## Sub-features
 
-- `events/list` offers 49 raw names after the fifteen typed ones. Each takes `repo`, and optionally `actions` (the payload's top-level `action`) and `fields` (paths of payload members, for example `repository.id`).
+- Every faucet that the suite starts has `FAUCET_RAW_EVENTS` set to `RAW_EVENTS` of `verify/env.mjs` (`issue_comment,issues,push,release`). A test sets `FAUCET_RAW_EVENTS: ''` to start one without raw events: its `events/list` offers the typed names only, and a raw name is the error -32023 `unknown event type`.
+- A refused event (`repository_advisory`, the secret scanning and Dependabot alerts, `member`, `deploy_key` and the others of the `raw-events` table in `docs/events.md`) in `FAUCET_RAW_EVENTS` makes the server exit 1 with `FAUCET_RAW_EVENTS: <event> is refused: ...`. A name that faucet cannot offer raw, such as `pull_request`, exits 1 too. `tests/startup.e2e.ts` covers both.
+- `events/list` offers the raw names of `FAUCET_RAW_EVENTS` after the fifteen typed ones, in rising order. Each takes `repo`, and optionally `actions` (the payload's top-level `action`) and `fields` (paths of payload members, for example `repository.id`).
 - A signed delivery of such an event is 202 `ignored` with no row while no interest of its repository wants it. With one it is 200 `stored`, and the same delivery ID again is 200 `duplicate`.
 - `events/poll` with a raw name and no cursor opens a poll lease and returns no events and a cursor `r1.<position>.<lease>`. A later poll with that cursor returns the events that arrived since, with GitHub's delivery ID as `eventId` and the payload as `data`. The next cursor acknowledges them, and the same cursor returns them again.
 - A lease belongs to one poller: another login, other arguments or another repository with the same cursor open a new lease and say `truncated`. A lease lives one hour after each poll.

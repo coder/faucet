@@ -184,6 +184,20 @@ describe('startup configuration', () => {
       message: 'FAUCET_RETENTION_DAYS must be a whole number of days from 1 to 3650\n',
     })),
     ...webhookCases.map(([name, settings, message]) => ({ name, env: { ...valid, ...settings }, message })),
+    ...[
+      ['repository_advisory', 'repository_advisory'],
+      ['push,secret_scanning_alert', 'secret_scanning_alert'],
+      ['push, member', 'member'],
+    ].map(([events, refused]) => ({
+      name: `FAUCET_RAW_EVENTS=${events}`,
+      env: { ...valid, FAUCET_RAW_EVENTS: events ?? '' },
+      message: `FAUCET_RAW_EVENTS: ${refused} is refused: GitHub shows its payload only to people with more than read access to a repository, and faucet checks only read access\n`,
+    })),
+    {
+      name: 'FAUCET_RAW_EVENTS with an event that faucet cannot offer raw',
+      env: { ...valid, FAUCET_RAW_EVENTS: 'push,pull_request' },
+      message: 'FAUCET_RAW_EVENTS: "pull_request" is not a GitHub event that faucet can offer raw\n',
+    },
   ];
   const printedNever = [
     FAKE_DB_PASSWORD, FAKE_SECRET, SHORT_SECRET, FAKE_CRON_SECRET, FAKE_HOOK_TOKEN,
