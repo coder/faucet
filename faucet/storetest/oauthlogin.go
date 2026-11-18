@@ -1035,8 +1035,8 @@ func everyRotationOfOneTokenAtOnceTradesIt(t *testing.T, s oauth.Store) {
 
 // Two unused tokens of one session that come at once, long after a client
 // got both, have two holders, and the rotation of each retires the other.
-// Each rotation trades its token, or answers ErrUnknownSession and changes
-// nothing, and at least one of the two trades.
+// Exactly one of the two trades its token. The other answers
+// ErrUnknownSession and changes nothing.
 func siblingTokensRotatedAtOnceTradeOrAreRefused(t *testing.T, s oauth.Store) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -1078,7 +1078,7 @@ func siblingTokensRotatedAtOnceTradeOrAreRefused(t *testing.T, s oauth.Store) {
 			require.ErrorIs(t, err, oauth.ErrUnknownSession, "session %d, rotation %d", i, j)
 			requireNoTokens(t, s, rots[i][j].Next, rots[i][j].Access, "session %d, rotation %d", i, j)
 		}
-		require.NotZero(t, traded, "session %d: one of the two trades", i)
+		require.Equal(t, 1, traded, "session %d: exactly one of the two trades", i)
 	}
 }
 
