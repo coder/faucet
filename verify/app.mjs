@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFile, spawn } from 'node:child_process';
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpServer } from 'node:http';
@@ -71,11 +71,22 @@ function freePort() {
 const HOOK_PATH = '/orgs/verify/hooks/7';
 const RETENTION_MS = 72 * 60 * 60 * 1000;
 
-async function readJson(req) {
+async function readText(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  return Buffer.concat(chunks).toString('utf8');
 }
+
+async function readJson(req) {
+  return JSON.parse(await readText(req));
+}
+
+// PERSON is the one GitHub user of the browser login, who authorized faucet's GitHub App before.
+const PERSON = { id: 4242, login: 'verify-person' };
+// The App's user access token lasts 8 minutes, under faucet's 10-minute margin, so every refresh grant that faucet answers
+// refreshes it at the stub too. GitHub's lasts 8 hours.
+const APP_ACCESS_SECONDS = 8 * 60;
+const APP_REFRESH_SECONDS = 184 * 24 * 60 * 60;
 
 // The stub plays GitHub. It knows two tokens and answers GET /user with the login of the token (verify-user and
 // verify-other) and GET /repos/verify/r<id> with repository id <id> for both. Every other repository is 404, like one the
@@ -86,14 +97,27 @@ async function readJson(req) {
 // request makes the stub post the stored payload, signed, to the faucet that the test named, and add the answer as a new
 // attempt. A test sets the attempts and reads the requests through /__stub/, which needs `control`. The request log names
 // the kind of credential each request carried and never the credential.
-async function startGitHubStub({ token, otherToken, hookToken, control, revoked }) {
+//
+// It plays GitHub's side of the browser login too, for faucet's GitHub App `app` and PERSON. GET /login/oauth/authorize sends
+// the browser straight back to redirect_uri with a code and the state. POST /login/oauth/access_token trades the code, with
+// the App's secret, the same redirect_uri and the PKCE verifier, or a refresh token, for a new pair of ghu_ and ghr_ tokens.
+// A code and a refresh token work once, and a refusal is status 200 with an error, as GitHub's is. The API answers PERSON's
+// access tokens like the run's token. GET /__stub/app lists the tokens it issued and the token requests it answered.
+async function startGitHubStub({ token, otherToken, hookToken, control, revoked, app }) {
   const reply = (res, status, body, headers = {}) => {
     res.writeHead(status, { 'Content-Type': 'application/json', ...headers });
     res.end(JSON.stringify(body));
   };
+  const codes = new Map();
+  const appAccess = new Set();
+  const appRefresh = new Set();
+  const issued = [];
+  const exchanges = [];
+  const isPerson = (auth) => auth?.startsWith('Bearer ') === true && appAccess.has(auth.slice('Bearer '.length));
   const kindOf = (auth) => {
     if (auth === `Bearer ${hookToken}`) return 'hook';
     if (auth === `Bearer ${token}` || auth === `Bearer ${otherToken}`) return 'user';
+    if (isPerson(auth)) return 'person';
     return auth ? 'other' : 'none';
   };
   let attempts = [];
@@ -139,6 +163,7 @@ async function startGitHubStub({ token, otherToken, hookToken, control, revoked 
       return reply(res, 200, {});
     }
     if (req.method === 'GET' && url.pathname === '/__stub/requests') return reply(res, 200, requests);
+    if (req.method === 'GET' && url.pathname === '/__stub/app') return reply(res, 200, { tokens: issued, exchanges });
     if (req.method === 'GET' && url.pathname === '/__stub/attempts') {
       return reply(res, 200, attempts.map(({ id, guid, status, redelivery }) => ({ id, guid, status, redelivery })));
     }
@@ -208,6 +233,46 @@ async function startGitHubStub({ token, otherToken, hookToken, control, revoked 
     return reply(res, 202, {});
   };
 
+  const authorizeApp = (res, url) => {
+    const q = url.searchParams;
+    if (q.get('client_id') !== app.clientId || q.get('code_challenge_method') !== 'S256' || !q.get('code_challenge') || !q.get('redirect_uri')) {
+      return reply(res, 404, { message: 'Not Found' });
+    }
+    const code = randomBytes(10).toString('hex');
+    codes.set(code, { redirectUri: q.get('redirect_uri'), challenge: q.get('code_challenge') });
+    const back = new URL(q.get('redirect_uri'));
+    back.searchParams.set('code', code);
+    if (q.has('state')) back.searchParams.set('state', q.get('state'));
+    res.writeHead(302, { Location: back.toString() });
+    return res.end();
+  };
+
+  const issuePair = () => {
+    const pair = { access_token: `ghu_${randomBytes(18).toString('hex')}`, refresh_token: `ghr_${randomBytes(18).toString('hex')}` };
+    appAccess.add(pair.access_token);
+    appRefresh.add(pair.refresh_token);
+    issued.push(pair.access_token, pair.refresh_token);
+    return { ...pair, expires_in: APP_ACCESS_SECONDS, refresh_token_expires_in: APP_REFRESH_SECONDS, token_type: 'bearer', scope: '' };
+  };
+
+  // refusal is GitHub's error code for a token request, or undefined when the request gets a pair.
+  const refusal = (form, grant) => {
+    if (form.get('client_id') !== app.clientId || form.get('client_secret') !== app.clientSecret) return 'incorrect_client_credentials';
+    if (grant === 'refresh_token') return appRefresh.delete(form.get('refresh_token') ?? '') ? undefined : 'bad_refresh_token';
+    const code = codes.get(form.get('code') ?? '');
+    codes.delete(form.get('code') ?? '');
+    const challenge = createHash('sha256').update(form.get('code_verifier') ?? '').digest('base64url');
+    return code && code.redirectUri === form.get('redirect_uri') && code.challenge === challenge ? undefined : 'bad_verification_code';
+  };
+
+  const exchangeAppToken = async (req, res) => {
+    const form = new URLSearchParams(await readText(req));
+    const grant = form.get('grant_type') ?? 'authorization_code';
+    const error = refusal(form, grant);
+    exchanges.push({ grant, answer: error ?? 'issued' });
+    return reply(res, 200, error === undefined ? issuePair() : { error });
+  };
+
   const hooks = async (req, res, url) => {
     if (req.headers.authorization !== `Bearer ${hookToken}`) return reply(res, 401, { message: 'Bad credentials' });
     if (req.method === 'GET' && url.pathname === `${HOOK_PATH}/deliveries`) return list(res, url);
@@ -222,9 +287,12 @@ async function startGitHubStub({ token, otherToken, hookToken, control, revoked 
       if (url.pathname.startsWith('/__stub/')) return await handleControl(req, res, url);
       requests.push({ method: req.method, path: url.pathname, query: url.search, auth: kindOf(req.headers.authorization) });
       if (url.pathname.startsWith('/orgs/')) return await hooks(req, res, url);
+      if (req.method === 'GET' && url.pathname === '/login/oauth/authorize') return authorizeApp(res, url);
+      if (req.method === 'POST' && url.pathname === '/login/oauth/access_token') return await exchangeAppToken(req, res);
+      const person = isPerson(req.headers.authorization);
       const login = { [`Bearer ${token}`]: 'verify-user', [`Bearer ${otherToken}`]: 'verify-other' }[req.headers.authorization ?? ''];
-      if (login === undefined) return reply(res, 401, { message: 'Bad credentials' });
-      if (url.pathname === '/user') return reply(res, 200, { login });
+      if (login === undefined && !person) return reply(res, 401, { message: 'Bad credentials' });
+      if (url.pathname === '/user') return reply(res, 200, person ? PERSON : { login });
       const repo = /^\/repos\/verify\/r(\d+)$/.exec(url.pathname);
       if (repo && !revoked.has(Number(repo[1]))) return reply(res, 200, { id: Number(repo[1]) });
       return reply(res, 404, { message: 'Not Found' });
@@ -550,6 +618,13 @@ async function runStack({ port }, abort) {
     // The service agent logs in with go-sdk's client credentials handler, as a service that an operator made a client for does.
     const agentBinary = join(dir, 'serviceagent');
     await execFileAsync('go', ['build', '-o', agentBinary, './cmd/faucet/internal/serviceagent'], { cwd: root, env: goEnv, signal });
+    // The login agent logs in through the browser login with go-sdk's authorization code handler, as a coding agent does. It
+    // also writes the certificate that the tests serve client ID metadata documents with.
+    const loginAgentBinary = join(dir, 'loginagent');
+    await execFileAsync('go', ['build', '-o', loginAgentBinary, './cmd/faucet/internal/loginagent'], { cwd: root, env: goEnv, signal });
+    const tlsDir = join(dir, 'tls');
+    await execFileAsync(loginAgentBinary, ['-write-cert', tlsDir], { env: childEnv(), signal });
+    const tls = { cert: join(tlsDir, 'cert.pem'), key: join(tlsDir, 'key.pem') };
 
     const secret = randomBytes(32).toString('hex');
     const githubToken = `ghp_${randomBytes(20).toString('hex')}`;
@@ -564,7 +639,10 @@ async function runStack({ port }, abort) {
       stubControl: randomBytes(16).toString('hex'),
     };
     const revoked = new Set();
-    githubStub = await startGitHubStub({ token: githubToken, otherToken, hookToken: cron.hookToken, control: cron.stubControl, revoked });
+    const githubApp = { clientId: `Iv1.${randomBytes(8).toString('hex')}`, clientSecret: randomBytes(20).toString('hex') };
+    githubStub = await startGitHubStub({
+      token: githubToken, otherToken, hookToken: cron.hookToken, control: cron.stubControl, revoked, app: githubApp,
+    });
     const stubUrl = `http://127.0.0.1:${githubStub.address().port}`;
     await createDatabase(psql, dir, CRON_DB);
     const receiverControl = randomBytes(16).toString('hex');
@@ -574,7 +652,7 @@ async function runStack({ port }, abort) {
       stateFile(port),
       JSON.stringify({
         dbHost: dir, dbPort: DB_PORT, psql, secret, githubToken, otherToken, webhookKey, binary, e2eBinary, agentBinary,
-        cron: { ...cron, stubUrl }, receiver: receiverState,
+        loginAgentBinary, tls, githubApp, cron: { ...cron, stubUrl }, receiver: receiverState,
       }),
       { mode: 0o600 },
     );
