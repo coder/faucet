@@ -412,7 +412,9 @@ func (s *fakeStore) RotateSession(_ context.Context, r oauth.Rotation) (oauth.Se
 		s.refresh[r.Presented] = presented
 	}
 	s.refresh[r.Next] = oauth.RefreshToken{Hash: r.Next, SessionID: session.ID, IssuedAt: r.Now}
-	session.RefreshedAt = r.Now
+	if r.Now.After(session.RefreshedAt) {
+		session.RefreshedAt = r.Now
+	}
 	s.sessions[session.ID] = session
 	s.tokens[r.Access] = oauth.AccessToken{
 		Hash: r.Access, ExpiresAt: r.AccessExpiresAt, Scopes: slices.Clone(r.Scopes),

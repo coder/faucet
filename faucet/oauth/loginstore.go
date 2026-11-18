@@ -80,15 +80,17 @@ type LoginStore interface {
 	// when its first use came after r.UsedAfter. In one step it marks
 	// r.Presented used at r.Now unless it was used already, stores r.Next
 	// unused and issued at r.Now, sets the session's refreshed time to
-	// r.Now, stores the next access token, with the hash r.Access, the
-	// scopes r.Scopes and the session's resource, and returns the session
-	// as it is after. In the same step it retires at r.Now the session's
-	// other unused tokens that were issued at or before r.UsedAfter, which
-	// no client still holds. It deletes no token. When no live session
-	// holds such a token, as when a rotation of another token at once
-	// retires it, or the session lacks a scope of r.Scopes, it returns
-	// ErrUnknownSession and changes nothing. It fails when r is not
-	// valid, or when a stored token has one of the next hashes.
+	// r.Now unless it is later already, stores the next access token, with
+	// the hash r.Access, the scopes r.Scopes and the session's resource,
+	// and returns the session as it is after. The refreshed time never
+	// moves back, so a rotation by an instance whose clock lags makes no
+	// older access check fresh again. In the same step it retires at r.Now
+	// the session's other unused tokens that were issued at or before
+	// r.UsedAfter, which no client still holds. It deletes no token. When
+	// no live session holds such a token, as when a rotation of another
+	// token at once retires it, or the session lacks a scope of r.Scopes,
+	// it returns ErrUnknownSession and changes nothing. It fails when r is
+	// not valid, or when a stored token has one of the next hashes.
 	RotateSession(ctx context.Context, r Rotation) (Session, error)
 	// EndSession ends the live session with this ID at now. A session that
 	// ended already keeps its time, and an unknown ID is no error.

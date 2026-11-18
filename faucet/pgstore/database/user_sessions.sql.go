@@ -124,7 +124,7 @@ func (q *Queries) GetSessionByRefreshHash(ctx context.Context, refreshHash []byt
 const rotateSession = `-- name: RotateSession :one
 WITH rotated AS (
   UPDATE faucet_user_sessions s
-  SET refreshed_at = $1::timestamptz
+  SET refreshed_at = greatest(s.refreshed_at, $1::timestamptz)
   FROM faucet_refresh_tokens t
   WHERE t.token_hash = $2::bytea AND s.id = t.session_id
     AND t.retired_at IS NULL AND (t.used_at IS NULL OR t.used_at > $3::timestamptz)
@@ -179,7 +179,9 @@ type RotateSessionRow struct {
 // the next one, retires the session's unused tokens that no client still
 // holds, and issues the next access token, in one statement. The presented
 // token is unused and not retired, or its first use came after used_after.
-// The access token holds no scope that the session lacks.
+// The access token holds no scope that the session lacks. The refreshed
+// time never moves back, so a rotation by an instance whose clock lags makes
+// no older access check fresh again.
 func (q *Queries) RotateSession(ctx context.Context, arg RotateSessionParams) (RotateSessionRow, error) {
 	row := q.db.QueryRowContext(ctx, rotateSession,
 		arg.Now,

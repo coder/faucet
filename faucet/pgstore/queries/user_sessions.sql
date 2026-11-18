@@ -14,10 +14,12 @@ WHERE faucet_refresh_tokens.token_hash = @refresh_hash::bytea;
 -- the next one, retires the session's unused tokens that no client still
 -- holds, and issues the next access token, in one statement. The presented
 -- token is unused and not retired, or its first use came after used_after.
--- The access token holds no scope that the session lacks.
+-- The access token holds no scope that the session lacks. The refreshed
+-- time never moves back, so a rotation by an instance whose clock lags makes
+-- no older access check fresh again.
 WITH rotated AS (
   UPDATE faucet_user_sessions s
-  SET refreshed_at = @now::timestamptz
+  SET refreshed_at = greatest(s.refreshed_at, @now::timestamptz)
   FROM faucet_refresh_tokens t
   WHERE t.token_hash = @presented_hash::bytea AND s.id = t.session_id
     AND t.retired_at IS NULL AND (t.used_at IS NULL OR t.used_at > @used_after::timestamptz)
