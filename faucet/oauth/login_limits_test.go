@@ -111,3 +111,22 @@ func TestWithTooManyLoginsInProgressNoClientStartsOne(t *testing.T) {
 	loginRequireTooMany(t, b.authorize(h.request(c)))
 	require.Equal(t, oauth.MaxPendingAuthRequests, loginRequestCount(h.store))
 }
+
+// Showing the consent page stores nothing: the login waits in the page's
+// form, sealed, until its user presses Continue. So the GETs that anyone
+// can send grow no table and use up no limit that real users need.
+func TestTheConsentPageStoresNothingUntilContinue(t *testing.T) {
+	t.Parallel()
+	h := newLoginHarness(t)
+	b := h.newBrowser(t)
+	client := h.newClient("agent", nil)
+	var last loginConsent
+	for range 150 {
+		last = b.start(client)
+	}
+	require.Zero(t, h.store.requestCount(), "no request is stored before Continue")
+
+	a := b.continueWith(last)
+	require.Equal(t, http.StatusSeeOther, a.status, a.body)
+	require.Equal(t, 1, h.store.requestCount(), "Continue stores the request")
+}

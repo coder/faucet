@@ -147,6 +147,12 @@ func (s *fakeStore) DeleteAccessToken(_ context.Context, hash oauth.TokenHash) e
 	return nil
 }
 
+func (s *fakeStore) requestCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.requests)
+}
+
 func (s *fakeStore) tokenCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
