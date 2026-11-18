@@ -448,6 +448,29 @@ func TestTheFaucetTokenEndsNoLaterThanTheSubjectToken(t *testing.T) {
 	}
 }
 
+// Faucet answers a token's lifetime in whole seconds, and a client of
+// golang.org/x/oauth2 takes expires_in 0 for a token that never expires.
+// exp is in whole seconds, and faucet's clock is not.
+func TestAFaucetTokenLastsAtLeastASecond(t *testing.T) {
+	t.Parallel()
+	clock := quartz.NewMock(t)
+	clock.Advance(600 * time.Millisecond)
+	now := clock.Now()
+	nextSecond := now.Truncate(time.Second).Add(time.Second)
+	rule := testKubernetesRule(t, publicJWK(testRSAKey(), testKID))
+	c := newWorkloadChecker(&http.Client{}, clock)
+
+	claims := kubernetesClaims(now)
+	claims["exp"] = nextSecond.Unix()
+	_, err := checkAt(t, c, now, signToken(t, jose.RS256, testRSAKey(), testKID, claims), rule)
+	requireTokenRefused(t, err, "it has expired", "400ms before its exp")
+
+	claims["exp"] = nextSecond.Add(time.Second).Unix()
+	m, err := checkAt(t, c, now, signToken(t, jose.RS256, testRSAKey(), testKID, claims), rule)
+	require.NoError(t, err)
+	require.Equal(t, 1400*time.Millisecond, m.lifetime(now))
+}
+
 func TestAClaimMatchesOnlyTheSameString(t *testing.T) {
 	t.Parallel()
 	s := newIssuerServer(t)

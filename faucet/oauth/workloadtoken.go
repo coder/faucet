@@ -23,6 +23,12 @@ import (
 // faucet mints no token after the subject token's end by its own clock.
 const workloadClockLeeway = time.Minute
 
+// minWorkloadTokenLifetime is the least time that a subject token must have
+// left, so that lifetime is at least a second: faucet answers expires_in in
+// whole seconds, and golang.org/x/oauth2 takes expires_in 0 for a token that
+// never expires.
+const minWorkloadTokenLifetime = time.Second
+
 // workloadAlgorithms are the signatures that faucet takes from an outside
 // issuer. Every other alg, none and the HMAC ones included, fails the parse.
 var workloadAlgorithms = []jose.SignatureAlgorithm{jose.RS256, jose.ES256}
@@ -49,7 +55,7 @@ type workloadMatch struct {
 }
 
 // lifetime is how long a faucet token for m lasts when faucet mints it at
-// now.
+// now, at least minWorkloadTokenLifetime when now is the time of the check.
 func (m workloadMatch) lifetime(now time.Time) time.Duration {
 	return min(accessTokenLifetime, m.Expires.Sub(now))
 }
@@ -120,8 +126,8 @@ func (c *workloadChecker) match(ctx context.Context, rule trustRule, jws *jose.J
 		return time.Time{}, refuseToken("its aud must be " + audience + " alone")
 	case registered.Expiry == nil:
 		return time.Time{}, refuseToken("it must have an exp")
-	case !now.Before(registered.Expiry.Time()):
-		return time.Time{}, refuseToken("it has expired")
+	case registered.Expiry.Time().Sub(now) < minWorkloadTokenLifetime:
+		return time.Time{}, refuseToken("it has expired, or expires in less than a second")
 	case registered.NotBefore != nil && registered.NotBefore.Time().After(now.Add(workloadClockLeeway)):
 		return time.Time{}, refuseToken("its nbf is in the future")
 	case registered.IssuedAt != nil && registered.IssuedAt.Time().After(now.Add(workloadClockLeeway)):
