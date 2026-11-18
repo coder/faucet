@@ -409,6 +409,10 @@ func createDatabase(t *testing.T, adminURL string) *sql.DB {
 	require.NoError(t, err)
 	admin, err := sql.Open("postgres", adminURL)
 	require.NoError(t, err)
+	// The handle creates the database and drops it, and keeps no connection
+	// in between. One idle connection for each test that runs can pass the
+	// server's 100 connections.
+	admin.SetMaxIdleConns(0)
 	t.Cleanup(func() { _ = admin.Close() })
 
 	_, err = admin.ExecContext(ctx, "CREATE DATABASE "+pq.QuoteIdentifier(name))
