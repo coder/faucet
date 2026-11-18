@@ -156,7 +156,9 @@ func TestWebhookRenamesARepositoryOnlyFromTheNameItHolds(t *testing.T) {
 		clock.Advance(time.Minute)
 	}
 	renamedFrom := func(name string) string { return `"changes":{"repository":{"name":{"from":"` + name + `"}}},` }
-	movedFrom := func(org string) string { return `"changes":{"owner":{"from":{"organization":{"login":"` + org + `"}}}},` }
+	movedFrom := func(org string) string {
+		return `"changes":{"owner":{"from":{"organization":{"login":"` + org + `"}}}},`
+	}
 	named := func(fullName, owner string, at time.Time) []fakeRepo {
 		return []fakeRepo{{repo: faucet.Repository{ID: 5, OwnerID: 9, OwnerLogin: owner, FullName: fullName}, seenAt: at}}
 	}
