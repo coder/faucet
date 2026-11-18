@@ -69,6 +69,11 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/security.md", "among those used in the last %d minutes", []any{minutes(accessTokenLifetime)}},
 		{"docs/browser-login.md", "or a day after a session last used it, when `/cron/purge` deletes it", nil},
 		{"docs/upgrading.md", "`/cron/purge` deletes a stored check a day after a session last used it", nil},
+		{"docs/upgrading.md", "and a stored denial %d minutes after its check", []any{minutes(accessDenialRetention)}},
+		{"docs/browser-login.md", "A denial for %d minutes after its check, when `/cron/purge` deletes it.", []any{minutes(accessDenialRetention)}},
+		{"docs/browser-login.md", "Faucet keeps a denial only as a marker for %d minutes", []any{minutes(accessDenialRetention)}},
+		{"docs/browser-login.md", "After those %d minutes, every session that could take that pass", []any{minutes(accessDenialRetention)}},
+		{"docs/security.md", "Faucet keeps a denial only as a marker for %d minutes", []any{minutes(accessDenialRetention)}},
 	} {
 		doc, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(p.file)))
 		require.NoError(t, err)

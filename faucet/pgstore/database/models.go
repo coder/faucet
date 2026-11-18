@@ -13,7 +13,7 @@ import (
 type FaucetAccessCheck struct {
 	ConnectionID string
 	Repo         string
-	RepoID       int64
+	RepoID       sql.NullInt64
 	CheckedAt    time.Time
 	LastUsedAt   time.Time
 }

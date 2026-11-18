@@ -10,28 +10,19 @@ import (
 	"time"
 )
 
-const deleteAccessCheck = `-- name: DeleteAccessCheck :exec
-DELETE FROM faucet_access_checks
-WHERE connection_id = $1 AND repo = $2
-`
-
-type DeleteAccessCheckParams struct {
-	ConnectionID string
-	Repo         string
-}
-
-func (q *Queries) DeleteAccessCheck(ctx context.Context, arg DeleteAccessCheckParams) error {
-	_, err := q.db.ExecContext(ctx, deleteAccessCheck, arg.ConnectionID, arg.Repo)
-	return err
-}
-
 const deleteUnusedAccessChecks = `-- name: DeleteUnusedAccessChecks :execrows
 DELETE FROM faucet_access_checks
 WHERE last_used_at < $1::timestamptz
+  OR (repo_id IS NULL AND checked_at < $2::timestamptz)
 `
 
-func (q *Queries) DeleteUnusedAccessChecks(ctx context.Context, usedBefore time.Time) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deleteUnusedAccessChecks, usedBefore)
+type DeleteUnusedAccessChecksParams struct {
+	UsedBefore   time.Time
+	DeniedBefore time.Time
+}
+
+func (q *Queries) DeleteUnusedAccessChecks(ctx context.Context, arg DeleteUnusedAccessChecksParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteUnusedAccessChecks, arg.UsedBefore, arg.DeniedBefore)
 	if err != nil {
 		return 0, err
 	}
@@ -43,7 +34,8 @@ WITH fresh AS (
   SELECT a.connection_id, a.repo, a.repo_id
   FROM faucet_access_checks a
   JOIN faucet_user_sessions s ON s.connection_id = a.connection_id
-  WHERE s.id = $1 AND a.repo = $2 AND a.checked_at >= s.refreshed_at
+  WHERE s.id = $1 AND a.repo = $2 AND a.repo_id IS NOT NULL
+    AND a.checked_at >= s.refreshed_at
 ), used AS (
   UPDATE faucet_access_checks a
   SET last_used_at = greatest(a.last_used_at, $3::timestamptz)
@@ -51,7 +43,7 @@ WITH fresh AS (
   WHERE a.connection_id = f.connection_id AND a.repo = f.repo
     AND a.last_used_at < $4::timestamptz
 )
-SELECT repo_id FROM fresh
+SELECT repo_id::bigint FROM fresh
 `
 
 type FreshAccessCheckParams struct {
@@ -61,8 +53,8 @@ type FreshAccessCheckParams struct {
 	UsedBefore time.Time
 }
 
-// FreshAccessCheck takes the check of a repository by the connection of a
-// session when the check started at or after the session's last refresh.
+// FreshAccessCheck takes the pass of a repository by the connection of a
+// session when the pass started at or after the session's last refresh.
 // It moves the check's last use forward to now only when the last use came
 // before used_before, so a use that moves nothing writes no row.
 func (q *Queries) FreshAccessCheck(ctx context.Context, arg FreshAccessCheckParams) (int64, error) {
@@ -78,9 +70,10 @@ func (q *Queries) FreshAccessCheck(ctx context.Context, arg FreshAccessCheckPara
 }
 
 const recentAccessChecks = `-- name: RecentAccessChecks :many
-SELECT connection_id, repo, repo_id, checked_at, last_used_at
+SELECT connection_id, repo, repo_id::bigint AS repo_id, checked_at, last_used_at
 FROM faucet_access_checks
-WHERE connection_id = $1 AND last_used_at >= $2::timestamptz
+WHERE connection_id = $1 AND repo_id IS NOT NULL
+  AND last_used_at >= $2::timestamptz
 ORDER BY last_used_at DESC, repo
 LIMIT $3::bigint
 `
@@ -91,15 +84,23 @@ type RecentAccessChecksParams struct {
 	MaxChecks    int64
 }
 
-func (q *Queries) RecentAccessChecks(ctx context.Context, arg RecentAccessChecksParams) ([]FaucetAccessCheck, error) {
+type RecentAccessChecksRow struct {
+	ConnectionID string
+	Repo         string
+	RepoID       int64
+	CheckedAt    time.Time
+	LastUsedAt   time.Time
+}
+
+func (q *Queries) RecentAccessChecks(ctx context.Context, arg RecentAccessChecksParams) ([]RecentAccessChecksRow, error) {
 	rows, err := q.db.QueryContext(ctx, recentAccessChecks, arg.ConnectionID, arg.UsedSince, arg.MaxChecks)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []FaucetAccessCheck
+	var items []RecentAccessChecksRow
 	for rows.Next() {
-		var i FaucetAccessCheck
+		var i RecentAccessChecksRow
 		if err := rows.Scan(
 			&i.ConnectionID,
 			&i.Repo,
@@ -122,7 +123,7 @@ func (q *Queries) RecentAccessChecks(ctx context.Context, arg RecentAccessChecks
 
 const storeAccessCheck = `-- name: StoreAccessCheck :execrows
 INSERT INTO faucet_access_checks (connection_id, repo, repo_id, checked_at, last_used_at)
-SELECT c.id, $1::text, $2::bigint, $3::timestamptz, $4::timestamptz
+SELECT c.id, $1::text, nullif($2::bigint, 0), $3::timestamptz, $4::timestamptz
 FROM faucet_connections c
 WHERE c.id = $5
 ON CONFLICT (connection_id, repo) DO UPDATE SET
@@ -139,9 +140,10 @@ type StoreAccessCheckParams struct {
 	ConnectionID string
 }
 
-// StoreAccessCheck stores a check of a repository by a connection, in place
-// of the stored one unless that one started later. A conflict always updates
-// the row, so no row means no connection.
+// StoreAccessCheck stores a check of a repository by a connection, a pass or
+// a denial, whose repo_id 0 is stored as NULL, in place of the stored one
+// unless that one started later. A conflict always updates the row, so no
+// row means no connection.
 func (q *Queries) StoreAccessCheck(ctx context.Context, arg StoreAccessCheckParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, storeAccessCheck,
 		arg.Repo,

@@ -50,15 +50,6 @@ func (s *Store) StoreAccessCheck(ctx context.Context, c oauth.AccessCheck) (err 
 	return nil
 }
 
-// DeleteAccessCheck implements oauth.AccessCheckStore.
-func (s *Store) DeleteAccessCheck(ctx context.Context, connectionID, repo string) (err error) {
-	defer func() { err = endedBy(ctx, err) }()
-	if err := s.q.DeleteAccessCheck(ctx, database.DeleteAccessCheckParams{ConnectionID: connectionID, Repo: repo}); err != nil {
-		return xerrors.Errorf("delete access check: %w", err)
-	}
-	return nil
-}
-
 // RecentAccessChecks implements oauth.AccessCheckStore.
 func (s *Store) RecentAccessChecks(ctx context.Context, connectionID string, usedSince time.Time, limit int) (_ []oauth.AccessCheck, err error) {
 	defer func() { err = endedBy(ctx, err) }()
@@ -80,9 +71,9 @@ func (s *Store) RecentAccessChecks(ctx context.Context, connectionID string, use
 }
 
 // DeleteUnusedAccessChecks implements oauth.AccessCheckStore.
-func (s *Store) DeleteUnusedAccessChecks(ctx context.Context, usedBefore time.Time) (_ int64, err error) {
+func (s *Store) DeleteUnusedAccessChecks(ctx context.Context, usedBefore, deniedBefore time.Time) (_ int64, err error) {
 	defer func() { err = endedBy(ctx, err) }()
-	n, err := s.q.DeleteUnusedAccessChecks(ctx, usedBefore)
+	n, err := s.q.DeleteUnusedAccessChecks(ctx, database.DeleteUnusedAccessChecksParams{UsedBefore: usedBefore, DeniedBefore: deniedBefore})
 	if err != nil {
 		return 0, xerrors.Errorf("delete unused access checks: %w", err)
 	}

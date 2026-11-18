@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -203,7 +204,7 @@ func TestAUseMovesTheLastUseOfACheckOnlyOnceItIsAMinuteOld(t *testing.T) {
 
 // Until the next refresh a check stands, so a revoked access passes for at
 // most one access token's life. The refresh asks GitHub about the checks,
-// deletes the one that GitHub denies and keeps the other.
+// takes away the one that GitHub denies and keeps the other.
 func TestARefreshFindsARevokedRepositoryAccess(t *testing.T) {
 	t.Parallel()
 	for name, newStore := range usertokensStores {
@@ -235,7 +236,7 @@ func TestARefreshFindsARevokedRepositoryAccess(t *testing.T) {
 }
 
 // The sessions of a user share the checks, and each trusts only those made
-// since its own refresh. A denial deletes the check for every session.
+// since its own refresh. A denial takes the check away from every session.
 func TestASessionTrustsOnlyTheChecksMadeSinceItsRefresh(t *testing.T) {
 	t.Parallel()
 	for name, newStore := range usertokensStores {
@@ -253,7 +254,7 @@ func TestASessionTrustsOnlyTheChecksMadeSinceItsRefresh(t *testing.T) {
 			got := h.repoID(access, b, "o/x")
 			require.ErrorIs(t, got.err, faucet.ErrNoAccess)
 			require.Equal(t, []string{"o/x"}, got.asked, "b logged in after the check of o/x, so it asks GitHub")
-			require.Empty(t, h.checkedRepos(1), "the denial deleted the check")
+			require.Empty(t, h.checkedRepos(1), "the denial took the check away")
 			got = h.repoID(access, a, "o/x")
 			require.ErrorIs(t, got.err, faucet.ErrNoAccess)
 			require.Equal(t, []string{"o/x"}, got.asked, "with the check gone, a asks GitHub too")
@@ -268,7 +269,7 @@ func TestASessionTrustsOnlyTheChecksMadeSinceItsRefresh(t *testing.T) {
 
 // Every renewal checks access again at GitHub (R3), with a fresh check at
 // hand, and records the answer: a pass for the next check, a denial by
-// deleting the check.
+// taking the check away.
 func TestARenewalAlwaysAsksGitHub(t *testing.T) {
 	t.Parallel()
 	h := newGrantHarness(t, newFakeStore())
@@ -289,12 +290,13 @@ func TestARenewalAlwaysAsksGitHub(t *testing.T) {
 	require.Equal(t, []string{"o/x"}, got.asked)
 	require.Empty(t, h.checkedRepos(1))
 	got = h.repoID(access, p, "o/x")
-	require.ErrorIs(t, got.err, faucet.ErrNoAccess, "the renewal's denial deleted the check")
+	require.ErrorIs(t, got.err, faucet.ErrNoAccess, "the renewal's denial took the check away")
 	require.Equal(t, []string{"o/x"}, got.asked)
 }
 
-// A denial stores nothing, so the next check asks GitHub again.
-func TestAnAccessDenialStoresNothing(t *testing.T) {
+// A denial answers no check, so each check of a denied repository asks
+// GitHub again.
+func TestADeniedRepositoryIsAskedAgainAtEachCheck(t *testing.T) {
 	t.Parallel()
 	h := newGrantHarness(t, newFakeStore())
 	p := h.principal(h.redeem(h.approve("login-1", 1)))
@@ -385,8 +387,78 @@ func TestThePurgeDeletesTheChecksThatNoSessionUsedForADay(t *testing.T) {
 	}
 }
 
+// A pass whose lookup started first and that GitHub answers after a quick
+// denial of the same repository never answers a check: the answer of the
+// lookup that started later stands.
+func TestAnOlderPassThatLandsAfterADenialDoesNotAnswer(t *testing.T) {
+	t.Parallel()
+	for name, newStore := range usertokensStores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newGrantHarness(t, newStore(t))
+			p := h.principal(h.redeem(h.approve("login-1", 1)))
+			access := h.userAccess()
+			h.clock.Advance(time.Minute)
+			arrived, held := make(chan struct{}), make(chan struct{})
+			release := sync.OnceFunc(func() { close(held) })
+			t.Cleanup(release)
+			var lookups atomic.Int32
+			h.github.set(func(g *grantGitHub) {
+				g.onRepo = func(*http.Request) {
+					if lookups.Add(1) == 1 {
+						close(arrived)
+						<-held
+					}
+				}
+			})
+			slow := make(chan accessAnswer, 1)
+			go func() { slow <- h.repoID(access, p, "o/x") }()
+			<-arrived
+
+			h.clock.Advance(time.Minute)
+			h.github.set(func(g *grantGitHub) { g.denied["o/x"] = true })
+			require.ErrorIs(t, h.repoIDFresh(access, p, "o/x").err, faucet.ErrNoAccess)
+			h.github.set(func(g *grantGitHub) { delete(g.denied, "o/x") })
+			release()
+			require.NoError(t, (<-slow).err, "GitHub let the slow lookup pass")
+
+			require.Empty(t, h.checkedRepos(1), "the denial started later, so it stands")
+			got := h.repoID(access, p, "o/x")
+			require.NoError(t, got.err)
+			require.Equal(t, []string{"o/x"}, got.asked, "the older pass does not answer")
+		})
+	}
+}
+
+// The purge deletes a denial 15 minutes after its lookup started, when no
+// session takes a pass older than it any more, and keeps a newer one.
+func TestThePurgeDeletesADenialAfterFifteenMinutes(t *testing.T) {
+	t.Parallel()
+	for name, newStore := range usertokensStores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newGrantHarness(t, newStore(t))
+			p := h.principal(h.redeem(h.approve("login-1", 1)))
+			access := h.userAccess()
+			h.github.set(func(g *grantGitHub) { g.denied["o/old"], g.denied["o/new"] = true, true })
+			require.ErrorIs(t, h.repoID(access, p, "o/old").err, faucet.ErrNoAccess)
+			h.clock.Advance(10 * time.Minute)
+			require.ErrorIs(t, h.repoID(access, p, "o/new").err, faucet.ErrNoAccess)
+			h.clock.Advance(5*time.Minute + 30*time.Second)
+
+			res, err := h.server.Purge(context.Background())
+			require.NoError(t, err)
+			require.EqualValues(t, 1, res.UnusedAccessChecks, "the denial of o/old is 15 minutes old")
+			h.clock.Advance(10 * time.Minute)
+			res, err = h.server.Purge(context.Background())
+			require.NoError(t, err)
+			require.EqualValues(t, 1, res.UnusedAccessChecks, "the denial of o/new is 15 minutes old too")
+		})
+	}
+}
+
 // A caller that gives up right after GitHub denied a repository gets the
-// denial, and the denial still deletes the stored check.
+// denial, and the denial still takes the stored check away.
 func TestADenialCountsWhenItsCallerGivesUpRightAfterIt(t *testing.T) {
 	t.Parallel()
 	for name, newStore := range usertokensStores {
@@ -404,12 +476,12 @@ func TestADenialCountsWhenItsCallerGivesUpRightAfterIt(t *testing.T) {
 			_, err := access.RepoID(ctx, p, "o/x")
 			require.ErrorIs(t, err, faucet.ErrNoAccess)
 			require.NotErrorIs(t, err, context.Canceled)
-			require.Empty(t, h.checkedRepos(1), "the denial deleted the check")
+			require.Empty(t, h.checkedRepos(1), "the denial took the check away")
 		})
 	}
 }
 
-// A denial stands when the store cannot delete the check. A pass that the
+// A denial stands when the store cannot record it. A pass that the
 // store cannot keep is an error.
 func TestADenialStandsWhenTheStoreCannotRecordIt(t *testing.T) {
 	t.Parallel()
@@ -418,7 +490,6 @@ func TestADenialStandsWhenTheStoreCannotRecordIt(t *testing.T) {
 	p := h.principal(h.redeem(h.approve("login-1", 1)))
 	access := h.userAccess()
 	broken := errors.New("the store is down")
-	store.fail("DeleteAccessCheck", broken)
 	store.fail("StoreAccessCheck", broken)
 	h.github.set(func(g *grantGitHub) { g.denied["o/x"] = true })
 
@@ -427,8 +498,8 @@ func TestADenialStandsWhenTheStoreCannotRecordIt(t *testing.T) {
 }
 
 // A refresh whose request ends right after GitHub denied a repository that
-// the refresh checks again still deletes the check, and answers with tokens
-// that work.
+// the refresh checks again still takes the check away, and answers with
+// tokens that work.
 func TestARecheckDenialCountsWhenTheRefreshRequestEndsRightAfterIt(t *testing.T) {
 	t.Parallel()
 	for name, newStore := range usertokensStores {
@@ -444,7 +515,7 @@ func TestARecheckDenialCountsWhenTheRefreshRequestEndsRightAfterIt(t *testing.T)
 			defer cancel()
 			h.repos.cancelAfterAnswer(cancel)
 			next := grantTokens(t, s.id, h.serveToken(ctx, grantRefreshForm(s.refresh)))
-			require.Empty(t, h.checkedRepos(1), "the denial deleted the check")
+			require.Empty(t, h.checkedRepos(1), "the denial took the check away")
 			h.principal(next)
 		})
 	}

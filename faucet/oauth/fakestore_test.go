@@ -535,7 +535,7 @@ func (s *fakeStore) FreshAccessCheck(ctx context.Context, sessionID, repo string
 	}
 	key := accessCheckKey{session.ConnectionID, repo}
 	c, ok := s.checks[key]
-	if !ok || c.CheckedAt.Before(session.RefreshedAt) {
+	if !ok || c.Denied() || c.CheckedAt.Before(session.RefreshedAt) {
 		return 0, false, nil
 	}
 	if c.LastUsedAt.Before(usedBefore) && now.After(c.LastUsedAt) {
@@ -570,16 +570,6 @@ func (s *fakeStore) StoreAccessCheck(ctx context.Context, c oauth.AccessCheck) e
 	return nil
 }
 
-func (s *fakeStore) DeleteAccessCheck(ctx context.Context, connectionID, repo string) error {
-	if err := s.callErr(ctx, "DeleteAccessCheck"); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.checks, accessCheckKey{connectionID, repo})
-	return nil
-}
-
 func (s *fakeStore) RecentAccessChecks(ctx context.Context, connectionID string, usedSince time.Time, limit int) ([]oauth.AccessCheck, error) {
 	if err := s.callErr(ctx, "RecentAccessChecks"); err != nil {
 		return nil, err
@@ -588,7 +578,7 @@ func (s *fakeStore) RecentAccessChecks(ctx context.Context, connectionID string,
 	defer s.mu.Unlock()
 	var checks []oauth.AccessCheck
 	for key, c := range s.checks {
-		if key.connectionID == connectionID && !c.LastUsedAt.Before(usedSince) {
+		if key.connectionID == connectionID && !c.Denied() && !c.LastUsedAt.Before(usedSince) {
 			checks = append(checks, c)
 		}
 	}
@@ -601,14 +591,16 @@ func (s *fakeStore) RecentAccessChecks(ctx context.Context, connectionID string,
 	return checks[:min(len(checks), max(limit, 0))], nil
 }
 
-func (s *fakeStore) DeleteUnusedAccessChecks(ctx context.Context, usedBefore time.Time) (int64, error) {
+func (s *fakeStore) DeleteUnusedAccessChecks(ctx context.Context, usedBefore, deniedBefore time.Time) (int64, error) {
 	if err := s.callErr(ctx, "DeleteUnusedAccessChecks"); err != nil {
 		return 0, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := len(s.checks)
-	maps.DeleteFunc(s.checks, func(_ accessCheckKey, c oauth.AccessCheck) bool { return c.LastUsedAt.Before(usedBefore) })
+	maps.DeleteFunc(s.checks, func(_ accessCheckKey, c oauth.AccessCheck) bool {
+		return c.LastUsedAt.Before(usedBefore) || c.Denied() && c.CheckedAt.Before(deniedBefore)
+	})
 	return int64(n - len(s.checks)), nil
 }
 

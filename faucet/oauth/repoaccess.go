@@ -36,13 +36,18 @@ const (
 	// recordTimeout bounds the store write that keeps an answer of GitHub,
 	// which runs to its end however the caller's request ends.
 	recordTimeout = 5 * time.Second
+	// accessDenialRetention is how long a denial stays from the start of its
+	// lookup, which keeps out a pass whose lookup started before it. By then
+	// every session that could take such a pass has refreshed past it, as its
+	// access token expired.
+	accessDenialRetention = accessTokenLifetime
 )
 
 // repoAccess asks GitHub whether the GitHub token of a user's connection can
 // read a repository, and keeps the answer in the connection's access checks:
-// a pass stores the check, a denial deletes it, and any other answer changes
-// nothing. UserAccess asks through it, and the refresh grant checks again
-// through it.
+// a pass stores the check, a denial stores a denial in its place, and any
+// other answer changes nothing. UserAccess asks through it, and the refresh
+// grant checks again through it.
 type repoAccess struct {
 	tokens connections
 	repos  RepoChecker
@@ -68,7 +73,7 @@ func (r repoAccess) ask(ctx context.Context, session faucet.OAuthSession, repo s
 	case err == nil:
 		return id, answer
 	case refused(answer):
-		logger.Warn(ctx, "could not delete the access check of a repository that GitHub refused, the refusal stands", slog.F("repo", repo), slog.Error(err))
+		logger.Warn(ctx, "could not store the denial of a repository that GitHub refused, the refusal stands", slog.F("repo", repo), slog.Error(err))
 		return 0, answer
 	}
 	return 0, err
@@ -101,9 +106,10 @@ func (r repoAccess) check(ctx context.Context, token githubToken, repo string) (
 }
 
 // record keeps answer, GitHub's answer to the lookup of c: c is stored when
-// GitHub let the token read the repository, and deleted when GitHub refused,
-// as refused says. A refusal for one session thus also takes the check away
-// from the other sessions of the connection.
+// GitHub let the token read the repository, and a denial in its place when
+// GitHub refused, as refused says. A refusal for one session thus also takes
+// the check away from the other sessions of the connection. Either stays
+// only when no lookup that started later answered first.
 func (r repoAccess) record(ctx context.Context, c AccessCheck, answer error) error {
 	// GitHub answered, so the write runs to its end however the caller's
 	// request ends: a refusal that is not recorded leaves a check that the
@@ -116,8 +122,9 @@ func (r repoAccess) record(ctx context.Context, c AccessCheck, answer error) err
 			return xerrors.Errorf("store the access check of %s: %w", c.Repo, err)
 		}
 	case refused(answer):
-		if err := r.tokens.store.DeleteAccessCheck(ctx, c.ConnectionID, c.Repo); err != nil {
-			return xerrors.Errorf("delete the access check of %s: %w", c.Repo, err)
+		c.RepoID = 0
+		if err := r.tokens.store.StoreAccessCheck(ctx, c); err != nil {
+			return xerrors.Errorf("store the denial of %s: %w", c.Repo, err)
 		}
 	}
 	return nil

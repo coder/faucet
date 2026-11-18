@@ -23,12 +23,17 @@ var accessCheckSubtests = []struct {
 	{"AFreshCheckMovesItsLastUseOnlyWhenItCameBeforeTheBound", aFreshCheckMovesItsLastUseOnlyWhenItCameBeforeTheBound},
 	{"AMissChangesNothing", aMissChangesNothing},
 	{"AnOlderCheckNeverReplacesALaterOne", anOlderCheckNeverReplacesALaterOne},
+	{"AnOlderPassNeverReplacesALaterDenial", anOlderPassNeverReplacesALaterDenial},
+	{"ALaterPassReplacesAnOlderDenial", aLaterPassReplacesAnOlderDenial},
+	{"AnOlderDenialNeverReplacesALaterPass", anOlderDenialNeverReplacesALaterPass},
+	{"ADenialIsNeverFreshNorRecent", aDenialIsNeverFreshNorRecent},
 	{"StoreAccessCheckOfAnUnknownConnectionIsUnknown", storeAccessCheckOfAnUnknownConnectionIsUnknown},
 	{"StoreAccessCheckValidatesInput", storeAccessCheckValidatesInput},
-	{"DeleteAccessCheckDeletesThatCheckOnly", deleteAccessCheckDeletesThatCheckOnly},
+	{"ADenialTakesAwayThatCheckOnly", aDenialTakesAwayThatCheckOnly},
 	{"RecentAccessChecksAreTheMostRecentlyUsedOfTheConnection", recentAccessChecksAreTheMostRecentlyUsedOfTheConnection},
 	{"RecentAccessChecksLeaveOutTheChecksUsedBeforeTheBound", recentAccessChecksLeaveOutTheChecksUsedBeforeTheBound},
 	{"DeleteUnusedAccessChecksDeletesTheChecksUsedBeforeTheBound", deleteUnusedAccessChecksDeletesTheChecksUsedBeforeTheBound},
+	{"DeleteUnusedAccessChecksDeletesTheDenialsMadeBeforeTheirBound", deleteUnusedAccessChecksDeletesTheDenialsMadeBeforeTheirBound},
 	{"DeleteUnusedConnectionsDeletesTheirAccessChecks", deleteUnusedConnectionsDeletesTheirAccessChecks},
 }
 
@@ -47,6 +52,12 @@ func runAccessChecks(t *testing.T, newStore func(t *testing.T) oauth.Store) {
 // lookup started at checked, and which was last used then.
 func checkOf(c oauth.Connection, repo string, id int64, checked time.Time) oauth.AccessCheck {
 	return oauth.AccessCheck{ConnectionID: c.ID, Repo: repo, RepoID: id, CheckedAt: checked, LastUsedAt: checked}
+}
+
+// denialOf is the denial of repo to c by a lookup that started at checked,
+// and which was last used then.
+func denialOf(c oauth.Connection, repo string, checked time.Time) oauth.AccessCheck {
+	return checkOf(c, repo, 0, checked)
 }
 
 func storeCheck(t *testing.T, s oauth.Store, c oauth.AccessCheck) {
@@ -221,6 +232,61 @@ func anOlderCheckNeverReplacesALaterOne(t *testing.T, s oauth.Store) {
 	requireChecks(t, s, c.ID, []oauth.AccessCheck{want}, "a newer check replaces the ID and the time, not a later use")
 }
 
+// A pass whose lookup started before a denial's, and which GitHub answered
+// after it, is not stored: the denial stands, and no session takes the pass.
+func anOlderPassNeverReplacesALaterDenial(t *testing.T, s oauth.Store) {
+	now := loginNow()
+	c := connectionAt(1, now)
+	session := newSession(t, s, "req-1", c, now)
+	storeCheck(t, s, denialOf(c, "o/r", now.Add(2*time.Minute)))
+	storeCheck(t, s, checkOf(c, "o/r", 11, now.Add(time.Minute)))
+
+	requireStale(t, s, session.ID, "o/r", now.Add(3*time.Minute))
+	requireChecks(t, s, c.ID, nil, "the denial is no check")
+}
+
+func aLaterPassReplacesAnOlderDenial(t *testing.T, s oauth.Store) {
+	now := loginNow()
+	c := connectionAt(1, now)
+	session := newSession(t, s, "req-1", c, now)
+	storeCheck(t, s, denialOf(c, "o/r", now.Add(time.Minute)))
+	pass := checkOf(c, "o/r", 11, now.Add(2*time.Minute))
+	storeCheck(t, s, pass)
+
+	requireFresh(t, s, session.ID, "o/r", now.Add(3*time.Minute), 11)
+	pass.LastUsedAt = now.Add(3 * time.Minute)
+	requireChecks(t, s, c.ID, []oauth.AccessCheck{pass})
+}
+
+// A denial whose lookup started before a pass's, and which GitHub answered
+// after it, leaves the pass.
+func anOlderDenialNeverReplacesALaterPass(t *testing.T, s oauth.Store) {
+	now := loginNow()
+	c := connectionAt(1, now)
+	session := newSession(t, s, "req-1", c, now)
+	pass := checkOf(c, "o/r", 11, now.Add(2*time.Minute))
+	storeCheck(t, s, pass)
+	storeCheck(t, s, denialOf(c, "o/r", now.Add(time.Minute)))
+
+	requireChecks(t, s, c.ID, []oauth.AccessCheck{pass}, "the pass stands")
+	requireFresh(t, s, session.ID, "o/r", now.Add(2*time.Minute), 11)
+}
+
+// A denial is kept only to order the answers. No session takes it, and the
+// checks of a connection leave it out.
+func aDenialIsNeverFreshNorRecent(t *testing.T, s oauth.Store) {
+	now := loginNow()
+	c := connectionAt(1, now)
+	session := newSession(t, s, "req-1", c, now)
+	storeCheck(t, s, checkOf(c, "o/r", 11, now))
+	storeCheck(t, s, denialOf(c, "o/r", now.Add(time.Minute)))
+	storeCheck(t, s, denialOf(c, "o/new", now.Add(time.Minute)))
+
+	requireStale(t, s, session.ID, "o/r", now.Add(2*time.Minute))
+	requireStale(t, s, session.ID, "o/new", now.Add(2*time.Minute))
+	requireChecks(t, s, c.ID, nil)
+}
+
 func storeAccessCheckOfAnUnknownConnectionIsUnknown(t *testing.T, s oauth.Store) {
 	now := loginNow()
 	c := connectionAt(1, now)
@@ -240,7 +306,6 @@ func storeAccessCheckValidatesInput(t *testing.T, s oauth.Store) {
 		"no connection":         func(a *oauth.AccessCheck) { a.ConnectionID = "" },
 		"no repository":         func(a *oauth.AccessCheck) { a.Repo = "" },
 		"a capital letter":      func(a *oauth.AccessCheck) { a.Repo = "o/R" },
-		"no repository ID":      func(a *oauth.AccessCheck) { a.RepoID = 0 },
 		"a negative repository": func(a *oauth.AccessCheck) { a.RepoID = -1 },
 		"no lookup time":        func(a *oauth.AccessCheck) { a.CheckedAt = time.Time{} },
 		"no last use":           func(a *oauth.AccessCheck) { a.LastUsedAt = time.Time{} },
@@ -251,25 +316,26 @@ func storeAccessCheckValidatesInput(t *testing.T, s oauth.Store) {
 	}
 	requireChecks(t, s, c.ID, nil, "no invalid check is stored")
 	storeCheck(t, s, valid)
+	storeCheck(t, s, denialOf(c, "o/denied", now))
 }
 
-func deleteAccessCheckDeletesThatCheckOnly(t *testing.T, s oauth.Store) {
-	ctx := context.Background()
+// A denial takes away the connection's check of that repository, and no
+// other check.
+func aDenialTakesAwayThatCheckOnly(t *testing.T, s oauth.Store) {
 	now := loginNow()
 	c, other := connectionAt(1, now), connectionAt(2, now)
-	approvedRequest(t, s, "req-1", c, now)
+	session := newSession(t, s, "req-1", c, now)
 	approvedRequest(t, s, "req-2", other, now)
-	storeCheck(t, s, checkOf(c, "o/a", 11, now.Add(time.Minute)))
+	storeCheck(t, s, checkOf(c, "o/a", 11, now))
 	kept := checkOf(c, "o/b", 12, now)
 	storeCheck(t, s, kept)
 	theirs := checkOf(other, "o/a", 11, now)
 	storeCheck(t, s, theirs)
 
-	require.NoError(t, s.DeleteAccessCheck(ctx, c.ID, "o/a"))
+	storeCheck(t, s, denialOf(c, "o/a", now.Add(time.Minute)))
+	requireStale(t, s, session.ID, "o/a", now.Add(time.Minute))
 	requireChecks(t, s, c.ID, []oauth.AccessCheck{kept})
 	requireChecks(t, s, other.ID, []oauth.AccessCheck{theirs}, "another connection keeps its check of the repository")
-	require.NoError(t, s.DeleteAccessCheck(ctx, c.ID, "o/a"), "a check that is gone")
-	require.NoError(t, s.DeleteAccessCheck(ctx, connectionAt(3, now).ID, "o/a"), "an unknown connection")
 }
 
 func recentAccessChecksAreTheMostRecentlyUsedOfTheConnection(t *testing.T, s oauth.Store) {
@@ -329,12 +395,49 @@ func deleteUnusedAccessChecksDeletesTheChecksUsedBeforeTheBound(t *testing.T, s 
 		storeCheck(t, s, check)
 	}
 
-	n, err := s.DeleteUnusedAccessChecks(ctx, bound)
+	n, err := s.DeleteUnusedAccessChecks(ctx, bound, time.Time{})
 	require.NoError(t, err)
 	require.EqualValues(t, 2, n)
 	requireChecks(t, s, c.ID, []oauth.AccessCheck{at})
 	requireChecks(t, s, other.ID, nil)
-	n, err = s.DeleteUnusedAccessChecks(ctx, bound)
+	n, err = s.DeleteUnusedAccessChecks(ctx, bound, time.Time{})
+	require.NoError(t, err)
+	require.Zero(t, n, "nothing is left to delete")
+}
+
+// A denial whose lookup started before its bound goes, of every connection,
+// and one that started at the bound or later stays, to keep the older passes
+// out. A pass that started before the bound stays.
+func deleteUnusedAccessChecksDeletesTheDenialsMadeBeforeTheirBound(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	now := loginNow()
+	c, other := connectionAt(1, now), connectionAt(2, now)
+	approvedRequest(t, s, "req-1", c, now)
+	approvedRequest(t, s, "req-2", other, now)
+	bound := now.Add(time.Hour)
+	pass := checkOf(c, "o/pass", 11, bound.Add(-time.Hour))
+	pass.LastUsedAt = bound
+	for _, check := range []oauth.AccessCheck{
+		pass, denialOf(c, "o/before", bound.Add(-time.Microsecond)), denialOf(c, "o/at", bound),
+		denialOf(other, "o/before", bound.Add(-time.Minute)),
+	} {
+		storeCheck(t, s, check)
+	}
+
+	n, err := s.DeleteUnusedAccessChecks(ctx, now, bound)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, n)
+	requireChecks(t, s, c.ID, []oauth.AccessCheck{pass}, "a pass stays")
+	storeCheck(t, s, checkOf(c, "o/before", 12, bound.Add(-time.Minute)))
+	storeCheck(t, s, checkOf(c, "o/at", 13, bound.Add(-time.Minute)))
+	got, err := s.RecentAccessChecks(ctx, c.ID, time.Time{}, 10)
+	require.NoError(t, err)
+	var repos []string
+	for _, check := range got {
+		repos = append(repos, check.Repo)
+	}
+	require.ElementsMatch(t, []string{"o/pass", "o/before"}, repos, "the denial at the bound stays and keeps the older pass out")
+	n, err = s.DeleteUnusedAccessChecks(ctx, now, bound)
 	require.NoError(t, err)
 	require.Zero(t, n, "nothing is left to delete")
 }
