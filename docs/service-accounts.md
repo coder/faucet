@@ -125,7 +125,7 @@ A token matches a rule when all of these hold:
 - Its signature verifies with the issuer's key of that `kid`. A discovery document must name the rule's issuer byte for byte.
 - Its `iss` is the rule's issuer, byte for byte, and its `aud` is faucet's public URL alone, such as `https://faucet.example.com`, as a string or an array of one. That is faucet's issuer, not the `/github/mcp` endpoint.
 - Its `exp` is at least a second away. It has an `iat` or an `nbf`, each at most a minute ahead of faucet's clock, and it lives at most 24 hours, from the earlier of the two to its `exp`. Vercel and Kubernetes set both.
-- It has no `act` claim, so it acts for no other party (RFC 8693 section 4.1).
+- Its `act` claim, if it has one, names no other party (RFC 8693 section 4.1): it is an object of `iat`, `aud`, `exp` and `nbf` alone. Vercel's token for a custom audience carries such an `act`, with the `iat` and `aud` of the token that Vercel exchanged.
 - Each claim that the rule pins holds that value as a JSON string, byte for byte.
 
 Faucet tries the client's rules in the order they were added, and the first that matches wins.
