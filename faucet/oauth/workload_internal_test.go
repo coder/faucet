@@ -80,6 +80,11 @@ func vercelClaims(now time.Time) map[string]any {
 		"owner": "codercom", "owner_id": testVercelTeam,
 		"project": "digest-bot", "project_id": testVercelProject,
 		"environment": "production",
+		// A token for a custom audience also carries these, as the claim names
+		// of a real one showed on 2026-11-18. act holds the iat and the aud of
+		// the token that Vercel exchanged.
+		"deployment_id": "dpl_7Gw5ZMBpQA8h9GF832KGp7nwbuh3", "plan": "enterprise", "scope": "owner:codercom:project:digest-bot:environment:production",
+		"act": map[string]any{"iat": now.Add(-time.Minute).Unix(), "aud": "https://vercel.com/codercom"},
 	}
 }
 
@@ -438,17 +443,28 @@ func TestTheTokenMustBeValidNow(t *testing.T) {
 	}
 }
 
-func TestATokenWithAnActClaimIsRefused(t *testing.T) {
+func TestATokenWhoseActNamesAnotherPartyIsRefused(t *testing.T) {
 	t.Parallel()
 	clock := quartz.NewMock(t)
 	now := clock.Now()
 	rule := testKubernetesRule(t, publicJWK(testRSAKey(), testKID))
 	c := newWorkloadChecker(&http.Client{}, clock)
-	for _, act := range []any{map[string]any{"sub": "system:serviceaccount:apps:other-bot"}, nil, "x"} {
+	for _, act := range []any{
+		map[string]any{"sub": "system:serviceaccount:apps:other-bot"},
+		map[string]any{"iat": now.Unix(), "iss": testKubernetesIssuer},
+		map[string]any{"aud": "x", "act": map[string]any{"sub": "y"}},
+		nil, "x", []any{},
+	} {
 		claims := kubernetesClaims(now)
 		claims["act"] = act
 		_, err := checkAt(t, c, now, signToken(t, jose.RS256, testRSAKey(), testKID, claims), rule)
-		requireTokenRefused(t, err, "it carries an act claim, the delegation of RFC 8693", act)
+		requireTokenRefused(t, err, "its act claim names another party, the delegation of RFC 8693", act)
+	}
+	for _, act := range []any{map[string]any{}, map[string]any{"iat": now.Unix(), "aud": "https://vercel.com/codercom"}, map[string]any{"exp": now.Unix(), "nbf": now.Unix()}} {
+		claims := kubernetesClaims(now)
+		claims["act"] = act
+		_, err := checkAt(t, c, now, signToken(t, jose.RS256, testRSAKey(), testKID, claims), rule)
+		require.NoError(t, err, "an act of provenance alone names no other party: %v", act)
 	}
 	claims := kubernetesClaims(now)
 	claims["may_act"] = map[string]any{"sub": "system:serviceaccount:apps:other-bot"}

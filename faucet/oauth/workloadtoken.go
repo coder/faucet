@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -125,7 +126,8 @@ func (c *workloadChecker) match(ctx context.Context, rule trustRule, jws *jose.J
 	if json.Unmarshal(payload, &registered) != nil || json.Unmarshal(payload, &claims) != nil {
 		return time.Time{}, refuseSigned("its claims must be a JSON object, with the registered claims of RFC 7519 in their types")
 	}
-	_, delegated := claims["act"]
+	act, hasAct := claims["act"]
+	delegated := hasAct && actsForAnother(act)
 	issued := registered.IssuedAt
 	if registered.NotBefore != nil && (issued == nil || registered.NotBefore.Time().Before(issued.Time())) {
 		issued = registered.NotBefore
@@ -144,7 +146,7 @@ func (c *workloadChecker) match(ctx context.Context, rule trustRule, jws *jose.J
 	case registered.IssuedAt != nil && registered.IssuedAt.Time().After(now.Add(workloadClockLeeway)):
 		return time.Time{}, refuseSigned("its iat is in the future")
 	case delegated:
-		return time.Time{}, refuseSigned("it carries an act claim, the delegation of RFC 8693, and faucet takes only a workload's own token")
+		return time.Time{}, refuseSigned("its act claim names another party, the delegation of RFC 8693, and faucet takes only a workload's own token")
 	case issued == nil:
 		return time.Time{}, refuseSigned("it must have an iat or an nbf")
 	case registered.Expiry.Time().Sub(issued.Time()) > maxSubjectTokenLifetime:
@@ -156,6 +158,28 @@ func (c *workloadChecker) match(ctx context.Context, rule trustRule, jws *jose.J
 		}
 	}
 	return registered.Expiry.Time(), nil
+}
+
+// actProvenance are the members that an act claim may hold when it names no
+// actor. Vercel's token for a custom audience carries act with only the iat
+// and the aud of the token that it was exchanged for, which records where
+// the token came from and names no other party.
+var actProvenance = []string{"iat", "aud", "exp", "nbf"}
+
+// actsForAnother reports whether act, the value of a token's act claim (RFC
+// 8693 section 4.1), names a party that acts for the workload: any act that
+// is not an object of provenance members alone.
+func actsForAnother(act any) bool {
+	members, ok := act.(map[string]any)
+	if !ok {
+		return true
+	}
+	for name := range members {
+		if !slices.Contains(actProvenance, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *workloadChecker) key(ctx context.Context, rule trustRule, header jose.Header) (any, error) {
