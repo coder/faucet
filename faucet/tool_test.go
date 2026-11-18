@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -432,6 +433,30 @@ func TestWaitAcceptsEveryCatalogTypeAndTheLimits(t *testing.T) {
 		res := h.call(args("repo", testRepo, "types", allTypes, "cursor", 0, "timeout_s", timeout)).success(t)
 		require.Len(t, res.Events, len(allTypes))
 	}
+}
+
+func TestWaitWithNamesRepeatedTensOfThousandsOfTimesCostsWhatAsManyBranchesCost(t *testing.T) {
+	t.Parallel()
+
+	h := newWaitHarness(t)
+	storePullRequests(h.ctx, t, h.store)
+	types := []string{"pr.activity", "pr.closed"}
+	actions := []string{"opened", "synchronize"}
+	branches := []string{"main"}
+	want := waitIDs(t, h, types, "actions", actions, "base_branch", branches)
+	require.NotEmpty(t, want)
+
+	const repeats = 20_000
+	start := time.Now()
+	require.Equal(t, want, waitIDs(t, h, types, "actions", actions, "base_branch", slices.Repeat(branches, 4*repeats)))
+	waitWithAsManyBranches := time.Since(start)
+
+	ctx, cancel := context.WithTimeout(h.ctx, 10*waitWithAsManyBranches)
+	defer cancel()
+	out := <-h.callAsync(ctx, args("repo", testRepo, "types", slices.Repeat(types, repeats), "actions", slices.Repeat(actions, repeats),
+		"base_branch", branches, "cursor", 0))
+	require.NoError(t, ctx.Err(), "the wait took over ten times the %v of a wait with as many branches", waitWithAsManyBranches)
+	require.Equal(t, want, out.success(t).ids(), "the answer is that of the lists without repeats")
 }
 
 func TestWaitCursorOfNothingMatchingIsTheHead(t *testing.T) {
