@@ -22,7 +22,7 @@ var giveUpMeanings = map[string]string{
 	"event_purged":               "A retention purge deleted the event before the delivery ended.",
 	"repo_mismatch":              "The event's repository is not the one that the subscription is granted now.",
 	"secret_unreadable":          "The subscriber's sealed secret does not open, as after a change of `FAUCET_WEBHOOK_KEY`. The subscription is deleted too, until its subscriber renews.",
-	"subscription_expired":       "The subscription expired before the delivery ended.",
+	"subscription_expired":       "The subscription expired before the delivery ended. A raw delivery also ends so when its subscription was unsubscribed, or deleted after a renewal found access revoked.",
 	"arguments_undecodable":      "The subscription's stored arguments do not decode, so faucet deleted the subscription with its deliveries.",
 }
 
