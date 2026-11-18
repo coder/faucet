@@ -1,0 +1,521 @@
+package oauth_test
+
+import (
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/cookiejar"
+	"net/http/httptest"
+	"net/url"
+	"regexp"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/sloghuman"
+	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/oauth"
+	"github.com/coder/quartz"
+)
+
+// Made-up values of faucet's GitHub App and of the user who logs in.
+const (
+	loginAppClientID = "Iv1.loginapp"
+	loginAppSecret   = "login-app-secret-5d1e0c"
+	loginUserID      = 583231
+	loginUserLogin   = "octo-user"
+	loginForeign     = "https://attacker.example"
+)
+
+// loginGitHub stands in for GitHub. Its authorize page sends the browser
+// straight back with a code, as GitHub does for a user who authorized the
+// App before; its token endpoint trades a code for tokens once, under PKCE;
+// and /user names the user of an access token.
+type loginGitHub struct {
+	*httptest.Server
+	mu sync.Mutex
+	// authorizes counts the browsers that reached the authorize page.
+	authorizes int
+	// codes are the codes that the authorize page gave and the token
+	// endpoint has not traded yet.
+	codes map[string]loginGitHubCode
+	// users are the access tokens that the token endpoint gave.
+	users map[string]bool
+	// issued are the tokens of each trade, in order.
+	issued []loginGitHubTokens
+	// deny makes the user refuse at GitHub.
+	deny bool
+	// tokenAnswer, when set, is the token endpoint's answer to a good trade.
+	tokenAnswer string
+	n           int
+}
+
+type loginGitHubCode struct{ challenge, redirectURI string }
+
+type loginGitHubTokens struct{ access, refresh string }
+
+func newLoginGitHub(t *testing.T) *loginGitHub {
+	t.Helper()
+	g := &loginGitHub{codes: map[string]loginGitHubCode{}, users: map[string]bool{}}
+	g.Server = httptest.NewServer(http.HandlerFunc(g.serve))
+	t.Cleanup(g.Close)
+	return g
+}
+
+func (g *loginGitHub) serve(w http.ResponseWriter, r *http.Request) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	switch r.URL.Path {
+	case "/login/oauth/authorize":
+		g.authorizes++
+		q := r.URL.Query()
+		if q.Get("client_id") != loginAppClientID || q.Get("code_challenge_method") != "S256" || q.Get("state") == "" {
+			http.Error(w, "bad authorize request", http.StatusBadRequest)
+			return
+		}
+		back := url.Values{"state": {q.Get("state")}}
+		if g.deny {
+			back.Set("error", "access_denied")
+		} else {
+			g.n++
+			code := fmt.Sprintf("gh-code-%d", g.n)
+			g.codes[code] = loginGitHubCode{challenge: q.Get("code_challenge"), redirectURI: q.Get("redirect_uri")}
+			back.Set("code", code)
+		}
+		http.Redirect(w, r, q.Get("redirect_uri")+"?"+back.Encode(), http.StatusFound)
+	case "/login/oauth/access_token":
+		_ = r.ParseForm()
+		code, ok := g.codes[r.PostForm.Get("code")]
+		delete(g.codes, r.PostForm.Get("code"))
+		w.Header().Set("Content-Type", "application/json")
+		if !ok || r.PostForm.Get("client_id") != loginAppClientID || r.PostForm.Get("client_secret") != loginAppSecret ||
+			r.PostForm.Get("redirect_uri") != code.redirectURI || loginS256(r.PostForm.Get("code_verifier")) != code.challenge {
+			_, _ = io.WriteString(w, `{"error":"bad_verification_code"}`)
+			return
+		}
+		if g.tokenAnswer != "" {
+			_, _ = io.WriteString(w, g.tokenAnswer)
+			return
+		}
+		g.n++
+		tokens := loginGitHubTokens{access: fmt.Sprintf("ghu_access%d", g.n), refresh: fmt.Sprintf("ghr_refresh%d", g.n)}
+		g.users[tokens.access] = true
+		g.issued = append(g.issued, tokens)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": tokens.access, "expires_in": 28800, "refresh_token": tokens.refresh,
+			"refresh_token_expires_in": 15897600, "token_type": "bearer", "scope": "",
+		})
+	case "/user":
+		if !g.users[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")] {
+			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": loginUserID, "login": loginUserLogin})
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (g *loginGitHub) authorizeCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.authorizes
+}
+
+func (g *loginGitHub) set(change func(g *loginGitHub)) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	change(g)
+}
+
+func (g *loginGitHub) lastTokens() loginGitHubTokens {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.issued) == 0 {
+		return loginGitHubTokens{}
+	}
+	return g.issued[len(g.issued)-1]
+}
+
+func loginS256(verifier string) string {
+	sum := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+// loginDocuments serves the client ID metadata documents over TLS.
+type loginDocuments struct {
+	*httptest.Server
+	mu   sync.Mutex
+	docs map[string]map[string]any
+}
+
+func newLoginDocuments(t *testing.T) *loginDocuments {
+	t.Helper()
+	d := &loginDocuments{docs: map[string]map[string]any{}}
+	d.Server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		d.mu.Lock()
+		doc, ok := d.docs[r.URL.Path]
+		d.mu.Unlock()
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(doc)
+	}))
+	t.Cleanup(d.Close)
+	return d
+}
+
+// loginAgents is where the clients' redirect URIs point: it records the
+// query of every request that reaches each path.
+type loginAgents struct {
+	*httptest.Server
+	mu   sync.Mutex
+	hits map[string][]string
+}
+
+func newLoginAgents(t *testing.T) *loginAgents {
+	t.Helper()
+	a := &loginAgents{hits: map[string][]string{}}
+	a.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		a.hits[r.URL.Path] = append(a.hits[r.URL.Path], r.URL.RawQuery)
+		_, _ = io.WriteString(w, "agent got it")
+	}))
+	t.Cleanup(a.Close)
+	return a
+}
+
+func (a *loginAgents) received(path string) []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.hits[path]...)
+}
+
+// loginLogs holds what the server logged.
+type loginLogs struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (l *loginLogs) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *loginLogs) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+// loginHarness serves faucet's browser login over TLS, with a stub GitHub,
+// a TLS server of client documents that faucet trusts, and the server that
+// the clients' redirect URIs point at.
+type loginHarness struct {
+	t         *testing.T
+	issuer    string
+	resource  string
+	store     *fakeStore
+	clock     *quartz.Mock
+	github    *loginGitHub
+	docs      *loginDocuments
+	agents    *loginAgents
+	logs      *loginLogs
+	keys      oauth.TokenKeys
+	transport http.RoundTripper
+}
+
+func newLoginHarness(t *testing.T) *loginHarness {
+	t.Helper()
+	h := &loginHarness{
+		t: t, store: newFakeStore(), clock: quartz.NewMock(t), github: newLoginGitHub(t),
+		docs: newLoginDocuments(t), agents: newLoginAgents(t), logs: &loginLogs{}, keys: testTokenKeys(t),
+	}
+	mux := http.NewServeMux()
+	srv := httptest.NewUnstartedServer(mux)
+	h.issuer = "https://" + srv.Listener.Addr().String()
+	h.resource = h.issuer + "/github/mcp"
+	pool := x509.NewCertPool()
+	pool.AddCert(h.docs.Certificate())
+	server, err := oauth.NewServer(oauth.ServerDeps{
+		Store: h.store, Clock: h.clock, Logger: slog.Make(sloghuman.Sink(h.logs)).Leveled(slog.LevelDebug),
+		Issuer: h.issuer, Resources: []string{h.resource},
+		Login: &oauth.BrowserLogin{
+			GitHub: oauth.GitHubApp{
+				ClientID: loginAppClientID, ClientSecret: loginAppSecret, WebURL: h.github.URL, APIURL: h.github.URL,
+				Client: &http.Client{Timeout: 5 * time.Second},
+			},
+			Keys:      h.keys,
+			Documents: faucet.NewHTTPClient(faucet.HTTPClientOptions{AllowInsecureLoopback: true, RootCAs: pool}),
+		},
+	})
+	require.NoError(t, err)
+	mux.Handle(oauth.AuthorizePath, server.AuthorizeHandler())
+	mux.Handle(oauth.GitHubCallbackPath, server.GitHubCallbackHandler())
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	h.transport = srv.Client().Transport
+	return h
+}
+
+// loginClient is a client of the browser login: the URL of its document,
+// and its one redirect URI, which points at the agents server.
+type loginClient struct {
+	id          string
+	redirectURI string
+	// path is the path of the redirect URI on the agents server.
+	path string
+}
+
+// newClient serves the document of a client named name, with members of the
+// document added or replaced. A member set to nil is left out.
+func (h *loginHarness) newClient(name string, members map[string]any) loginClient {
+	c := loginClient{id: h.docs.URL + "/" + name + ".json", path: "/cb/" + name}
+	c.redirectURI = h.agents.URL + c.path
+	doc := map[string]any{"client_id": c.id, "client_name": "Agent " + name, "redirect_uris": []string{c.redirectURI}}
+	for k, v := range members {
+		if v == nil {
+			delete(doc, k)
+		} else {
+			doc[k] = v
+		}
+	}
+	if uris, ok := doc["redirect_uris"].([]string); ok && len(uris) > 0 {
+		c.redirectURI = uris[0]
+	}
+	h.docs.mu.Lock()
+	defer h.docs.mu.Unlock()
+	h.docs.docs["/"+name+".json"] = doc
+	return c
+}
+
+// request is the query of a valid authorization request of c.
+func (h *loginHarness) request(c loginClient) url.Values {
+	return url.Values{
+		"response_type":         {"code"},
+		"client_id":             {c.id},
+		"redirect_uri":          {c.redirectURI},
+		"code_challenge":        {loginS256("agent-verifier-" + c.path)},
+		"code_challenge_method": {"S256"},
+		"resource":              {h.resource},
+		"scope":                 {"events:read events:subscribe"},
+		"state":                 {"agent-state-" + c.path},
+	}
+}
+
+// loginAnswer is what a browser got for one request.
+type loginAnswer struct {
+	url    *url.URL
+	status int
+	header http.Header
+	body   string
+}
+
+func (a loginAnswer) location(t *testing.T) *url.URL {
+	t.Helper()
+	require.Contains(t, []int{http.StatusFound, http.StatusSeeOther}, a.status, a.body)
+	u, err := a.url.Parse(a.header.Get("Location"))
+	require.NoError(t, err)
+	return u
+}
+
+// loginBrowser is one browser, with its own cookie jar. It follows a
+// redirect only when a test asks it to.
+type loginBrowser struct {
+	t      *testing.T
+	h      *loginHarness
+	jar    http.CookieJar
+	client *http.Client
+}
+
+func (h *loginHarness) newBrowser(t *testing.T) *loginBrowser {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	return &loginBrowser{t: t, h: h, jar: jar, client: &http.Client{
+		Transport: h.transport, Jar: jar, Timeout: 10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}
+}
+
+func (b *loginBrowser) do(req *http.Request) loginAnswer {
+	b.t.Helper()
+	resp, err := b.client.Do(req)
+	require.NoError(b.t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(b.t, err)
+	return loginAnswer{url: req.URL, status: resp.StatusCode, header: resp.Header, body: string(body)}
+}
+
+func (b *loginBrowser) get(u string) loginAnswer {
+	b.t.Helper()
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	require.NoError(b.t, err)
+	return b.do(req)
+}
+
+// authorize opens the authorization endpoint with query q.
+func (b *loginBrowser) authorize(q url.Values) loginAnswer {
+	b.t.Helper()
+	return b.get(b.h.issuer + oauth.AuthorizePath + "?" + q.Encode())
+}
+
+// post posts form to the authorization endpoint with these Origin headers,
+// and with cookies on top of the jar's.
+func (b *loginBrowser) post(form url.Values, origins []string, cookies ...*http.Cookie) loginAnswer {
+	b.t.Helper()
+	req, err := http.NewRequest(http.MethodPost, b.h.issuer+oauth.AuthorizePath, strings.NewReader(form.Encode()))
+	require.NoError(b.t, err)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for _, origin := range origins {
+		req.Header.Add("Origin", origin)
+	}
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	return b.do(req)
+}
+
+// follow loads each Location in turn, from a, until an answer is not a
+// redirect, and returns that answer.
+func (b *loginBrowser) follow(a loginAnswer) loginAnswer {
+	b.t.Helper()
+	for range 10 {
+		if a.status != http.StatusFound && a.status != http.StatusSeeOther {
+			return a
+		}
+		a = b.get(a.location(b.t).String())
+	}
+	require.FailNow(b.t, "too many redirects")
+	return a
+}
+
+// cookie returns the browser's cookie for faucet that is named name, or nil.
+func (b *loginBrowser) cookie(name string) *http.Cookie {
+	u, err := url.Parse(b.h.issuer)
+	require.NoError(b.t, err)
+	for _, c := range b.jar.Cookies(u) {
+		if c.Name == name {
+			return &http.Cookie{Name: c.Name, Value: c.Value}
+		}
+	}
+	return nil
+}
+
+var consentField = regexp.MustCompile(`<input type="hidden" name="(request|token)" value="([^"]*)">`)
+
+// loginConsent is the consent page of a login that a browser started: its
+// form and the cookie that the page set.
+type loginConsent struct {
+	page   loginAnswer
+	id     string
+	form   url.Values
+	cookie *http.Cookie
+}
+
+// start opens the authorization endpoint with a valid request of c and reads
+// the consent page.
+func (b *loginBrowser) start(c loginClient) loginConsent {
+	b.t.Helper()
+	page := b.authorize(b.h.request(c))
+	require.Equal(b.t, http.StatusOK, page.status, page.body)
+	return b.consentOf(page)
+}
+
+func (b *loginBrowser) consentOf(page loginAnswer) loginConsent {
+	b.t.Helper()
+	form := url.Values{}
+	for _, m := range consentField.FindAllStringSubmatch(page.body, -1) {
+		form.Add(m[1], m[2])
+	}
+	require.Len(b.t, form["request"], 1, page.body)
+	require.Len(b.t, form["token"], 1, page.body)
+	id := form.Get("request")
+	cookie := b.cookie("__Host-faucet_" + id)
+	require.NotNil(b.t, cookie, "the consent page sets the cookie of its request")
+	return loginConsent{page: page, id: id, form: form, cookie: cookie}
+}
+
+// continueWith presses Continue on the consent page: the browser posts the
+// page's form with faucet's issuer as Origin.
+func (b *loginBrowser) continueWith(c loginConsent) loginAnswer {
+	b.t.Helper()
+	return b.post(c.form, []string{b.h.issuer})
+}
+
+// R1: the attacker's server starts a login for the attacker's client, and a
+// page of the attacker makes the victim's browser post the consent form. The
+// victim authorized the App before, so GitHub would send the browser straight
+// back, and the attacker's client would get a code for the victim.
+func TestAConsentThatTheBrowserOfTheLoginDidNotSendIsRefusedAndEndsTheLogin(t *testing.T) {
+	t.Parallel()
+	h := newLoginHarness(t)
+	client := h.newClient("attacker", nil)
+	ownForm := func(own, _ loginConsent) url.Values { return own.form }
+	ownCookie := func(own, _ loginConsent) []*http.Cookie { return []*http.Cookie{own.cookie} }
+	noCookie := func(_, _ loginConsent) []*http.Cookie { return nil }
+	onlyID := func(own, _ loginConsent) url.Values { return url.Values{"request": {own.id}} }
+	for _, c := range []struct {
+		name    string
+		origins []string
+		form    func(own, other loginConsent) url.Values
+		cookies func(own, other loginConsent) []*http.Cookie
+	}{
+		{name: "the victim's browser posts only the request id", origins: []string{loginForeign}, form: onlyID, cookies: noCookie},
+		{name: "only the request id, with faucet's Origin", origins: []string{h.issuer}, form: onlyID, cookies: noCookie},
+		{name: "the victim's browser posts the request id and the form token", origins: []string{h.issuer}, form: ownForm, cookies: noCookie},
+		{name: "a foreign Origin", origins: []string{loginForeign}, form: ownForm, cookies: ownCookie},
+		{name: "Origin null", origins: []string{"null"}, form: ownForm, cookies: ownCookie},
+		{name: "no Origin", form: ownForm, cookies: ownCookie},
+		{name: "a second Origin", origins: []string{h.issuer, loginForeign}, form: ownForm, cookies: ownCookie},
+		{
+			name: "the cookie of another request", origins: []string{h.issuer}, form: ownForm,
+			cookies: func(_, other loginConsent) []*http.Cookie { return []*http.Cookie{other.cookie} },
+		},
+		{
+			name: "another request's cookie value under this request's name, with its form token", origins: []string{h.issuer},
+			form: func(own, other loginConsent) url.Values {
+				return url.Values{"request": {own.id}, "token": {other.form.Get("token")}}
+			},
+			cookies: func(own, other loginConsent) []*http.Cookie {
+				return []*http.Cookie{{Name: own.cookie.Name, Value: other.cookie.Value}}
+			},
+		},
+		{
+			name: "the right cookie and a wrong form token", origins: []string{h.issuer},
+			form: func(own, other loginConsent) url.Values {
+				return url.Values{"request": {own.id}, "token": {other.form.Get("token")}}
+			},
+			cookies: ownCookie,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			attacker := h.newBrowser(t)
+			own, other := attacker.start(client), attacker.start(client)
+
+			forged := h.newBrowser(t).post(c.form(own, other), c.origins, c.cookies(own, other)...)
+			require.Equal(t, http.StatusForbidden, forged.status, forged.body)
+			require.Empty(t, forged.header.Values("Set-Cookie"))
+			require.Empty(t, forged.header.Get("Location"))
+
+			later := attacker.follow(attacker.continueWith(own))
+			require.Equal(t, http.StatusForbidden, later.status, "the login is dead: "+later.body)
+			require.Zero(t, h.github.authorizeCount(), "no browser reached GitHub")
+			require.Empty(t, h.agents.received(client.path), "no code reached the attacker's client")
+		})
+	}
+}
