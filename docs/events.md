@@ -46,6 +46,8 @@ With `owner` or `all`, `repos` (a list of `owner/name`) keeps the events of thos
 
 An `owner` target reads only the typed events stored since faucet added owner targets, because an older event does not record its owner. An `all` target reads every event.
 
+Through an `owner` or `all` target, the `data` of a typed event also holds `repo_id` and `repo`, the full name that its delivery carried (an event stored before faucet recorded names has `repo_id` only). A `repo` target's data is as before. The data of a raw event is GitHub's payload, whose `repository` already names it.
+
 ## The Mcp-Name header
 
 Every `events/poll`, `events/subscribe` and `events/unsubscribe` request over HTTP must carry the header `Mcp-Name` with the event name of its `params.name`, or faucet answers 400 with `HeaderMismatch`. The go-sdk client does not set it for `events/*` yet. A host that embeds faucet gets the check from `faucet.RequireEventName`.

@@ -269,7 +269,7 @@ func (s *Service) readEvents(ctx context.Context, req pollRequest) (*eventsPollR
 	}
 	occurrences := make([]eventOccurrence, len(events))
 	for i, ev := range events {
-		if occurrences[i], err = occurrenceOf(req.entry.name, ev); err != nil {
+		if occurrences[i], err = occurrenceOf(req.entry.name, ev, req.query.Target); err != nil {
 			return nil, err
 		}
 	}
@@ -307,11 +307,14 @@ func newPollResult(events []eventOccurrence, cursor int64, truncated, hasMore bo
 // occurrenceOf names the event by the name it was asked for. It adds the pull
 // request numbers, the head SHA, the stored type and its action to the data,
 // because the store keeps them in columns and the payload schemas list them.
-func occurrenceOf(name string, ev Event) (eventOccurrence, error) {
+// Read through target, an owner or all target, the data also names the
+// repository, as withRepository does.
+func occurrenceOf(name string, ev Event, target Target) (eventOccurrence, error) {
 	var data map[string]json.RawMessage
 	if err := json.Unmarshal(ev.Data, &data); err != nil || data == nil {
 		return eventOccurrence{}, xerrors.Errorf("data of event %d is not a JSON object", ev.ID)
 	}
+	withRepository(data, ev, target)
 	prs := ev.PRs
 	if prs == nil {
 		prs = []int32{}
@@ -332,6 +335,20 @@ func occurrenceOf(name string, ev Event) (eventOccurrence, error) {
 		Timestamp: ev.ReceivedAt.UTC(),
 		Data:      marshalRaw(data),
 	}, nil
+}
+
+// withRepository adds repo_id and repo, the full name that the delivery
+// carried, to the data of an event read through an owner or all target,
+// which can be of any of several repositories while the data of some types,
+// such as a check suite's, names none. A repo target's data is as before.
+func withRepository(data map[string]json.RawMessage, ev Event, target Target) {
+	if target.Kind() == TargetRepo {
+		return
+	}
+	data["repo_id"] = marshalRaw(ev.RepoID)
+	if ev.RepoName != "" {
+		data["repo"] = marshalRaw(ev.RepoName)
+	}
 }
 
 func marshalRaw(v any) json.RawMessage {

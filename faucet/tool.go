@@ -2,6 +2,7 @@ package faucet
 
 import (
 	"context"
+	"encoding/json"
 	"regexp"
 	"slices"
 	"strings"
@@ -202,7 +203,9 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 
 	out := waitOutput{Events: make([]waitEvent, len(page.Events)), Cursor: page.Next, Truncated: truncated}
 	for i, ev := range page.Events {
-		out.Events[i] = toWaitEvent(ev)
+		if out.Events[i], err = toWaitEvent(ev, req.query.Target); err != nil {
+			return nil, waitOutput{}, storeError(ctx, logger, err)
+		}
 	}
 	return nil, out, nil
 }
@@ -389,10 +392,22 @@ func storeError(ctx context.Context, logger slog.Logger, err error) error {
 	return errStore
 }
 
-func toWaitEvent(ev Event) waitEvent {
+// toWaitEvent returns ev as the wait tool returns it. Read through target, an
+// owner or all target, its data names the repository, as withRepository
+// does.
+func toWaitEvent(ev Event, target Target) (waitEvent, error) {
 	prs := ev.PRs
 	if prs == nil {
 		prs = []int32{}
+	}
+	data := ev.Data
+	if target.Kind() != TargetRepo {
+		var members map[string]json.RawMessage
+		if err := json.Unmarshal(ev.Data, &members); err != nil || members == nil {
+			return waitEvent{}, xerrors.Errorf("data of event %d is not a JSON object", ev.ID)
+		}
+		withRepository(members, ev, target)
+		data = marshalRaw(members)
 	}
 	return waitEvent{
 		ID:         ev.ID,
@@ -400,7 +415,7 @@ func toWaitEvent(ev Event) waitEvent {
 		RepoID:     ev.RepoID,
 		PRs:        prs,
 		HeadSHA:    ev.HeadSHA,
-		Data:       ev.Data,
+		Data:       data,
 		ReceivedAt: ev.ReceivedAt,
-	}
+	}, nil
 }

@@ -752,7 +752,7 @@ func (r *deliveryRun) decide(ctx context.Context, o outbound) attemptOutcome {
 }
 
 func buildBody(claim DeliveryClaim, ev Event) ([]byte, attemptOutcome, bool) {
-	occ, err := occurrenceOf(claim.EventType, ev)
+	occ, err := occurrenceOf(claim.EventType, ev, claim.Target)
 	if err != nil {
 		return nil, giveUp(GiveUpEventMalformed), false
 	}

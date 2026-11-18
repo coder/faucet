@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/coder/faucet/faucet"
 )
 
 // ownedRepo is a repository and the account that owns it.
@@ -234,4 +236,57 @@ func TestAPollLeaseOfAnOwnerReadsEachOfItsRepositories(t *testing.T) {
 	page := h.pollRaw("github.push", args("owner", "coder"), opened.Cursor)
 	require.Equal(t, []string{"push-coder/a", "push-coder/b"}, page.eventIDs())
 	require.False(t, page.Truncated)
+}
+
+// An event read through an owner or all target says in its data which
+// repository it is of, because the data of some types, such as a check
+// suite's, names none. An event read through a repo target is as before.
+func TestAnEventOfAnOwnerOrAllTargetNamesItsRepository(t *testing.T) {
+	t.Parallel()
+	named := func(t *testing.T, data json.RawMessage) (repo, repoID any) {
+		t.Helper()
+		var members map[string]any
+		require.NoError(t, json.Unmarshal(data, &members))
+		return members["repo"], members["repo_id"]
+	}
+
+	d := newDeliverHarness(t, asCaller(newServicePrincipal(t), orgGrants()))
+	for path, arguments := range map[string]map[string]any{"/owner": args("owner", "coder"), "/all": args("all", true)} {
+		d.subscribe(subscribeTo(arguments, d.rcv.url(path), newSecret(t, 32)))
+	}
+	d.advance(time.Second)
+	d.post("workflow_run", "run-a", runOf(t, coderA))
+	require.Equal(t, 2, d.deliverDue().Delivered)
+	for _, path := range []string{"/owner", "/all"} {
+		requests := d.rcv.requests(path)
+		require.Len(t, requests, 1, path)
+		data := requests[0].body(t).Data
+		require.Equal(t, coderA.fullName, data["repo"], path)
+		require.EqualValues(t, coderA.id, data["repo_id"], path)
+	}
+
+	h := newRawPollHarness(t, asCaller(newServicePrincipal(t), orgGrants()))
+	opened := h.poll(pollParams("ci.run_completed", args("owner", "coder"), nil))
+	h.post("workflow_run", "run-a", runOf(t, coderA))
+	polled := h.poll(pollParams("ci.run_completed", args("owner", "coder"), cursorOf(opened.Cursor)))
+	require.Len(t, polled.Events, 1)
+	require.Equal(t, coderA.fullName, polled.Events[0].Data["repo"])
+	require.EqualValues(t, coderA.id, polled.Events[0].Data["repo_id"])
+
+	w := newWaitHarness(t, asCaller(newServicePrincipal(t), orgGrants()))
+	_, _, err := w.store.InsertEvent(w.ctx, faucet.Event{
+		Source: "github", DeliveryID: "run-a", Type: "ci.run_completed", RepoID: coderA.id, OwnerID: ownerID, RepoName: coderA.fullName,
+		Data: json.RawMessage(`{"conclusion":"success"}`),
+	})
+	require.NoError(t, err)
+	waited := w.call(args("owner", "coder", "types", []string{"ci.run_completed"}, "cursor", 0)).success(t)
+	require.Len(t, waited.Events, 1)
+	repo, id := named(t, waited.Events[0].Data)
+	require.Equal(t, coderA.fullName, repo)
+	require.EqualValues(t, coderA.id, id)
+
+	w.insert(repoID, "ci.run_completed", "")
+	waited = w.call(args("repo", testRepo, "types", []string{"ci.run_completed"}, "cursor", 0)).success(t)
+	require.Len(t, waited.Events, 1)
+	require.JSONEq(t, `{"conclusion":"success"}`, string(waited.Events[0].Data), "a repo target's data is as before")
 }
