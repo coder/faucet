@@ -10,6 +10,7 @@ SELECT
 FROM faucet_subscriptions s, head
 WHERE s.expires_at > sqlc.arg(now)
   AND s.scanned_through < head.max_id
+  AND NOT s.principal = ANY(sqlc.arg(skip_principals)::text[])
   AND (
     s.scanned_through < (SELECT purged_through FROM faucet_purge_mark)
     OR (s.target_kind = 'repo' AND EXISTS (

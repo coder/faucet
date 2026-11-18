@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"time"
 
@@ -68,7 +69,7 @@ func (s *fakeStore) headLocked() int64 {
 	return head
 }
 
-func (s *fakeStore) ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32) ([]faucet.ScanTarget, error) {
+func (s *fakeStore) ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32, skipPrincipals ...string) ([]faucet.ScanTarget, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -84,7 +85,8 @@ func (s *fakeStore) ScanTargets(ctx context.Context, now time.Time, maxPending, 
 	var targets []faucet.ScanTarget
 	for key, sub := range s.subs {
 		pending := s.pendingLocked(key)
-		if !sub.ExpiresAt.After(now) || s.scanned[key] >= head || pending >= maxPending || !s.hasSomethingToReadLocked(key, sub) {
+		if !sub.ExpiresAt.After(now) || s.scanned[key] >= head || pending >= maxPending || slices.Contains(skipPrincipals, sub.Principal) ||
+			!s.hasSomethingToReadLocked(key, sub) {
 			continue
 		}
 		targets = append(targets, faucet.ScanTarget{
@@ -359,9 +361,28 @@ func (s *fakeStore) repeatCurrentSecretAsPrevious(key faucet.SubscriptionKeyHash
 
 // A row written by another version of faucet can hold such arguments.
 func (s *fakeStore) corruptArguments(key faucet.SubscriptionKeyHash) {
+	s.setArguments(key, json.RawMessage(`{"repo":"octo/repo","pr":"not a number"}`))
+}
+
+// appendRunEvents stores n run events of the test repository at once. It
+// skips the delivery ID check of InsertEvent, which reads every event, so a
+// test can store a long history quickly.
+func (s *fakeStore) appendRunEvents(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for range n {
+		s.lastID++
+		s.events = append(s.events, faucet.Event{
+			ID: s.lastID, Source: "github", DeliveryID: fmt.Sprintf("history-%d", s.lastID), Type: "ci.run_completed",
+			RepoID: repoID, Data: json.RawMessage(sampleData["ci.run_completed"]), ReceivedAt: s.nowLocked(),
+		})
+	}
+}
+
+func (s *fakeStore) setArguments(key faucet.SubscriptionKeyHash, arguments json.RawMessage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sub := s.subs[key]
-	sub.Arguments = json.RawMessage(`{"repo":"octo/repo","pr":"not a number"}`)
+	sub.Arguments = arguments
 	s.subs[key] = sub
 }

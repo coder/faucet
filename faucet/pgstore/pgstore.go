@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 
 	"golang.org/x/xerrors"
@@ -127,6 +128,10 @@ func (s *Store) PollEvents(ctx context.Context, q faucet.PollQuery) (_ faucet.Po
 	if types == nil {
 		types = []string{}
 	}
+	through := q.Through
+	if through == 0 {
+		through = math.MaxInt64
+	}
 	filters := make([]fieldFilter, len(q.Fields))
 	for i, f := range q.Fields {
 		filters[i] = fieldFilter(f)
@@ -146,6 +151,7 @@ func (s *Store) PollEvents(ctx context.Context, q faucet.PollQuery) (_ faucet.Po
 		Pr:         q.PR,
 		Fields:     string(fields),
 		RowLimit:   q.Limit,
+		Through:    through,
 	})
 	if err != nil {
 		return faucet.PollPage{}, xerrors.Errorf("poll events: %w", err)
@@ -154,7 +160,7 @@ func (s *Store) PollEvents(ctx context.Context, q faucet.PollQuery) (_ faucet.Po
 		return faucet.PollPage{}, xerrors.New("poll events: statement returned no head row")
 	}
 
-	page := faucet.PollPage{Next: max(rows[0].MaxID, q.After), PurgedThrough: rows[0].PurgedThrough}
+	page := faucet.PollPage{Next: max(min(rows[0].MaxID, through), q.After), PurgedThrough: rows[0].PurgedThrough}
 	for _, row := range rows {
 		if row.ID.Valid {
 			page.Events = append(page.Events, pollRowToEvent(row))

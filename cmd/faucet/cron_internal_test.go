@@ -115,7 +115,7 @@ type cronStore struct {
 	expired int64
 }
 
-func (s *cronStore) ScanTargets(context.Context, time.Time, int32, int32) ([]faucet.ScanTarget, error) {
+func (s *cronStore) ScanTargets(context.Context, time.Time, int32, int32, ...string) ([]faucet.ScanTarget, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return nil, s.failing

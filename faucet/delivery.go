@@ -296,7 +296,7 @@ type DeliverResult struct {
 	// other run counts its end.
 	Superseded int
 	// Incomplete says that due work was left, because the run reached its
-	// limit or its deadline.
+	// limit or its deadline, or a subscription's read ran out of time.
 	Incomplete bool
 	// RawFailures counts the calls of the RawStore that failed. The first
 	// ends the raw part of the run, which then sends no more raw deliveries or

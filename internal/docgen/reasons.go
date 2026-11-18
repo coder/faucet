@@ -23,7 +23,7 @@ var giveUpMeanings = map[string]string{
 	"repo_mismatch":              "The event is outside the target that the subscription is granted now: another repository, or a repository of another owner.",
 	"secret_unreadable":          "The subscriber's sealed secret does not open, as after a change of `FAUCET_WEBHOOK_KEY`. The subscription is deleted too, until its subscriber renews.",
 	"subscription_expired":       "The subscription expired before the delivery ended. A raw delivery also ends so when its subscription was unsubscribed, or deleted after a renewal found access revoked.",
-	"arguments_undecodable":      "The subscription's stored arguments do not decode, so faucet deleted the subscription with its deliveries.",
+	"arguments_undecodable":      "The subscription's stored arguments do not decode, or hold a list longer than an argument may now be, so faucet deleted the subscription with its deliveries.",
 }
 
 // callbackReason explains one faucet.CallbackReason. faucet's

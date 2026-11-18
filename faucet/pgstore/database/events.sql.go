@@ -382,15 +382,16 @@ WITH mark AS (
     )
     AND (cardinality($4::text[]) = 0 OR lower(e.repo_name) = ANY($4::text[]))
     AND e.id > $5
-    AND (cardinality($6::text[]) = 0 OR e.type = ANY($6::text[]))
-    AND ($7::text = '' OR e.head_sha = $7::text)
-    AND ($8::int = 0 OR $8::int = ANY(e.prs))
+    AND e.id <= $6::bigint
+    AND (cardinality($7::text[]) = 0 OR e.type = ANY($7::text[]))
+    AND ($8::text = '' OR e.head_sha = $8::text)
+    AND ($9::int = 0 OR $9::int = ANY(e.prs))
     AND NOT EXISTS (
-      SELECT 1 FROM jsonb_to_recordset($9::text::jsonb) AS f(field text, matches text[], types text[])
+      SELECT 1 FROM jsonb_to_recordset($10::text::jsonb) AS f(field text, matches text[], types text[])
       WHERE e.type = ANY(f.types) AND NOT COALESCE(e.data ->> f.field = ANY(f.matches), false)
     )
   ORDER BY e.id
-  LIMIT $10
+  LIMIT $11
 )
 SELECT
   head.max_id,
@@ -408,6 +409,7 @@ type PollEventsParams struct {
 	OwnerID    int64
 	RepoNames  []string
 	AfterID    int64
+	Through    int64
 	Types      []string
 	HeadSha    string
 	Pr         int32
@@ -442,6 +444,7 @@ func (q *Queries) PollEvents(ctx context.Context, arg PollEventsParams) ([]PollE
 		arg.OwnerID,
 		pq.Array(arg.RepoNames),
 		arg.AfterID,
+		arg.Through,
 		pq.Array(arg.Types),
 		arg.HeadSha,
 		arg.Pr,

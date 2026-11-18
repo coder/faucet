@@ -46,6 +46,7 @@ WITH mark AS (
     )
     AND (cardinality(sqlc.arg(repo_names)::text[]) = 0 OR lower(e.repo_name) = ANY(sqlc.arg(repo_names)::text[]))
     AND e.id > sqlc.arg(after_id)
+    AND e.id <= sqlc.arg(through)::bigint
     AND (cardinality(sqlc.arg(types)::text[]) = 0 OR e.type = ANY(sqlc.arg(types)::text[]))
     AND (sqlc.arg(head_sha)::text = '' OR e.head_sha = sqlc.arg(head_sha)::text)
     AND (sqlc.arg(pr)::int = 0 OR sqlc.arg(pr)::int = ANY(e.prs))

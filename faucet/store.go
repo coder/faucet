@@ -88,6 +88,10 @@ type PollQuery struct {
 	After int64
 	// Limit is the page size. It must be positive.
 	Limit int32
+	// Through, when positive, limits the result to events with ID <= Through,
+	// so a read looks at no more than Through - After IDs however few of them
+	// match or belong to the Target. Zero means no limit.
+	Through int64
 }
 
 // Validate checks the fields a caller supplies to Store.PollEvents.
@@ -101,6 +105,8 @@ func (q PollQuery) Validate() error {
 		return xerrors.New("after must not be negative")
 	case q.PR < 0:
 		return xerrors.New("pr must not be negative")
+	case q.Through < 0:
+		return xerrors.New("through must not be negative")
 	case slices.ContainsFunc(q.Fields, func(f FieldFilter) bool { return f.Field == "" }):
 		return xerrors.New("a field filter must name a field")
 	}
@@ -127,9 +133,10 @@ type PollPage struct {
 	Events []Event
 	// Next is the cursor to poll with next. It is Events[len(Events)-1].ID
 	// when the page is full. Otherwise it is the highest event ID the store
-	// had when it answered, so a waiter whose repository is quiet does not
-	// rescan other repositories' events. It is never lower than the query's
-	// After or than PurgedThrough.
+	// had when it answered, or Through when that is lower, so a waiter whose
+	// repository is quiet does not rescan other repositories' events. It is
+	// never lower than the query's After, and not lower than PurgedThrough
+	// unless Through is.
 	Next int64
 	// PurgedThrough is the purge mark: the highest event ID any purge has
 	// deleted, or 0. The store reads it in the same snapshot as Events, so a
@@ -296,9 +303,9 @@ type Store interface {
 	// ScanTargets returns the live subscriptions at now that hold fewer than
 	// maxPending unsent deliveries and have something to read: an event that
 	// their target covers, of their event types, above their read position,
-	// or a purge mark above it. The ones furthest behind come first, at most
-	// limit.
-	ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32) ([]ScanTarget, error)
+	// or a purge mark above it, and whose principal is none of
+	// skipPrincipals. The ones furthest behind come first, at most limit.
+	ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32, skipPrincipals ...string) ([]ScanTarget, error)
 	// EnqueueDeliveries queues e.Deliveries and moves the subscription's read
 	// position to e.NewScannedThrough in one transaction, and only if the
 	// subscription is live at now and still at e.ExpectedScannedThrough. It

@@ -110,7 +110,7 @@ A delivery that a run takes and that doesn't succeed ends with one of these reas
 | `repo_mismatch` | The event is outside the target that the subscription is granted now: another repository, or a repository of another owner. |
 | `secret_unreadable` | The subscriber's sealed secret does not open, as after a change of `FAUCET_WEBHOOK_KEY`. The subscription is deleted too, until its subscriber renews. |
 | `subscription_expired` | The subscription expired before the delivery ended. A raw delivery also ends so when its subscription was unsubscribed, or deleted after a renewal found access revoked. |
-| `arguments_undecodable` | The subscription's stored arguments do not decode, so faucet deleted the subscription with its deliveries. |
+| `arguments_undecodable` | The subscription's stored arguments do not decode, or hold a list longer than an argument may now be, so faucet deleted the subscription with its deliveries. |
 <!-- END generated:give-up-reasons -->
 
 A delivery can also end with its subscription and no reason: `events/unsubscribe` and a renewal that finds access revoked delete the subscription with the deliveries it still holds, and `/cron/purge` counts the deliveries of the expired subscriptions that it deletes in `ended_deliveries`.

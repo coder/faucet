@@ -11,12 +11,12 @@ import (
 	"github.com/coder/faucet/faucet/pgstore/database"
 )
 
-func (s *Store) ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32) (_ []faucet.ScanTarget, err error) {
+func (s *Store) ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32, skipPrincipals ...string) (_ []faucet.ScanTarget, err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if maxPending <= 0 || limit <= 0 {
 		return nil, xerrors.New("max pending and limit must be positive")
 	}
-	rows, err := s.q.ScanTargets(ctx, database.ScanTargetsParams{Now: now, MaxPending: maxPending, RowLimit: limit})
+	rows, err := s.q.ScanTargets(ctx, database.ScanTargetsParams{Now: now, MaxPending: maxPending, RowLimit: limit, SkipPrincipals: nonNil(skipPrincipals)})
 	if err != nil {
 		return nil, xerrors.Errorf("select scan targets: %w", err)
 	}
