@@ -9,3 +9,6 @@ DELETE FROM faucet_access_tokens WHERE expires_at <= @now;
 SELECT token_hash, expires_at, scopes, resource, subject_kind, subject
 FROM faucet_access_tokens
 WHERE token_hash = @token_hash;
+
+-- name: DeleteAccessToken :exec
+DELETE FROM faucet_access_tokens WHERE token_hash = @token_hash;

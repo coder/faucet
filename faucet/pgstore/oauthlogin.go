@@ -321,6 +321,27 @@ func (s *Store) DeleteExpiredAuthRequests(ctx context.Context, before time.Time)
 	return n, nil
 }
 
+// DeleteEndedSessions implements oauth.LoginStore. Their refresh tokens go
+// with them by the foreign key's cascade.
+func (s *Store) DeleteEndedSessions(ctx context.Context, now, idleSince time.Time) (_ int64, err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	n, err := s.q.DeleteEndedSessions(ctx, database.DeleteEndedSessionsParams{Now: now, IdleSince: idleSince})
+	if err != nil {
+		return 0, xerrors.Errorf("delete ended sessions: %w", err)
+	}
+	return n, nil
+}
+
+// DeleteUnusedConnections implements oauth.LoginStore in one statement.
+func (s *Store) DeleteUnusedConnections(ctx context.Context, updatedBefore time.Time) (_ int64, err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	n, err := s.q.DeleteUnusedConnections(ctx, updatedBefore)
+	if err != nil {
+		return 0, xerrors.Errorf("delete unused connections: %w", err)
+	}
+	return n, nil
+}
+
 func authRequestOf(row database.FaucetAuthRequest) (oauth.AuthRequest, error) {
 	var hashes [3]oauth.TokenHash
 	for i, raw := range [][]byte{row.BrowserHash, row.GithubStateHash, row.CodeHash} {

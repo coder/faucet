@@ -136,6 +136,10 @@ type authServerMetadata struct {
 	// 9207).
 	ClientIDMetadataDocumentSupported          bool `json:"client_id_metadata_document_supported,omitempty"`
 	AuthorizationResponseIssParameterSupported bool `json:"authorization_response_iss_parameter_supported,omitempty"`
+	// RevocationEndpoint (RFC 7009) takes the clients that the token
+	// endpoint takes, authenticated the same ways.
+	RevocationEndpoint                     string   `json:"revocation_endpoint"`
+	RevocationEndpointAuthMethodsSupported []string `json:"revocation_endpoint_auth_methods_supported"`
 }
 
 // metadataOf describes the authorization server at issuer that takes the
@@ -145,6 +149,7 @@ func metadataOf(issuer string, table map[string]grant) authServerMetadata {
 		Issuer:                        issuer,
 		AuthorizationEndpoint:         issuer + AuthorizePath,
 		TokenEndpoint:                 issuer + TokenPath,
+		RevocationEndpoint:            issuer + RevokePath,
 		ResponseTypesSupported:        []string{},
 		GrantTypesSupported:           slices.Sorted(maps.Keys(table)),
 		CodeChallengeMethodsSupported: []string{"S256"},
@@ -160,6 +165,7 @@ func metadataOf(issuer string, table map[string]grant) authServerMetadata {
 	}
 	slices.Sort(m.TokenEndpointAuthMethodsSupported)
 	m.TokenEndpointAuthMethodsSupported = slices.Compact(m.TokenEndpointAuthMethodsSupported)
+	m.RevocationEndpointAuthMethodsSupported = slices.Clone(m.TokenEndpointAuthMethodsSupported)
 	slices.Sort(m.ResponseTypesSupported)
 	m.ClientIDMetadataDocumentSupported = len(m.ResponseTypesSupported) > 0
 	m.AuthorizationResponseIssParameterSupported = len(m.ResponseTypesSupported) > 0
@@ -181,22 +187,38 @@ type PurgeResult struct {
 	// more than a day ago. A request stays for that day, so a code that is
 	// used again still ends the session it made.
 	ExpiredAuthRequests int64
+	// EndedSessions is how many sessions had ended or gone unused for 180
+	// days. Their refresh tokens went with them.
+	EndedSessions int64
+	// UnusedConnections is how many connections no session and no request
+	// named, a day after their last update. The GitHub tokens that faucet
+	// kept for their users went with them.
+	UnusedConnections int64
 }
 
 // Purge deletes the state of the login server that is past its use: every
-// access token that has expired, and every authorization request that
-// expired more than a day ago.
+// access token that has expired, every authorization request that expired
+// more than a day ago, every session that ended or went unused for 180
+// days, and then every connection that nothing names any more.
 func (s *Server) Purge(ctx context.Context) (PurgeResult, error) {
 	now := s.clock.Now()
-	tokens, err := s.store.DeleteExpiredAccessTokens(ctx, now)
-	if err != nil {
+	var res PurgeResult
+	var err error
+	if res.ExpiredAccessTokens, err = s.store.DeleteExpiredAccessTokens(ctx, now); err != nil {
 		return PurgeResult{}, err
 	}
-	requests, err := s.store.DeleteExpiredAuthRequests(ctx, now.Add(-authRequestRetention))
-	if err != nil {
+	if res.ExpiredAuthRequests, err = s.store.DeleteExpiredAuthRequests(ctx, now.Add(-authRequestRetention)); err != nil {
 		return PurgeResult{}, err
 	}
-	return PurgeResult{ExpiredAccessTokens: tokens, ExpiredAuthRequests: requests}, nil
+	if res.EndedSessions, err = s.store.DeleteEndedSessions(ctx, now, now.Add(-sessionIdleLifetime)); err != nil {
+		return PurgeResult{}, err
+	}
+	// A login stores its connection a moment before the request that names
+	// it, so a connection that a login just stored is a day from going.
+	if res.UnusedConnections, err = s.store.DeleteUnusedConnections(ctx, now.Add(-authRequestRetention)); err != nil {
+		return PurgeResult{}, err
+	}
+	return res, nil
 }
 
 // AuthorizeHandler serves the authorization endpoint at AuthorizePath: the
@@ -258,21 +280,30 @@ func (s *Server) TokenHandler() http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Pragma", "no-cache")
 		resp, err := s.token(w, r)
-		var te *tokenError
-		switch {
-		case xerrors.As(err, &te):
-			s.logger.Info(r.Context(), "token request refused", slog.F("error", te.code), slog.F("reason", te.description))
-			if te.status == http.StatusUnauthorized {
-				w.Header().Set("WWW-Authenticate", `Basic realm="faucet"`)
-			}
-			writeJSON(w, te.status, map[string]string{"error": te.code, "error_description": te.description})
-		case err != nil:
-			s.logger.Warn(r.Context(), "could not issue a token", slog.Error(err))
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error", "error_description": "could not issue a token, try again"})
-		default:
-			writeJSON(w, http.StatusOK, resp)
+		if err != nil {
+			s.writeTokenError(w, r, err, "token request", "issue a token")
+			return
 		}
+		writeJSON(w, http.StatusOK, resp)
 	})
+}
+
+// writeTokenError answers a request to the token endpoint or the
+// revocation endpoint that failed with err: a tokenError as itself (RFC
+// 6749 section 5.2), any other error as server_error. request names the
+// request and work what failed, in the log and in the answer.
+func (s *Server) writeTokenError(w http.ResponseWriter, r *http.Request, err error, request, work string) {
+	var te *tokenError
+	if !xerrors.As(err, &te) {
+		s.logger.Warn(r.Context(), "could not "+work, slog.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error", "error_description": "could not " + work + ", try again"})
+		return
+	}
+	s.logger.Info(r.Context(), request+" refused", slog.F("error", te.code), slog.F("reason", te.description))
+	if te.status == http.StatusUnauthorized {
+		w.Header().Set("WWW-Authenticate", `Basic realm="faucet"`)
+	}
+	writeJSON(w, te.status, map[string]string{"error": te.code, "error_description": te.description})
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

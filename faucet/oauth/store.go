@@ -92,6 +92,9 @@ type Store interface {
 	// expired or not, or ErrUnknownToken. A stored token need not pass
 	// Validate: a later build can write a scope that this one does not know.
 	AccessToken(ctx context.Context, hash TokenHash) (AccessToken, error)
+	// DeleteAccessToken deletes the access token whose hash is hash. An
+	// unknown hash is no error.
+	DeleteAccessToken(ctx context.Context, hash TokenHash) error
 	// DeleteExpiredAccessTokens deletes every access token that expired at or
 	// before now and returns how many it deleted.
 	DeleteExpiredAccessTokens(ctx context.Context, now time.Time) (int64, error)

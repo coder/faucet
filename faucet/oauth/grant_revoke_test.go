@@ -14,13 +14,11 @@ import (
 	"github.com/coder/faucet/faucet/oauth"
 )
 
-const revokePath = "/oauth/revoke"
-
 // revoke sends form to the revocation endpoint with authorization as the
 // Authorization header, none when it is empty.
 func (h *grantHarness) revoke(authorization string, form url.Values) tokenReply {
 	h.t.Helper()
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, h.srv.URL+revokePath, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, h.srv.URL+oauth.RevokePath, strings.NewReader(form.Encode()))
 	require.NoError(h.t, err)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if authorization != "" {

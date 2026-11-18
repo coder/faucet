@@ -66,8 +66,8 @@ An agent names itself with a Client ID Metadata Document. That is a JSON documen
 
 | What | In what form | For how long |
 | --- | --- | --- |
-| The GitHub App access token and refresh token of each user | Sealed with AES-256-GCM under `FAUCET_TOKEN_KEY`. One pair per GitHub user, which all the user's sessions share. | Until a refresh or the user's next login replaces the pair. Faucet deletes no pair, so it outlives the user's sessions. |
-| One session for each login of an agent | The SHA-256 of each refresh token that the agent may still hold, and of the one it used last. | The row stays after the session ends. |
+| The GitHub App access token and refresh token of each user | Sealed with AES-256-GCM under `FAUCET_TOKEN_KEY`. One pair per GitHub user, which all the user's sessions share. | Until a refresh or the user's next login replaces the pair. Once no session and no login request names the pair, `/cron/purge` deletes it a day after its last update. |
+| One session for each login of an agent | The SHA-256 of each refresh token that the agent may still hold, and of the one it used last. | Until the session ends or goes unused for 180 days. `/cron/purge` then deletes it with its refresh tokens. |
 | One request for each login in progress | The SHA-256 of the browser's cookie, of the state sent to GitHub and of the code. | 10 minutes to finish in the browser, then 60 seconds to redeem the code. `/cron/purge` deletes the request a day after it expired. |
 | Each faucet access token | Its SHA-256. | 15 minutes. `/cron/purge` deletes it after that. |
 
@@ -82,7 +82,7 @@ A session lasts as long as its agent refreshes its tokens. It ends, and the agen
 - **The refresh token went unused for 180 days.** GitHub ends its own refresh tokens after six months, so faucet ends the session at its next refresh.
 - **GitHub refuses the user's refresh token,** because it expired, was revoked, or was used already. Then every session of that user ends. The same happens when faucet stops after GitHub gave a user a new pair and before faucet stored that pair, because the stored refresh token is then spent.
 
-Faucet has no logout. When a user revokes faucet's App at GitHub, GitHub rejects the user's tokens at the next check, and faucet ends every session of that user. An operator can end every session of one user at once with `UPDATE faucet_user_sessions SET ended_at = now() WHERE connection_id = 'github:<GitHub user ID>' AND ended_at IS NULL`. The sealed pair stays in `faucet_connections` until the user's next login replaces it.
+An agent logs out by revoking its refresh token at `POST /oauth/revoke` (RFC 7009), which the authorization server metadata names as `revocation_endpoint`. That ends the session, so its access token fails too. A revoked access token fails alone, and its session lives on. A client can revoke only the tokens that faucet issued to it. When a user revokes faucet's App at GitHub, GitHub rejects the user's tokens at the next check, and faucet ends every session of that user. An operator can end every session of one user at once with `UPDATE faucet_user_sessions SET ended_at = now() WHERE connection_id = 'github:<GitHub user ID>' AND ended_at IS NULL`. `/cron/purge` then deletes the ended sessions, and a day later the sealed pair.
 
 ## Rotate the token key
 

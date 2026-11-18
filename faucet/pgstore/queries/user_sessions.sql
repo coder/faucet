@@ -54,3 +54,10 @@ WHERE id = @id AND ended_at IS NULL;
 UPDATE faucet_user_sessions
 SET ended_at = @now::timestamptz
 WHERE connection_id = @connection_id AND ended_at IS NULL;
+
+-- name: DeleteEndedSessions :execrows
+-- DeleteEndedSessions deletes the sessions that ended, and the live ones
+-- that went unused for too long, with their refresh tokens.
+DELETE FROM faucet_user_sessions
+WHERE ended_at <= @now::timestamptz
+  OR (ended_at IS NULL AND refreshed_at <= @idle_since::timestamptz);

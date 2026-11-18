@@ -6,13 +6,13 @@ The server applies every schema change at start (on Vercel, in production only, 
 
 This came in [#54](https://github.com/coder/faucet/pull/54). Nothing that a client sees changes until you set `FAUCET_GITHUB_APP_CLIENT_ID`, `FAUCET_GITHUB_APP_CLIENT_SECRET` and `FAUCET_TOKEN_KEY` next to `FAUCET_PUBLIC_URL` (see [browser-login.md](browser-login.md)). With only some of them set, the server refuses to start and names the missing ones. Then:
 
-- `/oauth/authorize` shows the consent page and takes its form, the new route `/oauth/github/callback` takes GitHub's answer, and `/oauth/token` also takes the `authorization_code` and `refresh_token` grants. The authorization server metadata lists the new grants and says that faucet takes client ID metadata documents.
+- `/oauth/authorize` shows the consent page and takes its form, the new route `/oauth/github/callback` takes GitHub's answer, `/oauth/token` also takes the `authorization_code` and `refresh_token` grants, and the new route `/oauth/revoke` revokes a client's own tokens (RFC 7009), service clients' included. The authorization server metadata lists the new grants and the revocation endpoint, and says that faucet takes client ID metadata documents.
 - Faucet keeps the GitHub App tokens of the users who log in, sealed under `FAUCET_TOKEN_KEY` (see [security.md](security.md#three-kinds-of-caller)).
 
 Whether or not you set them:
 
 - The migration adds the tables of the browser login, which stay empty until you do.
-- `/cron/purge` also deletes login requests a day after they expired, and counts them in `expired_auth_requests`, which is 0 while the browser login is off.
+- `/cron/purge` also deletes login requests a day after they expired, sessions that ended or went unused for 180 days, and a user's sealed GitHub tokens a day after no session and no login request names them. It counts them in `expired_auth_requests`, `ended_sessions` and `unused_connections`, which are 0 while the browser login is off.
 
 A host that embeds faucet: an `oauth.Store` of your own must also implement `oauth.LoginStore` and pass the new `storetest.RunOAuth` subtests. An Instant Rollback past this migration cannot start (see [deploy.md](deploy.md#rolling-back)), and its down migration drops every session and every GitHub token that faucet keeps, so every user must log in again.
 

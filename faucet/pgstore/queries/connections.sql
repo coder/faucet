@@ -41,3 +41,13 @@ SET login = @login,
   updated_at = @updated_at
 WHERE id = @id
 RETURNING id, provider, upstream_user_id, login, access_token_enc, refresh_token_enc, key_id, access_expires_at, refresh_expires_at, updated_at;
+
+-- name: DeleteUnusedConnections :execrows
+-- DeleteUnusedConnections deletes the connections that no session and no
+-- authorization request names. A login that stores a connection while this
+-- runs sets updated_at, which a deletion that waits for its row lock checks
+-- again, so the connection stays.
+DELETE FROM faucet_connections c
+WHERE c.updated_at < @updated_before::timestamptz
+  AND NOT EXISTS (SELECT 1 FROM faucet_user_sessions s WHERE s.connection_id = c.id)
+  AND NOT EXISTS (SELECT 1 FROM faucet_auth_requests r WHERE r.connection_id = c.id);

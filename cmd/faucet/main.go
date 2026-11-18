@@ -470,6 +470,7 @@ func newRouter(svc *faucet.Service, tokens bearers, login *oauth.Server, cron cr
 		r.Handle("/oauth/authorize", login.AuthorizeHandler())
 		r.Handle("/oauth/github/callback", login.GitHubCallbackHandler())
 		r.Handle("/oauth/token", login.TokenHandler())
+		r.Handle("/oauth/revoke", login.RevokeHandler())
 	}
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok\n")

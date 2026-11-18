@@ -10,6 +10,25 @@ import (
 	"time"
 )
 
+const deleteUnusedConnections = `-- name: DeleteUnusedConnections :execrows
+DELETE FROM faucet_connections c
+WHERE c.updated_at < $1::timestamptz
+  AND NOT EXISTS (SELECT 1 FROM faucet_user_sessions s WHERE s.connection_id = c.id)
+  AND NOT EXISTS (SELECT 1 FROM faucet_auth_requests r WHERE r.connection_id = c.id)
+`
+
+// DeleteUnusedConnections deletes the connections that no session and no
+// authorization request names. A login that stores a connection while this
+// runs sets updated_at, which a deletion that waits for its row lock checks
+// again, so the connection stays.
+func (q *Queries) DeleteUnusedConnections(ctx context.Context, updatedBefore time.Time) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteUnusedConnections, updatedBefore)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getConnection = `-- name: GetConnection :one
 SELECT id, provider, upstream_user_id, login, access_token_enc, refresh_token_enc, key_id, access_expires_at, refresh_expires_at, updated_at
 FROM faucet_connections

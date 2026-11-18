@@ -224,6 +224,7 @@ func newGrantHarness(t *testing.T, store oauth.Store) *grantHarness {
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		token.ServeHTTP(w, r)
 	}))
+	mux.Handle("POST "+oauth.RevokePath, server.RevokeHandler())
 	h.srv = httptest.NewServer(mux)
 	t.Cleanup(h.srv.Close)
 	return h

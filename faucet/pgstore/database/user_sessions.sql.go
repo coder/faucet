@@ -13,6 +13,27 @@ import (
 	"github.com/lib/pq"
 )
 
+const deleteEndedSessions = `-- name: DeleteEndedSessions :execrows
+DELETE FROM faucet_user_sessions
+WHERE ended_at <= $1::timestamptz
+  OR (ended_at IS NULL AND refreshed_at <= $2::timestamptz)
+`
+
+type DeleteEndedSessionsParams struct {
+	Now       time.Time
+	IdleSince time.Time
+}
+
+// DeleteEndedSessions deletes the sessions that ended, and the live ones
+// that went unused for too long, with their refresh tokens.
+func (q *Queries) DeleteEndedSessions(ctx context.Context, arg DeleteEndedSessionsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteEndedSessions, arg.Now, arg.IdleSince)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const endConnectionSessions = `-- name: EndConnectionSessions :exec
 UPDATE faucet_user_sessions
 SET ended_at = $1::timestamptz

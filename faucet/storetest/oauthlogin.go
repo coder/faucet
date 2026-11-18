@@ -47,6 +47,8 @@ var loginSubtests = []struct {
 	{"RotateRefusesAnAccessTokenWithAScopeThatTheSessionLacks", rotateRefusesAnAccessTokenWithAScopeThatTheSessionLacks},
 	{"EveryRotationOfOneTokenAtOnceTradesIt", everyRotationOfOneTokenAtOnceTradesIt},
 	{"EndSessionKeepsTheFirstTime", endSessionKeepsTheFirstTime},
+	{"DeleteEndedSessionsDeletesTheEndedAndTheIdleWithTheirTokens", deleteEndedSessionsDeletesTheEndedAndTheIdleWithTheirTokens},
+	{"DeleteUnusedConnectionsDeletesTheOnesThatNothingNames", deleteUnusedConnectionsDeletesTheOnesThatNothingNames},
 	// Connections.
 	{"ConnectionOfAnUnknownIDIsUnknown", connectionOfAnUnknownIDIsUnknown},
 	{"RefreshConnectionKeepsReplacesOrEndsTheSessions", refreshConnectionKeepsReplacesOrEndsTheSessions},
@@ -1042,6 +1044,73 @@ func endSessionKeepsTheFirstTime(t *testing.T, s oauth.Store) {
 	ended.EndedAt = now.Add(time.Minute)
 	requireSessionIs(t, s, ended)
 	requireSessionIs(t, s, other)
+}
+
+func deleteEndedSessionsDeletesTheEndedAndTheIdleWithTheirTokens(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	now := loginNow()
+	idleSince := now.Add(-180 * 24 * time.Hour)
+	c := connectionAt(1, idleSince)
+	live := newSession(t, s, "req-live", c, now)
+	ended := newSession(t, s, "req-ended", c, now)
+	require.NoError(t, s.EndSession(ctx, ended.ID, now))
+	idle := newSession(t, s, "req-idle", c, idleSince)
+	almostIdle := newSession(t, s, "req-almost-idle", c, idleSince.Add(time.Microsecond))
+	endsLater := newSession(t, s, "req-ends-later", c, now)
+	require.NoError(t, s.EndSession(ctx, endsLater.ID, now.Add(time.Microsecond)))
+	endsLater.EndedAt = now.Add(time.Microsecond)
+
+	n, err := s.DeleteEndedSessions(ctx, now, idleSince)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, n)
+	for _, gone := range []oauth.Session{ended, idle} {
+		_, err := s.Session(ctx, gone.ID)
+		require.ErrorIs(t, err, oauth.ErrUnknownSession, gone.ID)
+		requireForgotten(t, s, refreshOf(gone.ID), gone.ID)
+	}
+	for _, kept := range []oauth.Session{live, almostIdle, endsLater} {
+		requireSessionIs(t, s, kept)
+		requireRefreshToken(t, s, oauth.RefreshToken{Hash: refreshOf(kept.ID), SessionID: kept.ID, IssuedAt: kept.RefreshedAt}, kept.ID)
+	}
+	n, err = s.DeleteEndedSessions(ctx, now, idleSince)
+	require.NoError(t, err)
+	require.Zero(t, n)
+}
+
+// A connection goes once no session and no request names it, and it was
+// updated before the time.
+func deleteUnusedConnectionsDeletesTheOnesThatNothingNames(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	now := loginNow()
+	before := now.Add(-24 * time.Hour)
+	old := before.Add(-time.Hour)
+	withSession := connectionAt(1, old)
+	newSession(t, s, "req-1", withSession, old)
+	withRequest := connectionAt(2, old)
+	approvedRequest(t, s, "req-2", withRequest, now)
+	unused := connectionAt(3, old)
+	newSession(t, s, "req-3", unused, old)
+	recent := connectionAt(4, before)
+	newSession(t, s, "req-4", recent, old)
+	for _, id := range []string{"req-3", "req-4"} {
+		require.NoError(t, s.EndSession(ctx, id, old))
+	}
+	_, err := s.DeleteEndedSessions(ctx, now, now.Add(-180*24*time.Hour))
+	require.NoError(t, err)
+	_, err = s.DeleteExpiredAuthRequests(ctx, before)
+	require.NoError(t, err)
+
+	n, err := s.DeleteUnusedConnections(ctx, before)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, n)
+	_, err = s.Connection(ctx, unused.ID)
+	require.ErrorIs(t, err, oauth.ErrUnknownConnection)
+	for name, kept := range map[string]oauth.Connection{"a session names it": withSession, "a request names it": withRequest, "updated at the time": recent} {
+		requireConnectionIs(t, s, kept, name)
+	}
+	n, err = s.DeleteUnusedConnections(ctx, before)
+	require.NoError(t, err)
+	require.Zero(t, n)
 }
 
 func connectionOfAnUnknownIDIsUnknown(t *testing.T, s oauth.Store) {

@@ -3,6 +3,7 @@ package oauth_test
 import (
 	"bytes"
 	"context"
+	"maps"
 	"slices"
 	"sync"
 	"testing"
@@ -137,6 +138,13 @@ func (s *fakeStore) DeleteExpiredAccessTokens(_ context.Context, now time.Time) 
 		}
 	}
 	return n, nil
+}
+
+func (s *fakeStore) DeleteAccessToken(_ context.Context, hash oauth.TokenHash) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.tokens, hash)
+	return nil
 }
 
 func (s *fakeStore) tokenCount() int {
@@ -439,6 +447,40 @@ func (s *fakeStore) RefreshConnection(ctx context.Context, id string, now time.T
 		}
 	}
 	return cloneConnection(s.connections[id]), nil
+}
+
+func (s *fakeStore) DeleteEndedSessions(_ context.Context, now, idleSince time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for id, session := range s.sessions {
+		if session.Live() && session.RefreshedAt.After(idleSince) || !session.Live() && session.EndedAt.After(now) {
+			continue
+		}
+		delete(s.sessions, id)
+		for hash, token := range s.refresh {
+			if token.SessionID == id {
+				delete(s.refresh, hash)
+			}
+		}
+		n++
+	}
+	return n, nil
+}
+
+func (s *fakeStore) DeleteUnusedConnections(_ context.Context, updatedBefore time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for id, c := range s.connections {
+		named := slices.ContainsFunc(slices.Collect(maps.Values(s.sessions)), func(o oauth.Session) bool { return o.ConnectionID == id }) ||
+			slices.ContainsFunc(slices.Collect(maps.Values(s.requests)), func(r oauth.AuthRequest) bool { return r.ConnectionID == id })
+		if !named && c.UpdatedAt.Before(updatedBefore) {
+			delete(s.connections, id)
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (s *fakeStore) DeleteExpiredAuthRequests(_ context.Context, before time.Time) (int64, error) {

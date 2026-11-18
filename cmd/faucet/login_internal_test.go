@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -179,6 +180,9 @@ func TestThePurgeDeletesExpiredAccessTokens(t *testing.T) {
 	var reply map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&reply))
 	require.EqualValues(t, 1, reply["expired_access_tokens"])
+	for _, count := range []string{"expired_auth_requests", "ended_sessions", "unused_connections"} {
+		require.EqualValues(t, 0, reply[count], count)
+	}
 
 	_, err = srv.store.AccessToken(ctx, expired.Hash)
 	require.ErrorIs(t, err, oauth.ErrUnknownToken)
@@ -365,13 +369,15 @@ func TestTheLoginRoutesAreOffWithoutAPublicURL(t *testing.T) {
 		_ = resp.Body.Close()
 		require.Equal(t, http.StatusNotFound, resp.StatusCode, path)
 	}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/oauth/token", bytes.NewReader([]byte("grant_type=client_credentials")))
-	require.NoError(t, err)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := srv.Client().Do(req)
-	require.NoError(t, err)
-	_ = resp.Body.Close()
-	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	for _, path := range []string{"/oauth/token", "/oauth/revoke"} {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+path, bytes.NewReader([]byte("grant_type=client_credentials")))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		resp, err := srv.Client().Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		require.Equal(t, http.StatusNotFound, resp.StatusCode, path)
+	}
 
 	for _, path := range mcpPaths {
 		srv.mcpPath = path
@@ -455,9 +461,31 @@ func TestTheLoginRoutesAnswerTheirMethods(t *testing.T) {
 		status, _ = do(http.MethodPost, path)
 		require.Equal(t, http.StatusMethodNotAllowed, status, path)
 	}
-	status, header := do(http.MethodGet, "/oauth/token")
-	require.Equal(t, http.StatusMethodNotAllowed, status)
-	require.Equal(t, http.MethodPost, header.Get("Allow"))
+	for _, path := range []string{"/oauth/token", "/oauth/revoke"} {
+		status, header := do(http.MethodGet, path)
+		require.Equal(t, http.StatusMethodNotAllowed, status, path)
+		require.Equal(t, http.MethodPost, header.Get("Allow"), path)
+	}
+}
+
+// A service revokes its access token at /oauth/revoke (RFC 7009), and the
+// token is gone.
+func TestAServiceRevokesItsAccessToken(t *testing.T) {
+	t.Parallel()
+	srv := newLoginServer(t)
+	secret := srv.client(t, "ci-watcher", "/github/mcp", []faucet.Scope{faucet.ScopeEventsRead}, "repo:octo-org/octo-repo")
+	token := srv.token(t, "ci-watcher", secret)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/oauth/revoke", strings.NewReader(url.Values{"token": {token}}.Encode()))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("ci-watcher", secret)
+	resp, err := srv.Client().Do(req)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	_, err = srv.store.AccessToken(context.Background(), oauth.HashToken(token))
+	require.ErrorIs(t, err, oauth.ErrUnknownToken)
 }
 
 // countingClients counts the reads of a client.

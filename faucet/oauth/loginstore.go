@@ -107,6 +107,16 @@ type LoginStore interface {
 	// connection. refresh must not call the store.
 	RefreshConnection(ctx context.Context, id string, now time.Time, refresh func(current Connection) (ConnectionChange, error)) (Connection, error)
 
+	// DeleteEndedSessions deletes every session that ended at or before now,
+	// and every live one last refreshed at or before idleSince, which ends
+	// at its next refresh, with their refresh tokens. It returns how many
+	// sessions it deleted.
+	DeleteEndedSessions(ctx context.Context, now, idleSince time.Time) (int64, error)
+	// DeleteUnusedConnections deletes every connection that no session and
+	// no authorization request names, and that was last updated before
+	// updatedBefore, and returns how many. A connection that a login
+	// stores while the deletion runs stays.
+	DeleteUnusedConnections(ctx context.Context, updatedBefore time.Time) (int64, error)
 	// DeleteExpiredAuthRequests deletes the requests that expired before the time,
 	// whatever their state, and returns how many. A session outlives the
 	// request that made it.

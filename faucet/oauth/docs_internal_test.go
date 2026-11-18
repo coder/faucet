@@ -45,6 +45,11 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/security.md", "A refresh token that comes back %d seconds or more after its first use ends its session", []any{seconds(refreshReuseGrace)}},
 		{"docs/security.md", "Within those %d seconds it trades again", []any{seconds(refreshReuseGrace)}},
 		{"docs/upgrading.md", "deletes login requests a day after they expired", nil},
+		{"docs/upgrading.md", "sessions that ended or went unused for %d days", []any{days(sessionIdleLifetime)}},
+		{"docs/browser-login.md", "| Until the session ends or goes unused for %d days.", []any{days(sessionIdleLifetime)}},
+		{"docs/browser-login.md", "`/cron/purge` deletes it a day after its last update", nil},
+		{"docs/security.md", "once the session ended or went unused for %d days", []any{days(sessionIdleLifetime)}},
+		{"docs/security.md", "deletes a user's pair a day after no session", nil},
 	} {
 		doc, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(p.file)))
 		require.NoError(t, err)
