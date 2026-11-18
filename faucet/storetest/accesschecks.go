@@ -26,6 +26,8 @@ var accessCheckSubtests = []struct {
 	{"StoreAccessCheckValidatesInput", storeAccessCheckValidatesInput},
 	{"DeleteAccessCheckDeletesThatCheckOnly", deleteAccessCheckDeletesThatCheckOnly},
 	{"RecentAccessChecksAreTheMostRecentlyUsedOfTheConnection", recentAccessChecksAreTheMostRecentlyUsedOfTheConnection},
+	{"RecentAccessChecksLeaveOutTheChecksUsedBeforeTheBound", recentAccessChecksLeaveOutTheChecksUsedBeforeTheBound},
+	{"DeleteUnusedAccessChecksDeletesTheChecksUsedBeforeTheBound", deleteUnusedAccessChecksDeletesTheChecksUsedBeforeTheBound},
 	{"DeleteUnusedConnectionsDeletesTheirAccessChecks", deleteUnusedConnectionsDeletesTheirAccessChecks},
 }
 
@@ -55,7 +57,7 @@ func storeCheck(t *testing.T, s oauth.Store, c oauth.AccessCheck) {
 // the most recently used first, are want.
 func requireChecks(t *testing.T, s oauth.Store, connectionID string, want []oauth.AccessCheck, msgAndArgs ...any) {
 	t.Helper()
-	got, err := s.RecentAccessChecks(context.Background(), connectionID, len(want)+10)
+	got, err := s.RecentAccessChecks(context.Background(), connectionID, time.Time{}, len(want)+10)
 	require.NoError(t, err, msgAndArgs...)
 	requireSameChecks(t, want, got, msgAndArgs...)
 }
@@ -261,12 +263,56 @@ func recentAccessChecksAreTheMostRecentlyUsedOfTheConnection(t *testing.T, s oau
 	}
 
 	requireChecks(t, s, c.ID, []oauth.AccessCheck{newest, tieA, tieB, oldest})
-	got, err := s.RecentAccessChecks(ctx, c.ID, 2)
+	got, err := s.RecentAccessChecks(ctx, c.ID, time.Time{}, 2)
 	require.NoError(t, err)
 	requireSameChecks(t, []oauth.AccessCheck{newest, tieA}, got, "the limit keeps the most recently used")
-	got, err = s.RecentAccessChecks(ctx, c.ID, 0)
+	got, err = s.RecentAccessChecks(ctx, c.ID, time.Time{}, 0)
 	require.NoError(t, err)
 	require.Empty(t, got)
+}
+
+func recentAccessChecksLeaveOutTheChecksUsedBeforeTheBound(t *testing.T, s oauth.Store) {
+	now := loginNow()
+	c := connectionAt(1, now)
+	approvedRequest(t, s, "req-1", c, now)
+	since := now.Add(time.Hour)
+	before := checkOf(c, "o/before", 11, since.Add(-time.Microsecond))
+	at := checkOf(c, "o/at", 12, since)
+	after := checkOf(c, "o/after", 13, since.Add(time.Minute))
+	for _, check := range []oauth.AccessCheck{before, at, after} {
+		storeCheck(t, s, check)
+	}
+
+	got, err := s.RecentAccessChecks(context.Background(), c.ID, since, 10)
+	require.NoError(t, err)
+	requireSameChecks(t, []oauth.AccessCheck{after, at}, got, "a check last used before the bound is left out")
+}
+
+// A check whose last use came before the bound goes, of every connection,
+// and one used at the bound or later stays.
+func deleteUnusedAccessChecksDeletesTheChecksUsedBeforeTheBound(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	now := loginNow()
+	c, other := connectionAt(1, now), connectionAt(2, now)
+	approvedRequest(t, s, "req-1", c, now)
+	approvedRequest(t, s, "req-2", other, now)
+	bound := now.Add(time.Hour)
+	at := checkOf(c, "o/at", 12, bound)
+	for _, check := range []oauth.AccessCheck{
+		checkOf(c, "o/before", 11, bound.Add(-time.Microsecond)), at,
+		checkOf(other, "o/before", 11, bound.Add(-time.Hour)),
+	} {
+		storeCheck(t, s, check)
+	}
+
+	n, err := s.DeleteUnusedAccessChecks(ctx, bound)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, n)
+	requireChecks(t, s, c.ID, []oauth.AccessCheck{at})
+	requireChecks(t, s, other.ID, nil)
+	n, err = s.DeleteUnusedAccessChecks(ctx, bound)
+	require.NoError(t, err)
+	require.Zero(t, n, "nothing is left to delete")
 }
 
 func deleteUnusedConnectionsDeletesTheirAccessChecks(t *testing.T, s oauth.Store) {

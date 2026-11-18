@@ -60,7 +60,7 @@ func (h *grantHarness) refreshAsking(s grantSession) (grantSession, []string) {
 // the most recently used first.
 func (h *grantHarness) accessChecks(userID int64) []oauth.AccessCheck {
 	h.t.Helper()
-	checks, err := h.store.RecentAccessChecks(context.Background(), oauth.ConnectionID(oauth.ProviderGitHub, userID), 100)
+	checks, err := h.store.RecentAccessChecks(context.Background(), oauth.ConnectionID(oauth.ProviderGitHub, userID), time.Time{}, 100)
 	require.NoError(h.t, err)
 	return checks
 }
@@ -88,6 +88,16 @@ func (h *grantHarness) storeChecks(userID int64, repos []string) {
 			CheckedAt: now, LastUsedAt: now.Add(time.Duration(i) * time.Second),
 		}))
 	}
+}
+
+// storeCheck stores the check of repo by the GitHub user with this ID, made
+// and last used at the time at.
+func (h *grantHarness) storeCheck(userID int64, repo string, at time.Time) {
+	h.t.Helper()
+	require.NoError(h.t, h.store.StoreAccessCheck(context.Background(), oauth.AccessCheck{
+		ConnectionID: oauth.ConnectionID(oauth.ProviderGitHub, userID), Repo: repo, RepoID: grantRepoID,
+		CheckedAt: at, LastUsedAt: at,
+	}))
 }
 
 func numberedRepos(n int) []string {
@@ -258,6 +268,52 @@ func TestARefreshChecksAgainTheFiftyMostRecentlyUsedRepositories(t *testing.T) {
 					require.Empty(t, got.asked, "the refresh checked %s again", repo)
 				}
 			}
+		})
+	}
+}
+
+// A refresh checks again only the repositories that a session used within
+// one access token's life. The others wait for their next use.
+func TestARefreshChecksAgainOnlyTheRepositoriesUsedWithinOneAccessTokensLife(t *testing.T) {
+	t.Parallel()
+	for name, newStore := range usertokensStores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newGrantHarness(t, newStore(t))
+			s := h.redeem(h.approve("login-1", 1))
+			access := h.userAccess()
+			h.clock.Advance(20 * time.Minute)
+			now := h.clock.Now()
+			h.storeCheck(1, "o/idle", now.Add(-16*time.Minute))
+			h.storeCheck(1, "o/used", now.Add(-14*time.Minute))
+
+			s, asked := h.refreshAsking(s)
+			require.Equal(t, []string{"o/used"}, asked, "the refresh asked GitHub about the repository used 14 minutes before")
+			p := h.principal(s)
+			require.Equal(t, []string{"o/idle"}, h.repoID(access, p, "o/idle").asked, "a repository used 16 minutes before is asked on its next use")
+			require.Empty(t, h.repoID(access, p, "o/used").asked, "the refresh checked o/used again")
+		})
+	}
+}
+
+// The purge deletes a check that no session used for a day, and keeps one
+// used since.
+func TestThePurgeDeletesTheChecksThatNoSessionUsedForADay(t *testing.T) {
+	t.Parallel()
+	for name, newStore := range usertokensStores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newGrantHarness(t, newStore(t))
+			h.redeem(h.approve("login-1", 1))
+			start := h.clock.Now()
+			h.storeCheck(1, "o/unused", start)
+			h.storeCheck(1, "o/used", start.Add(time.Minute))
+			h.clock.Advance(24*time.Hour + 30*time.Second)
+
+			res, err := h.server.Purge(context.Background())
+			require.NoError(t, err)
+			require.EqualValues(t, 1, res.UnusedAccessChecks)
+			require.Equal(t, []string{"o/used"}, h.checkedRepos(1))
 		})
 	}
 }

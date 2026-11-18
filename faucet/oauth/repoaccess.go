@@ -25,6 +25,9 @@ const (
 	// recheckShare is the share of the time to the deadline of the refresh
 	// request that the lookups may take, so that the grant still answers.
 	recheckShare = 0.5
+	// accessCheckRetention is how long a check that no session uses stays,
+	// until the purge deletes it.
+	accessCheckRetention = 24 * time.Hour
 )
 
 // repoAccess asks GitHub whether the GitHub token of a user's connection can
@@ -96,16 +99,19 @@ func (r repoAccess) record(ctx context.Context, c AccessCheck, answer error) err
 }
 
 // recheck asks GitHub again, with token, about the most recently used checks
-// of the session's connection, which the refresh of the session just made
-// stale for it, and records each answer. After an answer that is neither a
-// pass nor a denial, no more lookups start. The lookups end at the earlier
-// of recheckTimeout and recheckShare of the time to ctx's deadline, and a
-// lookup still running then is canceled and changes nothing. The checks left
-// stay stale for the session until their next use asks GitHub. The session
-// is rotated by then, so recheck fails nothing and logs what it found. With
-// the zero token, which a failed refresh of the GitHub token leaves, it asks
-// nothing, so that no second GitHub refresh can run past the deadline.
-func (r repoAccess) recheck(ctx context.Context, session Session, token githubToken) {
+// of the session's connection, which the refresh of the session at now just
+// made stale for it, and records each answer. It asks only about the checks
+// used within one access token's life before now: one that no session used
+// that long is not in use, and its next use asks GitHub. After an answer
+// that is neither a pass nor a denial, no more lookups start. The lookups
+// end at the earlier of recheckTimeout and recheckShare of the time to
+// ctx's deadline, and a lookup still running then is canceled and changes
+// nothing. The checks left stay stale for the session until their next use
+// asks GitHub. The session is rotated by then, so recheck fails nothing and
+// logs what it found. With the zero token, which a failed refresh of the
+// GitHub token leaves, it asks nothing, so that no second GitHub refresh can
+// run past the deadline.
+func (r repoAccess) recheck(ctx context.Context, session Session, now time.Time, token githubToken) {
 	logger := r.tokens.logger.With(slog.F("session_id", session.ID), slog.F("connection_id", session.ConnectionID))
 	if token == (githubToken{}) {
 		logger.Debug(ctx, "the refresh has no GitHub token, so it checks no repository again")
@@ -113,7 +119,7 @@ func (r repoAccess) recheck(ctx context.Context, session Session, token githubTo
 	}
 	ctx, cancel := recheckContext(ctx)
 	defer cancel()
-	checks, err := r.tokens.store.RecentAccessChecks(ctx, session.ConnectionID, recheckLimit)
+	checks, err := r.tokens.store.RecentAccessChecks(ctx, session.ConnectionID, now.Add(-accessTokenLifetime), recheckLimit)
 	if err != nil {
 		logger.Warn(ctx, "could not read the access checks of a refreshed session, each is checked on its next use", slog.Error(err))
 		return

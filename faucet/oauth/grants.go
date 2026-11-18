@@ -282,7 +282,7 @@ func (s *Server) refreshToken(r *http.Request, form url.Values) (tokenResponse, 
 	// The rotation made the older access checks stale for the session, so
 	// the refresh checks the most recently used again. Nothing after the
 	// rotation may fail the grant, and the re-check fails nothing.
-	s.access.recheck(ctx, rotated, github)
+	s.access.recheck(ctx, rotated, now, github)
 	return tokens.response(scopes), nil
 }
 

@@ -60,9 +60,9 @@ func (s *Store) DeleteAccessCheck(ctx context.Context, connectionID, repo string
 }
 
 // RecentAccessChecks implements oauth.AccessCheckStore.
-func (s *Store) RecentAccessChecks(ctx context.Context, connectionID string, limit int) (_ []oauth.AccessCheck, err error) {
+func (s *Store) RecentAccessChecks(ctx context.Context, connectionID string, usedSince time.Time, limit int) (_ []oauth.AccessCheck, err error) {
 	defer func() { err = endedBy(ctx, err) }()
-	rows, err := s.q.RecentAccessChecks(ctx, database.RecentAccessChecksParams{ConnectionID: connectionID, MaxChecks: int64(max(limit, 0))})
+	rows, err := s.q.RecentAccessChecks(ctx, database.RecentAccessChecksParams{ConnectionID: connectionID, UsedSince: usedSince, MaxChecks: int64(max(limit, 0))})
 	if err != nil {
 		return nil, xerrors.Errorf("read access checks: %w", err)
 	}
@@ -77,4 +77,14 @@ func (s *Store) RecentAccessChecks(ctx context.Context, connectionID string, lim
 		}
 	}
 	return checks, nil
+}
+
+// DeleteUnusedAccessChecks implements oauth.AccessCheckStore.
+func (s *Store) DeleteUnusedAccessChecks(ctx context.Context, usedBefore time.Time) (_ int64, err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	n, err := s.q.DeleteUnusedAccessChecks(ctx, usedBefore)
+	if err != nil {
+		return 0, xerrors.Errorf("delete unused access checks: %w", err)
+	}
+	return n, nil
 }

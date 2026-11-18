@@ -545,12 +545,12 @@ func (s *fakeStore) DeleteAccessCheck(_ context.Context, connectionID, repo stri
 	return nil
 }
 
-func (s *fakeStore) RecentAccessChecks(_ context.Context, connectionID string, limit int) ([]oauth.AccessCheck, error) {
+func (s *fakeStore) RecentAccessChecks(_ context.Context, connectionID string, usedSince time.Time, limit int) ([]oauth.AccessCheck, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var checks []oauth.AccessCheck
 	for key, c := range s.checks {
-		if key.connectionID == connectionID {
+		if key.connectionID == connectionID && !c.LastUsedAt.Before(usedSince) {
 			checks = append(checks, c)
 		}
 	}
@@ -561,6 +561,14 @@ func (s *fakeStore) RecentAccessChecks(_ context.Context, connectionID string, l
 		return strings.Compare(a.Repo, b.Repo)
 	})
 	return checks[:min(len(checks), max(limit, 0))], nil
+}
+
+func (s *fakeStore) DeleteUnusedAccessChecks(_ context.Context, usedBefore time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.checks)
+	maps.DeleteFunc(s.checks, func(_ accessCheckKey, c oauth.AccessCheck) bool { return c.LastUsedAt.Before(usedBefore) })
+	return int64(n - len(s.checks)), nil
 }
 
 func TestFakeStore(t *testing.T) {

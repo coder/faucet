@@ -29,6 +29,10 @@ WHERE connection_id = @connection_id AND repo = @repo;
 -- name: RecentAccessChecks :many
 SELECT connection_id, repo, repo_id, checked_at, last_used_at
 FROM faucet_access_checks
-WHERE connection_id = @connection_id
+WHERE connection_id = @connection_id AND last_used_at >= @used_since::timestamptz
 ORDER BY last_used_at DESC, repo
 LIMIT @max_checks::bigint;
+
+-- name: DeleteUnusedAccessChecks :execrows
+DELETE FROM faucet_access_checks
+WHERE last_used_at < @used_before::timestamptz;

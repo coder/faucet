@@ -205,12 +205,16 @@ type PurgeResult struct {
 	// named, a day after their last update. The GitHub tokens that faucet
 	// kept for their users went with them.
 	UnusedConnections int64
+	// UnusedAccessChecks is how many access checks no session had used for
+	// a day.
+	UnusedAccessChecks int64
 }
 
 // Purge deletes the state of the login server that is past its use: every
 // access token that has expired, every authorization request that expired
 // more than a day ago, every session that ended or went unused for 180
-// days, and then every connection that nothing names any more.
+// days, every access check that no session used for a day, and then every
+// connection that nothing names any more.
 func (s *Server) Purge(ctx context.Context) (PurgeResult, error) {
 	now := s.clock.Now()
 	var res PurgeResult
@@ -222,6 +226,9 @@ func (s *Server) Purge(ctx context.Context) (PurgeResult, error) {
 		return PurgeResult{}, err
 	}
 	if res.EndedSessions, err = s.store.DeleteEndedSessions(ctx, now, now.Add(-sessionIdleLifetime)); err != nil {
+		return PurgeResult{}, err
+	}
+	if res.UnusedAccessChecks, err = s.store.DeleteUnusedAccessChecks(ctx, now.Add(-accessCheckRetention)); err != nil {
 		return PurgeResult{}, err
 	}
 	// A login stores its connection a moment before the request that names

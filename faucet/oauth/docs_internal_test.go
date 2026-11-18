@@ -21,6 +21,7 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 	minutes := func(d time.Duration) int { return int(d / time.Minute) }
 	days := func(d time.Duration) int { return int(d / (24 * time.Hour)) }
 	require.Equal(t, 24*time.Hour, authRequestRetention, "the docs say \"a day\"")
+	require.Equal(t, 24*time.Hour, accessCheckRetention, "the docs say \"a day\"")
 	require.InDelta(t, 0.5, recheckShare, 0, "the docs say \"half of what is left\"")
 
 	for _, p := range []struct {
@@ -64,6 +65,10 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/browser-login.md", "lost access to is denied within %d minutes", []any{minutes(accessTokenLifetime)}},
 		{"docs/browser-login.md", "An access token lasts %d minutes, so an agent that keeps working refreshes", []any{minutes(accessTokenLifetime)}},
 		{"docs/upgrading.md", "asks GitHub again about up to %d repositories, which can make the refresh take up to %d seconds longer", []any{recheckLimit, seconds(recheckTimeout)}},
+		{"docs/browser-login.md", "among those used in the last %d minutes", []any{minutes(accessTokenLifetime)}},
+		{"docs/security.md", "among those used in the last %d minutes", []any{minutes(accessTokenLifetime)}},
+		{"docs/browser-login.md", "or a day after a session last used it, when `/cron/purge` deletes it", nil},
+		{"docs/upgrading.md", "`/cron/purge` deletes a stored check a day after a session last used it", nil},
 	} {
 		doc, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(p.file)))
 		require.NoError(t, err)

@@ -55,8 +55,11 @@ type AccessCheckStore interface {
 	// DeleteAccessCheck deletes the connection's check of repo. No such check
 	// is no error.
 	DeleteAccessCheck(ctx context.Context, connectionID, repo string) error
-	// RecentAccessChecks returns up to limit checks of the connection, the
-	// most recently used first, and those used at the same time by
-	// repository.
-	RecentAccessChecks(ctx context.Context, connectionID string, limit int) ([]AccessCheck, error)
+	// RecentAccessChecks returns up to limit checks of the connection whose
+	// last use came at or after usedSince, the most recently used first,
+	// and those used at the same time by repository.
+	RecentAccessChecks(ctx context.Context, connectionID string, usedSince time.Time, limit int) ([]AccessCheck, error)
+	// DeleteUnusedAccessChecks deletes every check, of every connection,
+	// whose last use came before usedBefore, and returns how many.
+	DeleteUnusedAccessChecks(ctx context.Context, usedBefore time.Time) (int64, error)
 }

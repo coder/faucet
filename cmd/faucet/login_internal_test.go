@@ -177,7 +177,7 @@ func TestThePurgeDeletesExpiredAccessTokens(t *testing.T) {
 	var reply map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&reply))
 	require.EqualValues(t, 1, reply["expired_access_tokens"])
-	for _, count := range []string{"expired_auth_requests", "ended_sessions", "unused_connections"} {
+	for _, count := range []string{"expired_auth_requests", "ended_sessions", "unused_connections", "unused_access_checks"} {
 		require.EqualValues(t, 0, reply[count], count)
 	}
 

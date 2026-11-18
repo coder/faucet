@@ -25,6 +25,19 @@ func (q *Queries) DeleteAccessCheck(ctx context.Context, arg DeleteAccessCheckPa
 	return err
 }
 
+const deleteUnusedAccessChecks = `-- name: DeleteUnusedAccessChecks :execrows
+DELETE FROM faucet_access_checks
+WHERE last_used_at < $1::timestamptz
+`
+
+func (q *Queries) DeleteUnusedAccessChecks(ctx context.Context, usedBefore time.Time) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteUnusedAccessChecks, usedBefore)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const freshAccessCheck = `-- name: FreshAccessCheck :one
 UPDATE faucet_access_checks a
 SET last_used_at = greatest(a.last_used_at, $1::timestamptz)
@@ -53,18 +66,19 @@ func (q *Queries) FreshAccessCheck(ctx context.Context, arg FreshAccessCheckPara
 const recentAccessChecks = `-- name: RecentAccessChecks :many
 SELECT connection_id, repo, repo_id, checked_at, last_used_at
 FROM faucet_access_checks
-WHERE connection_id = $1
+WHERE connection_id = $1 AND last_used_at >= $2::timestamptz
 ORDER BY last_used_at DESC, repo
-LIMIT $2::bigint
+LIMIT $3::bigint
 `
 
 type RecentAccessChecksParams struct {
 	ConnectionID string
+	UsedSince    time.Time
 	MaxChecks    int64
 }
 
 func (q *Queries) RecentAccessChecks(ctx context.Context, arg RecentAccessChecksParams) ([]FaucetAccessCheck, error) {
-	rows, err := q.db.QueryContext(ctx, recentAccessChecks, arg.ConnectionID, arg.MaxChecks)
+	rows, err := q.db.QueryContext(ctx, recentAccessChecks, arg.ConnectionID, arg.UsedSince, arg.MaxChecks)
 	if err != nil {
 		return nil, err
 	}

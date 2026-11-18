@@ -70,7 +70,7 @@ An agent names itself with a Client ID Metadata Document. That is a JSON documen
 | One session for each login of an agent | The SHA-256 of each refresh token that the session gave out. | Until the session ends or goes unused for 180 days. `/cron/purge` then deletes it with its refresh tokens. |
 | One request for each login whose user pressed Continue | The SHA-256 of the browser's cookie, of the state sent to GitHub and of the code. | 10 minutes to finish in the browser, then 60 seconds to redeem the code. `/cron/purge` deletes the request once it expired, or a day after for a request with a code, so that a code used again still ends its session. |
 | Each faucet access token | Its SHA-256. | 15 minutes. `/cron/purge` deletes it after that. |
-| The repositories that each user's GitHub token could read | The name and ID of each repository that passed a check, when faucet last asked GitHub and when a session last used the answer. A denial is never stored. | Until a check or a refresh finds the repository denied, or until `/cron/purge` deletes the user's sealed pair. |
+| The repositories that each user's GitHub token could read | The name and ID of each repository that passed a check, when faucet last asked GitHub and when a session last used the answer. A denial is never stored. | Until a check or a refresh finds the repository denied, or a day after a session last used it, when `/cron/purge` deletes it. |
 
 Of these, the GitHub tokens are the only ones that faucet can read back. GitHub App user tokens last 8 hours and their refresh tokens 6 months, and a refresh token works once. When the access token is close to its expiry, the user's next refresh or check makes faucet refresh the pair at GitHub and store the new pair.
 
@@ -78,7 +78,7 @@ Of these, the GitHub tokens are the only ones that faucet can read back. GitHub 
 
 Faucet asks GitHub `GET /repos/{owner}/{name}` with the user's GitHub token, and stores each check that passes. A session takes a stored check, and asks GitHub nothing, only when faucet made the check after that session's last refresh. So the stored checks of a user serve every session of the user, but never a session that refreshed after the check. A denial is never stored, and it deletes the stored check of that repository.
 
-At each refresh, faucet asks GitHub again about the 50 repositories that the user used last, and deletes those that GitHub denies. It spends at most 5 seconds on that, and half of what is left when the refresh request has a deadline. A repository that it does not get to is asked about at its next use. An access token lasts 15 minutes, so an agent that keeps working refreshes at least that often, and **a repository that the user lost access to is denied within 15 minutes**. `events/subscribe` always asks GitHub, so every renewal of a subscription checks access again.
+At each refresh, faucet asks GitHub again about the 50 repositories that the user used last, among those used in the last 15 minutes, and deletes those that GitHub denies. It spends at most 5 seconds on that, and half of what is left when the refresh request has a deadline. A repository that it leaves out or does not get to is asked about at its next use. An access token lasts 15 minutes, so an agent that keeps working refreshes at least that often, and **a repository that the user lost access to is denied within 15 minutes**. `events/subscribe` always asks GitHub, so every renewal of a subscription checks access again.
 
 ## How a session ends
 
