@@ -30,7 +30,9 @@ var nameMethods = []string{"events/poll", "events/stream", "events/subscribe", "
 // RequireEventName wraps an MCP Streamable HTTP handler. It answers 400 with
 // the HeaderMismatch error when the Mcp-Name header of an events/* request is
 // missing or differs from params.name. The SDK checks the header for tools,
-// resources and prompts only. A host that serves Service.Register over HTTP
+// resources and prompts only. It answers 400 with the Invalid Request error to
+// a JSON-RPC batch, whatever MCP-Protocol-Version says: the SDK serves one at
+// versions before 2025-06-18. A host that serves Service.Register over HTTP
 // puts this in front of the SDK handler. The wrapper reads each body whole, up
 // to MaxRequestBodyBytes, and answers 413 beyond that.
 func RequireEventName(next http.Handler) http.Handler {
@@ -73,40 +75,30 @@ func checkEventName(body []byte, header string) *rpcFailure {
 	if !json.Valid(body) {
 		return &rpcFailure{code: jsonrpc.CodeParseError, message: "request body is not one JSON value"}
 	}
-	var requests []json.RawMessage
-	if bytes.HasPrefix(bytes.TrimSpace(body), []byte("[")) {
-		if json.Unmarshal(body, &requests) != nil {
-			return &rpcFailure{code: jsonrpc.CodeParseError, message: "request body is not valid JSON-RPC"}
-		}
-	} else {
-		requests = []json.RawMessage{body}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil {
+		return &rpcFailure{code: jsonrpc.CodeInvalidRequest, message: "faucet takes one JSON-RPC message per request, as a JSON object"}
 	}
-	for _, raw := range requests {
-		var fields map[string]json.RawMessage
-		if json.Unmarshal(raw, &fields) != nil {
-			return &rpcFailure{code: jsonrpc.CodeInvalidRequest, message: "request is not a JSON object"}
-		}
-		if hasRepeatedKey(raw) {
-			return &rpcFailure{fields["id"], jsonrpc.CodeInvalidRequest, "request repeats a field"}
-		}
-		var method string
-		if json.Unmarshal(fields["method"], &method) != nil || !slices.Contains(nameMethods, method) {
-			continue
-		}
-		if hasRepeatedKey(fields["params"]) {
-			return &rpcFailure{fields["id"], jsonrpc.CodeInvalidRequest, "params repeats a field"}
-		}
-		var params map[string]json.RawMessage
-		var name string
-		if json.Unmarshal(fields["params"], &params) != nil || json.Unmarshal(params["name"], &name) != nil || name == "" {
-			continue
-		}
-		switch got, ok := decodeNameHeader(header); {
-		case header == "":
-			return &rpcFailure{fields["id"], mcp.CodeHeaderMismatch, fmt.Sprintf("missing required Mcp-Name header for method %q", method)}
-		case !ok || got != name:
-			return &rpcFailure{fields["id"], mcp.CodeHeaderMismatch, "header mismatch: Mcp-Name header does not match params.name"}
-		}
+	if hasRepeatedKey(body) {
+		return &rpcFailure{fields["id"], jsonrpc.CodeInvalidRequest, "request repeats a field"}
+	}
+	var method string
+	if json.Unmarshal(fields["method"], &method) != nil || !slices.Contains(nameMethods, method) {
+		return nil
+	}
+	if hasRepeatedKey(fields["params"]) {
+		return &rpcFailure{fields["id"], jsonrpc.CodeInvalidRequest, "params repeats a field"}
+	}
+	var params map[string]json.RawMessage
+	var name string
+	if json.Unmarshal(fields["params"], &params) != nil || json.Unmarshal(params["name"], &name) != nil || name == "" {
+		return nil
+	}
+	switch got, ok := decodeNameHeader(header); {
+	case header == "":
+		return &rpcFailure{fields["id"], mcp.CodeHeaderMismatch, fmt.Sprintf("missing required Mcp-Name header for method %q", method)}
+	case !ok || got != name:
+		return &rpcFailure{fields["id"], mcp.CodeHeaderMismatch, "header mismatch: Mcp-Name header does not match params.name"}
 	}
 	return nil
 }
