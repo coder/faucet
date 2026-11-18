@@ -301,9 +301,9 @@ func (s *Store) RefreshConnection(ctx context.Context, id string, now time.Time,
 
 // DeleteExpiredAuthRequests implements oauth.LoginStore. No session refers to its
 // request, so the sessions stay.
-func (s *Store) DeleteExpiredAuthRequests(ctx context.Context, before time.Time) (_ int64, err error) {
+func (s *Store) DeleteExpiredAuthRequests(ctx context.Context, now, codesBefore time.Time) (_ int64, err error) {
 	defer func() { err = endedBy(ctx, err) }()
-	n, err := s.q.DeleteAuthRequestsExpiredBefore(ctx, before)
+	n, err := s.q.DeleteExpiredAuthRequests(ctx, database.DeleteExpiredAuthRequestsParams{Now: now, CodesBefore: codesBefore})
 	if err != nil {
 		return 0, xerrors.Errorf("delete expired authorization requests: %w", err)
 	}

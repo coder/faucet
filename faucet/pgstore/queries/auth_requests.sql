@@ -69,6 +69,9 @@ WITH redeemed AS (
 SELECT id, client_id, client_name, connection_id, resource, scopes, refreshed_at, ended_at
 FROM new_session;
 
--- name: DeleteAuthRequestsExpiredBefore :execrows
+-- name: DeleteExpiredAuthRequests :execrows
+-- DeleteExpiredAuthRequests deletes the requests without a code once they
+-- expired, and those with a code once they expired before codes_before.
 DELETE FROM faucet_auth_requests
-WHERE expires_at < @before::timestamptz;
+WHERE (code_hash IS NULL AND expires_at <= @now::timestamptz)
+  OR (code_hash IS NOT NULL AND expires_at < @codes_before::timestamptz);

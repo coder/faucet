@@ -119,8 +119,9 @@ type LoginStore interface {
 	// updatedBefore, and returns how many. A connection that a login
 	// stores while the deletion runs stays.
 	DeleteUnusedConnections(ctx context.Context, updatedBefore time.Time) (int64, error)
-	// DeleteExpiredAuthRequests deletes the requests that expired before the time,
-	// whatever their state, and returns how many. A session outlives the
-	// request that made it.
-	DeleteExpiredAuthRequests(ctx context.Context, before time.Time) (int64, error)
+	// DeleteExpiredAuthRequests deletes every request without a code, pending
+	// or expired, that expired at or before now, and every request with a
+	// code that expired before codesBefore, and returns how many. A session
+	// outlives the request that made it.
+	DeleteExpiredAuthRequests(ctx context.Context, now, codesBefore time.Time) (int64, error)
 }

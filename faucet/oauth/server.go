@@ -183,9 +183,10 @@ type PurgeResult struct {
 	// ExpiredAccessTokens is how many access tokens had expired. A token is
 	// worth nothing once it expires, so none is kept.
 	ExpiredAccessTokens int64
-	// ExpiredAuthRequests is how many authorization requests had expired
-	// more than a day ago. A request stays for that day, so a code that is
-	// used again still ends the session it made.
+	// ExpiredAuthRequests is how many authorization requests had expired:
+	// at once for one without a code, from which nothing can come, and more
+	// than a day ago for one with a code, so that a code used again within
+	// that day still ends the session it made.
 	ExpiredAuthRequests int64
 	// EndedSessions is how many sessions had ended or gone unused for 180
 	// days. Their refresh tokens went with them.
@@ -207,7 +208,7 @@ func (s *Server) Purge(ctx context.Context) (PurgeResult, error) {
 	if res.ExpiredAccessTokens, err = s.store.DeleteExpiredAccessTokens(ctx, now); err != nil {
 		return PurgeResult{}, err
 	}
-	if res.ExpiredAuthRequests, err = s.store.DeleteExpiredAuthRequests(ctx, now.Add(-authRequestRetention)); err != nil {
+	if res.ExpiredAuthRequests, err = s.store.DeleteExpiredAuthRequests(ctx, now, now.Add(-authRequestRetention)); err != nil {
 		return PurgeResult{}, err
 	}
 	if res.EndedSessions, err = s.store.DeleteEndedSessions(ctx, now, now.Add(-sessionIdleLifetime)); err != nil {

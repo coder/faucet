@@ -12,7 +12,7 @@ This came in [#54](https://github.com/coder/faucet/pull/54). Nothing that a clie
 Whether or not you set them:
 
 - The migration adds the tables of the browser login, which stay empty until you do.
-- `/cron/purge` also deletes login requests a day after they expired, sessions that ended or went unused for 180 days, and a user's sealed GitHub tokens a day after no session and no login request names them. It counts them in `expired_auth_requests`, `ended_sessions` and `unused_connections`, which are 0 while the browser login is off.
+- `/cron/purge` also deletes login requests once they expired, or a day after for those with a code, sessions that ended or went unused for 180 days, and a user's sealed GitHub tokens a day after no session and no login request names them. It counts them in `expired_auth_requests`, `ended_sessions` and `unused_connections`, which are 0 while the browser login is off.
 
 A host that embeds faucet: an `oauth.Store` of your own must also implement `oauth.LoginStore` and pass the new `storetest.RunOAuth` subtests. An Instant Rollback past this migration cannot start (see [deploy.md](deploy.md#rolling-back)), and its down migration drops every session and every GitHub token that faucet keeps, so every user must log in again.
 

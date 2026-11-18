@@ -475,12 +475,13 @@ func (s *fakeStore) DeleteUnusedConnections(_ context.Context, updatedBefore tim
 	return n, nil
 }
 
-func (s *fakeStore) DeleteExpiredAuthRequests(_ context.Context, before time.Time) (int64, error) {
+func (s *fakeStore) DeleteExpiredAuthRequests(_ context.Context, now, codesBefore time.Time) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var n int64
 	for id, r := range s.requests {
-		if r.ExpiresAt.Before(before) {
+		coded := r.CodeHash != oauth.TokenHash{}
+		if !coded && !r.ExpiresAt.After(now) || coded && r.ExpiresAt.Before(codesBefore) {
 			delete(s.requests, id)
 			n++
 		}

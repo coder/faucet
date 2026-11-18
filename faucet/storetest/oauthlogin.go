@@ -33,7 +33,7 @@ var loginSubtests = []struct {
 	{"RedeemMakesTheSessionAndItsFirstAccessTokenFromTheRequest", redeemMakesTheSessionAndItsFirstAccessTokenFromTheRequest},
 	{"RedeemRefusesAnExpiredCodeAnUnknownCodeAndASecondUse", redeemRefusesAnExpiredCodeAnUnknownCodeAndASecondUse},
 	{"OnlyOneOfManyRedemptionsAtOnceMakesASession", onlyOneOfManyRedemptionsAtOnceMakesASession},
-	{"PurgeDeletesTheRequestsThatExpiredBeforeTheTimeAndKeepsTheirSessions", purgeDeletesTheRequestsThatExpiredBeforeTheTimeAndKeepsTheirSessions},
+	{"PurgeDeletesTheRequestsWithoutACodeAtExpiryAndTheOthersBeforeTheTime", purgeDeletesTheRequestsWithoutACodeAtExpiryAndTheOthersBeforeTheTime},
 	{"ConsentApproveRedeemAndRotateValidateInput", consentApproveRedeemAndRotateValidateInput},
 	{"AHashThatAnotherRowHoldsIsRefusedAndChangesNothing", aHashThatAnotherRowHoldsIsRefusedAndChangesNothing},
 	// Sessions.
@@ -659,32 +659,37 @@ func onlyOneOfManyRedemptionsAtOnceMakesASession(t *testing.T, s oauth.Store) {
 	requireRefreshToken(t, s, oauth.RefreshToken{Hash: reds[winner].Refresh, SessionID: r.ID, IssuedAt: now})
 }
 
-func purgeDeletesTheRequestsThatExpiredBeforeTheTimeAndKeepsTheirSessions(t *testing.T, s oauth.Store) {
+// A request without a code goes once it expired. One with a code goes when
+// it expired before the time, and its session lives on.
+func purgeDeletesTheRequestsWithoutACodeAtExpiryAndTheOthersBeforeTheTime(t *testing.T, s oauth.Store) {
 	ctx := context.Background()
 	now := loginNow()
 	old := now.Add(-time.Hour)
 	c := connectionAt(1, old)
-	oldPending := consentedRequest(t, s, "req-old-pending", old)
+	atExpiry := consentedRequest(t, s, "req-at-expiry", now.Add(-10*time.Minute))
+	given := consentedRequest(t, s, "req-given-up", old)
+	require.NoError(t, s.ExpireAuthRequest(ctx, given.ID))
+	live := consentedRequest(t, s, "req-live", now.Add(-10*time.Minute+time.Microsecond))
 	oldRedeemed := approvedRequest(t, s, "req-old-redeemed", c, old)
 	session, err := s.RedeemAuthRequest(ctx, redemptionOf(oldRedeemed.ID, oldRedeemed.ID, old))
 	require.NoError(t, err)
-	boundary := consentedRequest(t, s, "req-boundary", old.Add(5*time.Minute))
-	fresh := consentedRequest(t, s, "req-fresh", now)
-	before := boundary.ExpiresAt
+	boundary := approvedRequest(t, s, "req-boundary", c, old.Add(5*time.Minute))
+	codesBefore := boundary.ExpiresAt
 
-	n, err := s.DeleteExpiredAuthRequests(ctx, before)
+	n, err := s.DeleteExpiredAuthRequests(ctx, now, codesBefore)
 	require.NoError(t, err)
-	require.EqualValues(t, 2, n)
-	requireNoRequestByGitHubState(t, s, oldPending.GitHubStateHash)
-	requireNoRequestByCode(t, s, oldRedeemed.CodeHash)
-	requireRequestByGitHubState(t, s, boundary)
-	requireRequestByGitHubState(t, s, fresh)
+	require.EqualValues(t, 3, n)
+	requireNoRequestByGitHubState(t, s, atExpiry.GitHubStateHash, "a request without a code at its expiry")
+	requireNoRequestByGitHubState(t, s, given.GitHubStateHash, "an expired request")
+	requireNoRequestByCode(t, s, oldRedeemed.CodeHash, "a request with a code that expired before the time")
+	requireRequestByGitHubState(t, s, live)
+	requireRequestByCode(t, s, boundary)
 
 	requireSessionIs(t, s, session)
 	_, err = s.RotateSession(ctx, rotationOf(refreshOf(session.ID), "after the purge", now))
 	require.NoError(t, err, "the session of a purged request lives on")
 
-	n, err = s.DeleteExpiredAuthRequests(ctx, before)
+	n, err = s.DeleteExpiredAuthRequests(ctx, now, codesBefore)
 	require.NoError(t, err)
 	require.Zero(t, n)
 }
@@ -1143,7 +1148,7 @@ func deleteUnusedConnectionsDeletesTheOnesThatNothingNames(t *testing.T, s oauth
 	}
 	_, err := s.DeleteEndedSessions(ctx, now, now.Add(-180*24*time.Hour))
 	require.NoError(t, err)
-	_, err = s.DeleteExpiredAuthRequests(ctx, before)
+	_, err = s.DeleteExpiredAuthRequests(ctx, now, before)
 	require.NoError(t, err)
 
 	n, err := s.DeleteUnusedConnections(ctx, before)

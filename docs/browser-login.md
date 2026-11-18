@@ -68,7 +68,7 @@ An agent names itself with a Client ID Metadata Document. That is a JSON documen
 | --- | --- | --- |
 | The GitHub App access token and refresh token of each user | Sealed with AES-256-GCM under `FAUCET_TOKEN_KEY`. One pair per GitHub user, which all the user's sessions share. | Until a refresh or the user's next login replaces the pair. Once no session and no login request names the pair, `/cron/purge` deletes it a day after its last update. |
 | One session for each login of an agent | The SHA-256 of each refresh token that the session gave out. | Until the session ends or goes unused for 180 days. `/cron/purge` then deletes it with its refresh tokens. |
-| One request for each login whose user pressed Continue | The SHA-256 of the browser's cookie, of the state sent to GitHub and of the code. | 10 minutes to finish in the browser, then 60 seconds to redeem the code. `/cron/purge` deletes the request a day after it expired. |
+| One request for each login whose user pressed Continue | The SHA-256 of the browser's cookie, of the state sent to GitHub and of the code. | 10 minutes to finish in the browser, then 60 seconds to redeem the code. `/cron/purge` deletes the request once it expired, or a day after for a request with a code, so that a code used again still ends its session. |
 | Each faucet access token | Its SHA-256. | 15 minutes. `/cron/purge` deletes it after that. |
 
 Of these, the GitHub tokens are the only ones that faucet can read back. GitHub App user tokens last 8 hours and their refresh tokens 6 months, and a refresh token works once. When the access token is close to its expiry, the user's next refresh or check makes faucet refresh the pair at GitHub and store the new pair.

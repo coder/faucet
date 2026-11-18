@@ -103,13 +103,21 @@ func (q *Queries) ConsentAuthRequest(ctx context.Context, arg ConsentAuthRequest
 	return result.RowsAffected()
 }
 
-const deleteAuthRequestsExpiredBefore = `-- name: DeleteAuthRequestsExpiredBefore :execrows
+const deleteExpiredAuthRequests = `-- name: DeleteExpiredAuthRequests :execrows
 DELETE FROM faucet_auth_requests
-WHERE expires_at < $1::timestamptz
+WHERE (code_hash IS NULL AND expires_at <= $1::timestamptz)
+  OR (code_hash IS NOT NULL AND expires_at < $2::timestamptz)
 `
 
-func (q *Queries) DeleteAuthRequestsExpiredBefore(ctx context.Context, before time.Time) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deleteAuthRequestsExpiredBefore, before)
+type DeleteExpiredAuthRequestsParams struct {
+	Now         time.Time
+	CodesBefore time.Time
+}
+
+// DeleteExpiredAuthRequests deletes the requests without a code once they
+// expired, and those with a code once they expired before codes_before.
+func (q *Queries) DeleteExpiredAuthRequests(ctx context.Context, arg DeleteExpiredAuthRequestsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteExpiredAuthRequests, arg.Now, arg.CodesBefore)
 	if err != nil {
 		return 0, err
 	}
