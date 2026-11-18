@@ -366,8 +366,9 @@ type EndOldestRawLeaseOfTargetParams struct {
 }
 
 // The lease to end is waited for, not passed over, when a poll holds it, so
-// that the limit holds. A poll waits for no lock of an open. LockLiveRawLeasesOf
-// has done the waiting, so the order reads the times of the last polls.
+// that the limit holds. LockLiveRawLeasesOf has done the waiting, so the order
+// reads the times of the last polls. A poll that starts after that lock waits
+// for the open, and the open never waits for it in return.
 func (q *Queries) EndOldestRawLeaseOfTarget(ctx context.Context, arg EndOldestRawLeaseOfTargetParams) ([][]byte, error) {
 	rows, err := q.db.QueryContext(ctx, endOldestRawLeaseOfTarget,
 		arg.Principal,
