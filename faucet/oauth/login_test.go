@@ -332,6 +332,9 @@ func (a loginAnswer) location(t *testing.T) *url.URL {
 	return u
 }
 
+// loginEndpoint is u without its query.
+func loginEndpoint(u *url.URL) string { return u.Scheme + "://" + u.Host + u.Path }
+
 // loginBrowser is one browser, with its own cookie jar. It follows a
 // redirect only when a test asks it to.
 type loginBrowser struct {
@@ -363,7 +366,7 @@ func (b *loginBrowser) do(req *http.Request) loginAnswer {
 
 func (b *loginBrowser) get(u string) loginAnswer {
 	b.t.Helper()
-	req, err := http.NewRequest(http.MethodGet, u, nil)
+	req, err := http.NewRequestWithContext(b.t.Context(), http.MethodGet, u, nil)
 	require.NoError(b.t, err)
 	return b.do(req)
 }
@@ -378,7 +381,7 @@ func (b *loginBrowser) authorize(q url.Values) loginAnswer {
 // and with cookies on top of the jar's.
 func (b *loginBrowser) post(form url.Values, origins []string, cookies ...*http.Cookie) loginAnswer {
 	b.t.Helper()
-	req, err := http.NewRequest(http.MethodPost, b.h.issuer+oauth.AuthorizePath, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(b.t.Context(), http.MethodPost, b.h.issuer+oauth.AuthorizePath, strings.NewReader(form.Encode()))
 	require.NoError(b.t, err)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	for _, origin := range origins {
@@ -504,6 +507,7 @@ func TestAConsentThatTheBrowserOfTheLoginDidNotSendIsRefusedAndEndsTheLogin(t *t
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			attacker := h.newBrowser(t)
 			own, other := attacker.start(client), attacker.start(client)
 
@@ -516,6 +520,10 @@ func TestAConsentThatTheBrowserOfTheLoginDidNotSendIsRefusedAndEndsTheLogin(t *t
 			require.Equal(t, http.StatusForbidden, later.status, "the login is dead: "+later.body)
 			require.Zero(t, h.github.authorizeCount(), "no browser reached GitHub")
 			require.Empty(t, h.agents.received(client.path), "no code reached the attacker's client")
+
+			untouched := attacker.continueWith(other)
+			require.Equal(t, http.StatusSeeOther, untouched.status, "the browser's other login still goes to GitHub")
+			require.Equal(t, h.github.URL+"/login/oauth/authorize", loginEndpoint(untouched.location(t)))
 		})
 	}
 }
