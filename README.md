@@ -124,7 +124,7 @@ Faucet runs anywhere that runs a Go binary next to Postgres. This repository dep
 
 The packages:
 
-- [`faucet`](faucet): the core. `faucet.New` builds a `Service`. Mount `Service.WebhookHandler()` on your router. Build your `*mcp.Server` with `mcp.ServerOptions{Capabilities: faucet.ServerCapabilities()}`, call `Service.Register` on it, and wrap its HTTP handler in `faucet.RequireEventName`, which checks the `Mcp-Name` header. Bring your own `Authorizer` and principal lookup, or use `TokenAuthorizer` (see [docs/security.md](docs/security.md#principals-and-scopes) for the principal kinds and the scopes).
+- [`faucet`](faucet): the core. `faucet.New` builds a `Service`. Mount `Service.WebhookHandler()` on your router. Build your `*mcp.Server` with `mcp.ServerOptions{Capabilities: faucet.ServerCapabilities()}`, call `Service.Register` on it, and wrap its HTTP handler in `faucet.RequireEventName`, which checks the `Mcp-Name` header and refuses JSON-RPC batches. Bring your own `Authorizer` and principal lookup, or use `TokenAuthorizer` (see [docs/security.md](docs/security.md#principals-and-scopes) for the principal kinds and the scopes).
 - [`faucet/redelivery`](faucet/redelivery): the failed-webhook sweep, built with `redelivery.New`.
 - [`faucet/pgstore`](faucet/pgstore): the Postgres store, with embedded migrations.
 - [`faucet/storetest`](faucet/storetest): the contract tests that every `Store` must pass.
