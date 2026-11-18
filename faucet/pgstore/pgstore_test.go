@@ -440,10 +440,10 @@ func TestTheOrgGrantsMigrationBindsEachLoginToTheAccountThatHoldsItAndBack(t *te
 }
 
 // The workload trusts migration lets a client have no secret. Its down drops
-// the trust rules and gives each client with no secret the hash of 32 zero
-// bytes, which no known secret has, as the build before needs a hash, and
-// its up takes that hash back to no secret. No secret logs such a client in
-// at any step.
+// the trust rules and gives each client with no secret an all-zero hash,
+// which no known secret hashes to, as the build before needs a hash, and its
+// up takes that hash back to no secret. No secret logs such a client in at
+// any step.
 func TestTheWorkloadTrustsMigrationKeepsAClientWithNoSecretWithoutOneDownAndUp(t *testing.T) {
 	t.Parallel()
 	db := newDatabase(t, testDatabaseURL(t))
@@ -493,7 +493,7 @@ func TestTheWorkloadTrustsMigrationKeepsAClientWithNoSecretWithoutOneDownAndUp(t
 	requireNoLogIn("after the down")
 	require.Equal(t, withSecret.SecretHash[:], secretHashOf("with-secret"))
 	for _, id := range workloads {
-		require.Equal(t, make([]byte, 32), secretHashOf(id), "%s gets the hash of 32 zero bytes", id)
+		require.Equal(t, make([]byte, 32), secretHashOf(id), "%s gets an all-zero hash", id)
 	}
 	_, err = db.ExecContext(ctx, `UPDATE faucet_service_clients SET secret_hash = NULL WHERE client_id = 'workload-a'`)
 	require.Error(t, err, "a client needs a secret hash again")

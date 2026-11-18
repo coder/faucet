@@ -256,9 +256,6 @@ func TestAPastedKeySetHoldsAPublicKeyForSignatures(t *testing.T) {
 	}
 }
 
-// encoding/json takes the last member whose name folds to keys, and jsonb
-// sorts the members of an object, so a set that names its keys twice could
-// read as other keys once stored.
 func TestAPastedKeySetNamesItsKeysOnceInLowerCase(t *testing.T) {
 	t.Parallel()
 	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)

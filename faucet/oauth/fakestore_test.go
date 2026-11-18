@@ -217,9 +217,8 @@ func (s *fakeStore) CountTrustRules(context.Context) (map[string]int, error) {
 	return counts, nil
 }
 
-// sameTrustRule reports whether a and b hold the same issuer, claims and key
-// set, as AddTrustRule says. It compares numbers by their text, so 1 and 1.0
-// differ as in jsonb, but so do 1e2 and 100, which jsonb holds as one.
+// It compares numbers by their text, so 1 and 1.0 differ as in jsonb, but so
+// do 1e2 and 100, which jsonb holds as one.
 func sameTrustRule(a, b oauth.TrustRule) bool {
 	return a.Issuer == b.Issuer && maps.Equal(a.Claims, b.Claims) && sameJSON(a.JWKS, b.JWKS)
 }

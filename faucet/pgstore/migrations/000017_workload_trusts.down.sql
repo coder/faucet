@@ -1,7 +1,7 @@
 -- The build before has no trust rules and needs a secret hash for every
--- client. A client with no secret gets the hash of 32 zero bytes, which no
--- known secret has, so it still gets no token, and the up turns that hash
--- back into no secret. The lock keeps a client with no secret from coming in
+-- client. A client with no secret gets an all-zero secret_hash, which no
+-- known secret hashes to, so it still gets no token, and the up turns it back
+-- into no secret. The lock keeps a client with no secret from coming in
 -- between the update and SET NOT NULL.
 LOCK TABLE faucet_service_clients IN EXCLUSIVE MODE;
 DROP TABLE faucet_workload_trusts;

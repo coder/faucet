@@ -543,7 +543,6 @@ func TestTheClientsCommandRemovesATrustRuleOfThatClientOnly(t *testing.T) {
 	require.Len(t, rules, 1, "the rule stays")
 }
 
-// rulesUnread is a store whose TrustRules fails.
 type rulesUnread struct{ clientStore }
 
 func (rulesUnread) TrustRules(context.Context, string) ([]oauth.StoredTrustRule, error) {

@@ -52,9 +52,7 @@ type trustRule struct {
 // and why.
 type requiredPin struct {
 	claim, value, why string
-	// refuse returns why the pin cannot take a value, or nil. Nil takes every
-	// value.
-	refuse func(value string) error
+	refuse            func(value string) error
 }
 
 // issuerProfile is what faucet requires of a rule for the issuers of one
@@ -82,7 +80,7 @@ var issuerProfiles = map[string]issuerProfile{
 		pins: []requiredPin{
 			{claim: "repository_owner_id", why: "the workflows of every GitHub account get their tokens from this issuer, an owner can choose the parts of sub, and the name of a renamed or deleted account can pass to another, so only the owner ID tells the accounts apart"},
 			{claim: "repository_id", why: "every repository of the owner can get a token for faucet, and the name of a renamed or deleted repository can pass to another, so only the repository ID names one"},
-			{claim: "ref", why: "a workflow on any branch of the repository, or on a pull request from one, can get a token for faucet, so the rule names the ref whose code may act as the client, such as refs/heads/main", refuse: pullRequestRef},
+			{claim: "ref", why: "a workflow on any branch of the repository, or on a pull request from one, can get a token for faucet, so the rule names the ref whose code may act as the client, such as refs/heads/main", refuse: refusePullRequestRef},
 		},
 	},
 	"gitlab.com": {
@@ -108,9 +106,7 @@ var otherIssuers = issuerProfile{
 	pins: []requiredPin{{claim: "sub", why: "every workload of the issuer can get a token for faucet, and sub names one of them"}},
 }
 
-// pullRequestRef refuses the ref of a GitHub pull request, refs/pull/<n>/merge
-// or refs/pull/<n>/head.
-func pullRequestRef(ref string) error {
+func refusePullRequestRef(ref string) error {
 	if strings.HasPrefix(ref, "refs/pull/") {
 		return xerrors.New("a workflow on a pull request's ref runs the code of the pull request, which its author chose and no one need have reviewed: pin the ref of a branch or a tag, such as refs/heads/main")
 	}
@@ -220,15 +216,13 @@ func parseTrustRule(r TrustRule) (trustRule, error) {
 	return rule, nil
 }
 
-// printable reports whether s is valid UTF-8 with no control or format
-// character, which could hide or fake text in a terminal.
+// A control or format character can hide or fake text in a terminal.
 func printable(s string) bool {
 	return utf8.ValidString(s) && !strings.ContainsFunc(s, func(r rune) bool { return unicode.In(r, unicode.Cc, unicode.Cf) })
 }
 
-// storableStrings reports whether no string of a JSON text holds NUL or
-// U+FFFD. Postgres refuses \u0000 in jsonb, and encoding/json reads a lone
-// surrogate, which Postgres refuses too, and invalid UTF-8 as U+FFFD.
+// Postgres refuses \u0000 and a lone surrogate in jsonb, and encoding/json
+// reads a lone surrogate or invalid UTF-8 as U+FFFD.
 func storableStrings(text []byte) bool {
 	d := json.NewDecoder(bytes.NewReader(text))
 	for {
@@ -245,8 +239,6 @@ func storableStrings(text []byte) bool {
 	}
 }
 
-// compactKeySet is the key set {"keys":entries}, with no white space. It is
-// no longer than the set that entries came from.
 func compactKeySet(entries []json.RawMessage) (json.RawMessage, error) {
 	set := []byte(`{"keys":[`)
 	for i, entry := range entries {
@@ -288,8 +280,7 @@ var secretKeyMembers = []string{"d", "p", "q", "dp", "dq", "qi", "oth", "k", "pr
 // that have a kid, for signatures with RS256 or ES256. It skips a key that it
 // cannot read, as section 5 says, and refuses a set in which a key has a
 // member of secretKeyMembers, read or not, or that holds no key that it
-// keeps. It returns the entries of keys too, each as it read it. Its errors
-// complete the sentence "the key set ...".
+// keeps. Its errors complete the sentence "the key set ...".
 func parseKeySet(body []byte) (jose.JSONWebKeySet, []json.RawMessage, error) {
 	if len(body) > MaxKeyDocumentBytes {
 		return jose.JSONWebKeySet{}, nil, xerrors.Errorf("must be at most %d bytes", MaxKeyDocumentBytes)
@@ -324,11 +315,8 @@ func parseKeySet(body []byte) (jose.JSONWebKeySet, []json.RawMessage, error) {
 	return set, entries, nil
 }
 
-// keySetEntries returns the entries of the keys array of a key set. It
-// refuses a set with a second member named keys, or one whose name is keys
-// in another case: encoding/json takes the last member whose name folds to
-// keys, and jsonb sorts the members of an object, so such a set can read as
-// other keys once stored.
+// encoding/json, and a reader like it, takes the last member whose name
+// folds to keys, so it can read other keys than this does.
 func keySetEntries(body []byte) ([]json.RawMessage, error) {
 	notASet := xerrors.New("must be a JSON object with a keys array")
 	if !json.Valid(body) {

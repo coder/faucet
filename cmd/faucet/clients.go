@@ -306,8 +306,6 @@ func sortedClaims(claims map[string]string) []string {
 	return pinned
 }
 
-// commandFlags is the flag set of one command, whose -h prints usage, the
-// command's line of clientsUsage, and its flags.
 func commandFlags(name, usage string, stderr io.Writer) *flag.FlagSet {
 	flags := flag.NewFlagSet("faucet clients "+name, flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -318,8 +316,6 @@ func commandFlags(name, usage string, stderr io.Writer) *flag.FlagSet {
 	return flags
 }
 
-// knownClient returns the client with this ID, live or disabled, or an error
-// that says there is none.
 func knownClient(ctx context.Context, store oauth.Store, id string) (oauth.Client, error) {
 	c, err := store.Client(ctx, id)
 	if xerrors.Is(err, oauth.ErrUnknownClient) {
@@ -337,16 +333,13 @@ func trustClient(ctx context.Context, args []string, store oauth.Store, now time
 	flags.Var(claims, "claim", "a claim that a token must hold, as <name>=<value>; repeat it for more")
 	var jwksFile string
 	flags.Func("jwks-file", "a file that holds the issuer's JWK Set, for an issuer that faucet cannot reach; without it, faucet fetches the keys that the issuer's discovery document names", func(path string) error {
-		// A shell passes an empty path for an unset variable, and no path
-		// means discovery.
+		// A shell passes an empty path for an unset variable.
 		if path == "" {
 			return xerrors.New("it names no file: leave -jwks-file out for the keys that the issuer's discovery document names")
 		}
 		jwksFile = path
 		return nil
 	})
-	// The client ID comes before the flags, so a flag in its place is -h or
-	// a client ID left out.
 	var id string
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		id, args = args[0], args[1:]
@@ -387,8 +380,6 @@ func trustClient(ctx context.Context, args []string, store oauth.Store, now time
 	return err
 }
 
-// readKeySetFile reads the key set that -jwks-file names. It reads no more
-// than a key set can hold, so a pipe that does not end gets an answer too.
 func readKeySetFile(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -435,7 +426,7 @@ func listTrustRules(ctx context.Context, args []string, store oauth.Store, stdou
 		if len(r.Rule.JWKS) > 0 {
 			keys = "pasted"
 		}
-		// JSON, with its keys sorted, so that no value can fake a column or
+		// json.Marshal sorts the keys, and no value can fake a column or
 		// another pin.
 		claims, err := json.Marshal(r.Rule.Claims)
 		if err != nil {

@@ -189,7 +189,7 @@ func (s *Store) TrustRules(ctx context.Context, clientID string) (_ []oauth.Stor
 		}
 		if row.Jwks != "" {
 			// jsonb's text puts a space after each colon and comma, which
-			// can take a key set past the size that the checker takes.
+			// can take a key set past oauth.MaxKeyDocumentBytes.
 			var jwks bytes.Buffer
 			if err := json.Compact(&jwks, []byte(row.Jwks)); err != nil {
 				return nil, xerrors.Errorf("read the key set of trust rule %d: %w", row.ID, err)

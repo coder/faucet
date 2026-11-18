@@ -1,7 +1,7 @@
 -- A client that faucet clients create -no-secret made has no secret_hash, so
--- the client credentials grant refuses it. The down gives such a client the
--- hash of 32 zero bytes, which no client with a secret holds, as
--- oauth.Client.Validate refuses it.
+-- the client credentials grant refuses it. The down gives such a client an
+-- all-zero secret_hash, which oauth.Client.Validate refuses for a client
+-- with a secret.
 ALTER TABLE faucet_service_clients ALTER COLUMN secret_hash DROP NOT NULL;
 UPDATE faucet_service_clients SET secret_hash = NULL WHERE secret_hash = decode(repeat('00', 32), 'hex');
 
