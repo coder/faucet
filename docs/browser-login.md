@@ -1,0 +1,95 @@
+# Browser login
+
+A coding agent can connect to `https://<your host>/github/mcp` with no token. Faucet answers 401, the agent opens a browser, and its user logs in to GitHub through faucet. Nobody makes a GitHub token by hand.
+
+For this way in, faucet keeps the user's GitHub App token. It seals the token under `FAUCET_TOKEN_KEY` and gives the agent only faucet's own tokens, an access token for 15 minutes and a refresh token. The [security model](security.md) compares this with a pasted token and a service.
+
+## Turn it on
+
+1. Make a GitHub App for faucet, under the organization's **Settings**, **Developer settings**, **GitHub Apps**:
+   - **Callback URL:** the value of `FAUCET_PUBLIC_URL` followed by `/oauth/github/callback`.
+   - **Expire user authorization tokens:** on. Faucet keeps no token that never expires. With this off, every login stops at a page that says "faucet cannot keep this login", and the log names the setting.
+   - **Repository permissions:** read-only. Metadata is enough, because faucet only asks GitHub whether the user can read a repository.
+   - **Webhook:** off. Events still come from the hook of the [quick start](../README.md#quick-start). Faucet uses no installation token and no private key of the App.
+2. Make a client secret for the App.
+3. Install the App on each organization or repository that users want events from. A GitHub App user token reaches only the repositories where the App is installed and that the user can read. A user gets no events from a repository without the App.
+4. Set the settings:
+
+   ```sh
+   FAUCET_PUBLIC_URL='https://faucet.example.com'
+   FAUCET_GITHUB_APP_CLIENT_ID='<the client ID of the App>'
+   FAUCET_GITHUB_APP_CLIENT_SECRET='<the client secret>'
+   FAUCET_TOKEN_KEY="k1:$(openssl rand -base64 32)"
+   ```
+
+   When one of the last three is set without the others, or without `FAUCET_PUBLIC_URL`, the server refuses to start and names the missing variables. On Vercel, set them for Production only, and the client secret and the key as sensitive. Keep a copy of `FAUCET_TOKEN_KEY` outside Vercel. Vercel does not show a sensitive value again, and a [rotation](#rotate-the-token-key) needs the old key.
+
+## What the user sees
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant B as Browser
+    participant F as faucet
+    participant G as GitHub
+    A->>F: POST /github/mcp without a token
+    F-->>A: 401, WWW-Authenticate names the metadata
+    A->>F: read the metadata of the endpoint and of faucet
+    A->>B: open /oauth/authorize with the client ID and a PKCE challenge
+    B->>F: GET /oauth/authorize
+    F->>F: fetch the client ID metadata document
+    F-->>B: consent page and a cookie for this login
+    B->>F: POST /oauth/authorize, Continue with GitHub
+    F-->>B: 303 to GitHub with a state and a PKCE challenge
+    B->>G: log in and authorize the faucet App
+    G-->>B: back to /oauth/github/callback with a code
+    B->>F: GET /oauth/github/callback
+    F->>G: trade the code with the client secret and the PKCE verifier
+    G-->>F: the access token and refresh token of the user
+    F-->>B: 302 to the redirect URI of the agent with a new code
+    B->>A: the code
+    A->>F: POST /oauth/token with the code and the PKCE verifier
+    F-->>A: an fct_ access token for 15 minutes and an fcr_ refresh token
+    A->>F: POST /github/mcp with Bearer fct_...
+```
+
+1. The agent calls `/github/mcp` without a token. The 401 points to the endpoint's metadata, which names faucet as the authorization server. Faucet's own metadata says that it takes client ID metadata documents.
+2. The agent opens the consent page in the browser. The page shows the host of the agent's client ID in large text, the name that the agent gives with a note that faucet has not checked it, the endpoint, what each scope allows, and where the browser returns to. The page works for 10 minutes.
+3. The user presses **Continue with GitHub**. GitHub asks them to log in and, the first time, to authorize faucet's App.
+4. GitHub sends the browser back to faucet, and faucet sends it on to the agent with a code. The agent trades the code for faucet's tokens within 60 seconds. From then on it refreshes them without the browser.
+
+When a step fails, the browser shows a page that says what happened and tells the user to start again from the agent. When the user refuses at GitHub, the agent gets `access_denied`.
+
+An agent names itself with a Client ID Metadata Document. That is a JSON document with the agent's name and redirect URIs, served at an `https` URL, and the URL is the agent's client ID. Faucet takes no dynamic client registration, so a client that can only register itself cannot log in. The consent page shows the host of the URL, because the name in the document is the client's own claim. When faucet refuses a document or a request, the page gives the reason for the client's developer. go-sdk's `auth.NewAuthorizationCodeHandler` with a `ClientIDMetadataDocumentConfig` does the agent's part, and the tests of `cmd/faucet` run it.
+
+## What faucet keeps
+
+| What | In what form | For how long |
+| --- | --- | --- |
+| The GitHub App access token and refresh token of each user | Sealed with AES-256-GCM under `FAUCET_TOKEN_KEY`. One pair per GitHub user, which all the user's sessions share. | Until a refresh or the user's next login replaces the pair. Faucet deletes no pair, so it outlives the user's sessions. |
+| One session for each login of an agent | The SHA-256 of the current refresh token and of the one before it. | The row stays after the session ends. |
+| One request for each login in progress | The SHA-256 of the browser's cookie, of the state sent to GitHub and of the code. | 10 minutes to finish in the browser, then 60 seconds to redeem the code. `/cron/purge` deletes the request a day after it expired. |
+| Each faucet access token | Its SHA-256. | 15 minutes. `/cron/purge` deletes it after that. |
+
+Of these, the GitHub tokens are the only ones that faucet can read back. GitHub App user tokens last 8 hours and their refresh tokens 6 months, and a refresh token works once. When the access token is close to its expiry, the user's next refresh or check makes faucet refresh the pair at GitHub and store the new pair.
+
+## How a session ends
+
+A session lasts as long as its agent refreshes its tokens. It ends, and the agent must log in again, in these cases:
+
+- **A refresh token comes back after a refresh replaced it.** Faucet takes that as a token with two holders. So two processes that share one refresh token, such as two agents that copy one token file, log each other out.
+- **A code comes back after the agent redeemed it.** The session that the code made ends.
+- **The refresh token went unused for 180 days.** GitHub ends its own refresh tokens after six months, so faucet ends the session at its next refresh.
+- **GitHub refuses the user's refresh token,** because it expired, was revoked, or was used already. Then every session of that user ends. This also happens when faucet stops after GitHub gave a user a new pair and before faucet stored it. The stored refresh token is then spent, so that user must log in again.
+
+Faucet has no logout. When a user revokes faucet's App at GitHub, GitHub rejects the user's tokens at the next check, and faucet ends every session of that user. An operator can end every session of one user at once with `UPDATE faucet_user_sessions SET ended_at = now() WHERE connection_id = 'github:<GitHub user ID>' AND ended_at IS NULL`. The sealed pair stays in `faucet_connections` until the user's next login replaces it.
+
+## Rotate the token key
+
+`FAUCET_TOKEN_KEY` holds one or more keys. The first key seals, and every key opens the tokens that it sealed.
+
+1. Put a new `<key_id>:<key>` first and keep the old one, such as `k2:<new key>,k1:<old key>`. Make the new key with `openssl rand -base64 32`.
+2. Deploy. A user's row moves to the new key when faucet refreshes the user's GitHub token or the user logs in again. For a user whose agent stays active, a refresh comes within 8 hours.
+3. Drop the old key once `SELECT count(*) FROM faucet_connections WHERE key_id = 'k1'` gives 0. A row whose `refresh_expires_at` has passed is of no use anyway, because its user must log in again whatever the key.
+
+If faucet runs without a key that rows name, because you dropped it too early or lost `FAUCET_TOKEN_KEY`, faucet cannot read those users' GitHub tokens. Their checks and refreshes fail, and no session ends. Put the key back and they work again. Without the key, each user recovers by logging in again, which seals a new pair under the first key.
