@@ -71,6 +71,10 @@ type ServerDeps struct {
 	// Login turns on the browser login. Nil leaves it off: the server then
 	// takes service clients only.
 	Login *BrowserLogin
+	// Repos asks GitHub whether the token of a user who logged in through
+	// the browser can read a repository, when a refresh checks the user's
+	// repositories again. It is required with Login.
+	Repos RepoChecker
 }
 
 // Server is faucet's authorization server: its metadata and its token
@@ -83,8 +87,10 @@ type Server struct {
 	resources []string
 	// grants is the grant table of this server.
 	grants map[string]grant
-	// login is nil when the browser login is off.
-	login *browserLogin
+	// login is nil when the browser login is off, and access is then the
+	// zero value.
+	login  *browserLogin
+	access repoAccess
 }
 
 // NewServer returns the Server for d.
@@ -105,10 +111,14 @@ func NewServer(d ServerDeps) (*Server, error) {
 	}
 	if d.Login != nil {
 		login, err := newBrowserLogin(*d.Login, d.Clock)
-		if err != nil {
+		switch {
+		case err != nil:
 			return nil, xerrors.Errorf("the browser login: %w", err)
+		case d.Repos == nil:
+			return nil, xerrors.New("the browser login needs the repository checker")
 		}
 		s.login = login
+		s.access = repoAccess{tokens: newConnections(d.Store, d.Clock, d.Logger, login), repos: d.Repos}
 		maps.Copy(s.grants, loginGrants)
 	}
 	return s, nil

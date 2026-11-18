@@ -113,8 +113,7 @@ func (h *grantHarness) principal(s grantSession) faucet.Principal {
 func (h *grantHarness) userAccess() oauth.UserAccess {
 	h.t.Helper()
 	a, err := oauth.NewUserAccess(oauth.UserAccessDeps{
-		Store: h.store, Clock: h.clock, Logger: slog.Make(), Login: *h.login,
-		Repos: faucet.TokenAuthorizer{BaseURL: h.github.URL, Client: h.github.Client()},
+		Store: h.store, Clock: h.clock, Logger: slog.Make(), Login: *h.login, Repos: h.github.repos(),
 	})
 	require.NoError(h.t, err)
 	return a
@@ -145,20 +144,21 @@ func TestEachSessionOfAUserResolvesToItsOwnSession(t *testing.T) {
 	require.Equal(t, []faucet.Scope{faucet.ScopeEventsRead}, p.Scopes(), "the principal holds the token's scopes")
 }
 
-// An access check of one session, right after the same check of another
-// session of the user, asks GitHub again, and GitHub's answer stands
-// (R13).
+// An access check of one session does not answer for another session of
+// the user that logged in after it: that one asks GitHub again, and GitHub's
+// answer stands (R13).
 func TestAnAccessCheckOfOneSessionDoesNotAnswerForAnother(t *testing.T) {
 	t.Parallel()
 	h := newGrantHarness(t, newFakeStore())
 	first := h.principal(h.redeem(h.approve("login-1", 1)))
-	second := h.principal(h.redeem(h.approve("login-2", 1)))
 	access := h.userAccess()
 	ctx := context.Background()
 
 	id, err := access.RepoID(ctx, first, "coder/faucet")
 	require.NoError(t, err)
 	require.EqualValues(t, grantRepoID, id)
+	h.clock.Advance(time.Minute)
+	second := h.principal(h.redeem(h.approve("login-2", 1)))
 	h.github.set(func(g *grantGitHub) { g.repoStatus = http.StatusNotFound })
 	_, err = access.RepoID(ctx, second, "coder/faucet")
 	require.ErrorIs(t, err, faucet.ErrNoAccess)
@@ -252,7 +252,7 @@ func TestTheAccessCheckRefreshesATokenThatExpiresWithinAMinute(t *testing.T) {
 	refreshes, _ := h.github.counts()
 	require.Zero(t, refreshes)
 	h.clock.Advance(time.Second)
-	_, err = access.RepoID(context.Background(), p, "coder/faucet")
+	_, err = access.RepoID(context.Background(), p, "coder/other")
 	require.NoError(t, err)
 	refreshes, _ = h.github.counts()
 	require.Equal(t, 1, refreshes)

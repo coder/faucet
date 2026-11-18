@@ -30,7 +30,7 @@ func TestAClientIDOnFaucetsOwnHostIsRefusedWithoutAFetch(t *testing.T) {
 	login := testBrowserLogin(t, "https://github.example.com")
 	login.Documents = &http.Client{Transport: documents}
 	server, err := oauth.NewServer(oauth.ServerDeps{
-		Store: newFakeStore(), Clock: quartz.NewMock(t), Logger: slog.Make(), Issuer: issuer, Resources: []string{resource}, Login: login,
+		Store: newFakeStore(), Clock: quartz.NewMock(t), Logger: slog.Make(), Issuer: issuer, Resources: []string{resource}, Login: login, Repos: noRepos,
 	})
 	require.NoError(t, err)
 	authorize := func(clientID string) *httptest.ResponseRecorder {

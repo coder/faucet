@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"cdr.dev/slog/v3"
+	"github.com/coder/faucet/faucet"
 	"github.com/coder/faucet/faucet/oauth"
 	"github.com/coder/quartz"
 )
@@ -121,6 +122,11 @@ func (g *grantGitHub) counts() (refreshes, repoChecks int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.refreshes, len(g.repoLookups)
+}
+
+// repos is the RepoChecker that asks this GitHub.
+func (g *grantGitHub) repos() faucet.TokenAuthorizer {
+	return faucet.TokenAuthorizer{BaseURL: g.URL, Client: g.Client()}
 }
 
 // lookups returns the repositories that GitHub was asked about, in the
@@ -233,7 +239,7 @@ func newGrantHarness(t *testing.T, store oauth.Store) *grantHarness {
 	h.login = testBrowserLogin(t, h.github.URL)
 	server, err := oauth.NewServer(oauth.ServerDeps{
 		Store: store, Clock: h.clock, Logger: slog.Make(), Issuer: issuer,
-		Resources: []string{resource, issuer + "/mcp"}, Login: h.login,
+		Resources: []string{resource, issuer + "/mcp"}, Login: h.login, Repos: h.github.repos(),
 	})
 	require.NoError(t, err)
 	h.server = server
