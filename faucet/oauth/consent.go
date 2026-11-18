@@ -2,6 +2,9 @@ package oauth
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"fmt"
 	"html/template"
 	"net/http"
 	"time"
@@ -9,10 +12,38 @@ import (
 	"github.com/coder/faucet/faucet"
 )
 
-// pageCSP lets a page of the browser login load nothing and run no script.
-// It names no form-action, because Chrome applies form-action to the
-// redirect that follows the consent form, and that redirect goes to GitHub.
-const pageCSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'"
+// continueDelay is how long the consent page must be visible and in focus
+// before Continue works. GitHub asks nothing of a user who authorized
+// faucet's App before, so without it a page of another site could open the
+// consent page under a click that the user meant for that page, such as the
+// second click of a double-click.
+const continueDelay = 500 * time.Millisecond
+
+// continueScript turns Continue on once the page has been visible and in
+// focus for continueDelay. Each change of focus or visibility starts the
+// wait again, and the button turns on only if the page is still visible and
+// in focus when the wait ends.
+var continueScript = fmt.Sprintf(`
+const button = document.querySelector("button");
+let timer;
+function wait() {
+  button.disabled = true;
+  clearTimeout(timer);
+  timer = setTimeout(() => { button.disabled = document.visibilityState !== "visible" || !document.hasFocus(); }, %d);
+}
+for (const type of ["focus", "blur", "pageshow"]) addEventListener(type, wait);
+document.addEventListener("visibilitychange", wait);
+wait();
+`, continueDelay.Milliseconds())
+
+var continueScriptHash = sha256.Sum256([]byte(continueScript))
+
+// pageCSP lets a page of the browser login load nothing and run no script
+// but continueScript. It names no form-action, because Chrome applies
+// form-action to the redirect that follows the consent form, and that
+// redirect goes to GitHub.
+var pageCSP = "default-src 'none'; script-src 'sha256-" + base64.StdEncoding.EncodeToString(continueScriptHash[:]) +
+	"'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'"
 
 // scopeDescriptions say in plain words what each scope lets a client do.
 var scopeDescriptions = map[faucet.Scope]string{
@@ -101,6 +132,7 @@ dd { margin: .25rem 0 0; }
 ul { margin: 0; padding-left: 1.25rem; }
 code { font: .9rem ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
 button { width: 100%; padding: .75rem 1rem; border: 0; border-radius: 8px; background: var(--button); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
 .note { color: var(--muted); font-size: .875rem; }
 </style>
 </head>
@@ -136,9 +168,11 @@ button { width: 100%; padding: .75rem 1rem; border: 0; border-radius: 8px; backg
 <form method="post" action="{{.Action}}">
 <input type="hidden" name="request" value="{{.RequestID}}">
 <input type="hidden" name="token" value="{{.FormToken}}">
-<button type="submit">Continue with GitHub</button>
+<button type="submit" disabled>Continue with GitHub</button>
 </form>
+<noscript><p class="note">Continue needs JavaScript. Turn it on for this site and reload this page.</p></noscript>
 <p class="note">If you did not just start a login from your agent, close this page. This page works for {{.Minutes}} minutes.</p>
+<script>` + continueScript + `</script>
 {{template "bottom"}}{{end}}
 
 {{define "error"}}{{template "top" .Title}}
