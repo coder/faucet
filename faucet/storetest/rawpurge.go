@@ -16,6 +16,7 @@ var rawPurgeSubtests = []rawSubtest{
 	{"PurgeRawEventsClearsABodyThatNothingNames", purgeRawEventsClearsABodyThatNothingNames},
 	{"PurgeRawEventsClearsTheBodyOfAMissedEvent", purgeRawEventsClearsTheBodyOfAMissedEvent},
 	{"PurgeRawEventsClearsEveryBodyReceivedBeforeClearBefore", purgeRawEventsClearsEveryBodyReceivedBeforeClearBefore},
+	{"PurgeRawEventsOwesAGapForEveryPayloadThatADeliveryStillNamed", purgeRawEventsOwesAGapForEveryPayloadThatADeliveryStillNamed},
 	{"PurgeRawEventsDeletesExpiredLeasesWithTheirUnreadEvents", purgeRawEventsDeletesExpiredLeasesWithTheirUnreadEvents},
 	{"PurgeRawEventsDeletesTheEventsReceivedBeforeDeleteBefore", purgeRawEventsDeletesTheEventsReceivedBeforeDeleteBefore},
 	{"PurgeRawEventsKeepsTheDeliveryIDOfAClearedEvent", purgeRawEventsKeepsTheDeliveryIDOfAClearedEvent},
@@ -144,6 +145,43 @@ func purgeRawEventsClearsEveryBodyReceivedBeforeClearBefore(t *testing.T, s RawS
 	require.Equal(t, ids[0], claim.Ref.EventID)
 	require.Nil(t, claim.Event, "a delivery that names a cleared event gets no body")
 	require.Equal(t, ids[2], r.head(), "clearing a body keeps the event")
+}
+
+func purgeRawEventsOwesAGapForEveryPayloadThatADeliveryStillNamed(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	waiting := r.subscribe(1, rawSpec{})
+	sent := r.subscribe(2, rawSpec{})
+	ids := r.purgeSpaced(3)
+	claims := r.claimAll(r.now)
+	require.Len(t, claims, 6, "each subscription has a delivery of each push")
+	for _, id := range ids[:2] {
+		require.True(t, r.finish(deliveryOf(t, claims, sent, id).Ref, r.now, faucet.Finish{Kind: faucet.FinishDelivered}).Accepted)
+	}
+	cut := deliveryOf(t, claims, sent, ids[2]).Event.ReceivedAt
+
+	require.Equal(t, faucet.RawPurgeResult{Cleared: 2}, r.purge(faucet.RawPurge{Now: r.now, ClearBefore: cut}))
+	gap := r.deliveryMustClaimGap(r.now)
+	require.Equal(t, waiting.KeyHash, gap.Ref.Key, "the subscription whose deliveries still named the cleared payloads is owed a gap, also while a claim holds them")
+	require.True(t, waiting.CreatedAt.Equal(gap.Ref.Incarnation), "got %s", gap.Ref.Incarnation)
+	require.Equal(t, ids[1], gap.Ref.Through, "the gap runs through the newest event whose payload the subscription lost")
+	_, ok := r.claimGap(r.now)
+	require.False(t, ok, "a subscription whose deliveries of the cleared events ended is owed no gap")
+	require.NoError(t, s.FinishRawGap(r.ctx, gap.Ref))
+
+	require.Equal(t, faucet.RawPurgeResult{Deleted: 2}, r.purge(faucet.RawPurge{Now: r.now, ClearBefore: cut, DeleteBefore: cut}))
+	_, ok = r.claimGap(r.now)
+	require.False(t, ok, "deleting an event whose payload a purge already cleared owes no second gap")
+
+	require.Equal(t, faucet.RawPurgeResult{Deleted: 1}, r.purge(faucet.RawPurge{Now: r.now, DeleteBefore: cut.Add(time.Hour)}))
+	var owed []faucet.SubscriptionKeyHash
+	for range 2 {
+		gap := r.deliveryMustClaimGap(r.now)
+		require.Equal(t, ids[2], gap.Ref.Through, "deleting an event with its payload owes a gap through it")
+		owed = append(owed, gap.Ref.Key)
+	}
+	require.ElementsMatch(t, []faucet.SubscriptionKeyHash{waiting.KeyHash, sent.KeyHash}, owed, "each subscription whose delivery named the deleted event")
+	_, ok = r.claimGap(r.now)
+	require.False(t, ok)
 }
 
 func purgeRawEventsDeletesExpiredLeasesWithTheirUnreadEvents(t *testing.T, s RawStore) {

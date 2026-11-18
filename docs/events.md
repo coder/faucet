@@ -79,6 +79,7 @@ A poller or a subscriber learns when it missed an event:
 | The lease ended | `truncated: true` on the next poll, which starts a new lease |
 | A lease holds at most 1000 unread events, and one more arrived | `truncated: true` on the poll that passes it |
 | A poller left an event unread for over 60 minutes, and a purge dropped its payload | `truncated: true` on the poll that passes it |
+| A delivery waited for over 60 minutes, as while `/cron/deliver` was down, and a purge dropped its payload | a `gap` [control message](webhooks.md#control-messages) |
 | The payload, or the `fields` of it, is over 256 KiB | `truncated: true` for a poller, a `gap` [control message](webhooks.md#control-messages) for a subscription |
 | A raw subscription holds 100 unsent deliveries, and one more arrived | a `gap` [control message](webhooks.md#control-messages) |
 

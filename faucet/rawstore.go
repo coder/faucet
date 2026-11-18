@@ -290,7 +290,8 @@ type RawPurge struct {
 	Now time.Time
 	// ClearBefore drops the body of every event received before it, also
 	// while a delivery or an unread event still names it. It bounds how long
-	// a poller that never moves its cursor keeps payloads.
+	// a poller that never moves its cursor, or a delivery that no run sends,
+	// keeps payloads.
 	ClearBefore time.Time
 	// DeleteBefore deletes every event received before it.
 	DeleteBefore time.Time
@@ -419,7 +420,10 @@ type RawStore interface {
 	// p.ClearBefore, and deletes the raw events received before
 	// p.DeleteBefore. The mark of a lease that missed an event does not name
 	// it. An event without a body keeps its delivery ID until then, so a
-	// delivery that GitHub sends again is a duplicate.
+	// delivery that GitHub sends again is a duplicate. A subscription whose
+	// delivery names an event that loses its body here, by the clear or by
+	// the delete, is owed a gap through it, written with the change, also
+	// while a claim holds the delivery.
 	PurgeRawEvents(ctx context.Context, p RawPurge) (RawPurgeResult, error)
 	// RawWants lists what the interests that are live at now want, without
 	// duplicates.

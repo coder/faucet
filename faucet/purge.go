@@ -75,8 +75,10 @@ func (s *Service) Purge(ctx context.Context, before time.Time) (PurgeResult, err
 // purgeRaw runs after the expired subscriptions are deleted, so that the raw
 // deliveries they held end first and their events are cleared by the same
 // call. A body older than a lease lives is cleared whatever still names it,
-// which bounds what a poller that never moves its cursor can keep. Each step
-// that fails is logged and counted, and the other still runs.
+// which bounds what a poller that never moves its cursor, or a delivery that
+// no run sends, can keep. A subscription whose delivery named a cleared body
+// gets a gap. Each step that fails is logged and counted, and the other still
+// runs.
 func (s *Service) purgeRaw(ctx context.Context, res PurgeResult, now, before time.Time) PurgeResult {
 	failed := func(step string, err error) {
 		s.logger.Error(ctx, "a raw purge step failed, the purge goes on", slog.F("step", step), slog.Error(err))

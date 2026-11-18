@@ -40,8 +40,9 @@ CREATE INDEX faucet_raw_deliveries_due ON faucet_raw_deliveries (next_attempt_at
 CREATE INDEX faucet_raw_deliveries_event ON faucet_raw_deliveries (raw_event_id);
 
 -- A gap envelope that a raw subscription is owed, because it missed an
--- event: it held the most unsent deliveries when the event arrived, or the
--- event was too large for it. through is the highest raw ID that it missed.
+-- event: it held the most unsent deliveries when the event arrived, the event
+-- was too large for it, or a purge took the payload before its delivery
+-- ended. through is the highest raw ID that it missed.
 CREATE TABLE faucet_raw_gaps (
   key_hash    bytea NOT NULL CHECK (octet_length(key_hash) = 32),
   incarnation timestamptz NOT NULL,

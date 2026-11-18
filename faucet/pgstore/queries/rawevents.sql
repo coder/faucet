@@ -317,29 +317,60 @@ WHERE (lease_id, raw_event_id) IN (
   FOR UPDATE OF u SKIP LOCKED
 );
 
--- name: ClearRawBodies :execrows
--- A lost row stands for events that the lease missed and needs no body.
-UPDATE faucet_raw_events
-SET body = NULL, fields = NULL
-WHERE id IN (
-  SELECT e.id
-  FROM faucet_raw_events e
-  WHERE e.body IS NOT NULL
-    AND (
-      e.received_at < sqlc.narg(clear_before)::timestamptz
-      OR (
-        NOT EXISTS (SELECT 1 FROM faucet_raw_deliveries d WHERE d.raw_event_id = e.id)
-        AND NOT EXISTS (SELECT 1 FROM faucet_raw_unread u WHERE u.raw_event_id = e.id AND NOT u.lost)
+-- name: ClearRawBodies :one
+-- A lost row stands for events that the lease missed and needs no body. Each
+-- subscription whose delivery names a cleared body is owed a gap through it,
+-- in the same statement, so no delivery loses its payload unseen. The insert
+-- waits for a gap row that another caller holds, because a skipped gap is a
+-- loss, and takes the rows in the order that RaiseRawGaps takes them.
+WITH cleared AS (
+  UPDATE faucet_raw_events
+  SET body = NULL, fields = NULL
+  WHERE id IN (
+    SELECT e.id
+    FROM faucet_raw_events e
+    WHERE e.body IS NOT NULL
+      AND (
+        e.received_at < sqlc.narg(clear_before)::timestamptz
+        OR (
+          NOT EXISTS (SELECT 1 FROM faucet_raw_deliveries d WHERE d.raw_event_id = e.id)
+          AND NOT EXISTS (SELECT 1 FROM faucet_raw_unread u WHERE u.raw_event_id = e.id AND NOT u.lost)
+        )
       )
-    )
-  FOR UPDATE OF e SKIP LOCKED
-);
+    FOR UPDATE OF e SKIP LOCKED
+  )
+  RETURNING id
+), owed AS (
+  INSERT INTO faucet_raw_gaps (key_hash, incarnation, through)
+  SELECT d.key_hash, d.incarnation, MAX(d.raw_event_id)
+  FROM faucet_raw_deliveries d
+  WHERE d.raw_event_id IN (SELECT id FROM cleared)
+  GROUP BY d.key_hash, d.incarnation
+  ORDER BY d.key_hash, d.incarnation
+  ON CONFLICT (key_hash, incarnation) DO UPDATE SET through = GREATEST(faucet_raw_gaps.through, EXCLUDED.through)
+)
+SELECT COUNT(*)::bigint FROM cleared;
 
--- name: DeleteRawEventsBefore :execrows
-DELETE FROM faucet_raw_events
-WHERE id IN (
-  SELECT e.id FROM faucet_raw_events e WHERE e.received_at < sqlc.arg(before) FOR UPDATE SKIP LOCKED
-);
+-- name: DeleteRawEventsBefore :one
+-- An event that still has its body owes a gap to each subscription whose
+-- delivery names it, as ClearRawBodies does. One without a body owed it when
+-- its body was cleared.
+WITH deleted AS (
+  DELETE FROM faucet_raw_events
+  WHERE id IN (
+    SELECT e.id FROM faucet_raw_events e WHERE e.received_at < sqlc.arg(before) FOR UPDATE SKIP LOCKED
+  )
+  RETURNING id, body IS NOT NULL AS held
+), owed AS (
+  INSERT INTO faucet_raw_gaps (key_hash, incarnation, through)
+  SELECT d.key_hash, d.incarnation, MAX(d.raw_event_id)
+  FROM faucet_raw_deliveries d
+  WHERE d.raw_event_id IN (SELECT id FROM deleted WHERE held)
+  GROUP BY d.key_hash, d.incarnation
+  ORDER BY d.key_hash, d.incarnation
+  ON CONFLICT (key_hash, incarnation) DO UPDATE SET through = GREATEST(faucet_raw_gaps.through, EXCLUDED.through)
+)
+SELECT COUNT(*)::bigint FROM deleted;
 
 -- name: RawWants :many
 SELECT

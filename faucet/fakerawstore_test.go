@@ -187,11 +187,7 @@ func (s *fakeStore) IngestRaw(ctx context.Context, d faucet.RawDelivery, now tim
 		s.rawOutbox[fakeRawOutboxKey{o.Key, id}] = &fakeRawOutbox{incarnation: o.Incarnation, enqueuedAt: now, nextAttempt: now}
 	}
 	for _, g := range p.Gaps {
-		k := fakeRawGapKey{g.Key, g.Incarnation.UnixNano()}
-		if s.rawGaps[k] == nil {
-			s.rawGaps[k] = &fakeGap{}
-		}
-		s.rawGaps[k].through = max(s.rawGaps[k].through, id)
+		s.raiseRawGapLocked(fakeRawGapKey{g.Key, g.Incarnation.UnixNano()}, id)
 	}
 	for _, leaseID := range p.Unread {
 		if l := s.rawLeases[leaseID]; l != nil {
@@ -551,6 +547,23 @@ func (s *fakeStore) ExpireRawDeliveries(ctx context.Context, now time.Time) (int
 	return deleted, nil
 }
 
+func (s *fakeStore) raiseRawGapLocked(k fakeRawGapKey, through int64) {
+	if s.rawGaps[k] == nil {
+		s.rawGaps[k] = &fakeGap{}
+	}
+	s.rawGaps[k].through = max(s.rawGaps[k].through, through)
+}
+
+// owePurgedLocked owes a gap to each subscription whose delivery names the
+// event, whose payload a purge takes.
+func (s *fakeStore) owePurgedLocked(id int64) {
+	for k, d := range s.rawOutbox {
+		if k.rawID == id {
+			s.raiseRawGapLocked(fakeRawGapKey{k.key, d.incarnation.UnixNano()}, id)
+		}
+	}
+}
+
 func (s *fakeStore) rawNamedLocked(id int64) bool {
 	for k := range s.rawOutbox {
 		if k.rawID == id {
@@ -583,11 +596,16 @@ func (s *fakeStore) PurgeRawEvents(ctx context.Context, p faucet.RawPurge) (fauc
 	}
 	kept := s.rawEvents[:0:0]
 	for _, ev := range s.rawEvents {
-		if ev.Body != nil && (ev.ReceivedAt.Before(p.ClearBefore) || !s.rawNamedLocked(ev.ID)) {
+		held := ev.Body != nil
+		if held && (ev.ReceivedAt.Before(p.ClearBefore) || !s.rawNamedLocked(ev.ID)) {
 			ev.Body, ev.Fields = nil, nil
 			res.Cleared++
 		}
-		if ev.ReceivedAt.Before(p.DeleteBefore) {
+		deleted := ev.ReceivedAt.Before(p.DeleteBefore)
+		if held && (ev.Body == nil || deleted) {
+			s.owePurgedLocked(ev.ID)
+		}
+		if deleted {
 			res.Deleted++
 			continue
 		}

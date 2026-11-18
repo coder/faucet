@@ -242,7 +242,8 @@ func TestDeliverDueEndsEveryRawDeliveryItCannotSendWithAReason(t *testing.T) {
 			res := tc.run(d, ep)
 			require.Equal(t, map[faucet.GiveUpReason]int{tc.reason: 1}, res.GaveUp, "the delivery ends with its reason, counted")
 			require.Zero(t, res.Delivered)
-			require.LessOrEqual(t, d.rcv.total(), 1, "no request goes out for it but the one that made it wait or that the endpoint refused")
+			gaps := len(d.rcv.envelopesOf("/hook", "gap"))
+			require.LessOrEqual(t, d.rcv.total()-gaps, 1, "no request goes out for it but the one that made it wait or that the endpoint refused")
 			require.True(t, d.logsContain(string(tc.reason)), "one log line names the reason")
 			require.Len(t, d.rows(), 1, "the subscription stays")
 			require.Zero(t, d.deliverDue().Claimed, "the delivery is over")
@@ -367,6 +368,60 @@ func TestDeliverDueTellsARawSubscriptionOfAnEventTooLargeToSend(t *testing.T) {
 	require.Equal(t, 1, d.deliverDue().Delivered, "the next event that fits is delivered")
 	requests := d.rcv.requests("/hook")
 	require.Equal(t, fmt.Sprintf("r1.%d", sent-1), requests[len(requests)-1].body(t).Cursor)
+}
+
+// A purge takes the payload of an event whose delivery waits: a run that
+// waits over an hour, while the subscriber renews and /cron/purge runs, finds
+// it cleared, and a retention under an hour deletes the event. Either way the
+// subscription learns that it missed the event, and the cursor of the next
+// event passes it.
+func TestDeliverDueTellsARawSubscriptionOfAnEventThatAPurgeTookBeforeItWasSent(t *testing.T) {
+	t.Parallel()
+
+	for name, purge := range map[string]func(d *deliverHarness, ep hookEndpoint) faucet.RawPurgeResult{
+		"a purge cleared its payload": func(d *deliverHarness, ep hookEndpoint) faucet.RawPurgeResult {
+			var sum faucet.RawPurgeResult
+			for range 13 {
+				d.advance(5 * time.Minute)
+				d.subscribeRaw("github.push", ep)
+				res, err := d.svc.Purge(d.ctx, d.clock.Now().Add(-30*24*time.Hour))
+				require.NoError(d.t, err)
+				sum.Cleared += res.Raw.Cleared
+			}
+			return sum
+		},
+		"a purge deleted it": func(d *deliverHarness, _ hookEndpoint) faucet.RawPurgeResult {
+			res, err := d.svc.Purge(d.ctx, d.clock.Now())
+			require.NoError(d.t, err)
+			return faucet.RawPurgeResult{Deleted: res.Raw.Deleted}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d := newRawDeliverHarness(t)
+			ep := d.endpoint("/hook")
+			sub := d.subscribeRaw("github.push", ep)
+			d.advance(time.Second)
+			missed := d.pushRaw(nil)
+			d.advance(time.Second)
+			require.NotZero(t, purge(d, ep), "the purge takes the payload while its delivery waits")
+			next := d.pushRaw(nil)
+
+			res := d.deliverDue()
+			require.Equal(t, map[faucet.GiveUpReason]int{faucet.GiveUpEventPurged: 1}, res.GaveUp)
+			require.Equal(t, 1, res.Delivered)
+			require.Equal(t, 1, res.GapsSent)
+			gaps := d.rcv.envelopesOf("/hook", "gap")
+			require.Len(t, gaps, 1, "the subscription learns that it missed the event")
+			members := d.requireEnvelope(gaps[0], "gap", ep.secret, sub.ID)
+			require.JSONEq(t, fmt.Sprintf(`"r1.%d"`, missed), string(members["cursor"]), "the gap runs through the event that the purge took")
+			// The requests without a type are the events.
+			events := d.rcv.envelopesOf("/hook", "")
+			require.Len(t, events, 1)
+			require.Equal(t, fmt.Sprintf("r1.%d", next-1), events[0].body(t).Cursor, "the next event is sent, and its cursor passes the missed one")
+			require.Zero(t, d.deliverDue().GapsSent, "the gap is sent once")
+		})
+	}
 }
 
 func TestDeliverDueDoesNotSendARawGapASecondTimeWhenTheEndpointRefusesIt(t *testing.T) {

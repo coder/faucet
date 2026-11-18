@@ -19,7 +19,7 @@ var giveUpMeanings = map[string]string{
 	"event_malformed":            "Faucet could not build a body from the stored event.",
 	"attempts_exhausted":         "All {faucet.MaxDeliveryAttempts} attempts failed.",
 	"window_expired":             "The next attempt would come more than {faucet.DeliveryWindow} after the event was queued.",
-	"event_purged":               "A retention purge deleted the event before the delivery ended.",
+	"event_purged":               "A retention purge deleted the event before the delivery ended, or, for a raw event, a purge dropped its payload. A raw subscription then gets a gap.",
 	"repo_mismatch":              "The event's repository is not the one that the subscription is granted now.",
 	"secret_unreadable":          "The subscriber's sealed secret does not open, as after a change of `FAUCET_WEBHOOK_KEY`. The subscription is deleted too, until its subscriber renews.",
 	"subscription_expired":       "The subscription expired before the delivery ended. A raw delivery also ends so when its subscription was unsubscribed, or deleted after a renewal found access revoked.",
