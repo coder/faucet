@@ -22,10 +22,12 @@ const continueDelay = 500 * time.Millisecond
 // continueScript turns Continue on once the page has been visible and in
 // focus for continueDelay. Each change of focus or visibility starts the
 // wait again, and the button turns on only if the page is still visible and
-// in focus when the wait ends.
+// in focus when the wait ends. A press that began while the button was off
+// clicks nothing when it ends, because Chrome clicks a button that turned on
+// during the press. A click from the keyboard has no press (detail 0).
 var continueScript = fmt.Sprintf(`
 const button = document.querySelector("button");
-let timer;
+let timer, pressedEarly = false;
 function wait() {
   button.disabled = true;
   clearTimeout(timer);
@@ -33,6 +35,11 @@ function wait() {
 }
 for (const type of ["focus", "blur", "pageshow"]) addEventListener(type, wait);
 document.addEventListener("visibilitychange", wait);
+addEventListener("pointerdown", () => { pressedEarly = button.disabled; }, true);
+button.addEventListener("click", (event) => {
+  if (pressedEarly && event.detail > 0) event.preventDefault();
+  pressedEarly = false;
+});
 wait();
 `, continueDelay.Milliseconds())
 

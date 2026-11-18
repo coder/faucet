@@ -55,7 +55,7 @@ sequenceDiagram
 
 1. The agent calls `/github/mcp` without a token. The 401 points to the endpoint's metadata, which names faucet as the authorization server. Faucet's own metadata says that it takes client ID metadata documents.
 2. The agent opens the consent page in the browser. The page shows the host of the agent's client ID in large text. Below it are the name that the agent gives, marked as unchecked, the endpoint, what each scope allows, and where the browser returns to. The page works for 10 minutes.
-3. The user presses **Continue with GitHub**. It works only once the page has been visible and in focus for 500 milliseconds, so that a click meant for another page cannot press it. GitHub asks them to log in and, the first time, to authorize faucet's App.
+3. The user presses **Continue with GitHub**. It works only once the page has been visible and in focus for 500 milliseconds, so that a click meant for another page cannot press it. A press that began before then does not count. GitHub asks them to log in and, the first time, to authorize faucet's App.
 4. GitHub sends the browser back to faucet, and faucet sends it on to the agent with a code. The agent must trade the code for faucet's tokens within 60 seconds. From then on it refreshes them without the browser.
 
 When a step fails, the browser shows a page that says what happened and tells the user to start again from the agent. When the user refuses at GitHub, the agent gets `access_denied`.
