@@ -47,7 +47,7 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/events.md", "the cursor and the %d deliveries that a subscription may hold", []any{MaxPendingDeliveries}},
 		{"docs/events.md", "starts a lease, which ends %d minutes after its last poll", []any{minutes(rawLeaseTTL)}},
 		{"docs/events.md", "A login can hold %d leases", []any{maxLiveRawLeases}},
-		{"docs/events.md", "One event of one repository has at most %d live subscriptions and leases, and one login at most %d leases and %d subscriptions of it", []any{maxRawInterestsPerTarget, maxRawInterestsPerLogin, maxRawInterestsPerLogin}},
+		{"docs/events.md", "One event of one target has at most %d live subscriptions and leases, and one login at most %d leases and %d subscriptions of it", []any{maxRawInterestsPerTarget, maxRawInterestsPerLogin, maxRawInterestsPerLogin}},
 		{"docs/events.md", "and any payload older than %d minutes", []any{minutes(rawLeaseTTL)}},
 		{"docs/events.md", "A lease holds at most %d unread events", []any{maxUnreadPerLease}},
 		{"docs/events.md", "A poller left an event unread for over %d minutes", []any{minutes(rawLeaseTTL)}},

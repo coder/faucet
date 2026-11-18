@@ -399,7 +399,7 @@ func TestEventNamesDescribeWhatEventsListOffers(t *testing.T) {
 		require.Equal(t, e.PayloadSchema.Properties.Action.Enum, n.Actions, n.Name)
 		var filters []string
 		for property := range e.InputSchema.Properties {
-			if !slices.Contains([]string{"repo", "pr", "sha", "actions"}, property) {
+			if !slices.Contains([]string{"repo", "owner", "all", "repos", "pr", "sha", "actions"}, property) {
 				filters = append(filters, property)
 			}
 		}

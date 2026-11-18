@@ -73,19 +73,19 @@ func (s *Service) pollRaw(ctx context.Context, entry *rawEntry, p *eventsPollPar
 	if err != nil {
 		return nil, err
 	}
-	logger := s.logger.With(slog.F("repo", req.args.Repo), slog.F("event", entry.name))
+	logger := s.logger.With(req.args.logField(), slog.F("event", entry.name))
 	principal, err := s.principal(ctx, logger, "poll", ScopeEventsRead)
 	if err != nil {
 		return nil, accessError(err)
 	}
-	repoID, err := s.authorizeRepo(ctx, logger, principal, "poll", req.args.Repo)
+	target, err := s.authorizeTarget(ctx, logger, principal, "poll", req.args.targetArguments)
 	if err != nil {
 		return nil, accessError(err)
 	}
 	key := NewSubscriptionKeyHash(principal.Login, "", entry.name, req.args.canonical())
 	now := s.clock.Now()
 	if req.cursor != nil && req.cursor.hasLease {
-		res, found, err := s.readRawLease(ctx, logger, req, key, repoID, now)
+		res, found, err := s.readRawLease(ctx, logger, req, key, target, now)
 		if err != nil {
 			return nil, readError(storeError(ctx, logger, err))
 		}
@@ -99,7 +99,8 @@ func (s *Service) pollRaw(ctx context.Context, entry *rawEntry, p *eventsPollPar
 		Event:     entry.event,
 		Actions:   req.args.Actions,
 		Fields:    req.args.Fields,
-		RepoID:    repoID,
+		Target:    target,
+		RepoNames: req.args.Repos,
 		ExpiresAt: now.Add(rawLeaseTTL),
 	}
 	if _, err := rand.Read(lease.ID[:]); err != nil {
@@ -109,7 +110,7 @@ func (s *Service) pollRaw(ctx context.Context, entry *rawEntry, p *eventsPollPar
 	switch {
 	case xerrors.Is(err, ErrRawInterestLimit):
 		logger.Info(ctx, "poll refused, raw interest limit reached", slog.F("login", principal.Login))
-		return nil, rawInterestLimitError(entry, req.args.Repo)
+		return nil, rawInterestLimitError(entry, req.args.targetArguments)
 	case err != nil:
 		return nil, readError(storeError(ctx, logger, err))
 	}
@@ -117,11 +118,11 @@ func (s *Service) pollRaw(ctx context.Context, entry *rawEntry, p *eventsPollPar
 	return newRawPollResult(nil, head, lease.ID, req.cursor != nil, false), nil
 }
 
-func (s *Service) readRawLease(ctx context.Context, logger slog.Logger, req rawPollRequest, key SubscriptionKeyHash, repoID int64, now time.Time) (*eventsPollResult, bool, error) {
+func (s *Service) readRawLease(ctx context.Context, logger slog.Logger, req rawPollRequest, key SubscriptionKeyHash, target Target, now time.Time) (*eventsPollResult, bool, error) {
 	q := RawRead{
 		Lease:     req.cursor.lease,
 		Key:       key,
-		RepoID:    repoID,
+		Target:    target,
 		After:     req.cursor.pos,
 		Limit:     req.limit,
 		MaxBytes:  rawPageBytes,

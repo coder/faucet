@@ -28,10 +28,10 @@ type RawLimits struct {
 	// Live is the most live leases, or subscriptions, of one principal.
 	Live int
 	// PerTarget is the most live subscriptions and leases of one event of one
-	// repository.
+	// target.
 	PerTarget int
 	// PerPrincipalTarget is the most live leases, and the most live
-	// subscriptions, of one event of one repository that one principal holds,
+	// subscriptions, of one event of one target that one principal holds,
 	// so that no principal takes all of PerTarget.
 	PerPrincipalTarget int
 }
@@ -56,7 +56,10 @@ type RawEvent struct {
 	// Action is the action member of the payload. It is empty when the
 	// payload has none.
 	Action string
-	RepoID int64
+	// RepoID is 0 for a delivery that names no repository, and OwnerID 0 for
+	// one stored before faucet recorded owners.
+	RepoID  int64
+	OwnerID int64
 	// Body is the payload as stored. It is nil when no interest could get the
 	// event, and once no live interest has it unread.
 	Body json.RawMessage
@@ -75,7 +78,13 @@ type RawDelivery struct {
 	// payload, empty when it has none.
 	Event  string
 	Action string
-	RepoID int64
+	// RepoID is the repository the delivery names, and 0 when it names none,
+	// as an organization's delivery does. OwnerID is the repository's owner,
+	// or the organization of a delivery with no repository. RepoName is the
+	// repository's full name, owner/name, and empty without a repository.
+	RepoID   int64
+	OwnerID  int64
+	RepoName string
 }
 
 // Validate checks the fields a caller supplies to RawStore.IngestRaw.
@@ -85,8 +94,10 @@ func (d RawDelivery) Validate() error {
 		return xerrors.New("delivery ID is required")
 	case d.Event == "":
 		return xerrors.New("event is required")
-	case d.RepoID <= 0:
-		return xerrors.New("repo ID must be positive")
+	case d.RepoID < 0 || d.OwnerID < 0:
+		return xerrors.New("repo ID and owner ID must not be negative")
+	case d.RepoID == 0 && d.OwnerID == 0:
+		return xerrors.New("a delivery names a repository or an owner")
 	}
 	return nil
 }
@@ -177,10 +188,13 @@ type RawLease struct {
 	Principal string
 	// Event is GitHub's event name. Actions empty means every action, and
 	// Fields nil the whole payload.
-	Event     string
-	Actions   []string
-	Fields    []string
-	RepoID    int64
+	Event   string
+	Actions []string
+	Fields  []string
+	Target  Target
+	// RepoNames limits the lease to events of these lower-case full names.
+	// Empty means every repository that Target covers.
+	RepoNames []string
 	ExpiresAt time.Time
 }
 
@@ -193,8 +207,8 @@ func (l RawLease) Validate(now time.Time) error {
 		return xerrors.New("principal is required")
 	case l.Event == "":
 		return xerrors.New("event is required")
-	case l.RepoID <= 0:
-		return xerrors.New("repo ID must be positive")
+	case l.Target.Validate() != nil:
+		return xerrors.Errorf("target: %w", l.Target.Validate())
 	case !l.ExpiresAt.After(now):
 		return xerrors.New("expiry must be after now")
 	}
@@ -205,7 +219,7 @@ func (l RawLease) Validate(now time.Time) error {
 type RawRead struct {
 	Lease  RawLeaseID
 	Key    SubscriptionKeyHash
-	RepoID int64
+	Target Target
 	// After is the cursor position: the poller has every event at or below it.
 	After int64
 	// Limit is the most events of a page. It must be positive. An unread
@@ -275,8 +289,8 @@ type RawDeliveryClaim struct {
 	SecretEnc           []byte
 	PreviousSecretEnc   []byte
 	PreviousSecretUntil time.Time
-	// RepoID is the repository the subscription is granted now.
-	RepoID int64
+	// Target is what the subscription is granted now.
+	Target Target
 	// Watermark is the lowest unsent raw ID of the subscription, minus one.
 	Watermark int64
 	// Event is nil when the event is gone or its body is cleared.
@@ -319,9 +333,9 @@ type RawPurgeResult struct {
 }
 
 // RawWant is one thing that live interests want: the deliveries of an event
-// of a repository. Actions empty means every action.
+// that a target covers. Actions empty means every action.
 type RawWant struct {
-	RepoID int64
+	Target Target
 	// Event is GitHub's event name.
 	Event   string
 	Actions []string
@@ -349,8 +363,10 @@ type RawWant struct {
 // Raw IDs must be visible in commit order, as event IDs are in Store.
 type RawStore interface {
 	// IngestRaw stores one delivery for the interests that are live at now and
-	// match it: a subscription or lease of d.RepoID and d.Event whose actions
-	// are empty or hold d.Action. With no such interest it writes nothing and
+	// match it: a subscription or lease of d.Event whose target covers
+	// d.RepoID and d.OwnerID, whose repository names are empty or hold
+	// d.RepoName ignoring case, and whose actions are empty or hold d.Action.
+	// A delivery with no repository passes no list of repository names. With no such interest it writes nothing and
 	// reports Matched=false, whether or not the delivery ID is stored.
 	// Otherwise it calls plan once with the matching interests, outside any
 	// transaction. With a delivery ID that is already stored it then writes
@@ -388,7 +404,7 @@ type RawStore interface {
 	// already stored is an error.
 	OpenRawLease(ctx context.Context, lease RawLease, now time.Time, limits RawLimits) (head int64, err error)
 	// ReadRawLease serves one poll. found is false, and nothing changes,
-	// unless a lease with q.Lease, q.Key and q.RepoID is live at q.Now. For
+	// unless a lease with q.Lease, q.Key and q.Target is live at q.Now. For
 	// such a lease it raises the acknowledged position to q.After, sets the
 	// expiry to q.ExpiresAt, returns the unread events above q.After, and
 	// deletes the unread events at or below it, all in one transaction. The

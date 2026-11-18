@@ -333,20 +333,26 @@ var (
 )
 
 var (
-	repoArgument = map[string]any{"type": "string", "description": "The repository, written owner/name."}
-	prArgument   = map[string]any{"type": "integer", "minimum": 1, "maximum": math.MaxInt32, "description": "Only events that mention this pull request number."}
-	shaArgument  = map[string]any{"type": "string", "pattern": "^[0-9A-Fa-f]{40}$", "description": "Only events for this 40 character head commit SHA."}
+	repoArgument  = map[string]any{"type": "string", "description": "The repository, written owner/name. Name one of repo, owner and all."}
+	ownerArgument = map[string]any{"type": "string", "description": "Every repository of this owner, a GitHub user or organization login. For service clients whose grants cover the owner."}
+	allArgument   = map[string]any{"type": "boolean", "const": true, "description": "Every repository that faucet receives events from. For service clients granted all."}
+	reposArgument = map[string]any{
+		"type": "array", "minItems": 1, "items": map[string]any{"type": "string"},
+		"description": "With owner or all, only the events of these repositories, each written owner/name.",
+	}
+	prArgument  = map[string]any{"type": "integer", "minimum": 1, "maximum": math.MaxInt32, "description": "Only events that mention this pull request number."}
+	shaArgument = map[string]any{"type": "string", "pattern": "^[0-9A-Fa-f]{40}$", "description": "Only events for this 40 character head commit SHA."}
 
 	prsProperty     = map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "Pull request numbers the event mentions."}
 	headSHAProperty = map[string]any{"type": "string", "description": "The head commit SHA. Absent when the event has none."}
 )
 
-// argumentsSchema is the inputSchema of an event name: repo and the filters of
-// the name. It offers pr and sha unless the family's events name no pull
-// request or no head commit (no family means both), actions when it is given
-// them, and the field filters it is given.
+// argumentsSchema is the inputSchema of an event name: the target and the
+// filters of the name. It offers pr and sha unless the family's events name
+// no pull request or no head commit (no family means both), actions when it
+// is given them, and the field filters it is given.
 func argumentsSchema(f *family, actions, filters []string) json.RawMessage {
-	properties := map[string]any{"repo": repoArgument}
+	properties := targetProperties()
 	if f == nil || !f.noPRs {
 		properties["pr"] = prArgument
 	}
@@ -369,7 +375,14 @@ func argumentsSchema(f *family, actions, filters []string) json.RawMessage {
 			"description": lookupFieldFilter(name).description,
 		}
 	}
-	return marshalRaw(map[string]any{"type": "object", "properties": properties, "required": []string{"repo"}, "additionalProperties": false})
+	return marshalRaw(map[string]any{"type": "object", "properties": properties, "additionalProperties": false})
+}
+
+// targetProperties are the properties of an inputSchema that name the target.
+// Which of them a call names is checked in Go, so the caller gets an error in
+// words.
+func targetProperties() map[string]any {
+	return map[string]any{"repo": repoArgument, "owner": ownerArgument, "all": allArgument, "repos": reposArgument}
 }
 
 // shaInputResolved is the arguments schema of an event type that has a sha. A
@@ -557,7 +570,7 @@ func EventNames() []EventName {
 }
 
 type pollArguments struct {
-	Repo    string   `json:"repo"`
+	targetArguments
 	SHA     string   `json:"sha"`
 	PR      int32    `json:"pr"`
 	Actions []string `json:"actions"`

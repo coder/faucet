@@ -10,13 +10,63 @@ import (
 	"time"
 )
 
+const addOwner = `-- name: AddOwner :exec
+INSERT INTO faucet_owners (owner_id, login)
+VALUES ($1, $2)
+ON CONFLICT DO NOTHING
+`
+
+type AddOwnerParams struct {
+	OwnerID int64
+	Login   string
+}
+
+// An account that holds a row, or a login that another account holds, makes
+// it write nothing.
+func (q *Queries) AddOwner(ctx context.Context, arg AddOwnerParams) error {
+	_, err := q.db.ExecContext(ctx, addOwner, arg.OwnerID, arg.Login)
+	return err
+}
+
+const getOwnerByID = `-- name: GetOwnerByID :one
+SELECT owner_id, login
+FROM faucet_owners
+WHERE owner_id = $1
+`
+
+func (q *Queries) GetOwnerByID(ctx context.Context, ownerID int64) (FaucetOwner, error) {
+	row := q.db.QueryRowContext(ctx, getOwnerByID, ownerID)
+	var i FaucetOwner
+	err := row.Scan(&i.OwnerID, &i.Login)
+	return i, err
+}
+
+const getOwnerByLogin = `-- name: GetOwnerByLogin :one
+SELECT owner_id, login
+FROM faucet_owners
+WHERE lower(login) = lower($1::text)
+`
+
+func (q *Queries) GetOwnerByLogin(ctx context.Context, login string) (FaucetOwner, error) {
+	row := q.db.QueryRowContext(ctx, getOwnerByLogin, login)
+	var i FaucetOwner
+	err := row.Scan(&i.OwnerID, &i.Login)
+	return i, err
+}
+
 const getRepositoryByName = `-- name: GetRepositoryByName :one
-SELECT repo_id, owner_id, owner_login, full_name
-FROM faucet_repos
-WHERE lower(full_name) = lower($1::text)
-ORDER BY seen_at DESC, repo_id DESC
+SELECT r.repo_id, r.owner_id, o.login AS owner_login, (o.login || '/' || split_part(r.full_name, '/', 2))::text AS full_name
+FROM faucet_owners o
+JOIN faucet_repos r ON r.owner_id = o.owner_id
+WHERE lower(o.login) = lower($1::text) AND lower(split_part(r.full_name, '/', 2)) = lower($2::text)
+ORDER BY r.seen_at DESC, r.repo_id DESC
 LIMIT 1
 `
+
+type GetRepositoryByNameParams struct {
+	OwnerLogin string
+	Name       string
+}
 
 type GetRepositoryByNameRow struct {
 	RepoID     int64
@@ -25,8 +75,10 @@ type GetRepositoryByNameRow struct {
 	FullName   string
 }
 
-func (q *Queries) GetRepositoryByName(ctx context.Context, fullName string) (GetRepositoryByNameRow, error) {
-	row := q.db.QueryRowContext(ctx, getRepositoryByName, fullName)
+// The owner part of the name is the login of the account that holds it now,
+// and the name part is the one that the row was first seen or renamed under.
+func (q *Queries) GetRepositoryByName(ctx context.Context, arg GetRepositoryByNameParams) (GetRepositoryByNameRow, error) {
+	row := q.db.QueryRowContext(ctx, getRepositoryByName, arg.OwnerLogin, arg.Name)
 	var i GetRepositoryByNameRow
 	err := row.Scan(
 		&i.RepoID,
@@ -35,6 +87,22 @@ func (q *Queries) GetRepositoryByName(ctx context.Context, fullName string) (Get
 		&i.FullName,
 	)
 	return i, err
+}
+
+const recordOwner = `-- name: RecordOwner :exec
+INSERT INTO faucet_owners (owner_id, login)
+VALUES ($1, $2)
+ON CONFLICT (owner_id) DO UPDATE SET login = excluded.login
+`
+
+type RecordOwnerParams struct {
+	OwnerID int64
+	Login   string
+}
+
+func (q *Queries) RecordOwner(ctx context.Context, arg RecordOwnerParams) error {
+	_, err := q.db.ExecContext(ctx, recordOwner, arg.OwnerID, arg.Login)
+	return err
 }
 
 const recordRepository = `-- name: RecordRepository :exec
@@ -62,6 +130,22 @@ func (q *Queries) RecordRepository(ctx context.Context, arg RecordRepositoryPara
 	return err
 }
 
+const releaseOwnerLogin = `-- name: ReleaseOwnerLogin :exec
+DELETE FROM faucet_owners WHERE lower(login) = lower($1::text) AND owner_id <> $2
+`
+
+type ReleaseOwnerLoginParams struct {
+	Login   string
+	OwnerID int64
+}
+
+// Another account that held the login gives it up, because one login names
+// one account.
+func (q *Queries) ReleaseOwnerLogin(ctx context.Context, arg ReleaseOwnerLoginParams) error {
+	_, err := q.db.ExecContext(ctx, releaseOwnerLogin, arg.Login, arg.OwnerID)
+	return err
+}
+
 const renameRepository = `-- name: RenameRepository :exec
 INSERT INTO faucet_repos (repo_id, owner_id, owner_login, full_name, seen_at)
 VALUES ($1, $2, $3, $4, $5)
@@ -69,6 +153,13 @@ ON CONFLICT (repo_id) DO UPDATE
 SET owner_id = excluded.owner_id, owner_login = excluded.owner_login,
     full_name = excluded.full_name, seen_at = excluded.seen_at
 WHERE lower(faucet_repos.full_name) = lower($6::text)
+   -- GitHub writes from under the owner's login now, which the row lacks when
+   -- the owner was renamed after the row was first seen.
+   OR EXISTS (
+     SELECT 1 FROM faucet_owners o
+     WHERE o.owner_id = faucet_repos.owner_id
+       AND lower(o.login || '/' || split_part(faucet_repos.full_name, '/', 2)) = lower($6::text)
+   )
 `
 
 type RenameRepositoryParams struct {

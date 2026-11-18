@@ -57,6 +57,7 @@ func Run(t *testing.T, newStore func(t *testing.T) faucet.Store) {
 	}
 	subtests = append(subtests, deliverySubtests...)
 	subtests = append(subtests, repositorySubtests...)
+	subtests = append(subtests, targetSubtests...)
 	for _, st := range subtests {
 		t.Run(st.name, func(t *testing.T) {
 			t.Parallel()
@@ -71,6 +72,8 @@ func newEvent(deliveryID string) faucet.Event {
 		DeliveryID: deliveryID,
 		Type:       "ci.run_completed",
 		RepoID:     42,
+		OwnerID:    7,
+		RepoName:   "octo/repo",
 		PRs:        []int32{7, 9},
 		HeadSHA:    "0123abcd",
 		Data:       json.RawMessage(`{"conclusion":"success"}`),
@@ -86,6 +89,8 @@ func requireSameEvent(t *testing.T, want, got faucet.Event) {
 	require.Equal(t, want.DeliveryID, got.DeliveryID)
 	require.Equal(t, want.Type, got.Type)
 	require.Equal(t, want.RepoID, got.RepoID)
+	require.Equal(t, want.OwnerID, got.OwnerID)
+	require.Equal(t, want.RepoName, got.RepoName)
 	require.ElementsMatch(t, want.PRs, got.PRs)
 	require.Equal(t, want.HeadSHA, got.HeadSHA)
 	require.JSONEq(t, string(want.Data), string(got.Data))
@@ -239,7 +244,7 @@ func concurrentInsertsCommitInIDOrder(t *testing.T, s faucet.Store) {
 			return events, after, err
 		},
 		func(ctx context.Context, after int64) ([]faucet.Event, int64, error) {
-			page, err := s.PollEvents(ctx, faucet.PollQuery{RepoID: newEvent("").RepoID, After: after, Limit: pageSize})
+			page, err := s.PollEvents(ctx, faucet.PollQuery{Target: faucet.RepoTarget(newEvent("").RepoID), After: after, Limit: pageSize})
 			return page.Events, page.Next, err
 		},
 	}
@@ -343,7 +348,7 @@ func requirePollIDs(t *testing.T, s faucet.Store, q faucet.PollQuery, want ...fa
 
 func pollEventsAppliesFiltersBeforeLimit(t *testing.T, s faucet.Store) {
 	e := seedPollEvents(t, s)
-	base := faucet.PollQuery{RepoID: 42, Limit: 100}
+	base := faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 100}
 
 	tests := []struct {
 		name   string
@@ -351,8 +356,8 @@ func pollEventsAppliesFiltersBeforeLimit(t *testing.T, s faucet.Store) {
 		want   []faucet.Event
 	}{
 		{"repo only", func(*faucet.PollQuery) {}, []faucet.Event{e[0], e[1], e[2], e[3], e[4]}},
-		{"other repo", func(q *faucet.PollQuery) { q.RepoID = 43 }, []faucet.Event{e[5]}},
-		{"unknown repo", func(q *faucet.PollQuery) { q.RepoID = 99 }, nil},
+		{"other repo", func(q *faucet.PollQuery) { q.Target = faucet.RepoTarget(43) }, []faucet.Event{e[5]}},
+		{"unknown repo", func(q *faucet.PollQuery) { q.Target = faucet.RepoTarget(99) }, nil},
 		{"one type", func(q *faucet.PollQuery) { q.Types = []string{"pr.closed"} }, []faucet.Event{e[1]}},
 		{"two types", func(q *faucet.PollQuery) { q.Types = []string{"pr.closed", "pr.review_submitted"} }, []faucet.Event{e[1], e[3]}},
 		{"sha", func(q *faucet.PollQuery) { q.HeadSHA = shaA }, []faucet.Event{e[0], e[3], e[4]}},
@@ -431,11 +436,11 @@ func pollEventsAppliesFieldFilters(t *testing.T, s faucet.Store) {
 		{"no values pass nothing", runs, []faucet.FieldFilter{conclusion()}, nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			requirePollIDs(t, s, faucet.PollQuery{RepoID: 42, Types: tt.types, Fields: tt.fields, Limit: 100}, tt.want...)
+			requirePollIDs(t, s, faucet.PollQuery{Target: faucet.RepoTarget(42), Types: tt.types, Fields: tt.fields, Limit: 100}, tt.want...)
 		})
 	}
 
-	q := faucet.PollQuery{RepoID: 42, Types: runs, Fields: []faucet.FieldFilter{conclusion("failure", "timed_out")}, Limit: 1}
+	q := faucet.PollQuery{Target: faucet.RepoTarget(42), Types: runs, Fields: []faucet.FieldFilter{conclusion("failure", "timed_out")}, Limit: 1}
 	for _, want := range []faucet.Event{e[0], e[2], e[4]} {
 		page := requirePollIDs(t, s, q, want)
 		require.Equal(t, want.ID, page.Next, "the field filters apply before the limit")
@@ -446,7 +451,7 @@ func pollEventsAppliesFieldFilters(t *testing.T, s faucet.Store) {
 }
 
 func pollEventsReturnsHeadCursorWhenNothingMatches(t *testing.T, s faucet.Store) {
-	empty, err := s.PollEvents(context.Background(), faucet.PollQuery{RepoID: 42, Limit: 10})
+	empty, err := s.PollEvents(context.Background(), faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 10})
 	require.NoError(t, err)
 	require.Empty(t, empty.Events)
 	require.Zero(t, empty.Next, "an empty store has head 0")
@@ -455,33 +460,33 @@ func pollEventsReturnsHeadCursorWhenNothingMatches(t *testing.T, s faucet.Store)
 	head := e[5].ID
 
 	for name, q := range map[string]faucet.PollQuery{
-		"type nobody sent":                 {RepoID: 42, Types: []string{"pr.comment_created"}, Limit: 10},
-		"repo with no events":              {RepoID: 99, Limit: 10},
-		"already at the head":              {RepoID: 42, After: e[4].ID, Limit: 10},
-		"newer events only in other repos": {RepoID: 43, After: e[5].ID, Limit: 10},
+		"type nobody sent":                 {Target: faucet.RepoTarget(42), Types: []string{"pr.comment_created"}, Limit: 10},
+		"repo with no events":              {Target: faucet.RepoTarget(99), Limit: 10},
+		"already at the head":              {Target: faucet.RepoTarget(42), After: e[4].ID, Limit: 10},
+		"newer events only in other repos": {Target: faucet.RepoTarget(43), After: e[5].ID, Limit: 10},
 	} {
 		page := requirePollIDs(t, s, q)
 		require.Equal(t, head, page.Next, name)
 	}
 
-	page := requirePollIDs(t, s, faucet.PollQuery{RepoID: 42, After: head + 100, Limit: 10})
+	page := requirePollIDs(t, s, faucet.PollQuery{Target: faucet.RepoTarget(42), After: head + 100, Limit: 10})
 	require.Equal(t, head+100, page.Next, "the cursor never moves backwards")
 
-	page = requirePollIDs(t, s, faucet.PollQuery{RepoID: 42, Limit: 100}, e[0], e[1], e[2], e[3], e[4])
+	page = requirePollIDs(t, s, faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 100}, e[0], e[1], e[2], e[3], e[4])
 	require.Equal(t, head, page.Next, "a page with room left reports the head, not its last event")
 }
 
 func pollEventsReturnsLastIDWhenPageIsFull(t *testing.T, s faucet.Store) {
 	e := seedPollEvents(t, s)
 
-	page := requirePollIDs(t, s, faucet.PollQuery{RepoID: 42, Limit: 2}, e[0], e[1])
+	page := requirePollIDs(t, s, faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 2}, e[0], e[1])
 	require.Equal(t, e[1].ID, page.Next)
 
-	page = requirePollIDs(t, s, faucet.PollQuery{RepoID: 42, Limit: 5}, e[0], e[1], e[2], e[3], e[4])
+	page = requirePollIDs(t, s, faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 5}, e[0], e[1], e[2], e[3], e[4])
 	require.Equal(t, e[4].ID, page.Next, "a page that is exactly full still reports its last event")
 
 	var got []faucet.Event
-	q := faucet.PollQuery{RepoID: 42, Limit: 2}
+	q := faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 2}
 	for range 10 {
 		page, err := s.PollEvents(context.Background(), q)
 		require.NoError(t, err)
@@ -498,10 +503,11 @@ func pollEventsReturnsLastIDWhenPageIsFull(t *testing.T, s faucet.Store) {
 }
 
 func pollEventsValidatesQuery(t *testing.T, s faucet.Store) {
-	good := faucet.PollQuery{RepoID: 42, Limit: 10}
+	good := faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 10}
 	for name, mutate := range map[string]func(q *faucet.PollQuery){
-		"zero repo ID":     func(q *faucet.PollQuery) { q.RepoID = 0 },
-		"negative repo ID": func(q *faucet.PollQuery) { q.RepoID = -1 },
+		"zero repo ID":     func(q *faucet.PollQuery) { q.Target = faucet.RepoTarget(0) },
+		"zero target":      func(q *faucet.PollQuery) { q.Target = faucet.Target{} },
+		"negative repo ID": func(q *faucet.PollQuery) { q.Target = faucet.RepoTarget(-1) },
 		"zero limit":       func(q *faucet.PollQuery) { q.Limit = 0 },
 		"negative limit":   func(q *faucet.PollQuery) { q.Limit = -1 },
 		"negative after":   func(q *faucet.PollQuery) { q.After = -1 },
@@ -551,7 +557,7 @@ func cursorAtReturnsHighestIDReceivedBefore(t *testing.T, s faucet.Store) {
 		require.Equal(t, tt.want, got, name)
 	}
 
-	page, err := s.PollEvents(ctx, faucet.PollQuery{RepoID: 42, After: stored[0].ID, Limit: 10})
+	page, err := s.PollEvents(ctx, faucet.PollQuery{Target: faucet.RepoTarget(42), After: stored[0].ID, Limit: 10})
 	require.NoError(t, err)
 	require.Len(t, page.Events, 2)
 	require.Equal(t, stored[1].ID, page.Events[0].ID, "CursorAt then PollEvents returns the events from that time on")
@@ -678,7 +684,7 @@ func purgeDeletesOnlyEventsReceivedBefore(t *testing.T, s faucet.Store) {
 
 func pollEventsAndCursorAtNeverFallBelowThePurgeMark(t *testing.T, s faucet.Store) {
 	ctx := context.Background()
-	q := faucet.PollQuery{RepoID: 42, Limit: 10}
+	q := faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 10}
 
 	before, err := s.PollEvents(ctx, q)
 	require.NoError(t, err)
@@ -821,7 +827,7 @@ func pollEventsNeverHidesAConcurrentPurge(t *testing.T, s faucet.Store) {
 						done = true
 					default:
 					}
-					page, err := s.PollEvents(ctx, faucet.PollQuery{RepoID: 42, After: cursor, Limit: 100})
+					page, err := s.PollEvents(ctx, faucet.PollQuery{Target: faucet.RepoTarget(42), After: cursor, Limit: 100})
 					if err != nil {
 						t.Errorf("poll: %v", err)
 						return
@@ -867,7 +873,7 @@ func newSubscription(principal, callbackURL string, expiresAt time.Time) faucet.
 		EventType:   eventType,
 		EventTypes:  []string{eventType},
 		Arguments:   arguments,
-		RepoID:      42,
+		Target:      faucet.RepoTarget(42),
 		SecretEnc:   []byte("sealed-1"),
 		Cursor:      7,
 		ExpiresAt:   expiresAt,
@@ -891,7 +897,7 @@ func upsertSubscriptionStoresThenRefreshes(t *testing.T, s faucet.Store) {
 	require.Equal(t, sub.EventType, stored.EventType)
 	require.Equal(t, sub.EventTypes, stored.EventTypes)
 	require.JSONEq(t, string(sub.Arguments), string(stored.Arguments))
-	require.EqualValues(t, 42, stored.RepoID)
+	require.Equal(t, faucet.RepoTarget(42), stored.Target)
 	require.Equal(t, []byte("sealed-1"), stored.SecretEnc)
 	require.EqualValues(t, 7, stored.Cursor)
 	require.True(t, now.Equal(stored.CreatedAt), "created_at is the call's now, got %s", stored.CreatedAt)
@@ -900,14 +906,14 @@ func upsertSubscriptionStoresThenRefreshes(t *testing.T, s faucet.Store) {
 
 	later := now.Add(time.Minute)
 	refresh := sub
-	refresh.RepoID = 43
+	refresh.Target = faucet.RepoTarget(43)
 	refresh.SecretEnc = []byte("sealed-2")
 	refresh.Cursor = 99
 	refresh.EventTypes = []string{"ci.run_completed", "ci.run_requested"}
 	refresh.ExpiresAt = later.Add(5 * time.Minute)
 	again, err := s.UpsertSubscription(ctx, refresh, later, 10)
 	require.NoError(t, err)
-	require.EqualValues(t, 43, again.RepoID, "a refresh replaces the repository")
+	require.Equal(t, faucet.RepoTarget(43), again.Target, "a refresh replaces the repository")
 	require.Equal(t, []byte("sealed-2"), again.SecretEnc, "a refresh replaces the sealed secret")
 	require.Equal(t, refresh.EventTypes, again.EventTypes, "a refresh replaces the stored event types")
 	require.True(t, refresh.ExpiresAt.Equal(again.ExpiresAt), "a refresh sets the new expiry, even a shorter one")
@@ -1216,19 +1222,21 @@ func upsertSubscriptionValidatesInput(t *testing.T, s faucet.Store) {
 	good := subscriptionAt(1, subscriptionBase.Add(time.Hour))
 
 	bad := map[string]func(sub *faucet.Subscription){
-		"empty principal":      func(sub *faucet.Subscription) { sub.Principal = "" },
-		"empty callback URL":   func(sub *faucet.Subscription) { sub.CallbackURL = "" },
-		"empty event type":     func(sub *faucet.Subscription) { sub.EventType = "" },
-		"no stored types":      func(sub *faucet.Subscription) { sub.EventTypes = nil },
-		"empty stored type":    func(sub *faucet.Subscription) { sub.EventTypes = []string{"ci.run_completed", ""} },
-		"arguments not object": func(sub *faucet.Subscription) { sub.Arguments = json.RawMessage(`[1]`) },
-		"arguments not JSON":   func(sub *faucet.Subscription) { sub.Arguments = json.RawMessage(`{"repo":`) },
-		"zero repo ID":         func(sub *faucet.Subscription) { sub.RepoID = 0 },
-		"no sealed secret":     func(sub *faucet.Subscription) { sub.SecretEnc = nil },
-		"negative cursor":      func(sub *faucet.Subscription) { sub.Cursor = -1 },
-		"already expired":      func(sub *faucet.Subscription) { sub.ExpiresAt = subscriptionBase },
-		"zero key hash":        func(sub *faucet.Subscription) { sub.KeyHash = faucet.SubscriptionKeyHash{} },
-		"negative grace":       func(sub *faucet.Subscription) { sub.RotationGrace = -time.Second },
+		"empty principal":            func(sub *faucet.Subscription) { sub.Principal = "" },
+		"empty callback URL":         func(sub *faucet.Subscription) { sub.CallbackURL = "" },
+		"empty event type":           func(sub *faucet.Subscription) { sub.EventType = "" },
+		"no stored types":            func(sub *faucet.Subscription) { sub.EventTypes = nil },
+		"empty stored type":          func(sub *faucet.Subscription) { sub.EventTypes = []string{"ci.run_completed", ""} },
+		"arguments not object":       func(sub *faucet.Subscription) { sub.Arguments = json.RawMessage(`[1]`) },
+		"arguments not JSON":         func(sub *faucet.Subscription) { sub.Arguments = json.RawMessage(`{"repo":`) },
+		"zero repo ID":               func(sub *faucet.Subscription) { sub.Target = faucet.RepoTarget(0) },
+		"zero target":                func(sub *faucet.Subscription) { sub.Target = faucet.Target{} },
+		"owner target with no owner": func(sub *faucet.Subscription) { sub.Target = faucet.OwnerTarget(0) },
+		"no sealed secret":           func(sub *faucet.Subscription) { sub.SecretEnc = nil },
+		"negative cursor":            func(sub *faucet.Subscription) { sub.Cursor = -1 },
+		"already expired":            func(sub *faucet.Subscription) { sub.ExpiresAt = subscriptionBase },
+		"zero key hash":              func(sub *faucet.Subscription) { sub.KeyHash = faucet.SubscriptionKeyHash{} },
+		"negative grace":             func(sub *faucet.Subscription) { sub.RotationGrace = -time.Second },
 		"grace past the expiry": func(sub *faucet.Subscription) {
 			sub.RotationGrace = time.Hour + time.Second
 		},

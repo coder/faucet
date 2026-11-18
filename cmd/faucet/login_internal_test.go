@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -36,7 +37,9 @@ import (
 // server's own URL, over a scratch database.
 type loginServer struct {
 	*httptest.Server
+	db     *sql.DB
 	store  *pgstore.Store
+	svc    *faucet.Service
 	github *githubStub
 	logs   *syncBuffer
 }
@@ -46,11 +49,13 @@ type loginConfig struct {
 	webhook *faucet.WebhookDeps
 	// logins wraps the store that the login server reads.
 	logins func(*pgstore.Store) loginStore
+	// rawEvents are the events that the server offers raw, push without it.
+	rawEvents []string
 }
 
 func newLoginServer(t *testing.T, configure ...func(*loginConfig)) *loginServer {
 	t.Helper()
-	var cfg loginConfig
+	cfg := loginConfig{rawEvents: []string{"push"}}
 	for _, c := range configure {
 		c(&cfg)
 	}
@@ -77,15 +82,15 @@ func newLoginServer(t *testing.T, configure ...func(*loginConfig)) *loginServer 
 	if cfg.logins != nil {
 		logins = cfg.logins(store)
 	}
-	tokens, login, authorizer, err := newLogin(publicURL, nil, logins, cache, nil, clock, logger)
+	tokens, login, checks, err := newLogin(publicURL, nil, logins, cache, nil, clock, logger)
 	require.NoError(t, err)
-	svc, _, err := newServices(config{secret: testSecret, publicURL: publicURL, webhook: cfg.webhook, rawEvents: []string{"push"}}, store, authorizer, clock, logger)
+	svc, _, err := newServices(config{secret: testSecret, publicURL: publicURL, webhook: cfg.webhook, rawEvents: cfg.rawEvents}, store, checks, clock, logger)
 	require.NoError(t, err)
 	cron := cronRoutes{secret: []byte(loginCronSecret), svc: svc, retention: 24 * time.Hour, login: login, clock: clock, logger: logger}
 	srv.Config.Handler = newRouter(svc, tokens, login, cron, logger)
 	srv.Start()
 	t.Cleanup(srv.Close)
-	return &loginServer{Server: srv, store: store, github: github, logs: logs}
+	return &loginServer{Server: srv, db: db, store: store, svc: svc, github: github, logs: logs}
 }
 
 // client stores a client that an operator made for the endpoint at path,
@@ -104,17 +109,31 @@ func (s *loginServer) deliver(t *testing.T, delivery string) {
 	t.Helper()
 	body, err := os.ReadFile("../../faucet/testdata/workflow_run_completed.json")
 	require.NoError(t, err)
+	s.post(t, "workflow_run", delivery, body)
+}
+
+// post posts body as a delivery of event, signed as GitHub does, and needs a
+// 200.
+func (s *loginServer) post(t *testing.T, event, delivery string, body []byte) {
+	t.Helper()
+	s.postAnswered(t, event, delivery, body, http.StatusOK)
+}
+
+// postAnswered posts a signed delivery and requires that faucet answers it
+// with status.
+func (s *loginServer) postAnswered(t *testing.T, event, delivery string, body []byte, status int) {
+	t.Helper()
 	mac := hmac.New(sha256.New, []byte(testSecret))
 	_, _ = mac.Write(body)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, s.URL+"/webhook/github", bytes.NewReader(body))
 	require.NoError(t, err)
 	req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
-	req.Header.Set("X-GitHub-Event", "workflow_run")
+	req.Header.Set("X-GitHub-Event", event)
 	req.Header.Set("X-GitHub-Delivery", delivery)
 	resp, err := s.Client().Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, status, resp.StatusCode)
 }
 
 // connectService connects to the endpoint at path as go-sdk's client

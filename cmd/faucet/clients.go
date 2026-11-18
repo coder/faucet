@@ -19,12 +19,14 @@ import (
 )
 
 const clientsUsage = `usage:
-  faucet clients create [-resource <url>] [-scope <scopes>] -grant repo:<owner>/<name> [-grant ...] <client-id>
+  faucet clients create [-resource <url>] [-scope <scopes>] -grant <grant> [-grant ...] <client-id>
   faucet clients list
   faucet clients disable <client-id>
 
 The commands read DATABASE_URL and FAUCET_PUBLIC_URL, as the server does.
--resource defaults to FAUCET_PUBLIC_URL and /github/mcp.`
+-resource defaults to FAUCET_PUBLIC_URL and /github/mcp.
+A grant is repo:<owner>/<name> for one repository, org:<owner> for every
+repository of a user or organization, or all for every repository.`
 
 // clientEndpoint is the path of the endpoint that new clients are for. /mcp,
 // its old path, takes no new client, because a later release removes it.
@@ -134,7 +136,7 @@ func createClient(ctx context.Context, args []string, store oauth.Store, publicU
 	resource := flags.String("resource", defaultResource, "the MCP endpoint that the client's tokens are for, such as https://faucet.example.com/github/mcp")
 	scopeList := flags.String("scope", strings.Join(scopeNames(faucet.AllScopes()), ","), "the scopes that the client's tokens can hold, comma separated")
 	var grants grantFlags
-	flags.Var(&grants, "grant", "a repository that the client may read, repo:<owner>/<name>; repeat it for more")
+	flags.Var(&grants, "grant", "what the client may read: repo:<owner>/<name>, org:<owner> or all; repeat it for more")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}

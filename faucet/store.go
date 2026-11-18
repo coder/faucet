@@ -21,7 +21,12 @@ type Event struct {
 	// Type is the normalized event type, for example "ci.run_completed".
 	Type   string
 	RepoID int64
-	PRs    []int32
+	// OwnerID is the GitHub ID of the repository's owner, and RepoName its
+	// full name, owner/name, as the delivery wrote it. An event stored before
+	// faucet recorded them, or of a payload that names none, has 0 and "".
+	OwnerID  int64
+	RepoName string
+	PRs      []int32
 	// HeadSHA is empty when the event carries none.
 	HeadSHA string
 	Data    json.RawMessage
@@ -46,6 +51,8 @@ func (e Event) Validate() error {
 		return xerrors.New("type is required")
 	case e.RepoID == 0:
 		return xerrors.New("repo ID is required")
+	case e.OwnerID < 0:
+		return xerrors.New("owner ID must not be negative")
 	case len(e.Data) == 0:
 		return xerrors.New("data is required")
 	case !json.Valid(e.Data):
@@ -62,9 +69,12 @@ func (e Event) Validate() error {
 	return nil
 }
 
-// PollQuery selects the events one repository's waiter wants to see.
+// PollQuery selects the events one waiter wants to see.
 type PollQuery struct {
-	RepoID int64
+	Target Target
+	// RepoNames limits the result to events whose RepoName, in lower case,
+	// is one of these lower-case full names. Empty means no limit.
+	RepoNames []string
 	// Types limits the result to these event types. Empty means every type.
 	Types []string
 	// HeadSHA limits the result to events with this head SHA. Empty means no limit.
@@ -83,8 +93,8 @@ type PollQuery struct {
 // Validate checks the fields a caller supplies to Store.PollEvents.
 func (q PollQuery) Validate() error {
 	switch {
-	case q.RepoID <= 0:
-		return xerrors.New("repo ID must be positive")
+	case q.Target.Validate() != nil:
+		return xerrors.Errorf("target: %w", q.Target.Validate())
 	case q.Limit <= 0:
 		return xerrors.New("limit must be positive")
 	case q.After < 0:
@@ -197,14 +207,14 @@ type Store interface {
 	//
 	// In the same transaction it moves every subscription whose read position
 	// is at or above the old mark and below the new one up to the new mark,
-	// unless an event of that subscription's repository and event type lies
-	// above its position and at or below the new mark. What stays below the mark
+	// unless an event that its target covers, of its event types, lies above
+	// its position and at or below the new mark. What stays below the mark
 	// is then exactly what lost events, so a subscription that had nothing to
 	// read is not reported as a gap.
 	Purge(ctx context.Context, before time.Time) (PurgeResult, error)
 	// UpsertSubscription stores sub and returns the stored row. It calls
 	// sub.Validate(now). A row with the same KeyHash that expires after now is
-	// live: the call replaces its RepoID, SecretEnc and ExpiresAt and keeps its
+	// live: the call replaces its Target, SecretEnc and ExpiresAt and keeps its
 	// CreatedAt and Cursor. When the new SecretEnc differs from the row's, the
 	// row's becomes PreviousSecretEnc until now plus RotationGrace (and a
 	// previous secret from an earlier rotation is dropped). When it is equal,
@@ -237,20 +247,46 @@ type Store interface {
 	// RecordRepository records repo, which a signed delivery named, at
 	// seenAt, the time of record, when the store holds no row of its ID. A
 	// row that exists keeps its names, so a replayed or late delivery cannot
-	// move a name back to it. It calls repo.Validate.
+	// move a name back to it. The login of repo's owner is RecordOwner's or
+	// AddOwner's to record. It calls repo.Validate.
 	RecordRepository(ctx context.Context, repo Repository, seenAt time.Time) error
 	// RenameRepository gives the row of repo.ID the names of repo at seenAt
-	// when its FullName is from, ignoring case, and inserts it when there is
-	// no row. A repository event that renamed or transferred the repository
+	// when its FullName is from, ignoring case, either as the row holds it or
+	// under the login that the row's owner holds now, and inserts it when
+	// there is no row. GitHub writes from under the owner's current login,
+	// which the row lacks when the owner was renamed after it was seen. A repository event that renamed or transferred the repository
 	// from that name calls it, so a replayed older rename, whose from the row
 	// no longer holds, changes nothing. It calls repo.Validate.
 	RenameRepository(ctx context.Context, repo Repository, from string, seenAt time.Time) error
-	// RepositoryByName returns the repository whose FullName equals fullName,
-	// ignoring case as GitHub does. When more than one row holds the name,
-	// as when a repository was deleted with no event that says so and another
-	// took its name, it returns the one that took the name latest. It returns
-	// ErrUnknownRepository when no row holds the name.
+	// RecordOwner records that a signed delivery named the account owner.ID
+	// with owner.Login. The account keeps the login of its latest
+	// delivery, because GitHub sends no event for each repository of an
+	// account that it renames. One login names one account, ignoring case:
+	// another account that held the login gives it up, and holds no login
+	// until a delivery names it again. It calls owner.Validate.
+	RecordOwner(ctx context.Context, owner Owner) error
+	// AddOwner records owner as RecordOwner does when the store holds no row
+	// of the account and no account holds its login, and writes nothing
+	// otherwise. A delivery that GitHub sent again names an account as it was
+	// then, so it may add an account but must move no login. It calls
+	// owner.Validate.
+	AddOwner(ctx context.Context, owner Owner) error
+	// OwnerByID returns the account of id with the login that the store
+	// holds for it, and ErrUnknownOwner when it holds no row of it.
+	OwnerByID(ctx context.Context, id int64) (Owner, error)
+	// RepositoryByName returns the repository written fullName, ignoring case
+	// as GitHub does: a repository whose name, as it was first seen or renamed
+	// to, is the name part, of the account that holds the owner part as its
+	// login now. When more than one row holds the name, as when a repository
+	// was deleted with no event that says so and another took its name, it
+	// returns the one that took the name latest. The result's names are the
+	// ones that it matched. It returns ErrUnknownRepository when no row holds
+	// the name.
 	RepositoryByName(ctx context.Context, fullName string) (Repository, error)
+	// OwnerByLogin returns the account that holds login now, ignoring case,
+	// with the login as its latest delivery wrote it. It returns
+	// ErrUnknownOwner when no account holds it.
+	OwnerByLogin(ctx context.Context, login string) (Owner, error)
 
 	// The rest of the interface is the delivery queue. A subscription's
 	// deliveries end with it: deleting a subscription deletes the deliveries it
@@ -258,9 +294,10 @@ type Store interface {
 	// refresh of a live one leaves the read position alone.
 
 	// ScanTargets returns the live subscriptions at now that hold fewer than
-	// maxPending unsent deliveries and have something to read: an event of
-	// their repository and event type above their read position, or a purge
-	// mark above it. The ones furthest behind come first, at most limit.
+	// maxPending unsent deliveries and have something to read: an event that
+	// their target covers, of their event types, above their read position,
+	// or a purge mark above it. The ones furthest behind come first, at most
+	// limit.
 	ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32) ([]ScanTarget, error)
 	// EnqueueDeliveries queues e.Deliveries and moves the subscription's read
 	// position to e.NewScannedThrough in one transaction, and only if the

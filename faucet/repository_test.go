@@ -1,6 +1,7 @@
 package faucet_test
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,7 @@ func newRepositoryHarness(t *testing.T, mutate ...func(*faucet.Deps)) (*fakeStor
 	deps := testDeps(store)
 	deps.Clock = clock
 	deps.RecordRepositories = true
+	deps.Redelivered = noRedeliveries
 	for _, m := range mutate {
 		m(&deps)
 	}
@@ -30,6 +32,9 @@ func newRepositoryHarness(t *testing.T, mutate ...func(*faucet.Deps)) (*fakeStor
 	require.NoError(t, err)
 	return store, clock, svc.WebhookHandler()
 }
+
+// noRedeliveries is the Redelivered of a host that runs no redelivery.
+func noRedeliveries(context.Context, string) (bool, error) { return false, nil }
 
 func serveWebhook(handler http.Handler, req *http.Request) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
@@ -186,4 +191,78 @@ func TestWebhookRenamesARepositoryOnlyFromTheNameItHolds(t *testing.T) {
 	require.Equal(t, named("acme/spout", "acme", movedAt), store.repos)
 	deliver("repository", "transferred", "acme/spout", "acme", movedFrom("coder"))
 	require.Equal(t, named("acme/spout", "acme", movedAt), store.repos, "a replayed transfer finds the new name and changes nothing")
+}
+
+// A delivery that faucet's redelivery asked GitHub to send again names an
+// account as it was when the delivery first came. It adds an account that
+// faucet has not seen and moves no login, so a replay from before a rename
+// never gives the old login back. When faucet cannot tell whether a delivery
+// is such a replay, it moves no login either.
+func TestARedeliveredDeliveryMovesNoLogin(t *testing.T) {
+	t.Parallel()
+	redelivered := map[string]bool{"before-rename": true, "first-of-octo": true}
+	store, _, handler := newRepositoryHarness(t, func(d *faucet.Deps) {
+		d.Redelivered = func(_ context.Context, id string) (bool, error) {
+			if id == "unknown" {
+				return false, xerrors.New("read redeliveries: connection reset")
+			}
+			return redelivered[id], nil
+		}
+	})
+	deliver := func(event, delivery, body string) {
+		t.Helper()
+		rec := serveWebhook(handler, newRequest(http.MethodPost, []byte(body), event, delivery))
+		require.Less(t, rec.Code, 300, delivery)
+	}
+	push := func(delivery string, ownerID int64, login string) {
+		t.Helper()
+		deliver("push", delivery, fmt.Sprintf(`{"ref":"refs/heads/main","repository":{"id":%d,"full_name":%q,"owner":{"id":%d,"login":%q}}}`, ownerID*10, login+"/private", ownerID, login))
+	}
+	owner := func(login string) (faucet.Owner, error) {
+		t.Helper()
+		return store.OwnerByLogin(context.Background(), login)
+	}
+
+	push("first", 7, "acme")
+	deliver("organization", "renamed", `{"action":"renamed","organization":{"id":7,"login":"acme-legacy"},"changes":{"login":{"from":"acme"}}}`)
+	push("before-rename", 7, "acme")
+	push("unknown", 7, "acme")
+	_, err := owner("acme")
+	require.ErrorIs(t, err, faucet.ErrUnknownOwner, "a replay from before the rename does not give the old login back")
+	got, err := owner("acme-legacy")
+	require.NoError(t, err)
+	require.Equal(t, faucet.Owner{ID: 7, Login: "acme-legacy"}, got)
+
+	push("first-of-octo", 9, "octo")
+	got, err = owner("octo")
+	require.NoError(t, err)
+	require.Equal(t, faucet.Owner{ID: 9, Login: "octo"}, got, "a replay adds an account that faucet has not seen")
+}
+
+// Nearly every delivery names an account under the login that faucet holds
+// for it, so faucet writes an account's login only when it is new or changed,
+// and once for a delivery whose organization owns its repository.
+func TestADeliveryWritesTheLoginOfAnAccountOnlyWhenItChanged(t *testing.T) {
+	t.Parallel()
+	store, _, handler := newRepositoryHarness(t)
+	n := 0
+	push := func(login string) {
+		t.Helper()
+		n++
+		body := fmt.Sprintf(`{"ref":"refs/heads/main","organization":{"id":7,"login":%q},"repository":{"id":70,"full_name":%q,"owner":{"id":7,"login":%q}}}`,
+			login, login+"/tap", login)
+		rec := serveWebhook(handler, newRequest(http.MethodPost, []byte(body), "push", fmt.Sprintf("d-%d", n)))
+		require.Less(t, rec.Code, 300)
+	}
+
+	push("acme")
+	require.Equal(t, 1, store.ownerWriteCount(), "the organization owns the repository, so one write records both")
+	push("acme")
+	push("acme")
+	require.Equal(t, 1, store.ownerWriteCount(), "a login that faucet holds writes nothing")
+	push("Acme")
+	require.Equal(t, 2, store.ownerWriteCount(), "a login whose case changed is written as the delivery writes it")
+	got, err := store.OwnerByLogin(context.Background(), "acme")
+	require.NoError(t, err)
+	require.Equal(t, faucet.Owner{ID: 7, Login: "Acme"}, got)
 }

@@ -166,10 +166,11 @@ func newBrowserServer(t *testing.T, configure ...func(*faucet.Deps)) *browserSer
 	logs := &syncBuffer{}
 	logger := slog.Make(sloghuman.Sink(logs)).Leveled(slog.LevelDebug)
 	githubAPI := faucet.TokenAuthorizer{BaseURL: github.URL, Client: github.Client()}
-	tokens, login, authorizer, err := newLogin(publicURL, browser, store, faucet.NewAccessCache(githubAPI, clock), githubAPI, clock, logger)
+	tokens, login, checks, err := newLogin(publicURL, browser, store, faucet.NewAccessCache(githubAPI, clock), githubAPI, clock, logger)
 	require.NoError(t, err)
 	deps := faucet.Deps{
-		Store: store, Secret: []byte(testSecret), Logger: logger, Authorizer: authorizer, PrincipalFrom: principalFrom, Clock: clock,
+		Store: store, Secret: []byte(testSecret), Logger: logger, Authorizer: checks.authorizer, ServiceGrants: checks.grants,
+		PrincipalFrom: principalFrom, Clock: clock,
 	}
 	for _, c := range configure {
 		c(&deps)

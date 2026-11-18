@@ -284,3 +284,16 @@ func (s *Store) PurgeRedeliveries(ctx context.Context, before time.Time) (_ int6
 	}
 	return deleted, nil
 }
+
+// Redelivered reports whether redelivery tracks the delivery of guid, which
+// it does from a failed attempt on, so the delivery that comes after it is
+// one that GitHub sends again. It is the func that a host gives
+// faucet.Deps.Redelivered.
+func (s *Store) Redelivered(ctx context.Context, guid string) (_ bool, err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	redelivered, err := s.q.IsRedelivery(ctx, guid)
+	if err != nil {
+		return false, xerrors.Errorf("read redeliveries: %w", err)
+	}
+	return redelivered, nil
+}

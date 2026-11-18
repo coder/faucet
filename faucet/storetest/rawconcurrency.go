@@ -59,7 +59,7 @@ func ingestRawSeesASubscriptionAsSoonAsItsUpsertReturns(t *testing.T, s RawStore
 		}, func() error {
 			sub := <-upserted
 			d := r.newDelivery()
-			d.RepoID = sub.RepoID
+			d.RepoID = sub.Target.RepoID()
 			var got []faucet.RawInterest
 			res, err := s.IngestRaw(r.ctx, d, r.now, func(interests []faucet.RawInterest) faucet.RawPlan {
 				got = interests
@@ -67,11 +67,11 @@ func ingestRawSeesASubscriptionAsSoonAsItsUpsertReturns(t *testing.T, s RawStore
 			})
 			switch {
 			case err != nil:
-				return xerrors.Errorf("ingest for repository %d: %w", sub.RepoID, err)
+				return xerrors.Errorf("ingest for repository %d: %w", sub.Target.RepoID(), err)
 			case !res.Matched:
-				return xerrors.Errorf("repository %d: an ingest after the upsert returned matched nothing", sub.RepoID)
+				return xerrors.Errorf("repository %d: an ingest after the upsert returned matched nothing", sub.Target.RepoID())
 			case len(got) != 1 || got[0].IsLease || got[0].Subscription != sub.KeyHash || !got[0].Incarnation.Equal(sub.CreatedAt):
-				return xerrors.Errorf("repository %d: the plan got %+v, not only the subscription upserted for it", sub.RepoID, got)
+				return xerrors.Errorf("repository %d: the plan got %+v, not only the subscription upserted for it", sub.Target.RepoID(), got)
 			}
 			return nil
 		})

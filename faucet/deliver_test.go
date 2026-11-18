@@ -549,6 +549,60 @@ func TestDeliverDueARunPastTheLeaseSendsNothingAgain(t *testing.T) {
 	requireGapAndEventSentOnce()
 }
 
+func TestDeliverDueSendsTheRepositoriesOfAnOwnerThroughOneSubscription(t *testing.T) {
+	t.Parallel()
+	const owner, otherOwner = 7, 8
+	insert := func(d *deliverHarness, repo, ownerID int64) faucet.Event {
+		d.t.Helper()
+		d.deliveries++
+		ev, _, err := d.store.InsertEvent(d.ctx, faucet.Event{
+			Source: "github", DeliveryID: fmt.Sprintf("delivery-%d", d.deliveries), Type: "ci.run_completed",
+			RepoID: repo, OwnerID: ownerID, Data: json.RawMessage(sampleData["ci.run_completed"]),
+		})
+		require.NoError(d.t, err)
+		return ev
+	}
+
+	t.Run("every repository of the owner, and no other owner's", func(t *testing.T) {
+		t.Parallel()
+		d := newDeliverHarness(t)
+		sub := d.subscribeEndpoint(d.endpoint("/hook"))
+		d.store.retarget(sub.ID, faucet.OwnerTarget(owner))
+		d.advance(time.Second)
+		insert(d, repoID, owner)
+		insert(d, repoID+1, owner)
+		insert(d, repoID+2, otherOwner)
+
+		res := d.deliverDue()
+		require.Equal(t, 2, res.Enqueued, "the events of both repositories of the owner are queued")
+		require.Equal(t, 2, res.Delivered)
+		require.Empty(t, res.GaveUp)
+		require.Len(t, d.rcv.requests("/hook"), 2, "the event of the other owner is not sent")
+	})
+
+	t.Run("an event that the target no longer covers", func(t *testing.T) {
+		t.Parallel()
+		d := newDeliverHarness(t)
+		d.rcv.answer("/hook", func(n int) int {
+			if n == 1 {
+				return http.StatusInternalServerError
+			}
+			return http.StatusOK
+		})
+		sub := d.subscribeEndpoint(d.endpoint("/hook"))
+		d.store.retarget(sub.ID, faucet.OwnerTarget(owner))
+		d.advance(time.Second)
+		insert(d, repoID+1, owner)
+		require.Equal(t, 1, d.deliverDue().Retried)
+
+		d.store.retarget(sub.ID, faucet.OwnerTarget(otherOwner))
+		d.advance(15 * time.Second)
+		res := d.deliverDue()
+		require.Equal(t, map[faucet.GiveUpReason]int{faucet.GiveUpRepoMismatch: 1}, res.GaveUp, "the event of another owner ends without a request")
+		require.Len(t, d.rcv.requests("/hook"), 1)
+	})
+}
+
 func TestDeliverDueEndsEveryDeliveryItCannotSendWithAReason(t *testing.T) {
 	t.Parallel()
 

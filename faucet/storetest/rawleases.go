@@ -111,8 +111,14 @@ func readRawLeaseFindsOnlyALiveLeaseOfItsKeyAndRepository(t *testing.T, s RawSto
 	q.Key = newRawLease(1, rawSpec{actions: []string{"opened"}}, r.now.Add(time.Hour)).Key
 	misses["another key"] = q
 	q = r.query(lease, ids[1])
-	q.RepoID = rawRepo + 1
+	q.Target = faucet.RepoTarget(rawRepo + 1)
 	misses["another repository"] = q
+	q = r.query(lease, ids[1])
+	q.Target = faucet.OwnerTarget(rawOwner)
+	misses["the owner of its repository"] = q
+	q = r.query(lease, ids[1])
+	q.Target = faucet.AllTarget()
+	misses["every repository"] = q
 	q = r.query(lease, ids[1])
 	q.Now, q.ExpiresAt = lease.ExpiresAt, lease.ExpiresAt.Add(time.Hour)
 	misses["a lease that expired at now"] = q

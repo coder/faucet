@@ -26,12 +26,16 @@ func (s *Store) ScanTargets(ctx context.Context, now time.Time, maxPending, limi
 		if err != nil {
 			return nil, err
 		}
+		target, err := toTarget(row.TargetKind, row.RepoID, row.OwnerID)
+		if err != nil {
+			return nil, err
+		}
 		targets[i] = faucet.ScanTarget{
 			KeyHash:        key,
 			Principal:      row.Principal,
 			EventTypes:     row.EventTypes,
 			Arguments:      row.Arguments,
-			RepoID:         row.RepoID,
+			Target:         target,
 			ScannedThrough: row.ScannedThrough,
 			Pending:        row.Pending,
 		}
@@ -104,6 +108,10 @@ func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Dur
 	if err != nil {
 		return faucet.DeliveryClaim{}, false, err
 	}
+	target, err := toTarget(row.TargetKind, row.RepoID, row.OwnerID)
+	if err != nil {
+		return faucet.DeliveryClaim{}, false, err
+	}
 	claim := faucet.DeliveryClaim{
 		Ref:                 faucet.DeliveryRef{Key: key, EventID: row.EventID, MessageID: row.MessageID, Attempt: row.Attempts, Incarnation: row.Incarnation},
 		MessageID:           row.MessageID,
@@ -113,7 +121,7 @@ func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Dur
 		SecretEnc:           row.SecretEnc,
 		PreviousSecretEnc:   row.PreviousSecretEnc,
 		PreviousSecretUntil: row.PreviousSecretUntil.Time,
-		RepoID:              row.RepoID,
+		Target:              target,
 		Watermark:           row.Watermark,
 	}
 	if row.StoredEventID.Valid {
@@ -123,6 +131,8 @@ func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Dur
 			DeliveryID: row.DeliveryID.String,
 			Type:       row.Type.String,
 			RepoID:     row.EventRepoID.Int64,
+			OwnerID:    row.EventOwnerID.Int64,
+			RepoName:   row.RepoName.String,
 			PRs:        row.Prs,
 			HeadSHA:    row.HeadSha.String,
 			Data:       row.Data,

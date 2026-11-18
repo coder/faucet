@@ -49,8 +49,8 @@ type ScanTarget struct {
 	// EventTypes and Arguments are the subscription's own.
 	EventTypes []string
 	Arguments  json.RawMessage
-	// RepoID is the repository the principal could read at the last subscribe.
-	RepoID int64
+	// Target is what the principal could read at the last subscribe.
+	Target Target
 	// ScannedThrough is the highest event ID the enqueue has read for it.
 	ScannedThrough int64
 	// Pending is the number of deliveries it holds that have not ended.
@@ -136,8 +136,8 @@ type DeliveryClaim struct {
 	// as of the claim: the rotation window that signs the attempt too.
 	PreviousSecretEnc   []byte
 	PreviousSecretUntil time.Time
-	// RepoID is the repository the subscription is granted now.
-	RepoID int64
+	// Target is what the subscription is granted now.
+	Target Target
 	// Watermark is the lowest unsent event ID of the subscription, minus one.
 	Watermark int64
 	// Event is nil when a purge deleted the event.

@@ -84,8 +84,10 @@ var rules = map[string]rule{
 var actionMemberOf = map[string]string{"status": "state"}
 
 type envelope struct {
-	repoID int64
-	word   string
+	repoID   int64
+	ownerID  int64
+	repoName string
+	word     string
 }
 
 func readEnvelope(eventName string, payload []byte) (envelope, error) {
@@ -94,7 +96,13 @@ func readEnvelope(eventName string, payload []byte) (envelope, error) {
 		return envelope{}, err
 	}
 	member := cmp.Or(actionMemberOf[eventName], "action")
-	var repo repoRef
+	var repo struct {
+		ID       int64  `json:"id"`
+		FullName string `json:"full_name"`
+		Owner    struct {
+			ID int64 `json:"id"`
+		} `json:"owner"`
+	}
 	var word string
 	for name, into := range map[string]any{"repository": &repo, member: &word} {
 		raw, ok := members[name]
@@ -108,7 +116,10 @@ func readEnvelope(eventName string, payload []byte) (envelope, error) {
 	if word == "" {
 		return envelope{}, xerrors.Errorf("no %s", member)
 	}
-	return envelope{repoID: repo.ID, word: word}, nil
+	if strings.ContainsRune(repo.FullName, 0) {
+		return envelope{}, xerrors.New("repository: the full name holds a NUL byte")
+	}
+	return envelope{repoID: repo.ID, ownerID: repo.Owner.ID, repoName: repo.FullName, word: word}, nil
 }
 
 // Normalize turns one GitHub webhook into an Event.
@@ -158,6 +169,8 @@ func buildEvent(eventName string, payload []byte, deliveryID string) (Event, boo
 		DeliveryID: deliveryID,
 		Type:       r.eventType,
 		RepoID:     env.repoID,
+		OwnerID:    env.ownerID,
+		RepoName:   env.repoName,
 		PRs:        f.prs,
 		HeadSHA:    f.headSHA,
 		Data:       data,

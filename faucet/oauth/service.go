@@ -41,23 +41,29 @@ func liveClient(ctx context.Context, store Store, id string) (Client, error) {
 	return c, nil
 }
 
-// Repositories finds the repositories that deliveries named. faucet.Store
-// does.
+// Repositories finds the repositories that deliveries named, and their
+// owners. faucet.Store does.
 type Repositories interface {
 	RepositoryByName(ctx context.Context, fullName string) (faucet.Repository, error)
+	OwnerByLogin(ctx context.Context, login string) (faucet.Owner, error)
 }
 
-// ServiceAccess is the faucet.Authorizer of services. A service may read a
-// repository that one of its grants names, matched by name as GitHub does,
-// ignoring case. The repository's ID comes from the deliveries that named
-// it, so a service never calls GitHub, and a repository that no delivery
-// has named yet is not readable.
+// ServiceAccess is the faucet.Authorizer and the faucet.ServiceGrants of
+// services. A grant names a repository, an owner or every repository, and a
+// grant of an owner covers its repositories by the owner's account ID. Names
+// match as GitHub matches them, ignoring case. The IDs come from the
+// deliveries that named the repositories, so a service never calls GitHub,
+// and a repository or an owner that no delivery has named yet is not
+// readable.
 type ServiceAccess struct {
 	clients Store
 	repos   Repositories
 }
 
-var _ faucet.Authorizer = ServiceAccess{}
+var (
+	_ faucet.Authorizer    = ServiceAccess{}
+	_ faucet.ServiceGrants = ServiceAccess{}
+)
 
 // NewServiceAccess returns the ServiceAccess over the clients of clients and
 // the repositories of repos.
@@ -70,44 +76,151 @@ func NewServiceAccess(clients Store, repos Repositories) (ServiceAccess, error) 
 
 // RepoID implements faucet.Authorizer with the grants that p holds.
 func (a ServiceAccess) RepoID(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
-	client, ok := p.ServiceClient()
-	if !ok {
-		return 0, xerrors.Errorf("only a service is checked by its grants: %w", faucet.ErrNoAccess)
+	grants, err := heldGrants(p)
+	if err != nil {
+		return 0, err
 	}
-	return a.granted(ctx, client.Grants, repo)
+	return a.repoGranted(ctx, grants, repo)
 }
 
 // RepoIDFresh implements faucet.Authorizer with the grants that the client
 // holds in the store now. A client that is gone or disabled is
 // faucet.ErrInvalidToken.
 func (a ServiceAccess) RepoIDFresh(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
-	client, ok := p.ServiceClient()
-	if !ok {
-		return 0, xerrors.Errorf("only a service is checked by its grants: %w", faucet.ErrNoAccess)
-	}
-	c, err := liveClient(ctx, a.clients, client.ClientID)
+	grants, err := a.liveGrants(ctx, p)
 	if err != nil {
 		return 0, err
 	}
-	return a.granted(ctx, c.Grants, repo)
+	return a.repoGranted(ctx, grants, repo)
 }
 
-func (a ServiceAccess) granted(ctx context.Context, grants []string, repo string) (int64, error) {
-	if _, _, err := githubapi.ParseRepo(repo); err != nil {
+// OwnerID implements faucet.ServiceGrants with the grants that p holds.
+func (a ServiceAccess) OwnerID(ctx context.Context, p faucet.Principal, owner string) (int64, error) {
+	grants, err := heldGrants(p)
+	if err != nil {
 		return 0, err
 	}
-	if !slices.ContainsFunc(grants, func(g string) bool {
-		named, err := parseRepoGrant(g)
-		return err == nil && strings.EqualFold(named, repo)
-	}) {
-		return 0, xerrors.Errorf("no grant of this service names %s: %w", repo, faucet.ErrNoAccess)
+	return a.ownerGranted(ctx, grants, owner)
+}
+
+// OwnerIDFresh implements faucet.ServiceGrants with the grants that the
+// client holds in the store now.
+func (a ServiceAccess) OwnerIDFresh(ctx context.Context, p faucet.Principal, owner string) (int64, error) {
+	grants, err := a.liveGrants(ctx, p)
+	if err != nil {
+		return 0, err
+	}
+	return a.ownerGranted(ctx, grants, owner)
+}
+
+// CoversAll implements faucet.ServiceGrants with the grants that p holds.
+func (ServiceAccess) CoversAll(_ context.Context, p faucet.Principal) error {
+	grants, err := heldGrants(p)
+	if err != nil {
+		return err
+	}
+	return allGranted(grants)
+}
+
+// CoversAllFresh implements faucet.ServiceGrants with the grants that the
+// client holds in the store now.
+func (a ServiceAccess) CoversAllFresh(ctx context.Context, p faucet.Principal) error {
+	grants, err := a.liveGrants(ctx, p)
+	if err != nil {
+		return err
+	}
+	return allGranted(grants)
+}
+
+// heldGrants returns the grants that the service p holds.
+func heldGrants(p faucet.Principal) ([]clientGrant, error) {
+	client, ok := p.ServiceClient()
+	if !ok {
+		return nil, xerrors.Errorf("only a service is checked by its grants: %w", faucet.ErrNoAccess)
+	}
+	return parseGrants(client.Grants), nil
+}
+
+// liveGrants returns the grants that the client of the service p holds in
+// the store now.
+func (a ServiceAccess) liveGrants(ctx context.Context, p faucet.Principal) ([]clientGrant, error) {
+	client, ok := p.ServiceClient()
+	if !ok {
+		return nil, xerrors.Errorf("only a service is checked by its grants: %w", faucet.ErrNoAccess)
+	}
+	c, err := liveClient(ctx, a.clients, client.ClientID)
+	if err != nil {
+		return nil, err
+	}
+	return parseGrants(c.Grants), nil
+}
+
+// repoGranted returns the ID of repo when a grant names it, names every
+// repository, or names its owner: the owner of an org grant is the account
+// that the latest delivery named by that login, and it must be the owner
+// that the delivery of the repository named.
+func (a ServiceAccess) repoGranted(ctx context.Context, grants []clientGrant, repo string) (int64, error) {
+	repoOwner, _, err := githubapi.ParseRepo(repo)
+	if err != nil {
+		return 0, err
+	}
+	named := slices.ContainsFunc(grants, func(g clientGrant) bool { return g.all || strings.EqualFold(g.repo, repo) })
+	orgs := slices.DeleteFunc(slices.Clone(grants), func(g clientGrant) bool { return g.owner == "" })
+	notGranted := xerrors.Errorf("no grant of this service names %s: %w", repo, faucet.ErrNoAccess)
+	if !named && len(orgs) == 0 {
+		return 0, notGranted
 	}
 	r, err := a.repos.RepositoryByName(ctx, repo)
 	switch {
+	case xerrors.Is(err, faucet.ErrUnknownRepository) && !named &&
+		!slices.ContainsFunc(orgs, func(g clientGrant) bool { return strings.EqualFold(g.owner, repoOwner) }):
+		// Only a grant that names the repository or its owner learns that
+		// faucet has not seen it, so a service cannot probe which repositories
+		// of other owners faucet hears from.
+		return 0, notGranted
 	case xerrors.Is(err, faucet.ErrUnknownRepository):
 		return 0, xerrors.Errorf("faucet has received no webhook delivery from %s yet, so it cannot tell which repository the grant names; it can once GitHub sends one: %w", repo, faucet.ErrNoAccess)
 	case err != nil:
 		return 0, xerrors.Errorf("look up the repository: %w", err)
+	case named:
+		return r.ID, nil
 	}
-	return r.ID, nil
+	for _, g := range orgs {
+		o, err := a.repos.OwnerByLogin(ctx, g.owner)
+		switch {
+		case xerrors.Is(err, faucet.ErrUnknownOwner):
+			continue
+		case err != nil:
+			return 0, xerrors.Errorf("look up the owner: %w", err)
+		case o.ID == r.OwnerID:
+			return r.ID, nil
+		}
+	}
+	return 0, notGranted
+}
+
+// ownerGranted returns the account ID of owner when a grant names it or
+// names every repository.
+func (a ServiceAccess) ownerGranted(ctx context.Context, grants []clientGrant, owner string) (int64, error) {
+	if !githubapi.ValidOwner(owner) {
+		return 0, xerrors.New("owner must be a GitHub login")
+	}
+	if !slices.ContainsFunc(grants, func(g clientGrant) bool { return g.all || strings.EqualFold(g.owner, owner) }) {
+		return 0, xerrors.Errorf("no grant of this service names the owner %s: %w", owner, faucet.ErrNoAccess)
+	}
+	o, err := a.repos.OwnerByLogin(ctx, owner)
+	switch {
+	case xerrors.Is(err, faucet.ErrUnknownOwner):
+		return 0, xerrors.Errorf("faucet has received no webhook delivery from a repository of %s yet, so it cannot tell which owner the grant names; it can once GitHub sends one: %w", owner, faucet.ErrNoAccess)
+	case err != nil:
+		return 0, xerrors.Errorf("look up the owner: %w", err)
+	}
+	return o.ID, nil
+}
+
+func allGranted(grants []clientGrant) error {
+	if !slices.ContainsFunc(grants, func(g clientGrant) bool { return g.all }) {
+		return xerrors.Errorf("no grant of this service names every repository; that takes the grant all: %w", faucet.ErrNoAccess)
+	}
+	return nil
 }

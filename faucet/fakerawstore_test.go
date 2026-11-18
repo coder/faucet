@@ -111,6 +111,7 @@ func (s *fakeStore) rawPendingLocked(key faucet.SubscriptionKeyHash, incarnation
 type fakeRawArguments struct {
 	Actions []string `json:"actions"`
 	Fields  []string `json:"fields"`
+	Repos   []string `json:"repos"`
 }
 
 func fakeRawArgumentsOf(sub faucet.Subscription) fakeRawArguments {
@@ -123,11 +124,18 @@ func fakeRawWantsAction(actions []string, action string) bool {
 	return len(actions) == 0 || slices.Contains(actions, action)
 }
 
+// fakeRawWantsRepository reports whether a list of lower-case full names,
+// nil for none, lets a delivery of this repository name through.
+func fakeRawWantsRepository(repos []string, repoName string) bool {
+	return repos == nil || slices.Contains(repos, strings.ToLower(repoName))
+}
+
 func (s *fakeStore) rawInterestsLocked(d faucet.RawDelivery, now time.Time) []faucet.RawInterest {
 	var interests []faucet.RawInterest
 	for key, sub := range s.subs {
 		args := fakeRawArgumentsOf(sub)
-		if sub.EventType != fakeRawPrefix+d.Event || sub.RepoID != d.RepoID || !sub.ExpiresAt.After(now) || !fakeRawWantsAction(args.Actions, d.Action) {
+		if sub.EventType != fakeRawPrefix+d.Event || !sub.Target.Covers(d.RepoID, d.OwnerID) || !sub.ExpiresAt.After(now) ||
+			!fakeRawWantsAction(args.Actions, d.Action) || !fakeRawWantsRepository(args.Repos, d.RepoName) {
 			continue
 		}
 		interests = append(interests, faucet.RawInterest{
@@ -135,7 +143,8 @@ func (s *fakeStore) rawInterestsLocked(d faucet.RawDelivery, now time.Time) []fa
 		})
 	}
 	for id, l := range s.rawLeases {
-		if l.lease.Event != d.Event || l.lease.RepoID != d.RepoID || !l.lease.ExpiresAt.After(now) || !fakeRawWantsAction(l.lease.Actions, d.Action) {
+		if l.lease.Event != d.Event || !l.lease.Target.Covers(d.RepoID, d.OwnerID) || !l.lease.ExpiresAt.After(now) ||
+			!fakeRawWantsAction(l.lease.Actions, d.Action) || len(l.lease.RepoNames) > 0 && !fakeRawWantsRepository(l.lease.RepoNames, d.RepoName) {
 			continue
 		}
 		interests = append(interests, faucet.RawInterest{Lease: id, IsLease: true, Fields: slices.Clone(l.lease.Fields), Pending: l.pending()})
@@ -180,7 +189,7 @@ func (s *fakeStore) IngestRaw(ctx context.Context, d faucet.RawDelivery, now tim
 		s.rawReceivedAt = at
 	}
 	s.rawEvents = append(s.rawEvents, faucet.RawEvent{
-		ID: id, DeliveryID: d.DeliveryID, Event: d.Event, Action: d.Action, RepoID: d.RepoID,
+		ID: id, DeliveryID: d.DeliveryID, Event: d.Event, Action: d.Action, RepoID: d.RepoID, OwnerID: d.OwnerID,
 		Body: slices.Clone(p.Body), Fields: slices.Clone(p.Fields), ReceivedAt: s.rawReceivedAt,
 	})
 	for _, o := range p.Deliveries {
@@ -225,7 +234,7 @@ func (s *fakeStore) UpsertRawSubscription(ctx context.Context, sub faucet.Subscr
 		return faucet.Subscription{}, xerrors.Errorf("%q is not a raw event name", sub.EventType)
 	}
 	return s.upsertSubscriptionLocked(sub, now, limits.Live, func() error {
-		count := s.rawTargetLocked(sub.Principal, event, sub.RepoID, now, sub.KeyHash, nil)
+		count := s.rawTargetLocked(sub.Principal, event, sub.Target, now, sub.KeyHash, nil)
 		switch {
 		case count.ownSubscriptions >= limits.PerPrincipalTarget:
 			return faucet.ErrRawShareLimit
@@ -243,12 +252,12 @@ type fakeRawTarget struct {
 	ownLeases int
 }
 
-// rawTargetLocked counts the live raw subscriptions of event and repoID under
+// rawTargetLocked counts the live raw subscriptions of event and target under
 // another key than except, and their live leases but ended.
-func (s *fakeStore) rawTargetLocked(principal, event string, repoID int64, now time.Time, except faucet.SubscriptionKeyHash, ended map[faucet.RawLeaseID]bool) fakeRawTarget {
+func (s *fakeStore) rawTargetLocked(principal, event string, target faucet.Target, now time.Time, except faucet.SubscriptionKeyHash, ended map[faucet.RawLeaseID]bool) fakeRawTarget {
 	var t fakeRawTarget
 	for key, sub := range s.subs {
-		if key != except && sub.EventType == fakeRawPrefix+event && sub.RepoID == repoID && sub.ExpiresAt.After(now) {
+		if key != except && sub.EventType == fakeRawPrefix+event && sub.Target == target && sub.ExpiresAt.After(now) {
 			t.interests++
 			if sub.Principal == principal {
 				t.ownSubscriptions++
@@ -256,7 +265,7 @@ func (s *fakeStore) rawTargetLocked(principal, event string, repoID int64, now t
 		}
 	}
 	for id, l := range s.rawLeases {
-		if ended[id] || l.lease.Event != event || l.lease.RepoID != repoID || !l.lease.ExpiresAt.After(now) {
+		if ended[id] || l.lease.Event != event || l.lease.Target != target || !l.lease.ExpiresAt.After(now) {
 			continue
 		}
 		t.interests++
@@ -305,7 +314,7 @@ func (s *fakeStore) OpenRawLease(ctx context.Context, lease faucet.RawLease, now
 	if live >= limits.Live {
 		ended[oldest.lease.ID] = true
 	}
-	target := s.rawTargetLocked(lease.Principal, lease.Event, lease.RepoID, now, faucet.SubscriptionKeyHash{}, ended)
+	target := s.rawTargetLocked(lease.Principal, lease.Event, lease.Target, now, faucet.SubscriptionKeyHash{}, ended)
 	if target.ownLeases >= limits.PerPrincipalTarget {
 		ended[target.ownOldest.lease.ID] = true
 		target.interests--
@@ -316,7 +325,7 @@ func (s *fakeStore) OpenRawLease(ctx context.Context, lease faucet.RawLease, now
 	for id := range ended {
 		delete(s.rawLeases, id)
 	}
-	lease.Actions, lease.Fields = slices.Clone(lease.Actions), slices.Clone(lease.Fields)
+	lease.Actions, lease.Fields, lease.RepoNames = slices.Clone(lease.Actions), slices.Clone(lease.Fields), slices.Clone(lease.RepoNames)
 	head := s.rawHeadLocked()
 	s.rawLeases[lease.ID] = &fakeRawLease{lease: lease, acked: head, polledAt: now, unread: map[int64]struct{}{}}
 	return head, nil
@@ -332,7 +341,7 @@ func (s *fakeStore) ReadRawLease(ctx context.Context, q faucet.RawRead) (faucet.
 		return faucet.RawPage{}, false, err
 	}
 	l := s.rawLeases[q.Lease]
-	if l == nil || l.lease.Key != q.Key || l.lease.RepoID != q.RepoID || !l.lease.ExpiresAt.After(q.Now) {
+	if l == nil || l.lease.Key != q.Key || l.lease.Target != q.Target || !l.lease.ExpiresAt.After(q.Now) {
 		return faucet.RawPage{}, false, nil
 	}
 	page := faucet.RawPage{AckedThrough: l.acked}
@@ -419,7 +428,7 @@ func (s *fakeStore) ClaimRawDelivery(ctx context.Context, now time.Time, lease t
 		SecretEnc:           slices.Clone(sub.SecretEnc),
 		PreviousSecretEnc:   slices.Clone(sub.PreviousSecretEnc),
 		PreviousSecretUntil: sub.PreviousSecretUntil,
-		RepoID:              sub.RepoID,
+		Target:              sub.Target,
 		Watermark:           watermark - 1,
 	}
 	if ev, ok := s.rawEventLocked(best.rawID); ok && ev.Body != nil {
@@ -625,23 +634,23 @@ func (s *fakeStore) RawWants(ctx context.Context, now time.Time) ([]faucet.RawWa
 		return nil, err
 	}
 	var wants []faucet.RawWant
-	add := func(repoID int64, event string, actions []string) {
+	add := func(target faucet.Target, event string, actions []string) {
 		actions = slices.Clone(actions)
 		slices.Sort(actions)
-		wants = append(wants, faucet.RawWant{RepoID: repoID, Event: event, Actions: slices.Compact(actions)})
+		wants = append(wants, faucet.RawWant{Target: target, Event: event, Actions: slices.Compact(actions)})
 	}
 	for _, sub := range s.subs {
 		if event, raw := strings.CutPrefix(sub.EventType, fakeRawPrefix); raw && sub.ExpiresAt.After(now) {
-			add(sub.RepoID, event, fakeRawArgumentsOf(sub).Actions)
+			add(sub.Target, event, fakeRawArgumentsOf(sub).Actions)
 		}
 	}
 	for _, l := range s.rawLeases {
 		if l.lease.ExpiresAt.After(now) {
-			add(l.lease.RepoID, l.lease.Event, l.lease.Actions)
+			add(l.lease.Target, l.lease.Event, l.lease.Actions)
 		}
 	}
 	order := func(a, b faucet.RawWant) int {
-		return cmp.Or(cmp.Compare(a.RepoID, b.RepoID), cmp.Compare(a.Event, b.Event), slices.Compare(a.Actions, b.Actions))
+		return cmp.Or(cmp.Compare(a.Target.Kind(), b.Target.Kind()), cmp.Compare(a.Target.RepoID(), b.Target.RepoID()), cmp.Compare(a.Target.OwnerID(), b.Target.OwnerID()), cmp.Compare(a.Event, b.Event), slices.Compare(a.Actions, b.Actions))
 	}
 	slices.SortFunc(wants, order)
 	return slices.CompactFunc(wants, func(a, b faucet.RawWant) bool { return order(a, b) == 0 }), nil

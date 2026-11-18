@@ -77,6 +77,8 @@ func (s *Store) InsertEvent(ctx context.Context, ev faucet.Event) (_ faucet.Even
 		DeliveryID: ev.DeliveryID,
 		Type:       ev.Type,
 		RepoID:     ev.RepoID,
+		OwnerID:    ev.OwnerID,
+		RepoName:   ev.RepoName,
 		Prs:        prs,
 		HeadSha:    ev.HeadSHA,
 		Data:       string(ev.Data),
@@ -134,13 +136,16 @@ func (s *Store) PollEvents(ctx context.Context, q faucet.PollQuery) (_ faucet.Po
 		return faucet.PollPage{}, xerrors.Errorf("encode field filters: %w", err)
 	}
 	rows, err := s.q.PollEvents(ctx, database.PollEventsParams{
-		RepoID:   q.RepoID,
-		AfterID:  q.After,
-		Types:    types,
-		HeadSha:  q.HeadSHA,
-		Pr:       q.PR,
-		Fields:   string(fields),
-		RowLimit: q.Limit,
+		TargetKind: string(q.Target.Kind()),
+		RepoID:     q.Target.RepoID(),
+		OwnerID:    q.Target.OwnerID(),
+		RepoNames:  nonNil(q.RepoNames),
+		AfterID:    q.After,
+		Types:      types,
+		HeadSha:    q.HeadSHA,
+		Pr:         q.PR,
+		Fields:     string(fields),
+		RowLimit:   q.Limit,
 	})
 	if err != nil {
 		return faucet.PollPage{}, xerrors.Errorf("poll events: %w", err)
@@ -268,7 +273,9 @@ func (s *Store) upsertSubscriptionChecked(ctx context.Context, sub faucet.Subscr
 		EventType:           sub.EventType,
 		EventTypes:          sub.EventTypes,
 		Arguments:           string(sub.Arguments),
-		RepoID:              sub.RepoID,
+		TargetKind:          string(sub.Target.Kind()),
+		RepoID:              sub.Target.RepoID(),
+		OwnerID:             sub.Target.OwnerID(),
 		SecretEnc:           sub.SecretEnc,
 		Cursor:              sub.Cursor,
 		Now:                 now,
@@ -343,6 +350,10 @@ func toSubscription(row database.FaucetSubscription) (faucet.Subscription, error
 	if err != nil {
 		return faucet.Subscription{}, err
 	}
+	target, err := toTarget(row.TargetKind, row.RepoID, row.OwnerID)
+	if err != nil {
+		return faucet.Subscription{}, err
+	}
 	return faucet.Subscription{
 		KeyHash:             key,
 		Principal:           row.Principal,
@@ -350,7 +361,7 @@ func toSubscription(row database.FaucetSubscription) (faucet.Subscription, error
 		EventType:           row.EventType,
 		EventTypes:          row.EventTypes,
 		Arguments:           row.Arguments,
-		RepoID:              row.RepoID,
+		Target:              target,
 		SecretEnc:           row.SecretEnc,
 		PreviousSecretEnc:   row.PreviousSecretEnc,
 		PreviousSecretUntil: row.PreviousSecretUntil.Time,
@@ -373,6 +384,8 @@ func pollRowToEvent(row database.PollEventsRow) faucet.Event {
 		DeliveryID: row.DeliveryID.String,
 		Type:       row.Type.String,
 		RepoID:     row.RepoID.Int64,
+		OwnerID:    row.OwnerID.Int64,
+		RepoName:   row.RepoName.String,
 		PRs:        row.Prs,
 		HeadSHA:    row.HeadSha.String,
 		Data:       row.Data,
@@ -387,9 +400,19 @@ func toEvent(row database.FaucetEvent) faucet.Event {
 		DeliveryID: row.DeliveryID,
 		Type:       row.Type,
 		RepoID:     row.RepoID,
+		OwnerID:    row.OwnerID,
+		RepoName:   row.RepoName,
 		PRs:        row.Prs,
 		HeadSHA:    row.HeadSha.String,
 		Data:       row.Data,
 		ReceivedAt: row.ReceivedAt,
 	}
+}
+
+func toTarget(kind string, repoID, ownerID int64) (faucet.Target, error) {
+	target, err := faucet.ParseTarget(kind, repoID, ownerID)
+	if err != nil {
+		return faucet.Target{}, xerrors.Errorf("stored target: %w", err)
+	}
+	return target, nil
 }

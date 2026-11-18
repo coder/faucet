@@ -21,6 +21,9 @@ type Deps struct {
 	Logger slog.Logger
 	// Authorizer decides which repositories a caller may wait on.
 	Authorizer Authorizer
+	// ServiceGrants decides which owners, or whether every repository, a
+	// service may read. Nil refuses every owner and all target.
+	ServiceGrants ServiceGrants
 	// PrincipalFrom returns the caller the host application authenticated for
 	// this request. An error denies the request. It reads the context that
 	// go-sdk gives the handler. In stateful mode that is the context of the
@@ -48,6 +51,14 @@ type Deps struct {
 	// services by repo grants can find a granted repository's ID without
 	// GitHub. A failed write is logged, and the delivery goes on.
 	RecordRepositories bool
+	// Redelivered reports whether faucet's redelivery asked GitHub to send
+	// the delivery of this ID again. Such a replay names accounts as they
+	// were when it first came, so it moves no login. RecordRepositories needs
+	// it: pgstore.Store.Redelivered, or a func that answers false when the
+	// host runs no redelivery. There is no default, because one that answered
+	// no would let the host's own redeliveries move logins back, and one that
+	// answered yes would keep every login as first seen.
+	Redelivered func(ctx context.Context, deliveryID string) (bool, error)
 	// MaxWaitsPerLogin caps how many wait_for_github_events calls one login
 	// holds open at once in this process, so a client that opens waits and
 	// drops its connection cannot pile them up. Zero means 10. A negative value
@@ -85,10 +96,12 @@ type Service struct {
 	secret        []byte
 	logger        slog.Logger
 	authorizer    Authorizer
+	grants        ServiceGrants
 	principalFrom func(context.Context) (Principal, error)
 	clock         quartz.Clock
 	webhook       *webhookState
 	recordRepos   bool
+	redelivered   func(ctx context.Context, deliveryID string) (bool, error)
 	waits         *waitLimiter
 	listed        []eventDescriptor
 }
@@ -108,6 +121,8 @@ func New(d Deps) (*Service, error) {
 		return nil, xerrors.New("clock is required")
 	case len(d.RawEvents) > 0 && d.RawStore == nil:
 		return nil, xerrors.New("raw events need a RawStore")
+	case d.RecordRepositories && d.Redelivered == nil:
+		return nil, xerrors.New("recording repositories needs Redelivered: pgstore.Store.Redelivered, or a func that answers false when the host runs no redelivery")
 	}
 	offered, err := offeredRawEntries(d.RawEvents)
 	if err != nil {
@@ -120,9 +135,11 @@ func New(d Deps) (*Service, error) {
 		secret:        bytes.Clone(d.Secret),
 		logger:        d.Logger,
 		authorizer:    d.Authorizer,
+		grants:        d.ServiceGrants,
 		principalFrom: d.PrincipalFrom,
 		clock:         d.Clock,
 		recordRepos:   d.RecordRepositories,
+		redelivered:   d.Redelivered,
 		waits:         newWaitLimiter(d.MaxWaitsPerLogin),
 	}
 	delivery := []string{deliveryPoll}

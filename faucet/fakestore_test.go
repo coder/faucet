@@ -29,6 +29,10 @@ type fakeRepo struct {
 	seenAt time.Time
 }
 
+type fakeRepoOwner struct {
+	login string
+}
+
 func (s *fakeStore) RecordRepository(_ context.Context, repo faucet.Repository, seenAt time.Time) error {
 	return s.writeRepository(repo, func() {
 		if !slices.ContainsFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID }) {
@@ -43,10 +47,63 @@ func (s *fakeStore) RenameRepository(_ context.Context, repo faucet.Repository, 
 		switch {
 		case i < 0:
 			s.repos = append(s.repos, fakeRepo{repo: repo, seenAt: seenAt})
-		case strings.EqualFold(s.repos[i].repo.FullName, from):
+		case strings.EqualFold(s.repos[i].repo.FullName, from) || strings.EqualFold(s.currentNameLocked(s.repos[i].repo), from):
 			s.repos[i] = fakeRepo{repo: repo, seenAt: seenAt}
 		}
 	})
+}
+
+func (s *fakeStore) AddOwner(_ context.Context, owner faucet.Owner) error {
+	if err := owner.Validate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.repoWrites++
+	if s.repoErr != nil {
+		return s.repoErr
+	}
+	if _, held := s.owners[owner.ID]; held {
+		return nil
+	}
+	if _, _, taken := s.ownerLocked(owner.Login); taken {
+		return nil
+	}
+	s.recordOwnerLocked(owner)
+	return nil
+}
+
+func (s *fakeStore) RecordOwner(_ context.Context, owner faucet.Owner) error {
+	if err := owner.Validate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.repoWrites++
+	if s.repoErr != nil {
+		return s.repoErr
+	}
+	s.recordOwnerLocked(owner)
+	return nil
+}
+
+func (s *fakeStore) ownerWriteCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ownerWrites
+}
+
+// recordOwnerLocked gives owner its login, which every other account gives
+// up.
+func (s *fakeStore) recordOwnerLocked(owner faucet.Owner) {
+	s.ownerWrites++
+	if s.owners == nil {
+		s.owners = map[int64]fakeRepoOwner{}
+	}
+	maps.DeleteFunc(s.owners, func(id int64, o fakeRepoOwner) bool {
+		return id != owner.ID && strings.EqualFold(o.login, owner.Login)
+	})
+	s.owners[owner.ID] = fakeRepoOwner{login: owner.Login}
 }
 
 // writeRepository counts a write of repo and, unless it fails, runs write
@@ -71,16 +128,71 @@ func (s *fakeStore) RepositoryByName(_ context.Context, fullName string) (faucet
 	if s.repoErr != nil {
 		return faucet.Repository{}, s.repoErr
 	}
+	login, name, _ := strings.Cut(fullName, "/")
+	id, owner, ok := s.ownerLocked(login)
+	if !ok {
+		return faucet.Repository{}, faucet.ErrUnknownRepository
+	}
 	var found *fakeRepo
 	for i, r := range s.repos {
-		if strings.EqualFold(r.repo.FullName, fullName) && (found == nil || !r.seenAt.Before(found.seenAt)) {
+		_, held, _ := strings.Cut(r.repo.FullName, "/")
+		if r.repo.OwnerID == id && strings.EqualFold(held, name) &&
+			(found == nil || r.seenAt.After(found.seenAt) || r.seenAt.Equal(found.seenAt) && r.repo.ID > found.repo.ID) {
 			found = &s.repos[i]
 		}
 	}
 	if found == nil {
 		return faucet.Repository{}, faucet.ErrUnknownRepository
 	}
-	return found.repo, nil
+	_, held, _ := strings.Cut(found.repo.FullName, "/")
+	return faucet.Repository{ID: found.repo.ID, OwnerID: id, OwnerLogin: owner.login, FullName: owner.login + "/" + held}, nil
+}
+
+func (s *fakeStore) OwnerByLogin(_ context.Context, login string) (faucet.Owner, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.repoErr != nil {
+		return faucet.Owner{}, s.repoErr
+	}
+	id, owner, ok := s.ownerLocked(login)
+	if !ok {
+		return faucet.Owner{}, faucet.ErrUnknownOwner
+	}
+	return faucet.Owner{ID: id, Login: owner.login}, nil
+}
+
+func (s *fakeStore) OwnerByID(_ context.Context, id int64) (faucet.Owner, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.repoErr != nil {
+		return faucet.Owner{}, s.repoErr
+	}
+	o, ok := s.owners[id]
+	if !ok {
+		return faucet.Owner{}, faucet.ErrUnknownOwner
+	}
+	return faucet.Owner{ID: id, Login: o.login}, nil
+}
+
+// currentNameLocked is the full name of repo under the login that its owner
+// holds now, and "" when the owner holds none.
+func (s *fakeStore) currentNameLocked(repo faucet.Repository) string {
+	o, ok := s.owners[repo.OwnerID]
+	if !ok {
+		return ""
+	}
+	_, name, _ := strings.Cut(repo.FullName, "/")
+	return o.login + "/" + name
+}
+
+// ownerLocked returns the account that holds login, which is at most one.
+func (s *fakeStore) ownerLocked(login string) (int64, fakeRepoOwner, bool) {
+	for id, o := range s.owners {
+		if strings.EqualFold(o.login, login) {
+			return id, o, true
+		}
+	}
+	return 0, fakeRepoOwner{}, false
 }
 
 func (s *fakeStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.PollPage, error) {
@@ -98,7 +210,10 @@ func (s *fakeStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.Po
 	var page faucet.PollPage
 	for _, e := range s.events {
 		head = max(head, e.ID)
-		if e.ID <= q.After || e.RepoID != q.RepoID || len(page.Events) == int(q.Limit) {
+		if e.ID <= q.After || !q.Target.Covers(e.RepoID, e.OwnerID) || len(page.Events) == int(q.Limit) {
+			continue
+		}
+		if len(q.RepoNames) > 0 && !slices.Contains(q.RepoNames, strings.ToLower(e.RepoName)) {
 			continue
 		}
 		if len(q.Types) > 0 && !slices.Contains(q.Types, e.Type) {
@@ -186,8 +301,8 @@ func (s *fakeStore) Purge(_ context.Context, before time.Time) (faucet.PurgeResu
 
 // advanceSubscriptionsThatLoseNothingLocked moves a subscription that is not
 // below the purge mark yet to the mark that the purge will set (doomed), unless
-// an event of its repository and of one of its types above its position, still
-// in the log, lies at or below that mark.
+// an event that its target covers, of one of its types, above its position and
+// still in the log, lies at or below that mark.
 func (s *fakeStore) advanceSubscriptionsThatLoseNothingLocked(doomed int64) {
 	for key, sub := range s.subs {
 		pos := s.scanned[key]
@@ -195,7 +310,7 @@ func (s *fakeStore) advanceSubscriptionsThatLoseNothingLocked(doomed int64) {
 			continue
 		}
 		if !slices.ContainsFunc(s.events, func(e faucet.Event) bool {
-			return e.RepoID == sub.RepoID && slices.Contains(sub.EventTypes, e.Type) && e.ID > pos && e.ID <= doomed
+			return sub.Target.Covers(e.RepoID, e.OwnerID) && slices.Contains(sub.EventTypes, e.Type) && e.ID > pos && e.ID <= doomed
 		}) {
 			s.scanned[key] = doomed
 		}

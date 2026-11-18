@@ -32,6 +32,22 @@ flowchart LR
 - `events/poll` and the webhook body name each event by the name that was polled or subscribed.
 - Later versions add actions to the families. A family subscription without `actions` picks up a new action at its next renewal, and one with `actions` keeps to the actions it named.
 
+## Targets
+
+The arguments of the wait tool, `events/poll`, `events/subscribe` and `events/unsubscribe` name exactly one target, which says whose events to read:
+
+- `repo`, written `owner/name`: one repository.
+- `owner`, a GitHub login: every repository of that user or organization, also one it makes later.
+- `all: true`: every repository that faucet receives deliveries from.
+
+**`owner` and `all` are for [service clients](service-accounts.md#grants) only.** Any other caller, one with a GitHub token or an OAuth user, gets `Forbidden` (-32024) from `events/poll` and `events/subscribe`, and an error result from the wait tool, which tells it to name one repository with `repo`. A service needs a grant that covers the target.
+
+With `owner` or `all`, `repos` (a list of `owner/name`) keeps the events of those repositories only. It matches the full name that each delivery carried, ignoring case, and with `owner` each entry must be a repository of that owner.
+
+An `owner` target reads only the typed events stored since faucet added owner targets, because an older event does not record its owner. An `all` target reads every event.
+
+Through an `owner` or `all` target, the `data` of a typed event also holds `repo_id` and `repo`, the full name that its delivery carried (an event stored before faucet recorded names has `repo_id` only). A `repo` target's data is as before. The data of a raw event is GitHub's payload, whose `repository` already names it.
+
 ## The Mcp-Name header
 
 Every `events/poll`, `events/subscribe` and `events/unsubscribe` request over HTTP must carry the header `Mcp-Name` with the event name of its `params.name`, or faucet answers 400 with `HeaderMismatch`. The go-sdk client does not set it for `events/*` yet. A host that embeds faucet gets the check from `faucet.RequireEventName`.
@@ -44,7 +60,7 @@ A family also takes filters named after a field of its data, so an agent wakes o
 - "Pull requests into main to review" is `pr.activity` with `actions: ["opened", "reopened", "ready_for_review", "synchronize"]` and `base_branch: ["main"]`.
 - A field that is null passes no value, so a `conclusion` filter matches no run, job or check that has not completed.
 - `head_branch` never matches a branch of a fork, because a fork's `main` is not this repository's. It matches only events whose `from_fork` is false, so an event stored before `from_fork` existed matches none.
-- The store applies the filters before it cuts a page, so `maxEvents`, `hasMore`, the cursor and the 100 deliveries that a subscription may hold count only the events that match. It reads the `data` of the rows that the repository and the cursor select, with no index of its own.
+- The store applies the filters before it cuts a page, so `maxEvents`, `hasMore`, the cursor and the 100 deliveries that a subscription may hold count only the events that match. It reads the `data` of the rows that the target and the cursor select, with no index of its own.
 
 ## What an event carries
 
@@ -65,10 +81,11 @@ Faucet can offer the other GitHub events of a repository, such as `push`, `relea
 
 **Faucet stores a raw event only while someone wants it.** When a delivery arrives, faucet looks for a live subscription to its name and for a poller of it. With neither, it answers 202 and stores nothing, so nobody can read an event from before they first asked.
 
-- A raw name takes `repo`, and optionally `actions` and `fields`. `actions` matches the payload's top-level `action`. `fields` names the members to return, by path: `["ref", "commits.id"]` returns the `ref` and the `id` of each commit. When everyone who wants an event names `fields`, faucet stores only those members.
-- The first `events/poll` of a raw name returns no events and starts a lease, which ends 60 minutes after its last poll. The cursor names the lease, so each poller reads every event, also when two pollers share a login. A poll with a cursor that names no live lease of that login, name, arguments and repository starts a new lease and answers `truncated: true`. A login can hold 100 leases, and one more ends the one polled longest ago.
-- One event of one repository has at most 100 live subscriptions and leases, and one login at most 10 leases and 10 subscriptions of it, so that no login can take them all. One more lease of a login ends its lease of that event polled longest ago. Past either limit, `events/poll` and `events/subscribe` answer -32025 with `data.limit` `raw_interests` or `raw_subscriptions`, and a renewal always passes.
+- A raw name takes a [target](#targets), and optionally `actions` and `fields`. `actions` matches the payload's top-level `action`. `fields` names the members to return, by path: `["ref", "commits.id"]` returns the `ref` and the `id` of each commit. When everyone who wants an event names `fields`, faucet stores only those members.
+- The first `events/poll` of a raw name returns no events and starts a lease, which ends 60 minutes after its last poll. The cursor names the lease, so each poller reads every event, also when two pollers share a login. A poll with a cursor that names no live lease of that login, name, arguments and target starts a new lease and answers `truncated: true`. A login can hold 100 leases, and one more ends the one polled longest ago.
+- One event of one target has at most 100 live subscriptions and leases, and one login at most 10 leases and 10 subscriptions of it, so that no login can take them all. One more lease of a login ends its lease of that event and target polled longest ago. Past either limit, `events/poll` and `events/subscribe` answer -32025 with `data.limit` `raw_interests` or `raw_subscriptions`, and a renewal always passes.
 - `/cron/purge` drops a payload once no subscription still has to send it and every poller has passed it, and any payload older than 60 minutes. Faucet keeps the delivery ID for the retention, so a delivery that GitHub sends again is not stored twice.
+- A delivery of an organization that names no repository, as GitHub sends some `github.project`, `github.project_card`, `github.project_column`, `github.package` or `github.registry_package` events, reaches an `owner` target of the organization and an `all` target, unless they name `repos`, and never a `repo` target.
 - `github.issue_comment` carries the comments on plain issues. A comment on a pull request is a `pr.comments` event.
 - `wait_for_github_events` takes no raw name.
 
