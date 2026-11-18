@@ -25,6 +25,9 @@ var otherEnvReads = map[string][]string{
 	// The scratch database of the Postgres tests, and CI, which makes a test
 	// fail when that database is missing.
 	"faucet/internal/pgtest": {"CI", "FAUCET_TEST_DATABASE_URL"},
+	// The client secret of the end-to-end tests' service agent, which it
+	// takes from the environment so that it is not in the process list.
+	"cmd/faucet/internal/serviceagent": {"FAUCET_CLIENT_SECRET"},
 }
 
 // envReads returns, by package directory, the environment variables that

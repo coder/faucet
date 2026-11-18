@@ -78,6 +78,7 @@ var settings = []setting{
 	{"FAUCET_HOOK_ID", "for redelivery", "Numeric ID of the GitHub webhook to watch for failed deliveries."},
 	{"FAUCET_HOOK_ORG", "for an org hook", "The organization that owns the hook. Set this or `FAUCET_HOOK_REPO`, not both."},
 	{"FAUCET_HOOK_REPO", "for a repo hook", "The repository that owns the hook, as `owner/name`."},
+	{"FAUCET_PUBLIC_URL", "for service accounts", "Faucet's public URL, such as `https://faucet.example.com`, with no path or trailing slash. Turns on faucet's login server for service clients (see [docs/service-accounts.md](docs/service-accounts.md))."},
 	{"VERCEL", "set by Vercel", "Marks a Vercel deployment. There the server never migrates without `VERCEL_ENV`."},
 	{"VERCEL_ENV", "set by Vercel", "When set, the server migrates only if it is `production`, and otherwise starts only on a current schema."},
 }

@@ -2,6 +2,16 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## To service accounts (migration `000011_service_clients_and_repos`)
+
+This came in [#50](https://github.com/coder/faucet/pull/50). Nothing changes until you set `FAUCET_PUBLIC_URL` (see [service-accounts.md](service-accounts.md)). Then:
+
+- Every signed delivery that names a repository writes a row first, ping and ignored events too. A failed write is logged, and the delivery goes on. Tick Repositories on the GitHub hook so that renames reach faucet.
+- A 401 from `/github/mcp` or `/mcp` names the path's metadata document and both scopes in `WWW-Authenticate`, for a GitHub token too. A client that reads only the status sees no change.
+- `/cron/purge` also deletes expired access tokens and counts them in `expired_access_tokens`, which is 0 without `FAUCET_PUBLIC_URL`.
+
+A host that embeds faucet: a `Store` of your own must pass the new `storetest` subtests, and an `Authorizer` may now return an error that wraps `ErrNoAccess` and says why, because the caller reads its text. An Instant Rollback past this migration cannot start (see [deploy.md](deploy.md#rolling-back)).
+
 ## To principal kinds and scopes
 
 This came in [#49](https://github.com/coder/faucet/pull/49). It matters to a host that embeds faucet (see [security.md](security.md#principals-and-scopes)).

@@ -2,13 +2,13 @@
 
 ## Access to events
 
-Faucet reads events for a caller with the caller's own GitHub token. Its only GitHub token, `FAUCET_HOOK_TOKEN`, serves redelivery and nothing else (see [Secrets](#secrets)). Every `/github/mcp` request carries the caller's GitHub token as `Authorization: Bearer <token>`. Faucet checks it with `GET /user`, then checks that the same token can read the repository with `GET /repos/{owner}/{name}`. The token lives only for that request, and faucet sends it only to `FAUCET_GITHUB_API_URL`. A repository the token can't read gives the same `Forbidden` error as one that doesn't exist.
+Faucet reads events for a caller with the caller's own GitHub token, or, for a service, from the grants that an operator gave it (see [service-accounts.md](service-accounts.md)). Its only GitHub token, `FAUCET_HOOK_TOKEN`, serves redelivery and nothing else (see [Secrets](#secrets)). Every `/github/mcp` request carries the caller's GitHub token as `Authorization: Bearer <token>`. Faucet checks it with `GET /user`, then checks that the same token can read the repository with `GET /repos/{owner}/{name}`. The token lives only for that request, and faucet sends it only to `FAUCET_GITHUB_API_URL`. A repository the token can't read gives the same `Forbidden` error as one that doesn't exist.
 
 To save GitHub rate limit, faucet remembers a successful check for 60 seconds per token and repository. The cache is keyed by the SHA-256 of the token, never the token itself. Failed checks aren't cached, so a new grant works at once. The flip side is that **a revocation can take up to 60 seconds to reach** `events/poll` and the start of a wait. A wait that starts in that window can run for up to 50 more seconds. `events/subscribe` always checks fresh.
 
 A GitHub rate-limit answer counts as a failed check that the caller can retry, not as a denial.
 
-A bearer that starts with `fct_`, `fcr_` or `fcs_` is a faucet token: faucet checks it itself and never sends it to GitHub. This version mints none, so each one is 401.
+A bearer that starts with `fct_`, `fcr_` or `fcs_` is a faucet token: faucet checks it itself and never sends it to GitHub. Faucet mints access tokens for service clients only, each valid on the one endpoint it was issued for, and every other faucet token is 401.
 
 One login can hold 10 waits open at once per process. Embedders can change that with `Deps.MaxWaitsPerLogin`.
 
@@ -34,5 +34,6 @@ A binary built with `-tags faucet_e2e` lets the guarded client reach loopback ov
 
 - **Subscriber secrets** are sealed with AES-256-GCM under `FAUCET_WEBHOOK_KEY`, and never returned or logged.
 - **`CRON_SECRET`** guards the `/cron/*` routes. With it unset, they answer 503 and run nothing.
+- **Client secrets** of service clients are shown once, when an operator makes the client, and kept only as SHA-256 hashes. So are the access tokens that faucet issues to them, and `/cron/purge` deletes each one once it expires.
 - **`FAUCET_HOOK_TOKEN`** is the one GitHub credential that faucet holds. GitHub offers no grant narrower than one that can also edit or delete the hook, so give it to a machine user and keep it in production only. Faucet uses it for exactly two endpoints: listing a hook's deliveries and asking for a redelivery.
 - Startup errors name a bad variable but never its value.
