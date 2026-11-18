@@ -163,27 +163,27 @@ func (c *workloadChecker) key(ctx context.Context, rule trustRule, header jose.H
 	return nil, refuseToken("its kid and alg name no key of its issuer")
 }
 
-// tokenRefusal is the error of a subject token that faucet refuses. It wraps
-// errSubjectToken, and signed tells a refusal after the token's signature
-// verified.
-type tokenRefusal struct {
+// subjectTokenError is the error of a subject token that faucet refuses. It
+// wraps errSubjectToken, and signed tells a refusal after the token's
+// signature verified.
+type subjectTokenError struct {
 	why    string
 	signed bool
 }
 
-func (r tokenRefusal) Error() string { return errSubjectToken.Error() + ": " + r.why }
+func (r subjectTokenError) Error() string { return errSubjectToken.Error() + ": " + r.why }
 
-func (tokenRefusal) Unwrap() error { return errSubjectToken }
+func (subjectTokenError) Unwrap() error { return errSubjectToken }
 
-func refuseToken(why string) error { return tokenRefusal{why: why} }
+func refuseToken(why string) error { return subjectTokenError{why: why} }
 
-func refuseSigned(why string) error { return tokenRefusal{why: why, signed: true} }
+func refuseSigned(why string) error { return subjectTokenError{why: why, signed: true} }
 
 // rank orders the failures of the rules that a token fails: keys that faucet
 // could not fetch first, as the token may match once they come, then a
 // refusal after the token's signature verified, then any other refusal.
 func rank(err error) int {
-	var r tokenRefusal
+	var r subjectTokenError
 	switch {
 	case xerrors.Is(err, errIssuerKeys):
 		return 2
