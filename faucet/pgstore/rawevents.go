@@ -187,7 +187,9 @@ func countRawTarget(ctx context.Context, q *database.Queries, principal, event s
 
 // OpenRawLease takes a lock per principal, so two opens of one principal cannot
 // both pass the limit. The lock is another key than the one that
-// UpsertSubscription takes, so a poll never waits for a subscribe.
+// UpsertSubscription takes, so a poll never waits for a subscribe. It then
+// locks the principal's live leases, so that a lease to end is picked by the
+// times that the polls it waited for wrote.
 func (s *Store) OpenRawLease(ctx context.Context, lease faucet.RawLease, now time.Time, limits faucet.RawLimits) (_ int64, err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if err := limits.Validate(); err != nil {
@@ -206,6 +208,9 @@ func (s *Store) OpenRawLease(ctx context.Context, lease faucet.RawLease, now tim
 
 	if err := q.LockRawLeases(ctx, lease.Principal); err != nil {
 		return 0, xerrors.Errorf("lock raw leases: %w", err)
+	}
+	if _, err := q.LockLiveRawLeasesOf(ctx, database.LockLiveRawLeasesOfParams{Principal: lease.Principal, Now: now}); err != nil {
+		return 0, xerrors.Errorf("lock the live raw leases: %w", err)
 	}
 	ended, err := q.EndRawLeasesOf(ctx, database.EndRawLeasesOfParams{Principal: lease.Principal, Now: now, MaxLive: int64(limits.Live)})
 	if err != nil {

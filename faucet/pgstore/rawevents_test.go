@@ -110,8 +110,9 @@ func TestExpireRawDeliveriesCountsEveryDeliveryThatLeavesTheQueue(t *testing.T) 
 
 // A poll holds its lease's row until it commits. An open that needs to end a
 // lease to keep a limit waits for it rather than pass it over, so the limit
-// holds while every lease is being polled.
-func TestOpenRawLeaseKeepsItsLimitsWhileEveryLeaseIsPolled(t *testing.T) {
+// holds while a lease is being polled, and it then ends the lease polled
+// longest ago as the poll left them.
+func TestOpenRawLeaseKeepsItsLimitsAndEndsTheOldestLeaseWhileOneIsPolled(t *testing.T) {
 	t.Parallel()
 	for name, limits := range map[string]faucet.RawLimits{
 		"the leases of a principal":             {Live: 2, PerTarget: 100, PerPrincipalTarget: 100},
@@ -124,26 +125,39 @@ func TestOpenRawLeaseKeepsItsLimitsWhileEveryLeaseIsPolled(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			now := time.Now().UTC()
-			for n := range byte(2) {
-				_, err := store.OpenRawLease(ctx, rawTestLease(n+1, "octocat", now.Add(time.Hour)), now.Add(time.Duration(n)*time.Second), limits)
+			first, second := rawTestLease(1, "octocat", now.Add(time.Hour)), rawTestLease(2, "octocat", now.Add(time.Hour))
+			for i, lease := range []faucet.RawLease{first, second} {
+				_, err := store.OpenRawLease(ctx, lease, now.Add(time.Duration(i)*time.Second), limits)
 				require.NoError(t, err)
 			}
 
 			poll, err := db.BeginTx(ctx, nil)
 			require.NoError(t, err)
 			defer func() { _ = poll.Rollback() }()
-			_, err = poll.ExecContext(ctx, `SELECT id FROM faucet_raw_leases WHERE principal = 'octocat' FOR UPDATE`)
+			_, err = poll.ExecContext(ctx, `UPDATE faucet_raw_leases SET polled_at = $1 WHERE id = $2`, now.Add(5*time.Second), first.ID[:])
 			require.NoError(t, err)
 			opened := make(chan error, 1)
+			third := rawTestLease(3, "octocat", now.Add(time.Hour))
 			go func() {
-				_, err := store.OpenRawLease(ctx, rawTestLease(3, "octocat", now.Add(time.Hour)), now.Add(2*time.Second), limits)
+				_, err := store.OpenRawLease(ctx, third, now.Add(6*time.Second), limits)
 				opened <- err
 			}()
 			time.Sleep(300 * time.Millisecond)
 			require.NoError(t, poll.Commit())
-
 			require.NoError(t, <-opened)
-			require.Equal(t, 2, countRows(t, db, "faucet_raw_leases"), "the open waited for the poll and ended a lease")
+
+			rows, err := db.QueryContext(ctx, `SELECT id FROM faucet_raw_leases ORDER BY id`)
+			require.NoError(t, err)
+			defer func() { _ = rows.Close() }()
+			var kept [][]byte
+			for rows.Next() {
+				var id []byte
+				require.NoError(t, rows.Scan(&id))
+				kept = append(kept, id)
+			}
+			require.NoError(t, rows.Err())
+			require.Equal(t, [][]byte{first.ID[:], third.ID[:]}, kept,
+				"the open waited for the poll, then ended the second lease, which the poll left as the one polled longest ago")
 		})
 	}
 }

@@ -379,7 +379,8 @@ type RawStore interface {
 	// ago ends, with its unread events, to make room, and so does its one of
 	// lease.Event and lease.RepoID polled longest ago when it holds
 	// limits.PerPrincipalTarget of those. A lease that a poll holds is waited
-	// for, so neither limit is passed. When the event and repository then have
+	// for, so neither limit is passed, and the poll's time counts in which
+	// lease was polled longest ago. When the event and repository then have
 	// limits.PerTarget live subscriptions and leases, it returns
 	// ErrRawInterestLimit and changes nothing. Concurrent calls of it and
 	// UpsertRawSubscription never pass PerTarget together. A lease ID that is

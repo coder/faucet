@@ -65,6 +65,15 @@ SELECT COALESCE(MAX(id), 0)::bigint AS head FROM faucet_raw_events;
 -- name: LockRawLeases :exec
 SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg(principal)::text, 1));
 
+-- name: LockLiveRawLeasesOf :many
+-- An open locks every live lease of its principal before it picks one to end,
+-- so that it waits here for a poll that holds one, and the statements after it
+-- read the times of the last polls.
+SELECT l.id FROM faucet_raw_leases l
+WHERE l.principal = sqlc.arg(principal) AND l.expires_at > sqlc.arg(now)
+ORDER BY l.id
+FOR UPDATE;
+
 -- name: LockRawTarget :exec
 SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg(event)::text || '/' || sqlc.arg(repo_id)::bigint::text, 2));
 
@@ -84,7 +93,8 @@ SELECT
 
 -- name: EndOldestRawLeaseOfTarget :many
 -- The lease to end is waited for, not passed over, when a poll holds it, so
--- that the limit holds. A poll waits for no lock of an open.
+-- that the limit holds. A poll waits for no lock of an open. LockLiveRawLeasesOf
+-- has done the waiting, so the order reads the times of the last polls.
 DELETE FROM faucet_raw_leases l
 WHERE l.id IN (
   SELECT o.id FROM faucet_raw_leases o
@@ -97,8 +107,9 @@ WHERE l.id IN (
 RETURNING l.id;
 
 -- name: EndRawLeasesOf :many
--- The oldest lease is waited for as in EndOldestRawLeaseOfTarget. An expired
--- lease that another call holds counts toward no limit, so it is passed over.
+-- The oldest lease is waited for as in EndOldestRawLeaseOfTarget, and read
+-- after LockLiveRawLeasesOf. An expired lease that another call holds counts
+-- toward no limit, so it is passed over.
 WITH live AS (
   SELECT COUNT(*) AS leases FROM faucet_raw_leases v WHERE v.principal = sqlc.arg(principal) AND v.expires_at > sqlc.arg(now)
 ), expired AS (

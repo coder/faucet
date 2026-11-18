@@ -337,7 +337,8 @@ type EndOldestRawLeaseOfTargetParams struct {
 }
 
 // The lease to end is waited for, not passed over, when a poll holds it, so
-// that the limit holds. A poll waits for no lock of an open.
+// that the limit holds. A poll waits for no lock of an open. LockLiveRawLeasesOf
+// has done the waiting, so the order reads the times of the last polls.
 func (q *Queries) EndOldestRawLeaseOfTarget(ctx context.Context, arg EndOldestRawLeaseOfTargetParams) ([][]byte, error) {
 	rows, err := q.db.QueryContext(ctx, endOldestRawLeaseOfTarget,
 		arg.Principal,
@@ -427,8 +428,9 @@ type EndRawLeasesOfParams struct {
 	MaxLive   int64
 }
 
-// The oldest lease is waited for as in EndOldestRawLeaseOfTarget. An expired
-// lease that another call holds counts toward no limit, so it is passed over.
+// The oldest lease is waited for as in EndOldestRawLeaseOfTarget, and read
+// after LockLiveRawLeasesOf. An expired lease that another call holds counts
+// toward no limit, so it is passed over.
 func (q *Queries) EndRawLeasesOf(ctx context.Context, arg EndRawLeasesOfParams) ([][]byte, error) {
 	rows, err := q.db.QueryContext(ctx, endRawLeasesOf, arg.Principal, arg.Now, arg.MaxLive)
 	if err != nil {
@@ -618,6 +620,44 @@ type InsertRawUnreadParams struct {
 func (q *Queries) InsertRawUnread(ctx context.Context, arg InsertRawUnreadParams) error {
 	_, err := q.db.ExecContext(ctx, insertRawUnread, arg.RawEventID, pq.Array(arg.LeaseIds))
 	return err
+}
+
+const lockLiveRawLeasesOf = `-- name: LockLiveRawLeasesOf :many
+SELECT l.id FROM faucet_raw_leases l
+WHERE l.principal = $1 AND l.expires_at > $2
+ORDER BY l.id
+FOR UPDATE
+`
+
+type LockLiveRawLeasesOfParams struct {
+	Principal string
+	Now       time.Time
+}
+
+// An open locks every live lease of its principal before it picks one to end,
+// so that it waits here for a poll that holds one, and the statements after it
+// read the times of the last polls.
+func (q *Queries) LockLiveRawLeasesOf(ctx context.Context, arg LockLiveRawLeasesOfParams) ([][]byte, error) {
+	rows, err := q.db.QueryContext(ctx, lockLiveRawLeasesOf, arg.Principal, arg.Now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items [][]byte
+	for rows.Next() {
+		var id []byte
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const lockRawLeases = `-- name: LockRawLeases :exec
