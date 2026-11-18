@@ -392,7 +392,10 @@ func TestTheOwnerTargetsMigrationGoesDownToRepositoryRowsAndUpAgain(t *testing.T
 // The org grants migration binds each org grant of a client made before it to
 // the account that holds its login, under the login that the account holds,
 // and keeps a grant whose login no account holds, which then reads nothing.
-// Its down turns each bound grant back into a login.
+// Its down turns each bound grant back into the login that its account holds
+// at the down, so a build that resolves logins reads the same account. A
+// grant whose account holds no login keeps its bound form, which that build
+// reads as no grant.
 func TestTheOrgGrantsMigrationBindsEachLoginToTheAccountThatHoldsItAndBack(t *testing.T) {
 	t.Parallel()
 	db := newDatabase(t, testDatabaseURL(t))
@@ -425,8 +428,12 @@ func TestTheOrgGrantsMigrationBindsEachLoginToTheAccountThatHoldsItAndBack(t *te
 	require.NoError(t, err)
 	require.Error(t, c.Validate(), "org:gone names no account, so it is no grant that a new client can hold")
 
+	require.NoError(t, store.RecordOwner(ctx, faucet.Owner{ID: 7, Login: "coder-legacy"}))
+	require.NoError(t, store.RecordOwner(ctx, faucet.Owner{ID: 99, Login: "coder"}))
+	require.NoError(t, store.RecordOwner(ctx, faucet.Owner{ID: 10, Login: "octo"}))
 	runMigrationFile(t, db, "000016_org_grant_accounts.down.sql")
-	require.Equal(t, []string{"repo:coder/faucet", "org:Coder", "all", "org:octo", "org:gone"}, grantsOf("orgs"))
+	require.Equal(t, []string{"repo:coder/faucet", "org:coder-legacy", "all", "org:octo#9", "org:gone"}, grantsOf("orgs"),
+		"a renamed account's grant takes its new login, not the old one that account 99 holds now, and account 9 lost its login to 10")
 }
 
 func TestTheClearMigrationMovesTheOldTopToTheClearAndBack(t *testing.T) {
