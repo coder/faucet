@@ -257,18 +257,21 @@ type Store interface {
 	// no longer holds, changes nothing. It calls repo.Validate.
 	RenameRepository(ctx context.Context, repo Repository, from string, seenAt time.Time) error
 	// RecordOwner records that a signed delivery named the account owner.ID
-	// with owner.Login at seenAt. The account keeps the login of its latest
+	// with owner.Login. The account keeps the login of its latest
 	// delivery, because GitHub sends no event for each repository of an
 	// account that it renames. One login names one account, ignoring case:
 	// another account that held the login gives it up, and holds no login
 	// until a delivery names it again. It calls owner.Validate.
-	RecordOwner(ctx context.Context, owner Owner, seenAt time.Time) error
+	RecordOwner(ctx context.Context, owner Owner) error
 	// AddOwner records owner as RecordOwner does when the store holds no row
 	// of the account and no account holds its login, and writes nothing
 	// otherwise. A delivery that GitHub sent again names an account as it was
 	// then, so it may add an account but must move no login. It calls
 	// owner.Validate.
-	AddOwner(ctx context.Context, owner Owner, seenAt time.Time) error
+	AddOwner(ctx context.Context, owner Owner) error
+	// OwnerByID returns the account of id with the login that the store
+	// holds for it, and ErrUnknownOwner when it holds no row of it.
+	OwnerByID(ctx context.Context, id int64) (Owner, error)
 	// RepositoryByName returns the repository written fullName, ignoring case
 	// as GitHub does: a repository whose name, as it was first seen or renamed
 	// to, is the name part, of the account that holds the owner part as its

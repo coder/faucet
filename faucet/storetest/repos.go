@@ -35,7 +35,7 @@ func repositoryNamed(id int64, fullName string) faucet.Repository {
 // that names repo does.
 func recordDelivered(t *testing.T, s faucet.Store, repo faucet.Repository, at time.Time) {
 	t.Helper()
-	require.NoError(t, s.RecordOwner(context.Background(), faucet.Owner{ID: repo.OwnerID, Login: repo.OwnerLogin}, at))
+	require.NoError(t, s.RecordOwner(context.Background(), faucet.Owner{ID: repo.OwnerID, Login: repo.OwnerLogin}))
 	require.NoError(t, s.RecordRepository(context.Background(), repo, at))
 }
 
@@ -43,7 +43,7 @@ func recordDelivered(t *testing.T, s faucet.Store, repo faucet.Repository, at ti
 // as a repository event that renamed it does.
 func renameDelivered(t *testing.T, s faucet.Store, repo faucet.Repository, from string, at time.Time) {
 	t.Helper()
-	require.NoError(t, s.RecordOwner(context.Background(), faucet.Owner{ID: repo.OwnerID, Login: repo.OwnerLogin}, at))
+	require.NoError(t, s.RecordOwner(context.Background(), faucet.Owner{ID: repo.OwnerID, Login: repo.OwnerLogin}))
 	require.NoError(t, s.RenameRepository(context.Background(), repo, from, at))
 }
 
@@ -157,26 +157,28 @@ func ownerByLoginIgnoresCaseAndTakesTheOwnerSeenLatest(t *testing.T, s faucet.St
 	requireRepositoryNamed(t, s, "coder/new", faucet.Repository{ID: 3, OwnerID: 9, OwnerLogin: "coder", FullName: "coder/new"})
 	requireUnknownName(t, s, "coder/faucet")
 
-	require.NoError(t, s.RecordOwner(ctx, faucet.Owner{ID: 9, Login: "acme"}, repositoryTime.Add(2*time.Hour)))
+	require.NoError(t, s.RecordOwner(ctx, faucet.Owner{ID: 9, Login: "acme"}))
 	_, err = s.OwnerByLogin(ctx, "coder")
 	require.ErrorIs(t, err, faucet.ErrUnknownOwner, "the account that gave the login up does not get it back")
+	_, err = s.OwnerByID(ctx, 7)
+	require.ErrorIs(t, err, faucet.ErrUnknownOwner, "the account that gave its login up holds none")
 	requireUnknownName(t, s, "coder/tap")
 
-	require.NoError(t, s.RecordOwner(ctx, faucet.Owner{ID: 7, Login: "coder"}, repositoryTime.Add(3*time.Hour)))
+	require.NoError(t, s.RecordOwner(ctx, faucet.Owner{ID: 7, Login: "coder"}))
 	requireRepositoryNamed(t, s, "coder/tap", faucet.Repository{ID: 2, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/tap"})
 }
 
 // An organization's own events name it with no repository.
 func recordOwnerNamesAnAccountWithoutARepository(t *testing.T, s faucet.Store) {
 	ctx := context.Background()
-	require.NoError(t, s.RecordOwner(ctx, faucet.Owner{ID: 5, Login: "Acme"}, repositoryTime))
+	require.NoError(t, s.RecordOwner(ctx, faucet.Owner{ID: 5, Login: "Acme"}))
 	got, err := s.OwnerByLogin(ctx, "acme")
 	require.NoError(t, err)
 	require.Equal(t, faucet.Owner{ID: 5, Login: "Acme"}, got)
 	requireUnknownName(t, s, "acme/tap")
 
 	for _, bad := range []faucet.Owner{{}, {ID: 5}, {Login: "acme"}, {ID: -1, Login: "acme"}, {ID: 5, Login: "ac/me"}, {ID: 5, Login: "ac\x00me"}} {
-		require.Error(t, s.RecordOwner(ctx, bad, repositoryTime), "%+v", bad)
+		require.Error(t, s.RecordOwner(ctx, bad), "%+v", bad)
 	}
 	got, err = s.OwnerByLogin(ctx, "acme")
 	require.NoError(t, err)
@@ -209,24 +211,29 @@ func anOwnerKeepsOnlyTheLoginOfItsLatestDelivery(t *testing.T, s faucet.Store) {
 	require.Equal(t, faucet.Owner{ID: 7, Login: "acme-legacy"}, got)
 	requireUnknownName(t, s, "acme/private")
 	requireRepositoryNamed(t, s, "ACME-legacy/private", renamed)
+	got, err = s.OwnerByID(ctx, 7)
+	require.NoError(t, err)
+	require.Equal(t, faucet.Owner{ID: 7, Login: "acme-legacy"}, got)
+	_, err = s.OwnerByID(ctx, 8)
+	require.ErrorIs(t, err, faucet.ErrUnknownOwner)
 }
 
 // A delivery that GitHub sent again names an account as it was then: it may
 // add an account that the store lacks, but it moves no login.
 func addOwnerAddsAnAccountAndMovesNoLogin(t *testing.T, s faucet.Store) {
 	ctx := context.Background()
-	require.NoError(t, s.RecordOwner(ctx, faucet.Owner{ID: 7, Login: "acme"}, repositoryTime))
-	require.NoError(t, s.AddOwner(ctx, faucet.Owner{ID: 7, Login: "acme-old"}, repositoryTime.Add(time.Minute)))
-	require.NoError(t, s.AddOwner(ctx, faucet.Owner{ID: 9, Login: "ACME"}, repositoryTime.Add(time.Minute)))
+	require.NoError(t, s.RecordOwner(ctx, faucet.Owner{ID: 7, Login: "acme"}))
+	require.NoError(t, s.AddOwner(ctx, faucet.Owner{ID: 7, Login: "acme-old"}))
+	require.NoError(t, s.AddOwner(ctx, faucet.Owner{ID: 9, Login: "ACME"}))
 	got, err := s.OwnerByLogin(ctx, "acme")
 	require.NoError(t, err)
 	require.Equal(t, faucet.Owner{ID: 7, Login: "acme"}, got, "an account with a row keeps its login, and a login that one holds stays with it")
 	_, err = s.OwnerByLogin(ctx, "acme-old")
 	require.ErrorIs(t, err, faucet.ErrUnknownOwner)
 
-	require.NoError(t, s.AddOwner(ctx, faucet.Owner{ID: 9, Login: "octo"}, repositoryTime.Add(time.Minute)))
+	require.NoError(t, s.AddOwner(ctx, faucet.Owner{ID: 9, Login: "octo"}))
 	got, err = s.OwnerByLogin(ctx, "octo")
 	require.NoError(t, err)
 	require.Equal(t, faucet.Owner{ID: 9, Login: "octo"}, got, "an account that the store lacks is added")
-	require.Error(t, s.AddOwner(ctx, faucet.Owner{ID: 5, Login: "ac/me"}, repositoryTime))
+	require.Error(t, s.AddOwner(ctx, faucet.Owner{ID: 5, Login: "ac/me"}))
 }

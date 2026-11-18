@@ -3,7 +3,9 @@ package faucet
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
+	"sync"
 
 	"golang.org/x/xerrors"
 
@@ -75,31 +77,52 @@ func (r Repository) Validate() error {
 // changes the names of a repository the store knows. A failed write is
 // logged, and the delivery goes on: the next one that names them writes them.
 func (s *Service) recordRepository(ctx context.Context, logger slog.Logger, eventName, deliveryID string, payload []byte) {
-	now := s.clock.Now()
-	recordOwner := s.store.RecordOwner
-	if s.replayed(ctx, logger, deliveryID) {
-		recordOwner = s.store.AddOwner
-	}
+	named, hasRepo := repositoryOf(eventName, payload)
+	var owners []Owner
 	if org, ok := organizationOf(payload); ok {
-		if err := recordOwner(ctx, org, now); err != nil {
-			logger.Warn(ctx, "could not record the organization", slog.Error(err))
-		}
+		owners = append(owners, org)
 	}
-	named, ok := repositoryOf(eventName, payload)
-	if !ok {
+	if hasRepo && !slices.ContainsFunc(owners, func(o Owner) bool { return o.ID == named.repo.OwnerID }) {
+		owners = append(owners, Owner{ID: named.repo.OwnerID, Login: named.repo.OwnerLogin})
+	}
+	replay := sync.OnceValue(func() bool { return s.replayed(ctx, logger, deliveryID) })
+	for _, owner := range owners {
+		s.recordOwner(ctx, logger, owner, replay)
+	}
+	if !hasRepo {
 		return
-	}
-	if err := recordOwner(ctx, Owner{ID: named.repo.OwnerID, Login: named.repo.OwnerLogin}, now); err != nil {
-		logger.Warn(ctx, "could not record the owner of the repository", slog.Error(err))
 	}
 	var err error
 	if named.previous != "" {
-		err = s.store.RenameRepository(ctx, named.repo, named.previous, now)
+		err = s.store.RenameRepository(ctx, named.repo, named.previous, s.clock.Now())
 	} else {
-		err = s.store.RecordRepository(ctx, named.repo, now)
+		err = s.store.RecordRepository(ctx, named.repo, s.clock.Now())
 	}
 	if err != nil {
 		logger.Warn(ctx, "could not record the repository", slog.Error(err))
+	}
+}
+
+// recordOwner writes the login of owner when it is new or changed, which
+// few deliveries find, so most write nothing and never ask whether they are
+// a replay. A replay only adds an account that the store lacks.
+func (s *Service) recordOwner(ctx context.Context, logger slog.Logger, owner Owner, replay func() bool) {
+	held, err := s.store.OwnerByID(ctx, owner.ID)
+	switch {
+	case err == nil && held.Login == owner.Login:
+		return
+	case err != nil && !xerrors.Is(err, ErrUnknownOwner):
+		logger.Warn(ctx, "could not read the owner", slog.Error(err))
+		return
+	case replay() && err == nil:
+		return
+	case replay():
+		err = s.store.AddOwner(ctx, owner)
+	default:
+		err = s.store.RecordOwner(ctx, owner)
+	}
+	if err != nil {
+		logger.Warn(ctx, "could not record the owner", slog.Error(err))
 	}
 }
 

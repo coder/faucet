@@ -77,7 +77,6 @@ type FaucetEvent struct {
 type FaucetOwner struct {
 	OwnerID int64
 	Login   string
-	SeenAt  time.Time
 }
 
 type FaucetPurgeMark struct {

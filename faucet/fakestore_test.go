@@ -30,8 +30,7 @@ type fakeRepo struct {
 }
 
 type fakeRepoOwner struct {
-	login  string
-	seenAt time.Time
+	login string
 }
 
 func (s *fakeStore) RecordRepository(_ context.Context, repo faucet.Repository, seenAt time.Time) error {
@@ -54,7 +53,7 @@ func (s *fakeStore) RenameRepository(_ context.Context, repo faucet.Repository, 
 	})
 }
 
-func (s *fakeStore) AddOwner(_ context.Context, owner faucet.Owner, seenAt time.Time) error {
+func (s *fakeStore) AddOwner(_ context.Context, owner faucet.Owner) error {
 	if err := owner.Validate(); err != nil {
 		return err
 	}
@@ -70,11 +69,11 @@ func (s *fakeStore) AddOwner(_ context.Context, owner faucet.Owner, seenAt time.
 	if _, _, taken := s.ownerLocked(owner.Login); taken {
 		return nil
 	}
-	s.recordOwnerLocked(owner, seenAt)
+	s.recordOwnerLocked(owner)
 	return nil
 }
 
-func (s *fakeStore) RecordOwner(_ context.Context, owner faucet.Owner, seenAt time.Time) error {
+func (s *fakeStore) RecordOwner(_ context.Context, owner faucet.Owner) error {
 	if err := owner.Validate(); err != nil {
 		return err
 	}
@@ -84,20 +83,27 @@ func (s *fakeStore) RecordOwner(_ context.Context, owner faucet.Owner, seenAt ti
 	if s.repoErr != nil {
 		return s.repoErr
 	}
-	s.recordOwnerLocked(owner, seenAt)
+	s.recordOwnerLocked(owner)
 	return nil
+}
+
+func (s *fakeStore) ownerWriteCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ownerWrites
 }
 
 // recordOwnerLocked gives owner its login, which every other account gives
 // up.
-func (s *fakeStore) recordOwnerLocked(owner faucet.Owner, seenAt time.Time) {
+func (s *fakeStore) recordOwnerLocked(owner faucet.Owner) {
+	s.ownerWrites++
 	if s.owners == nil {
 		s.owners = map[int64]fakeRepoOwner{}
 	}
 	maps.DeleteFunc(s.owners, func(id int64, o fakeRepoOwner) bool {
 		return id != owner.ID && strings.EqualFold(o.login, owner.Login)
 	})
-	s.owners[owner.ID] = fakeRepoOwner{login: owner.Login, seenAt: seenAt}
+	s.owners[owner.ID] = fakeRepoOwner{login: owner.Login}
 }
 
 // writeRepository counts a write of repo and, unless it fails, runs write
@@ -153,6 +159,19 @@ func (s *fakeStore) OwnerByLogin(_ context.Context, login string) (faucet.Owner,
 		return faucet.Owner{}, faucet.ErrUnknownOwner
 	}
 	return faucet.Owner{ID: id, Login: owner.login}, nil
+}
+
+func (s *fakeStore) OwnerByID(_ context.Context, id int64) (faucet.Owner, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.repoErr != nil {
+		return faucet.Owner{}, s.repoErr
+	}
+	o, ok := s.owners[id]
+	if !ok {
+		return faucet.Owner{}, faucet.ErrUnknownOwner
+	}
+	return faucet.Owner{ID: id, Login: o.login}, nil
 }
 
 // ownerLocked returns the account that holds login, which is at most one.

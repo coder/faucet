@@ -27,16 +27,21 @@ LIMIT 1;
 DELETE FROM faucet_owners WHERE lower(login) = lower(@login::text) AND owner_id <> @owner_id;
 
 -- name: RecordOwner :exec
-INSERT INTO faucet_owners (owner_id, login, seen_at)
-VALUES (@owner_id, @login, @seen_at)
-ON CONFLICT (owner_id) DO UPDATE SET login = excluded.login, seen_at = excluded.seen_at;
+INSERT INTO faucet_owners (owner_id, login)
+VALUES (@owner_id, @login)
+ON CONFLICT (owner_id) DO UPDATE SET login = excluded.login;
 
 -- name: AddOwner :exec
 -- An account that holds a row, or a login that another account holds, makes
 -- it write nothing.
-INSERT INTO faucet_owners (owner_id, login, seen_at)
-VALUES (@owner_id, @login, @seen_at)
+INSERT INTO faucet_owners (owner_id, login)
+VALUES (@owner_id, @login)
 ON CONFLICT DO NOTHING;
+
+-- name: GetOwnerByID :one
+SELECT owner_id, login
+FROM faucet_owners
+WHERE owner_id = @owner_id;
 
 -- name: GetOwnerByLogin :one
 SELECT owner_id, login

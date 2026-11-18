@@ -234,3 +234,31 @@ func TestARedeliveredDeliveryMovesNoLogin(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, faucet.Owner{ID: 9, Login: "octo"}, got, "a replay adds an account that faucet has not seen")
 }
+
+// Nearly every delivery names an account under the login that faucet holds
+// for it, so faucet writes an account's login only when it is new or changed,
+// and once for a delivery whose organization owns its repository.
+func TestADeliveryWritesTheLoginOfAnAccountOnlyWhenItChanged(t *testing.T) {
+	t.Parallel()
+	store, _, handler := newRepositoryHarness(t)
+	n := 0
+	push := func(login string) {
+		t.Helper()
+		n++
+		body := fmt.Sprintf(`{"ref":"refs/heads/main","organization":{"id":7,"login":%q},"repository":{"id":70,"full_name":%q,"owner":{"id":7,"login":%q}}}`,
+			login, login+"/tap", login)
+		rec := serveWebhook(handler, newRequest(http.MethodPost, []byte(body), "push", fmt.Sprintf("d-%d", n)))
+		require.Less(t, rec.Code, 300)
+	}
+
+	push("acme")
+	require.Equal(t, 1, store.ownerWriteCount(), "the organization owns the repository, so one write records both")
+	push("acme")
+	push("acme")
+	require.Equal(t, 1, store.ownerWriteCount(), "a login that faucet holds writes nothing")
+	push("Acme")
+	require.Equal(t, 2, store.ownerWriteCount(), "a login whose case changed is written as the delivery writes it")
+	got, err := store.OwnerByLogin(context.Background(), "acme")
+	require.NoError(t, err)
+	require.Equal(t, faucet.Owner{ID: 7, Login: "Acme"}, got)
+}

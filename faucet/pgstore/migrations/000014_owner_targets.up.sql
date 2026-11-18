@@ -67,12 +67,11 @@ CREATE INDEX faucet_raw_leases_match_all ON faucet_raw_leases (event) WHERE targ
 -- faucet_repos.
 CREATE TABLE faucet_owners (
   owner_id bigint PRIMARY KEY CHECK (owner_id > 0),
-  login text NOT NULL CHECK (login <> ''),
-  seen_at timestamptz NOT NULL
+  login text NOT NULL CHECK (login <> '')
 );
 CREATE UNIQUE INDEX faucet_owners_login ON faucet_owners (lower(login));
-INSERT INTO faucet_owners (owner_id, login, seen_at)
-SELECT DISTINCT ON (lower(owner_login)) owner_id, owner_login, seen_at
+INSERT INTO faucet_owners (owner_id, login)
+SELECT DISTINCT ON (lower(owner_login)) owner_id, owner_login
 FROM (
   SELECT DISTINCT ON (owner_id) owner_id, owner_login, seen_at
   FROM faucet_repos

@@ -45,7 +45,7 @@ func (s *Store) RenameRepository(ctx context.Context, repo faucet.Repository, fr
 // RecordOwner implements faucet.Store. Another account that held the login
 // gives it up first, in the same transaction, so the unique login of
 // faucet_owners never refuses the write.
-func (s *Store) RecordOwner(ctx context.Context, owner faucet.Owner, seenAt time.Time) (err error) {
+func (s *Store) RecordOwner(ctx context.Context, owner faucet.Owner) (err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if err := owner.Validate(); err != nil {
 		return xerrors.Errorf("validate owner: %w", err)
@@ -59,7 +59,7 @@ func (s *Store) RecordOwner(ctx context.Context, owner faucet.Owner, seenAt time
 	if err := q.ReleaseOwnerLogin(ctx, database.ReleaseOwnerLoginParams{Login: owner.Login, OwnerID: owner.ID}); err != nil {
 		return xerrors.Errorf("release the login of other owners: %w", err)
 	}
-	if err := q.RecordOwner(ctx, database.RecordOwnerParams{OwnerID: owner.ID, Login: owner.Login, SeenAt: seenAt}); err != nil {
+	if err := q.RecordOwner(ctx, database.RecordOwnerParams{OwnerID: owner.ID, Login: owner.Login}); err != nil {
 		return xerrors.Errorf("record owner: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -69,12 +69,12 @@ func (s *Store) RecordOwner(ctx context.Context, owner faucet.Owner, seenAt time
 }
 
 // AddOwner implements faucet.Store.
-func (s *Store) AddOwner(ctx context.Context, owner faucet.Owner, seenAt time.Time) (err error) {
+func (s *Store) AddOwner(ctx context.Context, owner faucet.Owner) (err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if err := owner.Validate(); err != nil {
 		return xerrors.Errorf("validate owner: %w", err)
 	}
-	if err := s.q.AddOwner(ctx, database.AddOwnerParams{OwnerID: owner.ID, Login: owner.Login, SeenAt: seenAt}); err != nil {
+	if err := s.q.AddOwner(ctx, database.AddOwnerParams{OwnerID: owner.ID, Login: owner.Login}); err != nil {
 		return xerrors.Errorf("add owner: %w", err)
 	}
 	return nil
@@ -101,6 +101,19 @@ func (s *Store) RepositoryByName(ctx context.Context, fullName string) (_ faucet
 func (s *Store) OwnerByLogin(ctx context.Context, login string) (_ faucet.Owner, err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	row, err := s.q.GetOwnerByLogin(ctx, login)
+	switch {
+	case xerrors.Is(err, sql.ErrNoRows):
+		return faucet.Owner{}, faucet.ErrUnknownOwner
+	case err != nil:
+		return faucet.Owner{}, xerrors.Errorf("read owner: %w", err)
+	}
+	return faucet.Owner{ID: row.OwnerID, Login: row.Login}, nil
+}
+
+// OwnerByID implements faucet.Store.
+func (s *Store) OwnerByID(ctx context.Context, id int64) (_ faucet.Owner, err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	row, err := s.q.GetOwnerByID(ctx, id)
 	switch {
 	case xerrors.Is(err, sql.ErrNoRows):
 		return faucet.Owner{}, faucet.ErrUnknownOwner
