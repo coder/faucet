@@ -17,6 +17,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"cdr.dev/slog/v3"
 	"github.com/coder/faucet/faucet"
 	"github.com/coder/faucet/faucet/internal/githubapi"
 	"github.com/coder/faucet/faucet/oauth"
@@ -120,8 +121,8 @@ func (c *cancelingRepos) cancelAfterAnswer(cancel context.CancelFunc) {
 	c.cancel = cancel
 }
 
-func (c *cancelingRepos) RepoID(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
-	id, err := c.RepoChecker.RepoID(ctx, p, repo)
+func (c *cancelingRepos) RepoIDFresh(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
+	id, err := c.RepoChecker.RepoIDFresh(ctx, p, repo)
 	c.mu.Lock()
 	cancel := c.cancel
 	c.cancel = nil
@@ -773,6 +774,26 @@ func TestACheckRefusesANameThatOnlyItsLowerCaseMakesValid(t *testing.T) {
 		require.Empty(t, got.asked, name)
 	}
 	require.Empty(t, h.checkedRepos(1))
+}
+
+// A repository checker that remembers answers, as *faucet.AccessCache does,
+// still answers a renewal fresh: the access check asks it with RepoIDFresh,
+// never with RepoID.
+func TestARenewalThroughACachingRepositoryCheckerAsksGitHub(t *testing.T) {
+	t.Parallel()
+	h := newGrantHarness(t, newFakeStore())
+	p := h.principal(h.redeem(h.approve("login-1", 1)))
+	access, err := oauth.NewUserAccess(oauth.UserAccessDeps{
+		Store: h.store, Clock: h.clock, Logger: slog.Make(), Login: *h.login,
+		Repos: faucet.NewAccessCache(h.github.repos(), h.clock),
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.repoID(access, p, "o/x").err)
+	h.github.set(func(g *grantGitHub) { g.denied["o/x"] = true })
+
+	got := h.repoIDFresh(access, p, "o/x")
+	require.ErrorIs(t, got.err, faucet.ErrNoAccess)
+	require.Equal(t, []string{"o/x"}, got.asked, "the renewal asked GitHub")
 }
 
 // A lookup that GitHub fails is neither a pass nor a denial. The refresh

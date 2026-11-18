@@ -102,7 +102,7 @@ func (r repoAccess) check(ctx context.Context, token githubToken, repo string) (
 	if err != nil {
 		return 0, err
 	}
-	return r.repos.RepoID(ctx, p, repo)
+	return r.repos.RepoIDFresh(ctx, p, repo)
 }
 
 // record keeps answer, GitHub's answer to the lookup of c: c is stored when
