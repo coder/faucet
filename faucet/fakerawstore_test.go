@@ -111,6 +111,7 @@ func (s *fakeStore) rawPendingLocked(key faucet.SubscriptionKeyHash, incarnation
 type fakeRawArguments struct {
 	Actions []string `json:"actions"`
 	Fields  []string `json:"fields"`
+	Repos   []string `json:"repos"`
 }
 
 func fakeRawArgumentsOf(sub faucet.Subscription) fakeRawArguments {
@@ -123,11 +124,18 @@ func fakeRawWantsAction(actions []string, action string) bool {
 	return len(actions) == 0 || slices.Contains(actions, action)
 }
 
+// fakeRawWantsRepository reports whether a list of lower-case full names,
+// nil for none, lets a delivery of this repository name through.
+func fakeRawWantsRepository(repos []string, repoName string) bool {
+	return repos == nil || slices.Contains(repos, strings.ToLower(repoName))
+}
+
 func (s *fakeStore) rawInterestsLocked(d faucet.RawDelivery, now time.Time) []faucet.RawInterest {
 	var interests []faucet.RawInterest
 	for key, sub := range s.subs {
 		args := fakeRawArgumentsOf(sub)
-		if sub.EventType != fakeRawPrefix+d.Event || sub.Target.RepoID() != d.RepoID || !sub.ExpiresAt.After(now) || !fakeRawWantsAction(args.Actions, d.Action) {
+		if sub.EventType != fakeRawPrefix+d.Event || !sub.Target.Covers(d.RepoID, d.OwnerID) || !sub.ExpiresAt.After(now) ||
+			!fakeRawWantsAction(args.Actions, d.Action) || !fakeRawWantsRepository(args.Repos, d.RepoName) {
 			continue
 		}
 		interests = append(interests, faucet.RawInterest{
@@ -135,7 +143,8 @@ func (s *fakeStore) rawInterestsLocked(d faucet.RawDelivery, now time.Time) []fa
 		})
 	}
 	for id, l := range s.rawLeases {
-		if l.lease.Event != d.Event || l.lease.Target.RepoID() != d.RepoID || !l.lease.ExpiresAt.After(now) || !fakeRawWantsAction(l.lease.Actions, d.Action) {
+		if l.lease.Event != d.Event || !l.lease.Target.Covers(d.RepoID, d.OwnerID) || !l.lease.ExpiresAt.After(now) ||
+			!fakeRawWantsAction(l.lease.Actions, d.Action) || len(l.lease.RepoNames) > 0 && !fakeRawWantsRepository(l.lease.RepoNames, d.RepoName) {
 			continue
 		}
 		interests = append(interests, faucet.RawInterest{Lease: id, IsLease: true, Fields: slices.Clone(l.lease.Fields), Pending: l.pending()})
@@ -316,7 +325,7 @@ func (s *fakeStore) OpenRawLease(ctx context.Context, lease faucet.RawLease, now
 	for id := range ended {
 		delete(s.rawLeases, id)
 	}
-	lease.Actions, lease.Fields = slices.Clone(lease.Actions), slices.Clone(lease.Fields)
+	lease.Actions, lease.Fields, lease.RepoNames = slices.Clone(lease.Actions), slices.Clone(lease.Fields), slices.Clone(lease.RepoNames)
 	head := s.rawHeadLocked()
 	s.rawLeases[lease.ID] = &fakeRawLease{lease: lease, acked: head, polledAt: now, unread: map[int64]struct{}{}}
 	return head, nil

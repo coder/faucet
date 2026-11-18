@@ -23,12 +23,27 @@ SET scanned_through = doomed.mark
 FROM doomed
 WHERE s.scanned_through < doomed.mark
   AND s.scanned_through >= (SELECT purged_through FROM faucet_purge_mark)
-  AND NOT EXISTS (
-    SELECT 1 FROM faucet_events e
-    WHERE e.repo_id = s.repo_id AND e.type = ANY(s.event_types) AND e.id > s.scanned_through AND e.id <= doomed.mark
+  AND (
+    (s.target_kind = 'repo' AND NOT EXISTS (
+      SELECT 1 FROM faucet_events e
+      WHERE e.repo_id = s.repo_id AND e.type = ANY(s.event_types) AND e.id > s.scanned_through AND e.id <= doomed.mark
+    ))
+    OR (s.target_kind = 'owner' AND NOT EXISTS (
+      SELECT 1 FROM faucet_events e
+      WHERE e.owner_id = s.owner_id AND e.owner_id > 0 AND e.type = ANY(s.event_types) AND e.id > s.scanned_through AND e.id <= doomed.mark
+    ))
+    OR (s.target_kind = 'all' AND NOT EXISTS (
+      SELECT 1 FROM faucet_events e
+      WHERE e.type = ANY(s.event_types) AND e.id > s.scanned_through AND e.id <= doomed.mark
+    ))
   )
 `
 
+// A subscription moves only through the branch of its kind, so one of a kind
+// that this build does not know stays where it is: a false gap is safe, a
+// suppressed one is not. Like ScanTargets, it ignores the subscription's
+// other filters, so it can leave a subscription below the mark that lost
+// nothing it wanted, and never moves one that lost something.
 func (q *Queries) AdvanceSubscriptionsThatLostNothing(ctx context.Context, before time.Time) (int64, error) {
 	result, err := q.db.ExecContext(ctx, advanceSubscriptionsThatLostNothing, before)
 	if err != nil {
@@ -360,17 +375,22 @@ WITH mark AS (
   FROM faucet_events
 ), page AS (
   SELECT e.id, e.source, e.delivery_id, e.type, e.repo_id, e.prs, e.head_sha, e.data, e.received_at, e.owner_id, e.repo_name FROM faucet_events e
-  WHERE e.repo_id = $1
-    AND e.id > $2
-    AND (cardinality($3::text[]) = 0 OR e.type = ANY($3::text[]))
-    AND ($4::text = '' OR e.head_sha = $4::text)
-    AND ($5::int = 0 OR $5::int = ANY(e.prs))
+  WHERE (
+      ($1::text = 'repo' AND e.repo_id = $2::bigint)
+      OR ($1::text = 'owner' AND e.owner_id = $3::bigint AND e.owner_id > 0)
+      OR $1::text = 'all'
+    )
+    AND (cardinality($4::text[]) = 0 OR lower(e.repo_name) = ANY($4::text[]))
+    AND e.id > $5
+    AND (cardinality($6::text[]) = 0 OR e.type = ANY($6::text[]))
+    AND ($7::text = '' OR e.head_sha = $7::text)
+    AND ($8::int = 0 OR $8::int = ANY(e.prs))
     AND NOT EXISTS (
-      SELECT 1 FROM jsonb_to_recordset($6::text::jsonb) AS f(field text, matches text[], types text[])
+      SELECT 1 FROM jsonb_to_recordset($9::text::jsonb) AS f(field text, matches text[], types text[])
       WHERE e.type = ANY(f.types) AND NOT COALESCE(e.data ->> f.field = ANY(f.matches), false)
     )
   ORDER BY e.id
-  LIMIT $7
+  LIMIT $10
 )
 SELECT
   head.max_id,
@@ -383,13 +403,16 @@ ORDER BY page.id
 `
 
 type PollEventsParams struct {
-	RepoID   int64
-	AfterID  int64
-	Types    []string
-	HeadSha  string
-	Pr       int32
-	Fields   string
-	RowLimit int32
+	TargetKind string
+	RepoID     int64
+	OwnerID    int64
+	RepoNames  []string
+	AfterID    int64
+	Types      []string
+	HeadSha    string
+	Pr         int32
+	Fields     string
+	RowLimit   int32
 }
 
 type PollEventsRow struct {
@@ -408,9 +431,16 @@ type PollEventsRow struct {
 	ReceivedAt    sql.NullTime
 }
 
+// Each kind of target has a branch of its own, so each reads its own index:
+// faucet_events_poll for a repository, faucet_events_owner for an owner, and
+// the primary key for all. An event stored before owners were recorded has
+// owner 0, which no owner target names.
 func (q *Queries) PollEvents(ctx context.Context, arg PollEventsParams) ([]PollEventsRow, error) {
 	rows, err := q.db.QueryContext(ctx, pollEvents,
+		arg.TargetKind,
 		arg.RepoID,
+		arg.OwnerID,
+		pq.Array(arg.RepoNames),
 		arg.AfterID,
 		pq.Array(arg.Types),
 		arg.HeadSha,

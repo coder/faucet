@@ -330,7 +330,7 @@ func (s *fakeStore) hasSomethingToReadLocked(key faucet.SubscriptionKeyHash, sub
 		return true
 	}
 	return slices.ContainsFunc(s.events, func(e faucet.Event) bool {
-		return e.RepoID == sub.Target.RepoID() && slices.Contains(sub.EventTypes, e.Type) && e.ID > s.scanned[key]
+		return sub.Target.Covers(e.RepoID, e.OwnerID) && slices.Contains(sub.EventTypes, e.Type) && e.ID > s.scanned[key]
 	})
 }
 

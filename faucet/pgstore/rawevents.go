@@ -34,7 +34,7 @@ func (s *Store) IngestRaw(ctx context.Context, d faucet.RawDelivery, now time.Ti
 	if plan == nil {
 		return faucet.RawIngest{}, xerrors.New("plan is required")
 	}
-	rows, err := s.q.RawInterests(ctx, database.RawInterestsParams{RepoID: d.RepoID, Event: d.Event, Now: now, Action: d.Action})
+	rows, err := s.q.RawInterests(ctx, database.RawInterestsParams{RepoID: d.RepoID, OwnerID: d.OwnerID, RepoName: d.RepoName, Event: d.Event, Now: now, Action: d.Action})
 	if err != nil {
 		return faucet.RawIngest{}, xerrors.Errorf("read interests: %w", err)
 	}

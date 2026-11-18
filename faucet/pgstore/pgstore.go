@@ -136,13 +136,16 @@ func (s *Store) PollEvents(ctx context.Context, q faucet.PollQuery) (_ faucet.Po
 		return faucet.PollPage{}, xerrors.Errorf("encode field filters: %w", err)
 	}
 	rows, err := s.q.PollEvents(ctx, database.PollEventsParams{
-		RepoID:   q.Target.RepoID(),
-		AfterID:  q.After,
-		Types:    types,
-		HeadSha:  q.HeadSHA,
-		Pr:       q.PR,
-		Fields:   string(fields),
-		RowLimit: q.Limit,
+		TargetKind: string(q.Target.Kind()),
+		RepoID:     q.Target.RepoID(),
+		OwnerID:    q.Target.OwnerID(),
+		RepoNames:  nonNil(q.RepoNames),
+		AfterID:    q.After,
+		Types:      types,
+		HeadSha:    q.HeadSHA,
+		Pr:         q.PR,
+		Fields:     string(fields),
+		RowLimit:   q.Limit,
 	})
 	if err != nil {
 		return faucet.PollPage{}, xerrors.Errorf("poll events: %w", err)

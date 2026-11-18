@@ -1,4 +1,5 @@
 -- name: ScanTargets :many
+-- One EXISTS per kind of target, each on its own index, as in PollEvents.
 WITH head AS (
   SELECT GREATEST(COALESCE(MAX(id), 0), (SELECT purged_through FROM faucet_purge_mark))::bigint AS max_id
   FROM faucet_events
@@ -11,10 +12,18 @@ WHERE s.expires_at > sqlc.arg(now)
   AND s.scanned_through < head.max_id
   AND (
     s.scanned_through < (SELECT purged_through FROM faucet_purge_mark)
-    OR EXISTS (
+    OR (s.target_kind = 'repo' AND EXISTS (
       SELECT 1 FROM faucet_events e
       WHERE e.repo_id = s.repo_id AND e.type = ANY(s.event_types) AND e.id > s.scanned_through
-    )
+    ))
+    OR (s.target_kind = 'owner' AND EXISTS (
+      SELECT 1 FROM faucet_events e
+      WHERE e.owner_id = s.owner_id AND e.owner_id > 0 AND e.type = ANY(s.event_types) AND e.id > s.scanned_through
+    ))
+    OR (s.target_kind = 'all' AND EXISTS (
+      SELECT 1 FROM faucet_events e
+      WHERE e.type = ANY(s.event_types) AND e.id > s.scanned_through
+    ))
   )
   AND (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash) < sqlc.arg(max_pending)::int
 ORDER BY s.scanned_through, s.key_hash

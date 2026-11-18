@@ -809,27 +809,39 @@ SELECT
   (CASE WHEN s.arguments ? 'fields' THEN ARRAY(SELECT jsonb_array_elements_text(s.arguments -> 'fields')) END)::text[] AS fields,
   (SELECT COUNT(*) FROM faucet_raw_deliveries d WHERE d.key_hash = s.key_hash AND d.incarnation = s.created_at)::int AS pending
 FROM faucet_subscriptions s
-WHERE s.repo_id = $1
-  AND s.event_type = 'github.' || $2::text
-  AND s.expires_at > $3
-  AND (NOT (s.arguments ? 'actions') OR (s.arguments -> 'actions') ? $4::text)
+WHERE (
+    (s.target_kind = 'repo' AND s.repo_id = $1::bigint AND $1::bigint > 0)
+    OR (s.target_kind = 'owner' AND s.owner_id = $2::bigint AND $2::bigint > 0)
+    OR s.target_kind = 'all'
+  )
+  AND s.event_type = 'github.' || $3::text
+  AND s.expires_at > $4
+  AND (NOT (s.arguments ? 'actions') OR (s.arguments -> 'actions') ? $5::text)
+  AND (NOT (s.arguments ? 'repos') OR (s.arguments -> 'repos') ? lower($6::text))
 UNION ALL
 SELECT
   true, l.id, l.created_at, l.fields,
   (SELECT COUNT(*) FROM faucet_raw_unread u WHERE u.lease_id = l.id AND NOT u.lost)::int
 FROM faucet_raw_leases l
-WHERE l.repo_id = $1
-  AND l.event = $2::text
-  AND l.expires_at > $3
-  AND (cardinality(l.actions) = 0 OR $4::text = ANY(l.actions))
+WHERE (
+    (l.target_kind = 'repo' AND l.repo_id = $1::bigint AND $1::bigint > 0)
+    OR (l.target_kind = 'owner' AND l.owner_id = $2::bigint AND $2::bigint > 0)
+    OR l.target_kind = 'all'
+  )
+  AND l.event = $3::text
+  AND l.expires_at > $4
+  AND (cardinality(l.actions) = 0 OR $5::text = ANY(l.actions))
+  AND (cardinality(l.repos) = 0 OR lower($6::text) = ANY(l.repos))
 ORDER BY is_lease, id
 `
 
 type RawInterestsParams struct {
-	RepoID int64
-	Event  string
-	Now    time.Time
-	Action string
+	RepoID   int64
+	OwnerID  int64
+	Event    string
+	Now      time.Time
+	Action   string
+	RepoName string
 }
 
 type RawInterestsRow struct {
@@ -840,12 +852,16 @@ type RawInterestsRow struct {
 	Pending     int32
 }
 
+// A delivery with no repository has repo_id 0 and repo_name ”, so it reaches
+// no repo target and passes no list of repository names.
 func (q *Queries) RawInterests(ctx context.Context, arg RawInterestsParams) ([]RawInterestsRow, error) {
 	rows, err := q.db.QueryContext(ctx, rawInterests,
 		arg.RepoID,
+		arg.OwnerID,
 		arg.Event,
 		arg.Now,
 		arg.Action,
+		arg.RepoName,
 	)
 	if err != nil {
 		return nil, err

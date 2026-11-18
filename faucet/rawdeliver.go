@@ -44,8 +44,8 @@ func (r *deliveryRun) rawOutbound(claim RawDeliveryClaim) outbound {
 			switch ev := claim.Event; {
 			case ev == nil:
 				return GiveUpEventPurged
-			case ev.RepoID != claim.Target.RepoID():
-				logger.Error(ctx, "event belongs to another repository than the subscription's")
+			case !claim.Target.Covers(ev.RepoID, ev.OwnerID):
+				logger.Error(ctx, "event belongs to a repository that the subscription's target does not cover")
 				return GiveUpRepoMismatch
 			}
 			return ""

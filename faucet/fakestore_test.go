@@ -98,7 +98,10 @@ func (s *fakeStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.Po
 	var page faucet.PollPage
 	for _, e := range s.events {
 		head = max(head, e.ID)
-		if e.ID <= q.After || e.RepoID != q.Target.RepoID() || len(page.Events) == int(q.Limit) {
+		if e.ID <= q.After || !q.Target.Covers(e.RepoID, e.OwnerID) || len(page.Events) == int(q.Limit) {
+			continue
+		}
+		if len(q.RepoNames) > 0 && !slices.Contains(q.RepoNames, strings.ToLower(e.RepoName)) {
 			continue
 		}
 		if len(q.Types) > 0 && !slices.Contains(q.Types, e.Type) {
@@ -186,8 +189,8 @@ func (s *fakeStore) Purge(_ context.Context, before time.Time) (faucet.PurgeResu
 
 // advanceSubscriptionsThatLoseNothingLocked moves a subscription that is not
 // below the purge mark yet to the mark that the purge will set (doomed), unless
-// an event of its repository and of one of its types above its position, still
-// in the log, lies at or below that mark.
+// an event that its target covers, of one of its types, above its position and
+// still in the log, lies at or below that mark.
 func (s *fakeStore) advanceSubscriptionsThatLoseNothingLocked(doomed int64) {
 	for key, sub := range s.subs {
 		pos := s.scanned[key]
@@ -195,7 +198,7 @@ func (s *fakeStore) advanceSubscriptionsThatLoseNothingLocked(doomed int64) {
 			continue
 		}
 		if !slices.ContainsFunc(s.events, func(e faucet.Event) bool {
-			return e.RepoID == sub.Target.RepoID() && slices.Contains(sub.EventTypes, e.Type) && e.ID > pos && e.ID <= doomed
+			return sub.Target.Covers(e.RepoID, e.OwnerID) && slices.Contains(sub.EventTypes, e.Type) && e.ID > pos && e.ID <= doomed
 		}) {
 			s.scanned[key] = doomed
 		}

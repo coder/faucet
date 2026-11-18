@@ -395,10 +395,18 @@ WHERE s.expires_at > $1
   AND s.scanned_through < head.max_id
   AND (
     s.scanned_through < (SELECT purged_through FROM faucet_purge_mark)
-    OR EXISTS (
+    OR (s.target_kind = 'repo' AND EXISTS (
       SELECT 1 FROM faucet_events e
       WHERE e.repo_id = s.repo_id AND e.type = ANY(s.event_types) AND e.id > s.scanned_through
-    )
+    ))
+    OR (s.target_kind = 'owner' AND EXISTS (
+      SELECT 1 FROM faucet_events e
+      WHERE e.owner_id = s.owner_id AND e.owner_id > 0 AND e.type = ANY(s.event_types) AND e.id > s.scanned_through
+    ))
+    OR (s.target_kind = 'all' AND EXISTS (
+      SELECT 1 FROM faucet_events e
+      WHERE e.type = ANY(s.event_types) AND e.id > s.scanned_through
+    ))
   )
   AND (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash) < $2::int
 ORDER BY s.scanned_through, s.key_hash
@@ -423,6 +431,7 @@ type ScanTargetsRow struct {
 	Pending        int32
 }
 
+// One EXISTS per kind of target, each on its own index, as in PollEvents.
 func (q *Queries) ScanTargets(ctx context.Context, arg ScanTargetsParams) ([]ScanTargetsRow, error) {
 	rows, err := q.db.QueryContext(ctx, scanTargets, arg.Now, arg.MaxPending, arg.RowLimit)
 	if err != nil {

@@ -1,22 +1,34 @@
 -- name: RawInterests :many
+-- A delivery with no repository has repo_id 0 and repo_name '', so it reaches
+-- no repo target and passes no list of repository names.
 SELECT
   false AS is_lease, s.key_hash AS id, s.created_at AS incarnation,
   (CASE WHEN s.arguments ? 'fields' THEN ARRAY(SELECT jsonb_array_elements_text(s.arguments -> 'fields')) END)::text[] AS fields,
   (SELECT COUNT(*) FROM faucet_raw_deliveries d WHERE d.key_hash = s.key_hash AND d.incarnation = s.created_at)::int AS pending
 FROM faucet_subscriptions s
-WHERE s.repo_id = sqlc.arg(repo_id)
+WHERE (
+    (s.target_kind = 'repo' AND s.repo_id = sqlc.arg(repo_id)::bigint AND sqlc.arg(repo_id)::bigint > 0)
+    OR (s.target_kind = 'owner' AND s.owner_id = sqlc.arg(owner_id)::bigint AND sqlc.arg(owner_id)::bigint > 0)
+    OR s.target_kind = 'all'
+  )
   AND s.event_type = 'github.' || sqlc.arg(event)::text
   AND s.expires_at > sqlc.arg(now)
   AND (NOT (s.arguments ? 'actions') OR (s.arguments -> 'actions') ? sqlc.arg(action)::text)
+  AND (NOT (s.arguments ? 'repos') OR (s.arguments -> 'repos') ? lower(sqlc.arg(repo_name)::text))
 UNION ALL
 SELECT
   true, l.id, l.created_at, l.fields,
   (SELECT COUNT(*) FROM faucet_raw_unread u WHERE u.lease_id = l.id AND NOT u.lost)::int
 FROM faucet_raw_leases l
-WHERE l.repo_id = sqlc.arg(repo_id)
+WHERE (
+    (l.target_kind = 'repo' AND l.repo_id = sqlc.arg(repo_id)::bigint AND sqlc.arg(repo_id)::bigint > 0)
+    OR (l.target_kind = 'owner' AND l.owner_id = sqlc.arg(owner_id)::bigint AND sqlc.arg(owner_id)::bigint > 0)
+    OR l.target_kind = 'all'
+  )
   AND l.event = sqlc.arg(event)::text
   AND l.expires_at > sqlc.arg(now)
   AND (cardinality(l.actions) = 0 OR sqlc.arg(action)::text = ANY(l.actions))
+  AND (cardinality(l.repos) = 0 OR lower(sqlc.arg(repo_name)::text) = ANY(l.repos))
 ORDER BY is_lease, id;
 
 -- name: InsertRawEvent :one
