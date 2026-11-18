@@ -89,16 +89,16 @@ func (c cronRoutes) purge(w http.ResponseWriter, r *http.Request) {
 		// ExpiredAccessTokens is left out without the login server, which
 		// keeps no access token.
 		ExpiredAccessTokens *int64 `json:"expired_access_tokens,omitempty"`
-	}{res.Deleted, res.PurgedThrough, res.ExpiredSubscriptions, res.EndedDeliveries, present(c.login != nil, tokens.ExpiredAccessTokens)})
+	}{res.Deleted, res.PurgedThrough, res.ExpiredSubscriptions, res.EndedDeliveries, c.loginCount(tokens.ExpiredAccessTokens)})
 }
 
-// present returns a pointer to v when on, and nil otherwise, which omitempty
-// leaves out of a reply.
-func present[T any](on bool, v T) *T {
-	if !on {
+// loginCount is n when the login server is on, and nil, which omitempty
+// leaves out of a reply, when it is off.
+func (c cronRoutes) loginCount(n int64) *int64 {
+	if c.login == nil {
 		return nil
 	}
-	return &v
+	return &n
 }
 
 func (c cronRoutes) deliver(w http.ResponseWriter, r *http.Request) {
