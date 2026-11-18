@@ -3,6 +3,7 @@ package pgstore
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 
 	"golang.org/x/xerrors"
@@ -151,6 +152,61 @@ func (s *Store) DisableClient(ctx context.Context, id string, now time.Time) (_ 
 		return oauth.Client{}, xerrors.Errorf("disable client: %w", err)
 	}
 	return clientOf(row)
+}
+
+// AddTrustRule implements oauth.Store. The query hashes the rule's values as
+// jsonb, so the same JSON values, written in any order or spacing, are the
+// same rule.
+func (s *Store) AddTrustRule(ctx context.Context, clientID string, r oauth.TrustRule, now time.Time) (_ int64, err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	claims, err := json.Marshal(r.Claims)
+	if err != nil {
+		return 0, xerrors.Errorf("encode the claims: %w", err)
+	}
+	id, err := s.q.AddTrustRule(ctx, database.AddTrustRuleParams{
+		ClientID: clientID, Issuer: r.Issuer, Claims: string(claims), Jwks: string(r.JWKS), CreatedAt: now,
+	})
+	switch {
+	case xerrors.Is(err, sql.ErrNoRows):
+		return 0, oauth.ErrUnknownClient
+	case err != nil:
+		return 0, xerrors.Errorf("add trust rule: %w", err)
+	}
+	return id, nil
+}
+
+// TrustRules implements oauth.Store.
+func (s *Store) TrustRules(ctx context.Context, clientID string) (_ []oauth.StoredTrustRule, err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	rows, err := s.q.ListTrustRules(ctx, clientID)
+	if err != nil {
+		return nil, xerrors.Errorf("list trust rules: %w", err)
+	}
+	rules := make([]oauth.StoredTrustRule, 0, len(rows))
+	for _, row := range rows {
+		rule := oauth.StoredTrustRule{ID: row.ID, Rule: oauth.TrustRule{Issuer: row.Issuer}, CreatedAt: row.CreatedAt}
+		if err := json.Unmarshal([]byte(row.Claims), &rule.Rule.Claims); err != nil {
+			return nil, xerrors.Errorf("read the claims of trust rule %d: %w", row.ID, err)
+		}
+		if row.Jwks != "" {
+			rule.Rule.JWKS = json.RawMessage(row.Jwks)
+		}
+		rules = append(rules, rule)
+	}
+	return rules, nil
+}
+
+// RemoveTrustRule implements oauth.Store.
+func (s *Store) RemoveTrustRule(ctx context.Context, clientID string, id int64) (err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	n, err := s.q.RemoveTrustRule(ctx, database.RemoveTrustRuleParams{ClientID: clientID, ID: id})
+	switch {
+	case err != nil:
+		return xerrors.Errorf("remove trust rule: %w", err)
+	case n == 0:
+		return oauth.ErrUnknownTrustRule
+	}
+	return nil
 }
 
 func clientOf(row database.FaucetServiceClient) (oauth.Client, error) {

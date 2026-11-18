@@ -40,7 +40,16 @@ var (
 	// ErrClientExists means the store already holds a client with that ID,
 	// live or disabled.
 	ErrClientExists = xerrors.New("a client with this ID exists")
+	// ErrUnknownTrustRule means the client holds no trust rule with that ID.
+	ErrUnknownTrustRule = xerrors.New("unknown trust rule")
 )
+
+// StoredTrustRule is a trust rule as a store keeps it for one client.
+type StoredTrustRule struct {
+	ID        int64
+	Rule      TrustRule
+	CreatedAt time.Time
+}
 
 // AccessToken is an access token as a store keeps it: its hash, never the
 // token.
@@ -114,4 +123,22 @@ type Store interface {
 	// A client that is disabled already keeps the time it was first
 	// disabled. It returns ErrUnknownClient when there is no such client.
 	DisableClient(ctx context.Context, id string, now time.Time) (Client, error)
+
+	// AddTrustRule adds r, at now, to the trust rules of the client with this
+	// ID, live or disabled, and returns the rule's ID, which no other rule
+	// ever gets. When the client holds a rule with the same issuer, and the
+	// same JSON values in Claims and JWKS, already, it returns that rule's ID
+	// and changes nothing. It returns ErrUnknownClient when there is no such
+	// client. It does not run ValidateTrustRule: the caller does, and the
+	// checker again at each use, since a later build can refuse a rule.
+	AddTrustRule(ctx context.Context, clientID string, r TrustRule, now time.Time) (int64, error)
+	// TrustRules returns the trust rules of the client with this ID, in the
+	// order they were added, and none for an unknown client. A rule's JWKS
+	// holds the JSON value that was added, not always the same bytes, and is
+	// empty for a rule whose keys come from discovery.
+	TrustRules(ctx context.Context, clientID string) ([]StoredTrustRule, error)
+	// RemoveTrustRule removes the trust rule with this ID from the client
+	// with this ID. It returns ErrUnknownTrustRule when the client holds no
+	// such rule, as when another client holds it.
+	RemoveTrustRule(ctx context.Context, clientID string, id int64) error
 }

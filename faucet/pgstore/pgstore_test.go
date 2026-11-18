@@ -810,7 +810,7 @@ func TestOAuthStoreCallThatItsContextCutShortWrapsTheContextError(t *testing.T) 
 	tx, err := db.BeginTx(context.Background(), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = tx.Rollback() })
-	for _, table := range []string{"faucet_access_tokens", "faucet_service_clients"} {
+	for _, table := range []string{"faucet_access_tokens", "faucet_service_clients", "faucet_workload_trusts"} {
 		_, err = tx.Exec("LOCK TABLE " + table + " IN ACCESS EXCLUSIVE MODE") //nolint:gosec // The names are constants.
 		require.NoError(t, err)
 	}
@@ -844,6 +844,15 @@ func TestOAuthStoreCallThatItsContextCutShortWrapsTheContextError(t *testing.T) 
 			_, err := store.DisableClient(ctx, client.ID, time.Now())
 			return err
 		},
+		"AddTrustRule": func(ctx context.Context) error {
+			_, err := store.AddTrustRule(ctx, client.ID, oauth.TrustRule{Issuer: "https://k8s.wi-test.invalid", Claims: map[string]string{"sub": "system:serviceaccount:apps:digest-bot"}}, time.Now())
+			return err
+		},
+		"TrustRules": func(ctx context.Context) error {
+			_, err := store.TrustRules(ctx, client.ID)
+			return err
+		},
+		"RemoveTrustRule": func(ctx context.Context) error { return store.RemoveTrustRule(ctx, client.ID, 1) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
