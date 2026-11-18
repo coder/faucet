@@ -22,6 +22,7 @@ var accessCheckSubtests = []struct {
 	{"AFreshCheckMovesItsLastUseForwardOnly", aFreshCheckMovesItsLastUseForwardOnly},
 	{"AFreshCheckMovesItsLastUseOnlyWhenItCameBeforeTheBound", aFreshCheckMovesItsLastUseOnlyWhenItCameBeforeTheBound},
 	{"AMissChangesNothing", aMissChangesNothing},
+	{"AnEndedSessionTakesNoCheck", anEndedSessionTakesNoCheck},
 	{"AnOlderCheckNeverReplacesALaterOne", anOlderCheckNeverReplacesALaterOne},
 	{"AnOlderPassNeverReplacesALaterDenial", anOlderPassNeverReplacesALaterDenial},
 	{"ALaterPassReplacesAnOlderDenial", aLaterPassReplacesAnOlderDenial},
@@ -209,6 +210,20 @@ func aMissChangesNothing(t *testing.T, s oauth.Store) {
 	requireStale(t, s, "no-such-session", "o/stale", later)
 	requireChecks(t, s, c.ID, []oauth.AccessCheck{stale})
 	requireChecks(t, s, other.ID, []oauth.AccessCheck{theirs})
+}
+
+// A session that ended takes no check of its connection, and changes none.
+func anEndedSessionTakesNoCheck(t *testing.T, s oauth.Store) {
+	now := loginNow()
+	c := connectionAt(1, now)
+	session := newSession(t, s, "req-1", c, now)
+	check := checkOf(c, "o/r", 11, now)
+	storeCheck(t, s, check)
+	requireFresh(t, s, session.ID, "o/r", now, 11)
+	require.NoError(t, s.EndSession(context.Background(), session.ID, now.Add(time.Minute)))
+
+	requireStale(t, s, session.ID, "o/r", now.Add(2*time.Minute))
+	requireChecks(t, s, c.ID, []oauth.AccessCheck{check}, "the miss moved no last use")
 }
 
 // Two lookups of one repository can answer in either order. The check whose

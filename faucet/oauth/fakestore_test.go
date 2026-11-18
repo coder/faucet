@@ -530,7 +530,7 @@ func (s *fakeStore) FreshAccessCheck(ctx context.Context, sessionID, repo string
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	session, ok := s.sessions[sessionID]
-	if !ok {
+	if !ok || !session.Live() {
 		return 0, false, nil
 	}
 	key := accessCheckKey{session.ConnectionID, repo}

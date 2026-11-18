@@ -16,3 +16,5 @@ CREATE TABLE faucet_access_checks (
   last_used_at timestamptz NOT NULL,
   PRIMARY KEY (connection_id, repo)
 );
+-- A refresh reads the checks of its connection that were used last.
+CREATE INDEX faucet_access_checks_recent_idx ON faucet_access_checks (connection_id, last_used_at DESC, repo);

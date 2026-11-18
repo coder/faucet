@@ -48,11 +48,12 @@ func (c AccessCheck) Validate() error {
 // storetest.RunOAuth checks an implementation.
 type AccessCheckStore interface {
 	// FreshAccessCheck looks for the pass of repo by the connection of the
-	// session with this ID that started at or after the session's refreshed
-	// time. When it finds one, it returns its repository ID and true, and
-	// when the check's last use came before usedBefore, it sets the last use
-	// to now, never earlier than it was. Otherwise it returns 0 and false
-	// and changes nothing, as for a denial or an unknown session.
+	// live session with this ID that started at or after the session's
+	// refreshed time. When it finds one, it returns its repository ID and
+	// true, and when the check's last use came before usedBefore, it sets
+	// the last use to now, never earlier than it was. Otherwise it returns 0
+	// and false and changes nothing, as for a denial, an ended session or an
+	// unknown one.
 	FreshAccessCheck(ctx context.Context, sessionID, repo string, now, usedBefore time.Time) (int64, bool, error)
 	// StoreAccessCheck stores c, a pass or a denial, in place of the
 	// connection's check of c.Repo. A stored check that started later stays

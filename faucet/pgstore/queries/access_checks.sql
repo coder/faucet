@@ -1,14 +1,15 @@
 -- name: FreshAccessCheck :one
 -- FreshAccessCheck takes the pass of a repository by the connection of a
--- session when the pass started at or after the session's last refresh.
+-- live session when the pass started at or after the session's last
+-- refresh.
 -- It moves the check's last use forward to now only when the last use came
 -- before used_before, so a use that moves nothing writes no row.
 WITH fresh AS (
   SELECT a.connection_id, a.repo, a.repo_id
   FROM faucet_access_checks a
   JOIN faucet_user_sessions s ON s.connection_id = a.connection_id
-  WHERE s.id = @session_id AND a.repo = @repo AND a.repo_id IS NOT NULL
-    AND a.checked_at >= s.refreshed_at
+  WHERE s.id = @session_id AND s.ended_at IS NULL AND a.repo = @repo
+    AND a.repo_id IS NOT NULL AND a.checked_at >= s.refreshed_at
 ), used AS (
   UPDATE faucet_access_checks a
   SET last_used_at = greatest(a.last_used_at, @now::timestamptz)
