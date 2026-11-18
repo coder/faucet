@@ -8,3 +8,10 @@ sql:
         package: database
         out: faucet/pgstore/database
         sql_package: database/sql
+        overrides:
+          # A nullable jsonb column scans into []byte, nil for NULL, so the
+          # generated code needs no module beyond database/sql.
+          - db_type: jsonb
+            nullable: true
+            go_type:
+              type: "[]byte"

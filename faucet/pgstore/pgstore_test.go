@@ -217,7 +217,7 @@ func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {
 	require.EqualValues(t, 400, hostVersion)
 	var faucetVersion int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM `+pq.QuoteIdentifier(pgstore.MigrationsTable)).Scan(&faucetVersion))
-	require.EqualValues(t, 16, faucetVersion)
+	require.EqualValues(t, 17, faucetVersion)
 }
 
 // The raw events migration adds tables of its own and one index. A down
@@ -434,6 +434,50 @@ func TestTheOrgGrantsMigrationBindsEachLoginToTheAccountThatHoldsItAndBack(t *te
 	runMigrationFile(t, db, "000016_org_grant_accounts.down.sql")
 	require.Equal(t, []string{"repo:coder/faucet", "org:coder-legacy", "all", "org:octo#9", "org:gone"}, grantsOf("orgs"),
 		"a renamed account's grant takes its new login, not the old one that account 99 holds now, and account 9 lost its login to 10")
+}
+
+// The workload trusts migration lets a client have no secret. Its down drops
+// the trust rules and gives each client with no secret the hash of its own
+// random value, which no one holds, as the build before needs a hash.
+func TestTheWorkloadTrustsMigrationGivesEachClientWithNoSecretAHashOfItsOwnOnTheWayDown(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	ctx := context.Background()
+	// secretHash is an any, as lib/pq sends a nil []byte as an empty bytea,
+	// not as NULL.
+	insertClient := func(id string, secretHash any) {
+		t.Helper()
+		_, err := db.ExecContext(ctx, `INSERT INTO faucet_service_clients (client_id, secret_hash, resource, grants, scopes, created_at)
+			VALUES ($1, $2, 'https://faucet.example.com/github/mcp', '{repo:coder/faucet}', '{events:read}', now())`, id, secretHash)
+		require.NoError(t, err)
+	}
+	secretHashOf := func(id string) (hash []byte) {
+		t.Helper()
+		require.NoError(t, db.QueryRowContext(ctx, `SELECT secret_hash FROM faucet_service_clients WHERE client_id = $1`, id).Scan(&hash))
+		return hash
+	}
+	secret := oauth.HashToken("fcs_kept")
+	insertClient("with-secret", secret[:])
+	insertClient("workload-a", nil)
+	insertClient("workload-b", nil)
+	_, err := db.ExecContext(ctx, `INSERT INTO faucet_workload_trusts (client_id, issuer, claims, rule_hash, created_at)
+		VALUES ('workload-a', 'https://k8s.wi-test.invalid', '{"sub":"system:serviceaccount:apps:digest-bot"}', sha256('rule'), now())`)
+	require.NoError(t, err)
+
+	runMigrationFile(t, db, "000017_workload_trusts.down.sql")
+	require.Equal(t, secret[:], secretHashOf("with-secret"))
+	a, b := secretHashOf("workload-a"), secretHashOf("workload-b")
+	require.Len(t, a, 32)
+	require.Len(t, b, 32)
+	require.NotEqual(t, a, b, "each client gets the hash of a value of its own, which no one can know")
+	_, err = db.ExecContext(ctx, `UPDATE faucet_service_clients SET secret_hash = NULL WHERE client_id = 'workload-a'`)
+	require.Error(t, err, "a client needs a secret hash again")
+	var trusts *string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT to_regclass('faucet_workload_trusts')::text`).Scan(&trusts))
+	require.Nil(t, trusts, "the trust rules are gone")
+
+	runMigrationFile(t, db, "000017_workload_trusts.up.sql")
+	insertClient("workload-c", nil)
 }
 
 func TestTheClearMigrationMovesTheOldTopToTheClearAndBack(t *testing.T) {
