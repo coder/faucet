@@ -148,8 +148,8 @@ func parseTrustRule(r TrustRule) (trustRule, error) {
 	switch {
 	case len(r.Issuer) > maxURIBytes:
 		return trustRule{}, xerrors.Errorf("a trust rule's issuer must be at most %d bytes", maxURIBytes)
-	case !printable(r.Issuer):
-		return trustRule{}, xerrors.New("a trust rule's issuer must be valid UTF-8 with no control character")
+	case !printable(r.Issuer) || strings.ContainsFunc(r.Issuer, unicode.IsSpace):
+		return trustRule{}, xerrors.New("a trust rule's issuer must be valid UTF-8 with no control character or white space")
 	case err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || strings.Contains(r.Issuer, "#"):
 		return trustRule{}, xerrors.New("a trust rule's issuer must be an https URL with a host, and no user info, query or fragment")
 	case len(r.Claims) == 0:

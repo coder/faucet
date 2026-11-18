@@ -396,8 +396,8 @@ func TestTheClientsCommandMakesAClientForWorkloadsAndManagesItsTrustRules(t *tes
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	require.Len(t, lines, 3)
 	require.Regexp(t, `^RULE ID\s+ISSUER\s+CLAIMS\s+KEYS\s+CREATED$`, lines[0])
-	require.Regexp(t, `^`+vercelID+`\s+https://oidc\.vercel\.com/codercom\s+environment=production,owner_id=`+codercomTeam+`,project_id=`+digestProject+`\s+discovery\s+\S+Z$`, lines[1])
-	require.Regexp(t, `^`+clusterID+`\s+https://k8s\.wi-test\.invalid\s+sub=system:serviceaccount:apps:digest-bot\s+pasted\s+\S+Z$`, lines[2])
+	require.Regexp(t, `^`+vercelID+`\s+https://oidc\.vercel\.com/codercom\s+\{"environment":"production","owner_id":"`+codercomTeam+`","project_id":"`+digestProject+`"\}\s+discovery\s+\S+Z$`, lines[1])
+	require.Regexp(t, `^`+clusterID+`\s+https://k8s\.wi-test\.invalid\s+\{"sub":"system:serviceaccount:apps:digest-bot"\}\s+pasted\s+\S+Z$`, lines[2])
 	out, _, err = clients(t, getenv, "list")
 	require.NoError(t, err)
 	require.Regexp(t, `(?m)^digest-bot\s+.*\s-\s+no\s+2$`, out, "the list shows that the client has no secret and two rules")
@@ -411,6 +411,23 @@ func TestTheClientsCommandMakesAClientForWorkloadsAndManagesItsTrustRules(t *tes
 	require.NoError(t, err)
 	require.Len(t, rules, 1)
 	require.Equal(t, clusterIssuer, rules[0].Rule.Issuer)
+}
+
+// A claim value can hold a comma, an equals sign or a quote, so trusts prints
+// the claims of a rule as one JSON object, which no value can end early.
+func TestTrustsPrintsTheClaimsOfARuleAsOneJSONObject(t *testing.T) {
+	t.Parallel()
+	getenv, _ := newClientsDatabase(t)
+	_, _, err := clients(t, getenv, "create", "-resource", "https://faucet.example.com/github/mcp", "-no-secret", "-grant", "repo:coder/faucet", "digest-bot")
+	require.NoError(t, err)
+	_, _, err = clients(t, getenv, "trust", "digest-bot", "-issuer", clusterIssuer,
+		"-claim", "sub=system:serviceaccount:apps:bot,environment=production", "-claim", `kubernetes.io/namespace="apps"`)
+	require.NoError(t, err)
+	out, _, err := clients(t, getenv, "trusts", "digest-bot")
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	require.Len(t, lines, 2)
+	require.Equal(t, `{"kubernetes.io/namespace":"\"apps\"","sub":"system:serviceaccount:apps:bot,environment=production"}`, strings.Fields(lines[1])[2])
 }
 
 // trust runs ValidateTrustRule first, so its errors say what to pin and why,

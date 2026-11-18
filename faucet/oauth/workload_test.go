@@ -166,6 +166,7 @@ func TestARuleNamesAnHTTPSIssuerAndPinsAClaimToAValue(t *testing.T) {
 		"a long value":   {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": strings.Repeat("v", 257)}}, "must be at most 256 bytes"},
 
 		"a C1 control in the issuer":  {oauth.TrustRule{Issuer: "https://issuer.example.com/\u0085", Claims: sub}, "a trust rule's issuer must be valid UTF-8 with no control character"},
+		"a space in the issuer":       {oauth.TrustRule{Issuer: "https://issuer.example.com/a b", Claims: sub}, "a trust rule's issuer must be valid UTF-8 with no control character or white space"},
 		"invalid UTF-8 in the issuer": {oauth.TrustRule{Issuer: "https://issuer.example.com/\xff", Claims: sub}, "a trust rule's issuer must be valid UTF-8 with no control character"},
 		"a NUL in a value":            {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a\x00b"}}, "a trust rule's claim names and values must be valid UTF-8 with no control character"},
 		"an escape code in a value":   {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a\x1b[2K"}}, "must be valid UTF-8 with no control character"},

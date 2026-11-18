@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -388,7 +389,13 @@ func listTrustRules(ctx context.Context, id string, store oauth.Store, stdout io
 		if len(r.Rule.JWKS) > 0 {
 			keys = "pasted"
 		}
-		_, _ = fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", r.ID, r.Rule.Issuer, strings.Join(sortedClaims(r.Rule.Claims), ","), keys, r.CreatedAt.UTC().Format(time.RFC3339))
+		// JSON, with its keys sorted, so that no value can fake a column or
+		// another pin.
+		claims, err := json.Marshal(r.Rule.Claims)
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", r.ID, r.Rule.Issuer, claims, keys, r.CreatedAt.UTC().Format(time.RFC3339))
 	}
 	return w.Flush()
 }
