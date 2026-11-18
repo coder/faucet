@@ -517,9 +517,10 @@ func TestARenewalChecksAccessAgainForEveryKindOfCaller(t *testing.T) {
 		}
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
+	t.Cleanup(cancel)
 
 	t.Run("GitHubToken", func(t *testing.T) {
+		t.Parallel()
 		person := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, aliceToken)
 		require.NoError(t, subscribeTo(ctx, person, "o/r"))
 		srv.github.mu.Lock()
@@ -530,6 +531,7 @@ func TestARenewalChecksAccessAgainForEveryKindOfCaller(t *testing.T) {
 		require.Contains(t, rpcErr.Message, "not found or not accessible")
 	})
 	t.Run("Service", func(t *testing.T) {
+		t.Parallel()
 		secret := srv.client(t, "ci-watcher", "/github/mcp", bothScopes, "repo:octo-org/octo-repo")
 		srv.deliver(t, "d-1")
 		service := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, srv.token(t, "ci-watcher", secret))
