@@ -213,3 +213,34 @@ func TestDisablingAClientDeletesItsSubscriptions(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, deleted, "another caller's subscription stays")
 }
+
+// DATABASE_URL is Neon's pooled URL on Vercel, so the commands open it as
+// the server does, or every statement with a parameter fails behind the
+// pooler.
+func TestTheClientsCommandWorksThroughATransactionModePooler(t *testing.T) {
+	t.Parallel()
+	direct, _ := newClientsDatabase(t)
+	pooled := throughPooler(t, direct(envDatabaseURL))
+	getenv := func(name string) string { return map[string]string{envDatabaseURL: pooled}[name] }
+
+	_, _, err := clients(t, getenv, "create", "-resource", "https://faucet.example.com/github/mcp", "-grant", "repo:coder/faucet", "ci-watcher")
+	require.NoError(t, err)
+	out, _, err := clients(t, getenv, "list")
+	require.NoError(t, err)
+	require.Contains(t, out, "ci-watcher")
+	_, _, err = clients(t, getenv, "disable", "ci-watcher")
+	require.NoError(t, err)
+}
+
+// The pooler of the test above fails a statement that is parsed and bound
+// in two round trips, as a real one does.
+func TestTheTestPoolerFailsAStatementBoundInASecondRoundTrip(t *testing.T) {
+	t.Parallel()
+	direct, _ := newClientsDatabase(t)
+	db, err := dbconn.Open(throughPooler(t, direct(envDatabaseURL)))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	var one int
+	err = db.QueryRowContext(context.Background(), "SELECT $1::int", 1).Scan(&one)
+	require.ErrorContains(t, err, "unnamed prepared statement does not exist")
+}

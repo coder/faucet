@@ -48,7 +48,8 @@ func runClients(ctx context.Context, args []string, getenv func(string) string, 
 		}
 		publicURL = u
 	}
-	db, err := dbconn.Open(databaseURL)
+	// DATABASE_URL can be a transaction-mode pooler, as on Vercel with Neon.
+	db, err := dbconn.OpenPooled(databaseURL)
 	if err != nil {
 		return xerrors.Errorf("%s: %w", envDatabaseURL, err)
 	}
