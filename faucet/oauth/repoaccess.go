@@ -28,6 +28,9 @@ const (
 	// accessCheckRetention is how long a check that no session uses stays,
 	// until the purge deletes it.
 	accessCheckRetention = 24 * time.Hour
+	// recordTimeout bounds the store write that keeps an answer of GitHub,
+	// which runs to its end however the caller's request ends.
+	recordTimeout = 5 * time.Second
 )
 
 // repoAccess asks GitHub whether the GitHub token of a user's connection can
@@ -43,15 +46,22 @@ type repoAccess struct {
 // ask asks GitHub whether the connection of session can read repo, with its
 // GitHub token refreshed first when it expires within a minute. When GitHub
 // rejects the token, it refreshes the token once and asks once more. repo is
-// in lower case, and the answer counts from the time before the lookup.
+// in lower case, and the answer counts from the time before the lookup. A
+// denial stands even when recording it fails, which it logs. A pass that it
+// cannot record is an error.
 func (r repoAccess) ask(ctx context.Context, session faucet.OAuthSession, repo string) (int64, error) {
 	started := r.tokens.clock.Now()
-	id, err := r.lookup(ctx, session, repo)
+	id, answer := r.lookup(ctx, session, repo)
 	check := AccessCheck{ConnectionID: session.ConnectionID, Repo: repo, RepoID: id, CheckedAt: started, LastUsedAt: started}
-	if err := r.record(ctx, check, err); err != nil {
-		return 0, err
+	err := r.record(ctx, check, answer)
+	switch {
+	case err == nil:
+		return id, answer
+	case xerrors.Is(answer, faucet.ErrNoAccess):
+		r.tokens.logger.Warn(ctx, "could not delete the access check of a repository that GitHub denied, the denial stands", slog.F("session_id", session.SessionID), slog.F("connection_id", session.ConnectionID), slog.F("repo", repo), slog.Error(err))
+		return 0, answer
 	}
-	return id, err
+	return 0, err
 }
 
 func (r repoAccess) lookup(ctx context.Context, session faucet.OAuthSession, repo string) (int64, error) {
@@ -85,6 +95,11 @@ func (r repoAccess) check(ctx context.Context, token githubToken, repo string) (
 // it. A denial for one session thus also takes the check away from the
 // other sessions of the connection.
 func (r repoAccess) record(ctx context.Context, c AccessCheck, answer error) error {
+	// GitHub answered, so the write runs to its end however the caller's
+	// request ends: a denial that is not recorded leaves a check that the
+	// other sessions of the connection take.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
 	switch {
 	case answer == nil:
 		if err := r.tokens.store.StoreAccessCheck(ctx, c); err != nil {

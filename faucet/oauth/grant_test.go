@@ -219,6 +219,9 @@ type grantHarness struct {
 	store  oauth.Store
 	clock  *quartz.Mock
 	github *grantGitHub
+	// repos asks github, for the server and for each UserAccess of the
+	// harness.
+	repos  *cancelingRepos
 	login  *oauth.BrowserLogin
 	server *oauth.Server
 	srv    *httptest.Server
@@ -236,10 +239,11 @@ type grantRequest struct {
 func newGrantHarness(t *testing.T, store oauth.Store) *grantHarness {
 	t.Helper()
 	h := &grantHarness{t: t, store: store, clock: quartz.NewMock(t), github: newGrantGitHub(t)}
+	h.repos = &cancelingRepos{RepoChecker: h.github.repos()}
 	h.login = testBrowserLogin(t, h.github.URL)
 	server, err := oauth.NewServer(oauth.ServerDeps{
 		Store: store, Clock: h.clock, Logger: slog.Make(), Issuer: issuer,
-		Resources: []string{resource, issuer + "/mcp"}, Login: h.login, Repos: h.github.repos(),
+		Resources: []string{resource, issuer + "/mcp"}, Login: h.login, Repos: h.repos,
 	})
 	require.NoError(t, err)
 	h.server = server

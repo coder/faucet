@@ -3,11 +3,14 @@ package oauth_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,6 +101,46 @@ func (h *grantHarness) storeCheck(userID int64, repo string, at time.Time) {
 		ConnectionID: oauth.ConnectionID(oauth.ProviderGitHub, userID), Repo: repo, RepoID: grantRepoID,
 		CheckedAt: at, LastUsedAt: at,
 	}))
+}
+
+// cancelingRepos is a RepoChecker that can cancel a context right after the
+// checker that it wraps answers, as when the caller gives up just then.
+type cancelingRepos struct {
+	oauth.RepoChecker
+	mu     sync.Mutex
+	cancel context.CancelFunc
+}
+
+// cancelAfterAnswer makes the next answer call cancel.
+func (c *cancelingRepos) cancelAfterAnswer(cancel context.CancelFunc) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cancel = cancel
+}
+
+func (c *cancelingRepos) RepoID(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
+	id, err := c.RepoChecker.RepoID(ctx, p, repo)
+	c.mu.Lock()
+	cancel := c.cancel
+	c.cancel = nil
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return id, err
+}
+
+// serveToken sends form to the token endpoint of the server in a request
+// with ctx, and returns the reply.
+func (h *grantHarness) serveToken(ctx context.Context, form url.Values) tokenReply {
+	h.t.Helper()
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, oauth.TokenPath, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.server.TokenHandler().ServeHTTP(rec, req)
+	reply := tokenReply{status: rec.Code, header: rec.Header(), rawBody: rec.Body.String()}
+	require.NoError(h.t, json.Unmarshal(rec.Body.Bytes(), &reply.body), reply.rawBody)
+	return reply
 }
 
 func numberedRepos(n int) []string {
@@ -314,6 +357,71 @@ func TestThePurgeDeletesTheChecksThatNoSessionUsedForADay(t *testing.T) {
 			require.NoError(t, err)
 			require.EqualValues(t, 1, res.UnusedAccessChecks)
 			require.Equal(t, []string{"o/used"}, h.checkedRepos(1))
+		})
+	}
+}
+
+// A caller that gives up right after GitHub denied a repository gets the
+// denial, and the denial still deletes the stored check.
+func TestADenialCountsWhenItsCallerGivesUpRightAfterIt(t *testing.T) {
+	t.Parallel()
+	for name, newStore := range usertokensStores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newGrantHarness(t, newStore(t))
+			p := h.principal(h.redeem(h.approve("login-1", 1)))
+			access := h.userAccess()
+			h.storeCheck(1, "o/x", h.clock.Now().Add(-time.Minute))
+			h.github.set(func(g *grantGitHub) { g.denied["o/x"] = true })
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			h.repos.cancelAfterAnswer(cancel)
+			_, err := access.RepoID(ctx, p, "o/x")
+			require.ErrorIs(t, err, faucet.ErrNoAccess)
+			require.NotErrorIs(t, err, context.Canceled)
+			require.Empty(t, h.checkedRepos(1), "the denial deleted the check")
+		})
+	}
+}
+
+// A denial stands when the store cannot delete the check. A pass that the
+// store cannot keep is an error.
+func TestADenialStandsWhenTheStoreCannotRecordIt(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	h := newGrantHarness(t, store)
+	p := h.principal(h.redeem(h.approve("login-1", 1)))
+	access := h.userAccess()
+	broken := errors.New("the store is down")
+	store.fail("DeleteAccessCheck", broken)
+	store.fail("StoreAccessCheck", broken)
+	h.github.set(func(g *grantGitHub) { g.denied["o/x"] = true })
+
+	require.ErrorIs(t, h.repoID(access, p, "o/x").err, faucet.ErrNoAccess)
+	require.ErrorIs(t, h.repoID(access, p, "o/y").err, broken)
+}
+
+// A refresh whose request ends right after GitHub denied a repository that
+// the refresh checks again still deletes the check, and answers with tokens
+// that work.
+func TestARecheckDenialCountsWhenTheRefreshRequestEndsRightAfterIt(t *testing.T) {
+	t.Parallel()
+	for name, newStore := range usertokensStores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newGrantHarness(t, newStore(t))
+			s := h.redeem(h.approve("login-1", 1))
+			h.storeCheck(1, "o/x", h.clock.Now())
+			h.github.set(func(g *grantGitHub) { g.denied["o/x"] = true })
+			h.clock.Advance(time.Minute)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			h.repos.cancelAfterAnswer(cancel)
+			next := grantTokens(t, s.id, h.serveToken(ctx, grantRefreshForm(s.refresh)))
+			require.Empty(t, h.checkedRepos(1), "the denial deleted the check")
+			h.principal(next)
 		})
 	}
 }

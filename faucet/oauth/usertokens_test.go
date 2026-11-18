@@ -113,7 +113,7 @@ func (h *grantHarness) principal(s grantSession) faucet.Principal {
 func (h *grantHarness) userAccess() oauth.UserAccess {
 	h.t.Helper()
 	a, err := oauth.NewUserAccess(oauth.UserAccessDeps{
-		Store: h.store, Clock: h.clock, Logger: slog.Make(), Login: *h.login, Repos: h.github.repos(),
+		Store: h.store, Clock: h.clock, Logger: slog.Make(), Login: *h.login, Repos: h.repos,
 	})
 	require.NoError(h.t, err)
 	return a

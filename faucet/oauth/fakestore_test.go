@@ -24,7 +24,11 @@ type fakeStore struct {
 	sessions    map[string]oauth.Session
 	refresh     map[oauth.TokenHash]oauth.RefreshToken
 	connections map[string]oauth.Connection
-	checks      map[accessCheckKey]oauth.AccessCheck
+	// checks are the access checks. Their methods fail once their context
+	// is done, as Postgres does, and with the error that failing holds for
+	// their name.
+	checks  map[accessCheckKey]oauth.AccessCheck
+	failing map[string]error
 	// connectionLocks holds a lock per connection ID, which RefreshConnection
 	// holds while its callback runs and ApproveAuthRequest takes, as the row
 	// lock does in Postgres. A caller takes it before mu, never while it
@@ -42,6 +46,7 @@ func newFakeStore() *fakeStore {
 		refresh:         map[oauth.TokenHash]oauth.RefreshToken{},
 		connections:     map[string]oauth.Connection{},
 		checks:          map[accessCheckKey]oauth.AccessCheck{},
+		failing:         map[string]error{},
 		connectionLocks: map[string]*sync.Mutex{},
 	}
 }
@@ -49,6 +54,25 @@ func newFakeStore() *fakeStore {
 // accessCheckKey is what names an access check: a connection has one check
 // per repository.
 type accessCheckKey struct{ connectionID, repo string }
+
+// fail makes each call of the method with this name fail with err, and nil
+// makes the calls work again.
+func (s *fakeStore) fail(method string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failing[method] = err
+}
+
+// callErr is the error that a call of the method with this name fails with:
+// the error of ctx once it is done, or the one that fail set.
+func (s *fakeStore) callErr(ctx context.Context, method string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.failing[method]
+}
 
 func cloneClient(c oauth.Client) oauth.Client {
 	c.Grants, c.Scopes = slices.Clone(c.Grants), slices.Clone(c.Scopes)
@@ -497,7 +521,10 @@ func (s *fakeStore) DeleteExpiredAuthRequests(_ context.Context, now, codesBefor
 	return n, nil
 }
 
-func (s *fakeStore) FreshAccessCheck(_ context.Context, sessionID, repo string, now time.Time) (int64, bool, error) {
+func (s *fakeStore) FreshAccessCheck(ctx context.Context, sessionID, repo string, now time.Time) (int64, bool, error) {
+	if err := s.callErr(ctx, "FreshAccessCheck"); err != nil {
+		return 0, false, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	session, ok := s.sessions[sessionID]
@@ -516,7 +543,10 @@ func (s *fakeStore) FreshAccessCheck(_ context.Context, sessionID, repo string, 
 	return c.RepoID, true, nil
 }
 
-func (s *fakeStore) StoreAccessCheck(_ context.Context, c oauth.AccessCheck) error {
+func (s *fakeStore) StoreAccessCheck(ctx context.Context, c oauth.AccessCheck) error {
+	if err := s.callErr(ctx, "StoreAccessCheck"); err != nil {
+		return err
+	}
 	if err := c.Validate(); err != nil {
 		return err
 	}
@@ -538,14 +568,20 @@ func (s *fakeStore) StoreAccessCheck(_ context.Context, c oauth.AccessCheck) err
 	return nil
 }
 
-func (s *fakeStore) DeleteAccessCheck(_ context.Context, connectionID, repo string) error {
+func (s *fakeStore) DeleteAccessCheck(ctx context.Context, connectionID, repo string) error {
+	if err := s.callErr(ctx, "DeleteAccessCheck"); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.checks, accessCheckKey{connectionID, repo})
 	return nil
 }
 
-func (s *fakeStore) RecentAccessChecks(_ context.Context, connectionID string, usedSince time.Time, limit int) ([]oauth.AccessCheck, error) {
+func (s *fakeStore) RecentAccessChecks(ctx context.Context, connectionID string, usedSince time.Time, limit int) ([]oauth.AccessCheck, error) {
+	if err := s.callErr(ctx, "RecentAccessChecks"); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var checks []oauth.AccessCheck
@@ -563,7 +599,10 @@ func (s *fakeStore) RecentAccessChecks(_ context.Context, connectionID string, u
 	return checks[:min(len(checks), max(limit, 0))], nil
 }
 
-func (s *fakeStore) DeleteUnusedAccessChecks(_ context.Context, usedBefore time.Time) (int64, error) {
+func (s *fakeStore) DeleteUnusedAccessChecks(ctx context.Context, usedBefore time.Time) (int64, error) {
+	if err := s.callErr(ctx, "DeleteUnusedAccessChecks"); err != nil {
+		return 0, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := len(s.checks)
