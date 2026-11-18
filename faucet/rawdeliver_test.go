@@ -395,7 +395,7 @@ func TestDeliverDueTellsARawSubscriptionOfAnEventTooLargeToSend(t *testing.T) {
 // A purge takes the payload of an event whose delivery waits: a run that
 // waits over an hour, while the subscriber renews and /cron/purge runs, finds
 // it cleared, and a retention under an hour deletes the event. Either way the
-// subscription learns that it missed the event, and the cursor of the next
+// subscription learns that it missed the event, and the cursor of a later
 // event passes it.
 func TestDeliverDueTellsARawSubscriptionOfAnEventThatAPurgeTookBeforeItWasSent(t *testing.T) {
 	t.Parallel()
@@ -440,8 +440,19 @@ func TestDeliverDueTellsARawSubscriptionOfAnEventThatAPurgeTookBeforeItWasSent(t
 			// The requests without a type are the events.
 			events := d.rcv.envelopesOf("/hook", "")
 			require.Len(t, events, 1)
-			require.Equal(t, fmt.Sprintf("r1.%d", next-1), events[0].body(t).Cursor, "the next event is sent, and its cursor passes the missed one")
-			require.Zero(t, d.deliverDue().GapsSent, "the gap is sent once")
+			// The run's workers claim the two deliveries at once, so the
+			// next event's cursor is the watermark at its claim: below the
+			// missed event while that delivery is queued, and past it once
+			// that delivery ended.
+			require.Contains(t, []string{fmt.Sprintf("r1.%d", missed-1), fmt.Sprintf("r1.%d", next-1)}, events[0].body(t).Cursor)
+
+			later := d.pushRaw(nil)
+			res = d.deliverDue()
+			require.Equal(t, 1, res.Delivered)
+			require.Zero(t, res.GapsSent, "the gap is sent once")
+			events = d.rcv.envelopesOf("/hook", "")
+			require.Len(t, events, 2)
+			require.Equal(t, fmt.Sprintf("r1.%d", later-1), events[1].body(t).Cursor, "the cursor of a later event passes the missed one")
 		})
 	}
 }
