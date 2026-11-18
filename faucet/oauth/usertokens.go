@@ -230,9 +230,9 @@ func NewUserAccess(d UserAccessDeps) (UserAccess, error) {
 // RepoIDFresh implements faucet.Authorizer: it asks the RepoChecker with the
 // user's GitHub token, refreshed first when it expires within a minute.
 // When GitHub rejects the token, it refreshes the token once and asks once
-// more. A pass becomes the connection's check of the repository, and a
-// denial deletes the check. A principal that is not an OAuth user is
-// faucet.ErrNoAccess.
+// more. A pass becomes the connection's check of the repository. A denial
+// deletes the check, and so does a token that GitHub rejects even after the
+// refresh. A principal that is not an OAuth user is faucet.ErrNoAccess.
 func (a UserAccess) RepoIDFresh(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
 	session, err := userSession(p)
 	if err != nil {

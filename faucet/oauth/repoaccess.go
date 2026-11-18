@@ -51,40 +51,45 @@ type repoAccess struct {
 // ask asks GitHub whether the connection of session can read repo, with its
 // GitHub token refreshed first when it expires within a minute. When GitHub
 // rejects the token, it refreshes the token once and asks once more. repo is
-// in lower case, and the answer counts from the time before the lookup. A
-// denial stands even when recording it fails, which it logs. A pass that it
-// cannot record is an error.
+// in lower case, and the answer counts from the time before the lookup. An
+// answer that takes the check away stands even when recording it fails,
+// which it logs. A pass that it cannot record is an error.
 func (r repoAccess) ask(ctx context.Context, session faucet.OAuthSession, repo string) (int64, error) {
+	logger := r.tokens.logger.With(slog.F("session_id", session.SessionID), slog.F("connection_id", session.ConnectionID))
 	started := r.tokens.clock.Now()
-	id, answer := r.lookup(ctx, session, repo)
+	token, answer := r.tokens.accessToken(ctx, session.ConnectionID, r.tokens.expiresWithin(userTokenMargin))
+	var id int64
+	if answer == nil {
+		id, _, answer = r.lookup(ctx, logger, session.ConnectionID, token, repo)
+	}
 	check := AccessCheck{ConnectionID: session.ConnectionID, Repo: repo, RepoID: id, CheckedAt: started, LastUsedAt: started}
 	err := r.record(ctx, check, answer)
 	switch {
 	case err == nil:
 		return id, answer
-	case xerrors.Is(answer, faucet.ErrNoAccess):
-		r.tokens.logger.Warn(ctx, "could not delete the access check of a repository that GitHub denied, the denial stands", slog.F("session_id", session.SessionID), slog.F("connection_id", session.ConnectionID), slog.F("repo", repo), slog.Error(err))
+	case refused(answer):
+		logger.Warn(ctx, "could not delete the access check of a repository that GitHub refused, the refusal stands", slog.F("repo", repo), slog.Error(err))
 		return 0, answer
 	}
 	return 0, err
 }
 
-func (r repoAccess) lookup(ctx context.Context, session faucet.OAuthSession, repo string) (int64, error) {
-	token, err := r.tokens.accessToken(ctx, session.ConnectionID, r.tokens.expiresWithin(userTokenMargin))
-	if err != nil {
-		return 0, err
-	}
+// lookup asks GitHub with token whether it can read repo. When GitHub
+// rejects the token, it refreshes the token of the connection once and asks
+// once more with the new one. It returns the token that it asked with last.
+func (r repoAccess) lookup(ctx context.Context, logger slog.Logger, connectionID string, token githubToken, repo string) (int64, githubToken, error) {
 	id, err := r.check(ctx, token, repo)
 	if !xerrors.Is(err, faucet.ErrInvalidToken) {
-		return id, err
+		return id, token, err
 	}
-	r.tokens.logger.Info(ctx, "GitHub rejected the stored token of a connection, refreshing it", slog.F("session_id", session.SessionID), slog.F("connection_id", session.ConnectionID))
+	logger.Info(ctx, "GitHub rejected the stored token of a connection, refreshing it")
 	rejected := token.access
-	token, err = r.tokens.accessToken(ctx, session.ConnectionID, func(_ Connection, access string) bool { return access == rejected })
+	fresh, err := r.tokens.accessToken(ctx, connectionID, func(_ Connection, access string) bool { return access == rejected })
 	if err != nil {
-		return 0, err
+		return 0, token, err
 	}
-	return r.check(ctx, token, repo)
+	id, err = r.check(ctx, fresh, repo)
+	return id, fresh, err
 }
 
 func (r repoAccess) check(ctx context.Context, token githubToken, repo string) (int64, error) {
@@ -96,12 +101,12 @@ func (r repoAccess) check(ctx context.Context, token githubToken, repo string) (
 }
 
 // record keeps answer, GitHub's answer to the lookup of c: c is stored when
-// GitHub let the token read the repository, and deleted when GitHub denied
-// it. A denial for one session thus also takes the check away from the
-// other sessions of the connection.
+// GitHub let the token read the repository, and deleted when GitHub refused,
+// as refused says. A refusal for one session thus also takes the check away
+// from the other sessions of the connection.
 func (r repoAccess) record(ctx context.Context, c AccessCheck, answer error) error {
 	// GitHub answered, so the write runs to its end however the caller's
-	// request ends: a denial that is not recorded leaves a check that the
+	// request ends: a refusal that is not recorded leaves a check that the
 	// other sessions of the connection take.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
@@ -110,12 +115,19 @@ func (r repoAccess) record(ctx context.Context, c AccessCheck, answer error) err
 		if err := r.tokens.store.StoreAccessCheck(ctx, c); err != nil {
 			return xerrors.Errorf("store the access check of %s: %w", c.Repo, err)
 		}
-	case xerrors.Is(answer, faucet.ErrNoAccess):
+	case refused(answer):
 		if err := r.tokens.store.DeleteAccessCheck(ctx, c.ConnectionID, c.Repo); err != nil {
 			return xerrors.Errorf("delete the access check of %s: %w", c.Repo, err)
 		}
 	}
 	return nil
+}
+
+// refused reports whether answer takes the check of a repository away:
+// GitHub denied the repository, or rejected the token even after a refresh,
+// or refused to refresh it, which ends the sessions of the connection.
+func refused(answer error) bool {
+	return xerrors.Is(answer, faucet.ErrNoAccess) || xerrors.Is(answer, faucet.ErrInvalidToken)
 }
 
 // recheck asks GitHub again, with token, about the most recently used checks
@@ -126,11 +138,19 @@ func (r repoAccess) record(ctx context.Context, c AccessCheck, answer error) err
 // that is neither a pass nor a denial, no more lookups start. The lookups
 // end at the earlier of recheckTimeout and recheckShare of the time to
 // ctx's deadline, and a lookup still running then is canceled and changes
-// nothing. The checks left stay stale for the session until their next use
+// no check. The checks left stay stale for the session until their next use
 // asks GitHub. The session is rotated by then, so recheck fails nothing and
-// logs what it found. With the zero token, which a failed refresh of the
-// GitHub token leaves, it asks nothing, so that no second GitHub refresh can
-// run past the deadline.
+// logs what it found.
+//
+// When GitHub rejects the token, the lookup refreshes it once and asks
+// again, as a check does, and the lookups that start after it take the new
+// token. When GitHub refuses that refresh, every session of the connection
+// has ended, and no more lookups start. A refresh here can hold the grant's
+// answer back by one GitHub refresh, which is acceptable: it is detached, as
+// every GitHub refresh is, so GitHub's new pair is stored however the
+// request ends, and the host runs the token endpoint under a deadline. With
+// the zero token, which a failed refresh of the GitHub token leaves, it asks
+// nothing, so that no second GitHub refresh can run past the deadline.
 func (r repoAccess) recheck(ctx context.Context, session Session, now time.Time, token githubToken) {
 	logger := r.tokens.logger.With(slog.F("session_id", session.ID), slog.F("connection_id", session.ConnectionID))
 	if token == (githubToken{}) {
@@ -169,9 +189,13 @@ func (r repoAccess) recheck(ctx context.Context, session Session, now time.Time,
 			// The slot goes back after the outcome counts, so the loop sees a
 			// failure before it starts the next lookup.
 			defer func() { <-slots }()
-			gone, err := r.recheckOne(ctx, token, c)
+			mu.Lock()
+			with := token
+			mu.Unlock()
+			gone, last, err := r.recheckOne(ctx, logger, with, c)
 			mu.Lock()
 			defer mu.Unlock()
+			token = last
 			switch {
 			case err != nil:
 				if failure == nil {
@@ -196,20 +220,22 @@ func (r repoAccess) recheck(ctx context.Context, session Session, now time.Time,
 	}
 }
 
-// recheckOne asks GitHub about c again, records the answer, and reports
-// whether GitHub denied it.
-func (r repoAccess) recheckOne(ctx context.Context, token githubToken, c AccessCheck) (bool, error) {
+// recheckOne asks GitHub about c again with token, records the answer, and
+// reports whether GitHub denied it, with the token that it asked with last.
+// A token that GitHub rejects even after a refresh takes c away too, and is
+// an error, so that no more lookups start.
+func (r repoAccess) recheckOne(ctx context.Context, logger slog.Logger, token githubToken, c AccessCheck) (bool, githubToken, error) {
 	started := r.tokens.clock.Now()
-	id, answer := r.check(ctx, token, c.Repo)
+	id, last, answer := r.lookup(ctx, logger, c.ConnectionID, token, c.Repo)
 	c.RepoID, c.CheckedAt = id, started
 	if err := r.record(ctx, c, answer); err != nil {
-		return false, err
+		return false, last, err
 	}
 	denied := xerrors.Is(answer, faucet.ErrNoAccess)
 	if answer != nil && !denied {
-		return false, xerrors.Errorf("ask GitHub about %s: %w", c.Repo, answer)
+		return false, last, xerrors.Errorf("ask GitHub about %s: %w", c.Repo, answer)
 	}
-	return denied, nil
+	return denied, last, nil
 }
 
 // recheckContext returns ctx cut at the end of the lookups of a refresh. A

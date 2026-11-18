@@ -564,6 +564,94 @@ func TestACheckThatStartedBeforeARefreshDoesNotCountAfterIt(t *testing.T) {
 	require.Equal(t, []string{"o/x"}, got.asked, "the lookup started before the refresh, so its answer is stale after it")
 }
 
+// The user revokes the App, which kills both of their GitHub tokens, and
+// the refresh of one session meets the dead token as it checks again the
+// repository of another session. It refreshes the token, GitHub refuses,
+// which ends every session of the user, and the check of the other session
+// no longer answers.
+func TestARecheckThatMeetsARevokedAppEndsTheSessionsOfTheUser(t *testing.T) {
+	t.Parallel()
+	for name, newStore := range usertokensStores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newGrantHarness(t, newStore(t))
+			a := h.redeem(h.approve("login-a", 1))
+			h.clock.Advance(5 * time.Minute)
+			b := h.principal(h.redeem(h.approve("login-b", 1)))
+			access := h.userAccess()
+			require.NoError(t, h.repoID(access, b, "o/secret").err)
+			h.clock.Advance(time.Minute)
+			h.github.revoke(1)
+			h.clock.Advance(9 * time.Minute)
+
+			_, asked := h.refreshAsking(a)
+			require.Equal(t, []string{"o/secret"}, asked)
+			require.False(t, h.session("login-b").Live(), "GitHub refused the refresh token, which ends b too")
+			h.clock.Advance(time.Minute)
+			got := h.repoID(access, b, "o/secret")
+			require.ErrorIs(t, got.err, faucet.ErrInvalidToken)
+			require.Equal(t, []string{"o/secret"}, got.asked, "the check of o/secret no longer answers")
+		})
+	}
+}
+
+// GitHub rejecting the user's token even after a refresh takes the check
+// away, as a denial does: the next check asks GitHub.
+func TestATokenThatGitHubRejectsAfterARefreshLeavesNoCheck(t *testing.T) {
+	t.Parallel()
+	for name, newStore := range usertokensStores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newGrantHarness(t, newStore(t))
+			p := h.principal(h.redeem(h.approve("login-1", 1)))
+			access := h.userAccess()
+			require.NoError(t, h.repoID(access, p, "o/x").err)
+			h.github.set(func(g *grantGitHub) { g.repoStatus = http.StatusUnauthorized })
+
+			got := h.repoIDFresh(access, p, "o/x")
+			require.ErrorIs(t, got.err, faucet.ErrInvalidToken)
+			require.Equal(t, []string{"o/x", "o/x"}, got.asked, "it refreshed the token and asked again")
+			require.Empty(t, h.checkedRepos(1))
+			h.github.set(func(g *grantGitHub) { g.repoStatus = 0 })
+			got = h.repoID(access, p, "o/x")
+			require.NoError(t, got.err)
+			require.Equal(t, []string{"o/x"}, got.asked, "with the check gone, the next check asks GitHub")
+		})
+	}
+}
+
+// When GitHub rejects the stored token of the user, the refresh of a
+// session refreshes it once as it checks the repositories again, asks again
+// with the new token, and goes on with that one.
+func TestARecheckRefreshesAGitHubTokenThatGitHubRejects(t *testing.T) {
+	t.Parallel()
+	for name, newStore := range usertokensStores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newGrantHarness(t, newStore(t))
+			s := h.redeem(h.approve("login-1", 1))
+			access := h.userAccess()
+			repos := numberedRepos(6)
+			h.storeChecks(1, repos)
+			stored, _, err := oauth.GrantOpen(h.login.Keys, usertokensConnection(t, h, 1))
+			require.NoError(t, err)
+			h.github.rejectAccess(stored)
+			h.clock.Advance(time.Minute)
+
+			s, asked := h.refreshAsking(s)
+			refreshes, _ := h.github.counts()
+			require.Equal(t, 1, refreshes, "the re-check refreshed the GitHub token once")
+			require.Less(t, len(asked), 2*len(repos), "the lookups that started after the refresh sent the new token: %v", asked)
+			p := h.principal(s)
+			for _, repo := range repos {
+				got := h.repoID(access, p, repo)
+				require.NoError(t, got.err, repo)
+				require.Empty(t, got.asked, "the re-check checked %s again", repo)
+			}
+		})
+	}
+}
+
 // A lookup that GitHub fails is neither a pass nor a denial. The refresh
 // still succeeds, starts no more lookups, and leaves every check as it was.
 func TestARefreshThatGitHubFailsLeavesTheChecksAsTheyWere(t *testing.T) {
