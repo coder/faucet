@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -209,6 +210,12 @@ func (s *keySource) get(ctx context.Context, rawURL string) ([]byte, error) {
 	req.Header.Set("Accept", "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {
+		// A *url.Error quotes the URL, which the discovery document chose,
+		// and the grant logs this error.
+		var urlErr *url.Error
+		if xerrors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
 		return nil, lateOr(ctx, err)
 	}
 	defer resp.Body.Close()

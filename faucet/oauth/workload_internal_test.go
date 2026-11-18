@@ -905,11 +905,13 @@ func TestADiscoveryDocumentCannotSendFaucetToAPrivateAddress(t *testing.T) {
 	s := newKeySource(client, quartz.NewMock(t))
 	for _, uri := range []string{
 		"https://10.0.0.1/keys", "https://169.254.169.254/keys", "https://[fd00::1]/keys", "https://keys.example.com/keys", "http://keys.example.com/keys",
+		"https://10.0.0.1/keys?token=hunter2",
 	} {
 		jwksURI.Store(uri)
 		_, err := s.fetch(context.Background(), srv.URL)
 		require.ErrorContains(t, err, "the key set: ", uri)
 		require.ErrorIs(t, err, faucet.ErrDestinationRefused, uri)
+		require.NotContains(t, err.Error(), "/keys", "the error, which the grant logs, quotes no URL: %s", uri)
 	}
 	_, err := s.fetch(context.Background(), srv.URL+"/moved")
 	require.ErrorContains(t, err, "the discovery document: it must be served with status 200 and no redirect, not 302")
