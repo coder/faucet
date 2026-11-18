@@ -302,9 +302,10 @@ type loginStore interface {
 // goes to GitHub, and GitHub answers for every repository. With one, faucet's
 // own tokens verify too, and a service is checked by its grants. With a
 // browser login, a user who logged in through it is checked by GitHub with
-// the GitHub token that faucet keeps for them: repos asks GitHub, and the
-// repositories that it let the user read stand until the user's session
-// refreshes, which asks repos about them again.
+// the GitHub token that faucet keeps for them: repos asks GitHub at every
+// call, never through the cache github, and the repositories that it let
+// the user read stand until the user's session refreshes, which asks repos
+// about them again.
 func newLogin(publicURL *url.URL, browser *oauth.BrowserLogin, store loginStore, github *faucet.AccessCache, repos oauth.RepoChecker, clock quartz.Clock, logger slog.Logger) (bearers, *oauth.Server, faucet.Authorizer, error) {
 	if publicURL == nil {
 		tokens, err := newBearers(github, nil, "")

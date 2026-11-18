@@ -73,7 +73,8 @@ type ServerDeps struct {
 	Login *BrowserLogin
 	// Repos asks GitHub whether the token of a user who logged in through
 	// the browser can read a repository, when a refresh checks the user's
-	// repositories again. It is required with Login.
+	// repositories again. It is required with Login, and asks GitHub at
+	// every call, never through a cache, as RepoChecker says.
 	Repos RepoChecker
 }
 
