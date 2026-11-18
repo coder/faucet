@@ -209,6 +209,8 @@ func TestATokenExchangeCarriesNoSecretAndNoActor(t *testing.T) {
 		"a secret in HTTP Basic":         {basic("digest-bot", "fcs_guess"), exchange(token), "a token exchange carries no client secret"},
 		"HTTP Basic with no secret":      {basic("digest-bot", ""), exchange(token), "a token exchange carries no client secret"},
 		"a client_secret":                {"", exchange(token, "client_secret", "fcs_guess"), "a token exchange carries no client secret"},
+		"a client assertion":             {"", exchange(token, "client_assertion", token, "client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"), "a token exchange carries no client secret and no client assertion"},
+		"a client_assertion_type":        {"", exchange(token, "client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"), "no client assertion"},
 		"no client_id":                   {"", exchange(token, "client_id", ""), "client_id is required"},
 		"no subject_token":               {"", exchange("", "subject_token", ""), "subject_token is required"},
 		"no subject_token_type":          {"", exchange(token, "subject_token_type", ""), "subject_token_type must be " + jwtTokenType},
@@ -222,10 +224,16 @@ func TestATokenExchangeCarriesNoSecretAndNoActor(t *testing.T) {
 		require.Equal(t, "invalid_request", reply.body["error"], name)
 		require.Contains(t, reply.body["error_description"], c.want, name)
 	}
+	for name, header := range map[string][]string{"an empty Authorization header": {""}, "an empty one before HTTP Basic": {"", basic("digest-bot", "")}} {
+		reply := h.postWith(header, exchange(token))
+		require.Equal(t, http.StatusBadRequest, reply.status, "%s: %s", name, reply.rawBody)
+		require.Contains(t, reply.body["error_description"], "a token exchange carries no client secret", name)
+	}
 	for name, form := range map[string]url.Values{
-		"a JWT":                     exchange(token),
-		"an ID token":               exchange(token, "subject_token_type", "urn:ietf:params:oauth:token-type:id_token"),
-		"an access token asked for": exchange(token, "requested_token_type", accessTokenType),
+		"a JWT":                         exchange(token),
+		"an ID token":                   exchange(token, "subject_token_type", "urn:ietf:params:oauth:token-type:id_token"),
+		"an access token asked for":     exchange(token, "requested_token_type", accessTokenType),
+		"an empty requested_token_type": exchange(token, "requested_token_type", ""),
 	} {
 		reply := h.post("", form)
 		require.Equal(t, http.StatusOK, reply.status, "%s: %s", name, reply.rawBody)
@@ -255,8 +263,21 @@ func TestATokenExchangeIsForTheClientsEndpoint(t *testing.T) {
 		reply = h.post("", exchange("not-a-jwt", c.extra...))
 		require.Equal(t, refusedExchange, reply.body, "%s with a token that does not verify", name)
 	}
-	reply := h.post("", exchange(token, "audience", resource, "resource", resource))
-	require.Equal(t, http.StatusOK, reply.status, reply.rawBody)
+	for name, audiences := range map[string][]string{
+		"the client's endpoint":     {resource},
+		"an empty audience":         {""},
+		"the endpoint twice":        {resource, resource},
+		"the endpoint and an empty": {resource, ""},
+	} {
+		form := exchange(token, "resource", resource)
+		form["audience"] = audiences
+		reply := h.post("", form)
+		require.Equal(t, http.StatusOK, reply.status, "%s: %s", name, reply.rawBody)
+	}
+	form := exchange(token)
+	form["audience"] = []string{resource, issuer + "/mcp"}
+	reply := h.post("", form)
+	require.Equal(t, map[string]any{"error": "invalid_target", "error_description": "the tokens of this client are for " + resource}, reply.body, "each audience must be the client's endpoint")
 }
 
 // refusedExchange is the one answer to a token exchange that faucet refuses

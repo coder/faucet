@@ -438,6 +438,26 @@ func TestTheTokenMustBeValidNow(t *testing.T) {
 	}
 }
 
+// A token that acts for another party (RFC 8693 section 4.1) is not the
+// workload's own.
+func TestATokenWithAnActClaimIsRefused(t *testing.T) {
+	t.Parallel()
+	clock := quartz.NewMock(t)
+	now := clock.Now()
+	rule := testKubernetesRule(t, publicJWK(testRSAKey(), testKID))
+	c := newWorkloadChecker(&http.Client{}, clock)
+	for _, act := range []any{map[string]any{"sub": "system:serviceaccount:apps:other-bot"}, nil, "x"} {
+		claims := kubernetesClaims(now)
+		claims["act"] = act
+		_, err := checkAt(t, c, now, signToken(t, jose.RS256, testRSAKey(), testKID, claims), rule)
+		requireTokenRefused(t, err, "it carries an act claim, the delegation of RFC 8693", act)
+	}
+	claims := kubernetesClaims(now)
+	claims["may_act"] = map[string]any{"sub": "system:serviceaccount:apps:other-bot"}
+	_, err := checkAt(t, c, now, signToken(t, jose.RS256, testRSAKey(), testKID, claims), rule)
+	require.NoError(t, err, "may_act names who may act for the workload, and acts for no one")
+}
+
 func TestTheFaucetTokenEndsNoLaterThanTheSubjectToken(t *testing.T) {
 	t.Parallel()
 	clock := quartz.NewMock(t)

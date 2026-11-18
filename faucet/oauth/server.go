@@ -163,8 +163,9 @@ type authServerMetadata struct {
 	// 9207).
 	ClientIDMetadataDocumentSupported          bool `json:"client_id_metadata_document_supported,omitempty"`
 	AuthorizationResponseIssParameterSupported bool `json:"authorization_response_iss_parameter_supported,omitempty"`
-	// RevocationEndpoint (RFC 7009) takes the clients that the token
-	// endpoint takes, authenticated the same ways.
+	// RevocationEndpoint (RFC 7009) takes the clients of the grants that
+	// revoke, authenticated the ways that those grants take them. The token
+	// exchange's clients send no secret, so they cannot revoke.
 	RevocationEndpoint                     string   `json:"revocation_endpoint"`
 	RevocationEndpointAuthMethodsSupported []string `json:"revocation_endpoint_auth_methods_supported"`
 }
@@ -375,8 +376,8 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) (tokenResponse, e
 }
 
 // readTokenForm reads the form in the body of a token request. Every
-// parameter but resource, which RFC 8707 lets a client repeat, appears at
-// most once (RFC 6749 section 3.2).
+// parameter but resource and audience, which RFC 8707 and RFC 8693 let a
+// client repeat, appears at most once (RFC 6749 section 3.2).
 func readTokenForm(w http.ResponseWriter, r *http.Request) (url.Values, error) {
 	if media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || media != "application/x-www-form-urlencoded" {
 		return nil, badRequest("invalid_request", "the body is a form, application/x-www-form-urlencoded")
@@ -390,7 +391,7 @@ func readTokenForm(w http.ResponseWriter, r *http.Request) (url.Values, error) {
 		return nil, badRequest("invalid_request", "the body is not a valid form")
 	}
 	for name, values := range form {
-		if len(values) > 1 && name != "resource" {
+		if len(values) > 1 && name != "resource" && name != "audience" {
 			return nil, badRequest("invalid_request", name+" appears more than once")
 		}
 	}

@@ -125,13 +125,14 @@ A token matches a rule when all of these hold:
 - Its signature verifies with the issuer's key of that `kid`. A discovery document must name the rule's issuer byte for byte.
 - Its `iss` is the rule's issuer, byte for byte, and its `aud` is faucet's public URL alone, such as `https://faucet.example.com`, as a string or an array of one. That is faucet's issuer, not the `/github/mcp` endpoint.
 - Its `exp` is at least a second away. It has an `iat` or an `nbf`, each at most a minute ahead of faucet's clock, and it lives at most 24 hours, from the earlier of the two to its `exp`. Vercel and Kubernetes set both.
+- It has no `act` claim, so it acts for no other party (RFC 8693 section 4.1).
 - Each claim that the rule pins holds that value as a JSON string, byte for byte.
 
 Faucet tries the client's rules in the order they were added, and the first that matches wins.
 
 ### The request and the answers
 
-The workload posts a form to `/oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, `client_id`, the platform's token as `subject_token`, and `subject_token_type=urn:ietf:params:oauth:token-type:jwt` (`urn:ietf:params:oauth:token-type:id_token` works too). `scope` and `resource` work as for client credentials, and `audience`, when sent, must be the client's endpoint. The request carries no secret, no Authorization header and no `actor_token`: the workload acts as the client, for no one else.
+The workload posts a form to `/oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, `client_id`, the platform's token as `subject_token`, and `subject_token_type=urn:ietf:params:oauth:token-type:jwt` (`urn:ietf:params:oauth:token-type:id_token` works too). `scope` and `resource` work as for client credentials, and each `audience` must be the client's endpoint. An empty `audience` or `requested_token_type` counts as none. The request carries no secret, no client assertion, no `Authorization` header (not even HTTP Basic with an empty password, which the browser login takes) and no `actor_token`: the workload acts as the client, for no one else.
 
 | Answer | When |
 | --- | --- |

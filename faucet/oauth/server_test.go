@@ -70,12 +70,20 @@ type tokenReply struct {
 // Authorization header, none when it is empty.
 func (h *tokenHarness) post(authorization string, form url.Values) tokenReply {
 	h.t.Helper()
+	if authorization == "" {
+		return h.postWith(nil, form)
+	}
+	return h.postWith([]string{authorization}, form)
+}
+
+// postWith sends form to the token endpoint with an Authorization header
+// for each of authorization.
+func (h *tokenHarness) postWith(authorization []string, form url.Values) tokenReply {
+	h.t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, h.srv.URL+oauth.TokenPath, strings.NewReader(form.Encode()))
 	require.NoError(h.t, err)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if authorization != "" {
-		req.Header.Set("Authorization", authorization)
-	}
+	req.Header["Authorization"] = authorization
 	resp, err := h.srv.Client().Do(req)
 	require.NoError(h.t, err)
 	defer resp.Body.Close()

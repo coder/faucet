@@ -37,8 +37,8 @@ func (e workloadClientError) Error() string { return string(e) }
 
 func (s *Server) tokenExchange(r *http.Request, form url.Values) (tokenResponse, error) {
 	switch {
-	case r.Header.Get("Authorization") != "" || form.Has("client_secret"):
-		return tokenResponse{}, badRequest("invalid_request", "a token exchange carries no client secret: send client_id in the form, and the workload's token as subject_token")
+	case len(r.Header.Values("Authorization")) > 0 || form.Has("client_secret") || form.Has("client_assertion") || form.Has("client_assertion_type"):
+		return tokenResponse{}, badRequest("invalid_request", "a token exchange carries no client secret and no client assertion: send client_id in the form, and the workload's token as subject_token")
 	case form.Get("client_id") == "":
 		return tokenResponse{}, badRequest("invalid_request", "client_id is required: the client that the workload acts as")
 	case form.Get("subject_token") == "":
@@ -47,7 +47,7 @@ func (s *Server) tokenExchange(r *http.Request, form url.Values) (tokenResponse,
 		return tokenResponse{}, badRequest("invalid_request", "subject_token_type must be "+subjectTokenTypes[0]+" or "+subjectTokenTypes[1])
 	case form.Has("actor_token") || form.Has("actor_token_type"):
 		return tokenResponse{}, badRequest("invalid_request", "faucet takes no actor_token: a workload acts as the client, for no other party")
-	case form.Has("requested_token_type") && form.Get("requested_token_type") != accessTokenType:
+	case form.Get("requested_token_type") != "" && form.Get("requested_token_type") != accessTokenType:
 		return tokenResponse{}, badRequest("invalid_request", "requested_token_type can only be "+accessTokenType)
 	}
 	resp, err := s.exchange(r.Context(), form)
@@ -77,8 +77,10 @@ func (s *Server) exchange(ctx context.Context, form url.Values) (tokenResponse, 
 	if err := checkResources(form, c); err != nil {
 		return tokenResponse{}, err
 	}
-	if form.Has("audience") && form.Get("audience") != c.Resource {
-		return tokenResponse{}, badRequest("invalid_target", "the tokens of this client are for "+c.Resource)
+	for _, audience := range form["audience"] {
+		if audience != "" && audience != c.Resource {
+			return tokenResponse{}, badRequest("invalid_target", "the tokens of this client are for "+c.Resource)
+		}
 	}
 	now := s.clock.Now()
 	lifetime := match.lifetime(now)
