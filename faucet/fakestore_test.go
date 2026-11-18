@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"maps"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -206,17 +207,16 @@ func (s *fakeStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.Po
 	}
 	s.polls = append(s.polls, q)
 
-	var head, readThrough int64
-	var read int32
+	through := q.Through
+	if through == 0 {
+		through = math.MaxInt64
+	}
+	var head int64
 	var page faucet.PollPage
 	for _, e := range s.events {
 		head = max(head, e.ID)
-		if e.ID <= q.After || !q.Target.Covers(e.RepoID, e.OwnerID) || len(page.Events) == int(q.Limit) || readThrough > 0 {
+		if e.ID <= q.After || e.ID > through || !q.Target.Covers(e.RepoID, e.OwnerID) || len(page.Events) == int(q.Limit) {
 			continue
-		}
-		read++
-		if read == q.MaxRead {
-			readThrough = e.ID
 		}
 		if len(q.RepoNames) > 0 && !slices.Contains(q.RepoNames, strings.ToLower(e.RepoName)) {
 			continue
@@ -235,10 +235,7 @@ func (s *fakeStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.Po
 		}
 	}
 	head = max(head, s.purgeMark)
-	page.Next = max(head, q.After)
-	if readThrough > 0 {
-		page.Next = readThrough
-	}
+	page.Next = max(min(head, through), q.After)
 	page.PurgedThrough = s.purgeMark
 	if len(page.Events) == int(q.Limit) {
 		page.Next = page.Events[len(page.Events)-1].ID

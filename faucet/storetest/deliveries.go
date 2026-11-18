@@ -17,6 +17,7 @@ const testLease = faucet.DeliveryLease
 var deliverySubtests = []subtest{
 	{"ScanTargetsListsLiveSubscriptionsBehindTheHead", scanTargetsListsLiveSubscriptionsBehindTheHead},
 	{"ScanTargetsSkipsSubscriptionsAtThePendingCap", scanTargetsSkipsSubscriptionsAtThePendingCap},
+	{"ScanTargetsPassesOverThePrincipalsItIsToldTo", scanTargetsPassesOverThePrincipalsItIsToldTo},
 	{"ScanTargetsNeedsAnEventOfTheSubscriptionsRepositoryAndType", scanTargetsNeedsAnEventOfTheSubscriptionsRepositoryAndType},
 	{"ScanTargetsIncludesASubscriptionThatAPurgeOvertook", scanTargetsIncludesASubscriptionThatAPurgeOvertook},
 	{"ScanTargetsMatchEveryStoredTypeOfTheSubscription", scanTargetsMatchEveryStoredTypeOfTheSubscription},
@@ -194,6 +195,28 @@ func scanTargetsListsLiveSubscriptionsBehindTheHead(t *testing.T, s faucet.Store
 	targets = r.targets(later, 10)
 	require.Len(t, targets, 1, "a subscription that has read to the head is not a target")
 	require.Equal(t, ahead.KeyHash, targets[0].KeyHash)
+}
+
+func scanTargetsPassesOverThePrincipalsItIsToldTo(t *testing.T, s faucet.Store) {
+	r := newRig(t, s, 1)
+	other := newSubscription("hubot", "https://hooks.example.test/hubot", r.now.Add(time.Hour))
+	other.Cursor = 0
+	_, err := s.UpsertSubscription(r.ctx, other, r.now, 10)
+	require.NoError(t, err)
+
+	keys := func(skip ...string) []faucet.SubscriptionKeyHash {
+		t.Helper()
+		targets, err := s.ScanTargets(r.ctx, r.now, 10, 100, skip...)
+		require.NoError(t, err)
+		var out []faucet.SubscriptionKeyHash
+		for _, target := range targets {
+			out = append(out, target.KeyHash)
+		}
+		return out
+	}
+	require.ElementsMatch(t, []faucet.SubscriptionKeyHash{r.sub.KeyHash, other.KeyHash}, keys())
+	require.Equal(t, []faucet.SubscriptionKeyHash{other.KeyHash}, keys(r.sub.Principal))
+	require.Empty(t, keys(r.sub.Principal, "hubot"))
 }
 
 func scanTargetsSkipsSubscriptionsAtThePendingCap(t *testing.T, s faucet.Store) {

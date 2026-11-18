@@ -69,7 +69,7 @@ func (s *fakeStore) headLocked() int64 {
 	return head
 }
 
-func (s *fakeStore) ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32) ([]faucet.ScanTarget, error) {
+func (s *fakeStore) ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32, skipPrincipals ...string) ([]faucet.ScanTarget, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -85,7 +85,8 @@ func (s *fakeStore) ScanTargets(ctx context.Context, now time.Time, maxPending, 
 	var targets []faucet.ScanTarget
 	for key, sub := range s.subs {
 		pending := s.pendingLocked(key)
-		if !sub.ExpiresAt.After(now) || s.scanned[key] >= head || pending >= maxPending || !s.hasSomethingToReadLocked(key, sub) {
+		if !sub.ExpiresAt.After(now) || s.scanned[key] >= head || pending >= maxPending || slices.Contains(skipPrincipals, sub.Principal) ||
+			!s.hasSomethingToReadLocked(key, sub) {
 			continue
 		}
 		targets = append(targets, faucet.ScanTarget{

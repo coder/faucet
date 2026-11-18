@@ -393,6 +393,7 @@ SELECT
 FROM faucet_subscriptions s, head
 WHERE s.expires_at > $1
   AND s.scanned_through < head.max_id
+  AND NOT s.principal = ANY($2::text[])
   AND (
     s.scanned_through < (SELECT purged_through FROM faucet_purge_mark)
     OR (s.target_kind = 'repo' AND EXISTS (
@@ -408,15 +409,16 @@ WHERE s.expires_at > $1
       WHERE e.type = ANY(s.event_types) AND e.id > s.scanned_through
     ))
   )
-  AND (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash) < $2::int
+  AND (SELECT COUNT(*) FROM faucet_deliveries d WHERE d.key_hash = s.key_hash) < $3::int
 ORDER BY s.scanned_through, s.key_hash
-LIMIT $3
+LIMIT $4
 `
 
 type ScanTargetsParams struct {
-	Now        time.Time
-	MaxPending int32
-	RowLimit   int32
+	Now            time.Time
+	SkipPrincipals []string
+	MaxPending     int32
+	RowLimit       int32
 }
 
 type ScanTargetsRow struct {
@@ -433,7 +435,12 @@ type ScanTargetsRow struct {
 
 // One EXISTS per kind of target, each on its own index, as in PollEvents.
 func (q *Queries) ScanTargets(ctx context.Context, arg ScanTargetsParams) ([]ScanTargetsRow, error) {
-	rows, err := q.db.QueryContext(ctx, scanTargets, arg.Now, arg.MaxPending, arg.RowLimit)
+	rows, err := q.db.QueryContext(ctx, scanTargets,
+		arg.Now,
+		pq.Array(arg.SkipPrincipals),
+		arg.MaxPending,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

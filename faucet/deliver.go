@@ -43,9 +43,10 @@ const (
 	// The reads of a run share the few seconds before the sends need the rest
 	// of its deadline, so one principal must leave most of them to others.
 	scanTimeout = time.Second
-	// scanWindow is how many events of its target one read of a subscription
-	// looks at, matching or not.
-	scanWindow = 10_000
+	// scanWindow is how many event IDs one read of a subscription looks at,
+	// whatever their target, so its cost does not depend on how far behind
+	// the subscription is or where its target's events lie.
+	scanWindow = 50_000
 	// maxEventBodyBytes is the largest body that faucet sends, the delivery
 	// profile of SEP-3415.
 	maxEventBodyBytes = 256 << 10
@@ -125,9 +126,9 @@ type webhookBody struct {
 // A call that dies between a claim and its result leaves the delivery to the
 // next call after the lease, and the attempt counts.
 //
-// The call reads each subscription's events 10,000 at a time and stores its
-// read position after each, and the reads of one principal's subscriptions
-// get a second of the call. A read that runs out of that second is no
+// The call reads each subscription's events in ranges of 50,000 event IDs and
+// stores its read position after each, and the reads of one principal's
+// subscriptions get a second of the call. A read that runs out of that second is no
 // failure: the result is Incomplete, and the next call goes on from where it
 // stopped. A subscription whose events the call cannot read, because the
 // Store fails, is skipped for the rest of the call, and the call goes on with
@@ -322,15 +323,17 @@ func (r *deliveryRun) unlessEnded(ctx context.Context, err error) error {
 // that start with the ones furthest behind. It leaves the sends the time they
 // need: it starts no subscription with less than twice minTimeToStart left.
 // The reads of one principal's subscriptions share scanTimeout, so no
-// principal can take the run from the others. A subscription that the run
-// did not read to its end is not read again in the same run.
+// principal can take the run from the others, and a later batch passes over
+// the principals that used it up. A subscription that the run did not read to
+// its end is not read again in the same run.
 func (r *deliveryRun) enqueue(ctx context.Context) error {
 	s := r.svc
 	unfinished := map[SubscriptionKeyHash]bool{}
 	spent := map[string]time.Duration{}
+	var spentUp []string
 	for range maxScanBatches {
 		now := s.clock.Now()
-		targets, err := s.store.ScanTargets(ctx, now, MaxPendingDeliveries, maxScanTargetsPerBatch)
+		targets, err := s.store.ScanTargets(ctx, now, MaxPendingDeliveries, maxScanTargetsPerBatch, spentUp...)
 		if err != nil {
 			return xerrors.Errorf("select subscriptions to scan: %w", err)
 		}
@@ -353,6 +356,9 @@ func (r *deliveryRun) enqueue(ctx context.Context) error {
 				unfinished[target.KeyHash] = true
 			}
 			spent[target.Principal] += time.Since(start)
+			if spent[target.Principal] >= scanTimeout {
+				spentUp = append(spentUp, target.Principal)
+			}
 		}
 		if len(targets) < maxScanTargetsPerBatch {
 			return nil
@@ -362,10 +368,10 @@ func (r *deliveryRun) enqueue(ctx context.Context) error {
 	return nil
 }
 
-// scan reads a subscription's events scanWindow at a time and queues each
-// window's matches with the window's end as the new read position, so the
-// time to read a subscription far behind does not grow with how far behind
-// it is, and a read that runs out of time keeps the windows it finished. It
+// scan reads a subscription's events in windows of scanWindow event IDs and
+// queues each window's matches with the window's end as the new read
+// position, so one statement costs at most a window whatever the target, and
+// a read that runs out of time keeps the windows it finished. It
 // reads until it reaches the head, the subscription holds
 // MaxPendingDeliveries, or budget is used up, and reports whether it got to
 // the end. A failure that is not the end of the run's time is kept as the
@@ -424,7 +430,7 @@ func (r *deliveryRun) enqueueWindow(ctx, readCtx context.Context, now time.Time,
 		RepoNames: args.repoNames(),
 		After:     target.ScannedThrough,
 		Limit:     MaxPendingDeliveries - target.Pending,
-		MaxRead:   scanWindow,
+		Through:   target.ScannedThrough + scanWindow,
 	})
 	if err != nil {
 		return false, xerrors.Errorf("read events for a subscription: %w", err)

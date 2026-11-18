@@ -31,27 +31,12 @@ LIMIT sqlc.arg(row_limit);
 -- Each kind of target has a branch of its own, so each reads its own index:
 -- faucet_events_poll for a repository, faucet_events_owner for an owner, and
 -- the primary key for all. An event stored before owners were recorded has
--- owner 0, which no owner target names. With max_read, bound is the ID of the
--- last of the target's events that the read may look at, or NULL (0 in the
--- result) when fewer than max_read are left.
+-- owner 0, which no owner target names.
 WITH mark AS (
   SELECT purged_through FROM faucet_purge_mark
 ), head AS (
   SELECT GREATEST(COALESCE(MAX(id), 0), (SELECT purged_through FROM mark))::bigint AS max_id
   FROM faucet_events
-), bound AS (
-  SELECT CASE WHEN sqlc.arg(max_read)::int > 0 THEN (
-    SELECT e.id FROM faucet_events e
-    WHERE (
-        (sqlc.arg(target_kind)::text = 'repo' AND e.repo_id = sqlc.arg(repo_id)::bigint)
-        OR (sqlc.arg(target_kind)::text = 'owner' AND e.owner_id = sqlc.arg(owner_id)::bigint AND e.owner_id > 0)
-        OR sqlc.arg(target_kind)::text = 'all'
-      )
-      AND e.id > sqlc.arg(after_id)
-    ORDER BY e.id
-    OFFSET GREATEST(sqlc.arg(max_read)::int - 1, 0)
-    LIMIT 1
-  ) END AS read_through
 ), page AS (
   SELECT e.* FROM faucet_events e
   WHERE (
@@ -61,7 +46,7 @@ WITH mark AS (
     )
     AND (cardinality(sqlc.arg(repo_names)::text[]) = 0 OR lower(e.repo_name) = ANY(sqlc.arg(repo_names)::text[]))
     AND e.id > sqlc.arg(after_id)
-    AND e.id <= COALESCE((SELECT read_through FROM bound), 9223372036854775807)
+    AND e.id <= sqlc.arg(through)::bigint
     AND (cardinality(sqlc.arg(types)::text[]) = 0 OR e.type = ANY(sqlc.arg(types)::text[]))
     AND (sqlc.arg(head_sha)::text = '' OR e.head_sha = sqlc.arg(head_sha)::text)
     AND (sqlc.arg(pr)::int = 0 OR sqlc.arg(pr)::int = ANY(e.prs))
@@ -75,7 +60,6 @@ WITH mark AS (
 SELECT
   head.max_id,
   (SELECT purged_through FROM mark)::bigint AS purged_through,
-  COALESCE((SELECT read_through FROM bound), 0)::bigint AS read_through,
   page.id, page.source, page.delivery_id, page.type, page.repo_id, page.owner_id, page.repo_name, page.prs, page.head_sha,
   COALESCE(page.data, 'null'::jsonb)::jsonb AS data,
   page.received_at
