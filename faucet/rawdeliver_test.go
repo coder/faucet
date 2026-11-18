@@ -392,41 +392,49 @@ func TestDeliverDueTellsARawSubscriptionOfAnEventTooLargeToSend(t *testing.T) {
 	}
 }
 
-// A stored raw event that a run cannot decode for the subscription, such as
-// a projection where the subscription wants the whole payload, ends as
-// event_malformed. The subscription learns that it missed the event, and the
-// cursor of the next event passes it.
+// A stored raw event that a run cannot send to the subscription ends as
+// event_malformed: a projection where the subscription wants the whole
+// payload, or a body that is not JSON, which no webhook body can carry. The
+// subscription learns that it missed the event, and the cursor of the next
+// event passes it.
 func TestDeliverDueTellsARawSubscriptionOfAnEventItCannotDecode(t *testing.T) {
 	t.Parallel()
 
-	d := newRawDeliverHarness(t)
-	ep := d.endpoint("/hook")
-	sub := d.subscribeRaw("github.push", ep)
-	d.advance(time.Second)
-	stored, err := d.store.IngestRaw(d.ctx, faucet.RawDelivery{DeliveryID: "projected", Event: "push", RepoID: repoID}, d.clock.Now(),
-		func(interests []faucet.RawInterest) faucet.RawPlan {
-			require.Len(t, interests, 1)
-			return faucet.RawPlan{
-				Body: []byte(`{"ref":"refs/heads/main"}`), Fields: []string{"ref"},
-				Deliveries: []faucet.RawOutbox{{Key: interests[0].Subscription, Incarnation: interests[0].Incarnation}},
-			}
-		})
-	require.NoError(t, err)
-	d.rawQueued++
+	for name, stored := range map[string]faucet.RawPlan{
+		"a projection, and the subscription wants the whole payload": {Body: []byte(`{"ref":"refs/heads/main"}`), Fields: []string{"ref"}},
+		"a body that is not JSON":                                    {Body: []byte(`{"ref": "refs/heads/main"`)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d := newRawDeliverHarness(t)
+			ep := d.endpoint("/hook")
+			sub := d.subscribeRaw("github.push", ep)
+			d.advance(time.Second)
+			ingested, err := d.store.IngestRaw(d.ctx, faucet.RawDelivery{DeliveryID: "unsendable", Event: "push", RepoID: repoID}, d.clock.Now(),
+				func(interests []faucet.RawInterest) faucet.RawPlan {
+					require.Len(t, interests, 1)
+					plan := stored
+					plan.Deliveries = []faucet.RawOutbox{{Key: interests[0].Subscription, Incarnation: interests[0].Incarnation}}
+					return plan
+				})
+			require.NoError(t, err)
+			d.rawQueued++
 
-	first := d.deliverDue()
-	require.Equal(t, map[faucet.GiveUpReason]int{faucet.GiveUpEventMalformed: 1}, first.GaveUp)
-	sent := d.pushRaw(nil)
-	second := d.deliverDue()
-	require.Equal(t, 1, second.Delivered, "the next event is delivered")
-	require.Equal(t, 1, first.GapsSent+second.GapsSent)
-	gaps := d.rcv.envelopesOf("/hook", "gap")
-	require.Len(t, gaps, 1, "the subscription learns that it missed the event")
-	members := d.requireEnvelope(gaps[0], "gap", ep.secret, sub.ID)
-	require.JSONEq(t, fmt.Sprintf(`"r1.%d"`, stored.ID), string(members["cursor"]), "the cursor is the event that the subscription missed")
-	events := d.rcv.envelopesOf("/hook", "")
-	require.Len(t, events, 1, "nothing goes out for the event that does not decode")
-	require.Equal(t, fmt.Sprintf("r1.%d", sent-1), events[0].body(t).Cursor)
+			first := d.deliverDue()
+			require.Equal(t, map[faucet.GiveUpReason]int{faucet.GiveUpEventMalformed: 1}, first.GaveUp)
+			sent := d.pushRaw(nil)
+			second := d.deliverDue()
+			require.Equal(t, 1, second.Delivered, "the next event is delivered")
+			require.Equal(t, 1, first.GapsSent+second.GapsSent)
+			gaps := d.rcv.envelopesOf("/hook", "gap")
+			require.Len(t, gaps, 1, "the subscription learns that it missed the event")
+			members := d.requireEnvelope(gaps[0], "gap", ep.secret, sub.ID)
+			require.JSONEq(t, fmt.Sprintf(`"r1.%d"`, ingested.ID), string(members["cursor"]), "the cursor is the event that the subscription missed")
+			events := d.rcv.envelopesOf("/hook", "")
+			require.Len(t, events, 1, "nothing goes out for the event that cannot be sent")
+			require.Equal(t, fmt.Sprintf("r1.%d", sent-1), events[0].body(t).Cursor)
+		})
+	}
 }
 
 // A purge takes the payload of an event whose delivery waits: a run that
