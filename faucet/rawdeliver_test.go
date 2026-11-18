@@ -1,6 +1,7 @@
 package faucet_test
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -494,6 +495,79 @@ func TestDeliverDueEndsTheRawDeliveriesOfASubscriptionThatIsGone(t *testing.T) {
 				"the deliveries end with the subscription that held them, counted")
 			require.Zero(t, res.Claimed)
 			require.Zero(t, d.rcv.total(), "an event from before a subscription existed is never sent to it")
+		})
+	}
+}
+
+// rawDeliveryDown is a RawStore whose method named down fails.
+type rawDeliveryDown struct {
+	faucet.RawStore
+	down string
+}
+
+func (s *rawDeliveryDown) ExpireRawDeliveries(ctx context.Context, now time.Time) (int64, error) {
+	if s.down == "ExpireRawDeliveries" {
+		return 0, errRawStoreDown
+	}
+	return s.RawStore.ExpireRawDeliveries(ctx, now)
+}
+
+func (s *rawDeliveryDown) ClaimRawDelivery(ctx context.Context, now time.Time, lease time.Duration, skip []string) (faucet.RawDeliveryClaim, bool, error) {
+	if s.down == "ClaimRawDelivery" {
+		return faucet.RawDeliveryClaim{}, false, errRawStoreDown
+	}
+	return s.RawStore.ClaimRawDelivery(ctx, now, lease, skip)
+}
+
+func (s *rawDeliveryDown) FinishRawDelivery(ctx context.Context, ref faucet.DeliveryRef, now time.Time, f faucet.Finish) (faucet.FinishResult, error) {
+	if s.down == "FinishRawDelivery" {
+		return faucet.FinishResult{}, errRawStoreDown
+	}
+	return s.RawStore.FinishRawDelivery(ctx, ref, now, f)
+}
+
+func (s *rawDeliveryDown) ClaimRawGap(ctx context.Context, now time.Time, lease time.Duration, skip []string) (faucet.GapClaim, bool, error) {
+	if s.down == "ClaimRawGap" {
+		return faucet.GapClaim{}, false, errRawStoreDown
+	}
+	return s.RawStore.ClaimRawGap(ctx, now, lease, skip)
+}
+
+func (s *rawDeliveryDown) FinishRawGap(ctx context.Context, ref faucet.GapRef) error {
+	if s.down == "FinishRawGap" {
+		return errRawStoreDown
+	}
+	return s.RawStore.FinishRawGap(ctx, ref)
+}
+
+func TestDeliverDueSendsTheTypedDeliveriesWhenTheRawStoreFails(t *testing.T) {
+	t.Parallel()
+
+	for _, method := range []string{"ExpireRawDeliveries", "ClaimRawDelivery", "FinishRawDelivery", "ClaimRawGap", "FinishRawGap"} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+			store := &rawDeliveryDown{}
+			// No limit per origin, so that a worker that sends to the typed
+			// endpoint never makes another pass over the raw work.
+			d := newRawDeliverHarness(t, func(deps *faucet.Deps) {
+				store.RawStore, deps.RawStore = deps.RawStore, store
+				deps.Webhook.MaxWorkersPerOrigin = -1
+			})
+			d.subscribeEndpoint(d.endpoint("/typed"))
+			d.subscribeRaw("github.push", d.endpoint("/raw"))
+			d.advance(time.Second)
+			d.pushRaw(map[string]any{"blob": strings.Repeat("x", 300<<10)})
+			d.pushRaw(nil)
+			for range 3 {
+				d.newRunEvent()
+			}
+			store.down = method
+
+			res := d.deliverDue()
+			require.Len(t, d.rcv.requests("/typed"), 3, "every typed delivery goes out")
+			require.Equal(t, 1, res.RawFailures)
+			logLine(t, d.logs.String(), "a raw delivery step failed, the run goes on with the typed deliveries")
+			require.Contains(t, d.logs.String(), errRawStoreDown.Error())
 		})
 	}
 }

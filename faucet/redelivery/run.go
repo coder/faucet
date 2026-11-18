@@ -47,6 +47,9 @@ const (
 // whatever the delivery list costs. A slow list leaves a range open, as the
 // page limit does, and the next run reads on.
 const (
+	// redeliveryWantsShare is the share after which a call of Deps.Wants is
+	// canceled, so that a slow call leaves time to read the list.
+	redeliveryWantsShare = 0.1
 	// redeliveryScanShare is the share for reading the list. A page in flight
 	// when it ends is canceled and not counted.
 	redeliveryScanShare = 0.5
@@ -65,7 +68,7 @@ var errScanBudget = xerrors.New("the time for reading the delivery list ran out"
 // means no deadline, and nothing ends early. A context deadline is wall time,
 // so the split does not use the runner's clock.
 type runBudget struct {
-	scanEnd, askStart, askEnd time.Time
+	wantsEnd, scanEnd, askStart, askEnd time.Time
 }
 
 func newRunBudget(ctx context.Context) runBudget {
@@ -76,7 +79,10 @@ func newRunBudget(ctx context.Context) runBudget {
 	start := time.Now()
 	left := deadline.Sub(start)
 	at := func(share float64) time.Time { return start.Add(time.Duration(float64(left) * share)) }
-	return runBudget{scanEnd: at(redeliveryScanShare), askStart: at(redeliveryAskStartShare), askEnd: at(redeliveryAskEndShare)}
+	return runBudget{
+		wantsEnd: at(redeliveryWantsShare), scanEnd: at(redeliveryScanShare),
+		askStart: at(redeliveryAskStartShare), askEnd: at(redeliveryAskEndShare),
+	}
 }
 
 // pastScan says that the run must start no more pages.
@@ -141,8 +147,10 @@ type Deps struct {
 	// page and inside the time for reading the list. The predicate it returns
 	// says, for the interests that are live then, whether faucet would store
 	// a delivery of this GitHub event, action and repository
-	// (HookDelivery.RepositoryID). An error fails the run as a failed first
-	// page does. Nil, or a nil predicate, wants nothing.
+	// (HookDelivery.RepositoryID). A call that fails, or that runs past a
+	// tenth of the run's time, leaves the run to the deliveries that faucet
+	// stores: it logs the error and tracks no other delivery. Nil, or a nil
+	// predicate, wants nothing.
 	Wants func(ctx context.Context) (wants func(event, action string, repoID int64) bool, err error)
 }
 
@@ -264,8 +272,9 @@ type Result struct {
 // so a crash costs an ask and two runs never send the same one. A request that
 // fails stops the asks of the run, and a failed first page stops them as well,
 // because both mean that the token, the hook or GitHub is not working. A
-// first page without a usable Date is a failed first page, and so is an error
-// of Deps.Wants, which the run calls before it reads the first page.
+// first page without a usable Date is a failed first page. An error of
+// Deps.Wants, which the run calls before it reads the first page, only leaves
+// the run to the deliveries that faucet stores.
 //
 // When ctx has a deadline, the run keeps to it by construction. It reads the
 // list for half of the time that is left at its start, and a page that is not
@@ -392,16 +401,18 @@ func (r *redeliveryRun) classify(page DeliveryPage, bound readBound, want wanted
 	return p
 }
 
-// loadWants calls Deps.Wants inside the time for reading the list, so that a
-// slow call costs the scan and never the asks or the purge.
-func (r *redeliveryRun) loadWants(ctx context.Context) (wanted, error) {
-	wantCtx, cancel := until(ctx, r.budget.scanEnd)
+// loadWants calls Deps.Wants inside the first tenth of the run, so that a slow
+// call costs only some of the time for reading the list. A raw interest is no
+// reason to fail the typed work, so after an error the run wants nothing more.
+func (r *redeliveryRun) loadWants(ctx context.Context) wanted {
+	wantCtx, cancel := until(ctx, r.budget.wantsEnd)
 	defer cancel()
 	want, err := r.runner.wants(wantCtx)
 	if err != nil {
-		return nil, xerrors.Errorf("load the wanted deliveries: %w", err)
+		r.logger.Error(ctx, "the raw interests could not be read, this run tracks only typed deliveries", slog.Error(err))
+		return nil
 	}
-	return want, nil
+	return want
 }
 
 func (r *redeliveryRun) step(p pageRead) ScanStep {
@@ -451,10 +462,7 @@ func (r *redeliveryRun) countGap(ctx context.Context, gap Gap, cause string) {
 // scan reads the head of the list and then the open ranges, newest first. It
 // returns whether the head read worked.
 func (r *redeliveryRun) scan(ctx context.Context, scan Scan) (bool, error) {
-	want, err := r.loadWants(ctx)
-	if err != nil {
-		return false, err
-	}
+	want := r.loadWants(ctx)
 	top, clearAt, err := topAndClearOf(scan)
 	if err != nil {
 		return false, err

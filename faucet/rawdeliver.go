@@ -9,12 +9,18 @@ import (
 	"cdr.dev/slog/v3"
 )
 
+// claimRaw takes no raw delivery once the raw part of the run has ended, and
+// a failed claim ends it.
 func (r *deliveryRun) claimRaw(ctx context.Context) (outbound, bool, error) {
 	r.claimMu.Lock()
 	defer r.claimMu.Unlock()
+	if r.rawDown.Load() {
+		return outbound{}, false, nil
+	}
 	claim, ok, err := r.svc.raw.ClaimRawDelivery(ctx, r.svc.clock.Now(), DeliveryLease, r.gate.full())
 	if err = r.unlessEnded(ctx, err); err != nil {
-		return outbound{}, false, xerrors.Errorf("claim a raw delivery: %w", err)
+		r.rawFailed(ctx, xerrors.Errorf("claim a raw delivery: %w", err))
+		return outbound{}, false, nil
 	}
 	if !ok {
 		return outbound{}, false, nil
@@ -31,7 +37,7 @@ func (r *deliveryRun) rawOutbound(claim RawDeliveryClaim) outbound {
 	logger := s.logger.With(slog.F("subscription", claim.Ref.Key.ID()), slog.F("event_id", claim.Ref.EventID))
 	messageID := r.wh.messageID(claim.Ref.Key, claim.Ref.EventID)
 	return outbound{
-		ref: claim.Ref, messageID: messageID, enqueuedAt: claim.EnqueuedAt,
+		raw: true, ref: claim.Ref, messageID: messageID, enqueuedAt: claim.EnqueuedAt,
 		callbackURL: claim.CallbackURL, secretEnc: claim.SecretEnc,
 		secrets: sealedSecrets{current: claim.SecretEnc, previous: claim.PreviousSecretEnc, previousUntil: claim.PreviousSecretUntil},
 		mustEnd: func(ctx context.Context) GiveUpReason {
@@ -83,7 +89,7 @@ func rawData(ev RawEvent, fields []string) (json.RawMessage, error) {
 
 func (r *deliveryRun) rawGaps() gapKind {
 	return gapKind{
-		noun: "raw gap", claim: r.svc.raw.ClaimRawGap, finish: r.svc.raw.FinishRawGap, cursor: encodeRawCursor, through: "missed_through",
+		raw: true, noun: "raw gap", claim: r.svc.raw.ClaimRawGap, finish: r.svc.raw.FinishRawGap, cursor: encodeRawCursor, through: "missed_through",
 		sent:   "the subscription missed raw events, the gap envelope was sent",
 		failed: "the subscription missed raw events, the gap envelope was not delivered",
 	}

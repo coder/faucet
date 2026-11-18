@@ -15,6 +15,7 @@ interface PurgeReply {
   raw_events_cleared: number;
   raw_events_deleted: number;
   expired_leases: number;
+  raw_failures: number;
 }
 
 interface PollResult {
@@ -71,6 +72,7 @@ async function retentionOracle(faucet: Faucet): Promise<PurgeReply> {
     raw_events_cleared: 0,
     raw_events_deleted: 0,
     expired_leases: 0,
+    raw_failures: 0,
   };
 }
 
@@ -105,6 +107,7 @@ describe('purge', () => {
       raw_events_cleared: 0,
       raw_events_deleted: 0,
       expired_leases: 0,
+      raw_failures: 0,
     });
   });
 

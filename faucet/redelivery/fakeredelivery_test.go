@@ -366,12 +366,6 @@ func (s *fakeRedeliveryStore) rowCount() int {
 	return len(s.rows)
 }
 
-func (s *fakeRedeliveryStore) position() (top, clearAt time.Time) {
-	s.rmu.Lock()
-	defer s.rmu.Unlock()
-	return s.top, s.clearAt
-}
-
 // deliveries copies the state of every delivery that the store keeps.
 func (s *fakeRedeliveryStore) deliveries() map[string]fakeRedeliveryRow {
 	s.rmu.Lock()

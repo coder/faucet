@@ -89,12 +89,13 @@ func (c cronRoutes) purge(w http.ResponseWriter, r *http.Request) {
 		RawEventsCleared     int64 `json:"raw_events_cleared"`
 		RawEventsDeleted     int64 `json:"raw_events_deleted"`
 		ExpiredLeases        int64 `json:"expired_leases"`
+		RawFailures          int64 `json:"raw_failures"`
 		// ExpiredAccessTokens is left out without the login server, which
 		// keeps no access token.
 		ExpiredAccessTokens *int64 `json:"expired_access_tokens,omitempty"`
 	}{
 		res.Deleted, res.PurgedThrough, res.ExpiredSubscriptions, res.EndedDeliveries,
-		res.Raw.Cleared, res.Raw.Deleted, res.Raw.ExpiredLeases, c.loginCount(tokens.ExpiredAccessTokens),
+		res.Raw.Cleared, res.Raw.Deleted, res.Raw.ExpiredLeases, res.RawFailures, c.loginCount(tokens.ExpiredAccessTokens),
 	})
 }
 
@@ -131,7 +132,8 @@ func (c cronRoutes) deliver(w http.ResponseWriter, r *http.Request) {
 		Superseded             int                         `json:"superseded"`
 		PreviousSecretsCleared int                         `json:"previous_secrets_cleared"`
 		Incomplete             bool                        `json:"incomplete"`
-	}{res.Enqueued, res.Gaps, res.GapsSent, res.GapsFailed, res.Claimed, res.Sent, res.Delivered, res.Retried, res.GaveUp, res.Superseded, res.PreviousSecretsCleared, res.Incomplete})
+		RawFailures            int                         `json:"raw_failures"`
+	}{res.Enqueued, res.Gaps, res.GapsSent, res.GapsFailed, res.Claimed, res.Sent, res.Delivered, res.Retried, res.GaveUp, res.Superseded, res.PreviousSecretsCleared, res.Incomplete, res.RawFailures})
 }
 
 // redeliver answers with the counts of the run, also when the run failed: the

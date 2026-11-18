@@ -2,6 +2,7 @@ package faucet_test
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"testing"
 	"time"
@@ -163,11 +164,45 @@ func TestPurgeWithoutARawStoreReportsAndLogsNothingRaw(t *testing.T) {
 	require.EqualValues(t, 1, h.head(), "the raw event is still stored")
 }
 
-func TestPurgeReturnsTheRawStoreError(t *testing.T) {
+// rawExpireDown is a RawStore whose purge passes and whose end of the
+// deliveries of expired subscriptions fails.
+type rawExpireDown struct{ faucet.RawStore }
+
+func (rawExpireDown) ExpireRawDeliveries(context.Context, time.Time) (int64, error) {
+	return 0, errRawStoreDown
+}
+
+func TestARawPurgeThatFailsIsCountedAndThePurgeGoesOn(t *testing.T) {
 	t.Parallel()
 
-	h := newIngestHarness(t, func(d *faucet.Deps) { d.RawStore = rawPurgeDown{d.RawStore} })
+	for name, tc := range map[string]struct {
+		down    func(faucet.RawStore) faucet.RawStore
+		expired int64
+		logged  string
+	}{
+		"the purge of raw events": {func(s faucet.RawStore) faucet.RawStore { return rawPurgeDown{s} }, 0, "purge raw events"},
+		"the end of raw deliveries": {
+			func(s faucet.RawStore) faucet.RawStore { return rawExpireDown{s} }, 1, "end raw deliveries of expired subscriptions",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newIngestHarness(t, func(d *faucet.Deps) { d.RawStore = tc.down(d.RawStore) })
+			h.openLease(ingestInterest{})
+			h.push(1)
+			_, _, err := h.store.InsertEvent(h.ctx, faucet.Event{
+				Source: "github", DeliveryID: "typed", Type: "ci.run_completed", RepoID: repoID, HeadSHA: "abc",
+				Data: json.RawMessage(sampleData["ci.run_completed"]),
+			})
+			require.NoError(t, err)
+			h.clock.Advance(31 * 24 * time.Hour)
 
-	_, err := h.svc.Purge(h.ctx, h.clock.Now())
-	require.ErrorIs(t, err, errRawStoreDown)
+			res := h.purge()
+			require.EqualValues(t, 1, res.Deleted, "the typed events past the retention are deleted")
+			require.EqualValues(t, 1, res.RawFailures)
+			require.Equal(t, tc.expired, res.Raw.ExpiredLeases, "a raw step that fails leaves the other to run")
+			require.Contains(t, logLine(t, h.logs.String(), "a raw purge step failed, the purge goes on"), tc.logged)
+			require.Contains(t, h.logs.String(), errRawStoreDown.Error())
+		})
+	}
 }

@@ -290,6 +290,10 @@ type DeliverResult struct {
 	// Incomplete says that due work was left, because the run reached its
 	// limit or its deadline.
 	Incomplete bool
+	// RawFailures counts the calls of the RawStore that failed. The first
+	// ends the raw part of the run, which then sends no more raw deliveries or
+	// raw gaps and goes on with the typed ones. The log has each error.
+	RawFailures int
 }
 
 // GaveUpTotal is the number of deliveries that ended without a success.

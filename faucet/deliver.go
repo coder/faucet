@@ -117,9 +117,10 @@ type webhookBody struct {
 // A call that dies between a claim and its result leaves the delivery to the
 // next call after the lease, and the attempt counts.
 //
-// The error is the first failure of the store. The result holds what happened
-// before it. The method has no auth of its own. The host decides who may call
-// it.
+// The error is the first failure of the Store. The result holds what happened
+// before it. A failure of the RawStore is no error of the call: it is logged
+// and counted in RawFailures, and the run goes on with the typed deliveries.
+// The method has no auth of its own. The host decides who may call it.
 func (s *Service) DeliverDue(ctx context.Context) (DeliverResult, error) {
 	if s.webhook == nil {
 		return DeliverResult{}, ErrNoWebhook
@@ -156,6 +157,10 @@ type deliveryRun struct {
 	// step, so no two workers can both take the last place of an endpoint.
 	claimMu sync.Mutex
 	gate    endpointGate
+
+	// rawDown is set by the first failure of the RawStore, and ends the raw
+	// part of the run.
+	rawDown atomic.Bool
 }
 
 type endpointGate struct {
@@ -255,6 +260,9 @@ func (r *deliveryRun) claimTyped(ctx context.Context) (outbound, bool, error) {
 func (r *deliveryRun) claimGap(ctx context.Context, kind gapKind) (GapClaim, bool, error) {
 	r.claimMu.Lock()
 	defer r.claimMu.Unlock()
+	if kind.raw && r.rawDown.Load() {
+		return GapClaim{}, false, nil
+	}
 	claim, ok, err := kind.claim(ctx, r.svc.clock.Now(), DeliveryLease, r.gate.full())
 	if ok {
 		r.gate.enter(CallbackOrigin(claim.CallbackURL))
@@ -372,6 +380,8 @@ func (r *deliveryRun) endUndecodable(ctx context.Context, now time.Time, target 
 // gapKind is what differs between the gaps that a purge left on typed
 // subscriptions and the gaps that a raw ingest recorded.
 type gapKind struct {
+	// raw says that the RawStore holds the gaps.
+	raw    bool
 	noun   string
 	claim  func(ctx context.Context, now time.Time, lease time.Duration, skip []string) (GapClaim, bool, error)
 	finish func(ctx context.Context, ref GapRef) error
@@ -399,7 +409,14 @@ func (r *deliveryRun) sendGaps(ctx context.Context) error {
 		kinds = append(kinds, r.rawGaps())
 	}
 	for _, kind := range kinds {
-		if err := r.sendGapsOf(ctx, kind); err != nil {
+		if kind.raw && r.rawDown.Load() {
+			continue
+		}
+		err := r.sendGapsOf(ctx, kind)
+		switch {
+		case err != nil && kind.raw:
+			r.rawFailed(ctx, err)
+		case err != nil:
 			return err
 		}
 	}
@@ -466,10 +483,9 @@ func (r *deliveryRun) sweepExpired(ctx context.Context) error {
 		return xerrors.Errorf("expire deliveries: %w", err)
 	}
 	if r.svc.raw != nil {
-		var rawDeleted int64
-		rawDeleted, err = r.svc.raw.ExpireRawDeliveries(ctx, now)
-		if err != nil {
-			err = xerrors.Errorf("expire raw deliveries: %w", err)
+		rawDeleted, err := r.svc.raw.ExpireRawDeliveries(ctx, now)
+		if err = r.unlessEnded(ctx, err); err != nil {
+			r.rawFailed(ctx, xerrors.Errorf("expire raw deliveries: %w", err))
 		}
 		deleted += rawDeleted
 	}
@@ -477,7 +493,15 @@ func (r *deliveryRun) sweepExpired(ctx context.Context) error {
 		r.svc.logger.Info(ctx, "deliveries of expired subscriptions ended", slog.F("count", deleted))
 		r.add(func(res *DeliverResult) { res.GaveUp[GiveUpSubscriptionExpired] += int(deleted) })
 	}
-	return err
+	return nil
+}
+
+// rawFailed records a failure of the RawStore and ends the raw part of the
+// run.
+func (r *deliveryRun) rawFailed(ctx context.Context, err error) {
+	r.rawDown.Store(true)
+	r.svc.logger.Error(ctx, "a raw delivery step failed, the run goes on with the typed deliveries", slog.Error(err))
+	r.add(func(res *DeliverResult) { res.RawFailures++ })
 }
 
 // A sweep failure ends nothing else: signing ignores a window that ended, so
@@ -541,7 +565,11 @@ func (r *deliveryRun) send(ctx context.Context) error {
 				// that neither kind waits behind a long queue of the other.
 				slices.Reverse(kinds)
 				r.add(func(res *DeliverResult) { res.Claimed++ })
-				if err := r.attempt(ctx, o); err != nil {
+				err = r.attempt(ctx, o)
+				switch {
+				case err != nil && o.raw:
+					r.rawFailed(ctx, err)
+				case err != nil:
 					fail(err)
 					return
 				}
@@ -583,6 +611,8 @@ func giveUp(reason GiveUpReason) attemptOutcome {
 // outbound is one claimed attempt of a typed or a raw delivery: what the
 // shared attempt path needs, and the steps where the two kinds differ.
 type outbound struct {
+	// raw says that the RawStore holds the delivery.
+	raw         bool
 	ref         DeliveryRef
 	messageID   string
 	enqueuedAt  time.Time

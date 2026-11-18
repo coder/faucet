@@ -107,7 +107,7 @@ func TestALapsedInterestEndsItsPendingDeliveryAsRecoveredOnA2xxAttempt(t *testin
 	require.Equal(t, "pushed", recovered[0]["delivery_id"])
 }
 
-func TestAWantsThatFailsIsAFailedHeadRead(t *testing.T) {
+func TestAWantsThatFailsLeavesTheRunToTheTypedDeliveries(t *testing.T) {
 	t.Parallel()
 	interest := &pushInterest{repoID: 42, live: true}
 	env := newWantingEnv(t, interest)
@@ -116,41 +116,37 @@ func TestAWantsThatFailsIsAFailedHeadRead(t *testing.T) {
 	require.Equal(t, 1, env.run().Asked)
 	env.advance(cronEvery)
 	env.failedPush("pushed", 42)
-	top, clearAt := env.store.position()
+	env.gh.record("typed", env.now().Add(-time.Minute), 500)
 	outage := errors.New("the interests are out of reach")
 	interest.err = outage
 
 	res, err := env.runner.Run(context.Background())
-	require.ErrorIs(t, err, outage)
-	require.Zero(t, res.Pages, "a run reads no page without the predicate")
-	require.Zero(t, res.Tracked)
-	require.False(t, env.tracked("pushed"))
-	require.Zero(t, res.Asked)
-	require.Len(t, env.gh.askedTimes("waiting"), 1, "the second ask of waiting was due, and it did not go out")
-	require.Equal(t, 1, res.Pending, "the settle still ran")
-	gotTop, gotClear := env.store.position()
-	require.True(t, top.Equal(gotTop), "the top did not move")
-	require.True(t, clearAt.Equal(gotClear), "the clear did not move")
-
-	interest.err = nil
-	res = env.run()
-	require.Equal(t, 1, res.Tracked)
-	require.True(t, env.tracked("pushed"))
-	require.Equal(t, 2, res.Asked, "the second ask of waiting and the first of pushed")
+	require.NoError(t, err, "a run without the raw interests is no failed run")
+	require.Equal(t, 1, res.Pages, "the run reads the list")
+	require.True(t, env.tracked("typed"))
+	require.False(t, env.tracked("pushed"), "a raw delivery that an interest wanted is not tracked without the interests")
+	require.Equal(t, 2, res.Asked, "the second ask of waiting and the first of typed")
+	lost := env.logged("the raw interests could not be read, this run tracks only typed deliveries")
+	require.Len(t, lost, 1)
+	require.Contains(t, lost[0]["error"], outage.Error())
 }
 
 // In a synctest bubble the clock moves only when every goroutine waits, so the
 // call ends at the same time on every machine, whatever its load.
-func TestAWantsThatDoesNotAnswerCostsTheScanTimeAndNeverThePurge(t *testing.T) {
+func TestAWantsThatDoesNotAnswerCostsATenthOfTheRunAndNoTypedWork(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		const limit = 2 * time.Second
 		env := newRedeliveryEnv(t)
+		env.gh.record("typed", env.now().Add(-time.Minute), 500)
 		spy := &purgeSpy{fakeRedeliveryStore: env.store}
+		var cut time.Duration
+		start := time.Now()
 		runner, err := redelivery.New(redelivery.Deps{
 			Store: spy, Hooks: env.gh, Clock: env.clock, Logger: slog.Make(env.logs),
 			Wants: func(ctx context.Context) (func(string, string, int64) bool, error) {
 				<-ctx.Done()
+				cut = time.Since(start)
 				return nil, ctx.Err()
 			},
 		})
@@ -158,16 +154,16 @@ func TestAWantsThatDoesNotAnswerCostsTheScanTimeAndNeverThePurge(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), limit)
 		defer cancel()
 
-		start := time.Now()
 		res, err := runner.Run(ctx)
 
-		require.ErrorIs(t, err, context.DeadlineExceeded)
-		require.Zero(t, res.Pages)
+		require.NoError(t, err)
+		require.Equal(t, limit/10, cut, "the call is cut at a tenth of the run")
+		require.Equal(t, 1, res.Pages)
+		require.Equal(t, 1, res.Asked, "the typed delivery is asked for")
 		spy.mu.Lock()
 		defer spy.mu.Unlock()
 		require.Equal(t, 1, spy.calls)
 		require.True(t, spy.alive, "the purge runs inside the run's time")
-		require.Equal(t, limit/2, spy.at.Sub(start), "the call is cut where the time for reading the list ends")
 	})
 }
 

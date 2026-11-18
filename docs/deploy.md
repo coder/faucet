@@ -43,13 +43,13 @@ A preview runs any branch's code, and the Neon integration gives previews the pr
 
 ## Scheduled routes
 
-Each `/cron/*` route answers 200 with a JSON object, and the result type in the table documents each field. A failed `/cron/redeliver` run answers 500 with the same object, holding what the run did, and an `error` that names nothing; the log has the cause. A failed `/cron/deliver` or `/cron/purge` answers 500 with a line of text and no object. A route whose feature is off answers 503.
+Each `/cron/*` route answers 200 with a JSON object, and the result type in the table documents each field. A failed `/cron/redeliver` run answers 500 with the same object, holding what the run did, and an `error` that names nothing; the log has the cause. A failed `/cron/deliver` or `/cron/purge` answers 500 with a line of text and no object. A failure of the raw event store fails neither: the route does its typed work, answers 200 and counts the failure in `raw_failures`, and the log has the cause. A route whose feature is off answers 503.
 
 <!-- BEGIN generated:cron-replies -->
 | Route | Reply fields | Documented on |
 | --- | --- | --- |
-| `GET /cron/purge` | `deleted`, `purged_through`, `expired_subscriptions`, `ended_deliveries`, `raw_events_cleared`, `raw_events_deleted`, `expired_leases`, `expired_access_tokens` | `faucet.PurgeResult`, `oauth.PurgeResult` |
-| `GET /cron/deliver` | `enqueued`, `gaps`, `gaps_sent`, `gaps_failed`, `claimed`, `sent`, `delivered`, `retried`, `gave_up`, `superseded`, `previous_secrets_cleared`, `incomplete` | `faucet.DeliverResult` |
+| `GET /cron/purge` | `deleted`, `purged_through`, `expired_subscriptions`, `ended_deliveries`, `raw_events_cleared`, `raw_events_deleted`, `expired_leases`, `raw_failures`, `expired_access_tokens` | `faucet.PurgeResult`, `oauth.PurgeResult` |
+| `GET /cron/deliver` | `enqueued`, `gaps`, `gaps_sent`, `gaps_failed`, `claimed`, `sent`, `delivered`, `retried`, `gave_up`, `superseded`, `previous_secrets_cleared`, `incomplete`, `raw_failures` | `faucet.DeliverResult` |
 | `GET /cron/redeliver` | `busy`, `pages`, `attempts`, `tracked`, `asked`, `recovered`, `gave_up.limit`, `gave_up.expired`, `gaps`, `pending`, `ranges`, `error` | `redelivery.Result` |
 <!-- END generated:cron-replies -->
 

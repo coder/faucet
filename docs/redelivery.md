@@ -82,6 +82,7 @@ Redelivery trusts a `Date` up to 6 hours ahead of GitHub's list (the margin) and
 - **`Date` far behind on a quiet hook.** When a `Date` is more than 1 hour behind the clock that deletes GitHub's attempts, and no listed attempt shows the lag, a gap can end too early, and failures above it aren't counted. On a busy hook the run sees the lag and fails instead. ([#26](https://github.com/coder/faucet/issues/26))
 - **Dense burst, then silence.** When a burst holds more attempts in the 5 minute overlap than a run has pages, every run reads the same newest pages again, and older ranges starve. Their failures end inside counted gaps. ([#37](https://github.com/coder/faucet/issues/37))
 - **A raw event without a repository in the list.** A run knows who wants a raw delivery by the repository that GitHub's delivery list names for it. A failed raw delivery that the list names no repository for is never asked for again or counted.
+- **A run that cannot read the raw interests.** When faucet cannot read who wants raw events, or the read takes more than a tenth of the run, the run logs it and tracks only the deliveries that faucet stores. A raw delivery that failed meanwhile is not asked for again.
 - **Replacing the hook.** Failures that the old hook listed after the last run are never read or counted, because the new hook can't read the old hook's list. ([#38](https://github.com/coder/faucet/issues/38))
 
 ## Embedding

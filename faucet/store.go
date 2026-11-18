@@ -144,6 +144,9 @@ type PurgeResult struct {
 	// has a RawStore. Its raw deliveries are counted in EndedDeliveries.
 	// Store.Purge leaves it at zero.
 	Raw RawPurgeResult
+	// RawFailures is the number of the RawStore calls of Service.Purge that
+	// failed. Store.Purge leaves it at zero.
+	RawFailures int64
 }
 
 func hasNUL(v any) bool {

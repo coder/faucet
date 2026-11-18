@@ -217,7 +217,7 @@ func TestTheServerStoresARawEventOnlyWhileAPollerWantsIt(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(body), &reply), body)
 	require.Equal(t, map[string]int64{
 		"deleted": 0, "purged_through": 0, "expired_subscriptions": 0, "ended_deliveries": 0,
-		"raw_events_cleared": 1, "raw_events_deleted": 0, "expired_leases": 0,
+		"raw_events_cleared": 1, "raw_events_deleted": 0, "expired_leases": 0, "raw_failures": 0,
 	}, reply)
 	var held int
 	require.NoError(t, srv.db.QueryRowContext(ctx, `SELECT count(*) FROM faucet_raw_events WHERE body IS NOT NULL`).Scan(&held))

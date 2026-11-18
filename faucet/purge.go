@@ -28,7 +28,8 @@ import (
 // payload of every raw event that no delivery and no lease still waits for or
 // that is older than the life of a lease, and deletes the raw events received
 // before the given time. The result counts them in Raw, and the raw
-// deliveries in EndedDeliveries.
+// deliveries in EndedDeliveries. A failure of the RawStore is no error of the
+// call: it is logged and counted in RawFailures.
 //
 // The method has no auth of its own. The host decides who may call it.
 func (s *Service) Purge(ctx context.Context, before time.Time) (PurgeResult, error) {
@@ -57,16 +58,14 @@ func (s *Service) Purge(ctx context.Context, before time.Time) (PurgeResult, err
 		slog.F("expired_subscriptions_deleted", subscriptions),
 	}
 	if s.raw != nil {
-		if res, err = s.purgeRaw(ctx, res, now, before); err != nil {
-			return PurgeResult{}, err
-		}
+		res = s.purgeRaw(ctx, res, now, before)
 		fields = append(fields,
 			slog.F("raw_events_cleared", res.Raw.Cleared), slog.F("raw_events_deleted", res.Raw.Deleted),
-			slog.F("expired_leases", res.Raw.ExpiredLeases))
+			slog.F("expired_leases", res.Raw.ExpiredLeases), slog.F("raw_failures", res.RawFailures))
 	}
 	fields = append(fields, slog.F("deliveries_ended", res.EndedDeliveries))
 	logger := s.logger.Debug
-	if res.Deleted > 0 || subscriptions > 0 || res.EndedDeliveries > 0 || res.Raw != (RawPurgeResult{}) {
+	if res.Deleted > 0 || subscriptions > 0 || res.EndedDeliveries > 0 || res.Raw != (RawPurgeResult{}) || res.RawFailures > 0 {
 		logger = s.logger.Info
 	}
 	logger(ctx, "events purged", fields...)
@@ -76,16 +75,22 @@ func (s *Service) Purge(ctx context.Context, before time.Time) (PurgeResult, err
 // purgeRaw runs after the expired subscriptions are deleted, so that the raw
 // deliveries they held end first and their events are cleared by the same
 // call. A body older than a lease lives is cleared whatever still names it,
-// which bounds what a poller that never moves its cursor can keep.
-func (s *Service) purgeRaw(ctx context.Context, res PurgeResult, now, before time.Time) (PurgeResult, error) {
+// which bounds what a poller that never moves its cursor can keep. Each step
+// that fails is logged and counted, and the other still runs.
+func (s *Service) purgeRaw(ctx context.Context, res PurgeResult, now, before time.Time) PurgeResult {
+	failed := func(step string, err error) {
+		s.logger.Error(ctx, "a raw purge step failed, the purge goes on", slog.F("step", step), slog.Error(err))
+		res.RawFailures++
+	}
 	ended, err := s.raw.ExpireRawDeliveries(ctx, now)
 	if err != nil {
-		return PurgeResult{}, xerrors.Errorf("end raw deliveries of expired subscriptions: %w", err)
+		failed("end raw deliveries of expired subscriptions", err)
 	}
 	res.EndedDeliveries += ended
-	res.Raw, err = s.raw.PurgeRawEvents(ctx, RawPurge{Now: now, ClearBefore: now.Add(-rawLeaseTTL), DeleteBefore: before})
+	raw, err := s.raw.PurgeRawEvents(ctx, RawPurge{Now: now, ClearBefore: now.Add(-rawLeaseTTL), DeleteBefore: before})
 	if err != nil {
-		return PurgeResult{}, xerrors.Errorf("purge raw events: %w", err)
+		failed("purge raw events", err)
 	}
-	return res, nil
+	res.Raw = raw
+	return res
 }

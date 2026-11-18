@@ -11,7 +11,7 @@ This came in [#51](https://github.com/coder/faucet/pull/51). The server offers n
 - **A `Store` of your own** needs no change. A `RawStore` of your own must pass `storetest.RunRaw`.
 - **Migration `000012_raw_events`** adds five tables and one index on `faucet_subscriptions`. An instance of the build before it never reads them, and an Instant Rollback past it cannot start (see [deploy.md](deploy.md#rolling-back)).
 - **A rolling deploy drops some raw events.** Until every instance runs the new build, an old instance answers 202 to a delivery that a new instance would have stored, and `NotFound` to a raw name.
-- **`/cron/purge`** answers three more members (see [deploy.md](deploy.md#scheduled-routes)).
+- **`/cron/purge`** answers four more members, and `/cron/deliver` one more (see [deploy.md](deploy.md#scheduled-routes)).
 
 ## To service accounts (migration `000011_service_clients_and_repos`)
 
