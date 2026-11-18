@@ -3,6 +3,7 @@ package pgstore
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 
 	"golang.org/x/xerrors"
@@ -10,6 +11,9 @@ import (
 	"github.com/coder/faucet/faucet"
 	"github.com/coder/faucet/faucet/pgstore/database"
 )
+
+// rawNamePrefix starts the event type of every raw subscription.
+const rawNamePrefix = "github."
 
 // rawEventsLockKey is the FNV-1a 64-bit hash of "faucet_raw_events", read as an
 // int64. Every writer of faucet_raw_events must take this advisory lock first.
@@ -137,13 +141,54 @@ func (s *Store) RawHead(ctx context.Context) (_ int64, err error) {
 	return head, nil
 }
 
+// UpsertRawSubscription takes the lock of the subscription's event and
+// repository after the lock of its principal, as OpenRawLease does, so the two
+// never wait for each other in a cycle.
+func (s *Store) UpsertRawSubscription(ctx context.Context, sub faucet.Subscription, now time.Time, limits faucet.RawLimits) (_ faucet.Subscription, err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	if err := limits.Validate(); err != nil {
+		return faucet.Subscription{}, err
+	}
+	event, ok := strings.CutPrefix(sub.EventType, rawNamePrefix)
+	if !ok {
+		return faucet.Subscription{}, xerrors.Errorf("%q is not a raw event name", sub.EventType)
+	}
+	return s.upsertSubscriptionChecked(ctx, sub, now, limits.Live, func(q *database.Queries) error {
+		count, err := countRawTarget(ctx, q, sub.Principal, event, sub.RepoID, now, sub.KeyHash[:])
+		switch {
+		case err != nil:
+			return err
+		case count.OwnSubscriptions >= int64(limits.PerPrincipalTarget):
+			return faucet.ErrRawShareLimit
+		case count.Interests >= int64(limits.PerTarget):
+			return faucet.ErrRawInterestLimit
+		}
+		return nil
+	})
+}
+
+// countRawTarget counts the live interests of an event of a repository, but
+// the subscription of except. The lock that it takes first holds until the
+// commit, so no other new interest of the event and repository is stored
+// meanwhile.
+func countRawTarget(ctx context.Context, q *database.Queries, principal, event string, repoID int64, now time.Time, except []byte) (database.CountRawInterestsRow, error) {
+	if err := q.LockRawTarget(ctx, database.LockRawTargetParams{Event: event, RepoID: repoID}); err != nil {
+		return database.CountRawInterestsRow{}, xerrors.Errorf("lock raw interests: %w", err)
+	}
+	count, err := q.CountRawInterests(ctx, database.CountRawInterestsParams{RepoID: repoID, Event: event, Now: now, ExceptKey: except, Principal: principal})
+	if err != nil {
+		return database.CountRawInterestsRow{}, xerrors.Errorf("count raw interests: %w", err)
+	}
+	return count, nil
+}
+
 // OpenRawLease takes a lock per principal, so two opens of one principal cannot
 // both pass the limit. The lock is another key than the one that
 // UpsertSubscription takes, so a poll never waits for a subscribe.
-func (s *Store) OpenRawLease(ctx context.Context, lease faucet.RawLease, now time.Time, maxLive int) (_ int64, err error) {
+func (s *Store) OpenRawLease(ctx context.Context, lease faucet.RawLease, now time.Time, limits faucet.RawLimits) (_ int64, err error) {
 	defer func() { err = endedBy(ctx, err) }()
-	if maxLive <= 0 {
-		return 0, xerrors.Errorf("max live leases must be positive, got %d", maxLive)
+	if err := limits.Validate(); err != nil {
+		return 0, err
 	}
 	if err := lease.Validate(now); err != nil {
 		return 0, xerrors.Errorf("validate lease: %w", err)
@@ -159,9 +204,26 @@ func (s *Store) OpenRawLease(ctx context.Context, lease faucet.RawLease, now tim
 	if err := q.LockRawLeases(ctx, lease.Principal); err != nil {
 		return 0, xerrors.Errorf("lock raw leases: %w", err)
 	}
-	ended, err := q.EndRawLeasesOf(ctx, database.EndRawLeasesOfParams{Principal: lease.Principal, Now: now, MaxLive: int64(maxLive)})
+	ended, err := q.EndRawLeasesOf(ctx, database.EndRawLeasesOfParams{Principal: lease.Principal, Now: now, MaxLive: int64(limits.Live)})
 	if err != nil {
 		return 0, xerrors.Errorf("end raw leases: %w", err)
+	}
+	count, err := countRawTarget(ctx, q, lease.Principal, lease.Event, lease.RepoID, now, nil)
+	if err != nil {
+		return 0, err
+	}
+	if count.OwnLeases >= int64(limits.PerPrincipalTarget) {
+		oldest, err := q.EndOldestRawLeaseOfTarget(ctx, database.EndOldestRawLeaseOfTargetParams{
+			Principal: lease.Principal, RepoID: lease.RepoID, Event: lease.Event, Now: now,
+		})
+		if err != nil {
+			return 0, xerrors.Errorf("end the oldest raw lease of the event: %w", err)
+		}
+		ended = append(ended, oldest...)
+		count.Interests -= int64(len(oldest))
+	}
+	if count.Interests >= int64(limits.PerTarget) {
+		return 0, faucet.ErrRawInterestLimit
 	}
 	if len(ended) > 0 {
 		if err := q.DeleteRawUnreadOf(ctx, ended); err != nil {

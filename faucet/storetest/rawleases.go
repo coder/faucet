@@ -79,7 +79,7 @@ func openRawLeaseStartsAtTheHead(t *testing.T, s RawStore) {
 	head := r.push()
 
 	lease := newRawLease(1, rawSpec{}, r.now.Add(time.Hour))
-	got, err := s.OpenRawLease(r.ctx, lease, r.now, rawMaxLive)
+	got, err := s.OpenRawLease(r.ctx, lease, r.now, rawLimits(rawMaxLive))
 	require.NoError(t, err)
 	require.Equal(t, head, got, "a new lease starts at the head")
 
@@ -90,7 +90,7 @@ func openRawLeaseStartsAtTheHead(t *testing.T, s RawStore) {
 	require.Equal(t, head, page.AckedThrough, "a new lease has acknowledged the head")
 	require.Equal(t, head, page.Next)
 
-	_, err = s.OpenRawLease(r.ctx, lease, r.now, rawMaxLive)
+	_, err = s.OpenRawLease(r.ctx, lease, r.now, rawLimits(rawMaxLive))
 	require.Error(t, err, "a lease ID that is already stored is an error")
 	next := r.push()
 	require.Equal(t, []int64{next}, rawIDs(r.read(r.query(lease, head)).Events), "the refused open left the lease as it was")
@@ -389,7 +389,7 @@ func openRawLeaseEndsOnlyTheLeasePolledLongestAgoAtTheLimit(t *testing.T, s RawS
 		t.Helper()
 		n++
 		lease := newRawLease(n, w, at.Add(ttl))
-		_, err := s.OpenRawLease(r.ctx, lease, at, maxLive)
+		_, err := s.OpenRawLease(r.ctx, lease, at, rawLimits(maxLive))
 		require.NoError(t, err)
 		return lease
 	}

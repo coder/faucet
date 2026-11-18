@@ -105,8 +105,12 @@ func (s *Service) pollRaw(ctx context.Context, entry *rawEntry, p *eventsPollPar
 	if _, err := rand.Read(lease.ID[:]); err != nil {
 		return nil, readError(storeError(ctx, logger, xerrors.Errorf("make a lease ID: %w", err)))
 	}
-	head, err := s.raw.OpenRawLease(ctx, lease, now, maxLiveRawLeases)
-	if err != nil {
+	head, err := s.raw.OpenRawLease(ctx, lease, now, RawLimits{Live: maxLiveRawLeases, PerTarget: maxRawInterestsPerTarget, PerPrincipalTarget: maxRawInterestsPerLogin})
+	switch {
+	case xerrors.Is(err, ErrRawInterestLimit):
+		logger.Info(ctx, "poll refused, raw interest limit reached", slog.F("login", principal.Login))
+		return nil, rawInterestLimitError(entry, req.args.Repo)
+	case err != nil:
 		return nil, readError(storeError(ctx, logger, err))
 	}
 	logger.Debug(ctx, "poll lease opened", slog.F("login", principal.Login))

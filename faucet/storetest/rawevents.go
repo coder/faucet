@@ -32,7 +32,7 @@ type rawSubtest struct {
 // Every call to newStore must return an empty store that does not share state
 // with the others, because the subtests run in parallel.
 func RunRaw(t *testing.T, newStore func(t *testing.T) RawStore) {
-	groups := [][]rawSubtest{rawIngestSubtests, rawLeaseSubtests, rawDeliverySubtests, rawPurgeSubtests, rawConcurrencySubtests}
+	groups := [][]rawSubtest{rawIngestSubtests, rawLeaseSubtests, rawDeliverySubtests, rawPurgeSubtests, rawConcurrencySubtests, rawLimitSubtests}
 	for _, group := range groups {
 		for _, st := range group {
 			t.Run(st.name, func(t *testing.T) {
@@ -59,6 +59,9 @@ const (
 	rawRepo    int64 = 42
 	rawEvent         = "push"
 	rawMaxLive       = 100
+	// rawMaxPerTarget is the limit of interests per event and repository
+	// that the cases pass, except those of that limit.
+	rawMaxPerTarget = 1000
 )
 
 var rawBody = []byte(`{"ref":"refs/heads/main"}`)
@@ -149,6 +152,12 @@ type rawRig struct {
 	leases     atomic.Uint64
 }
 
+// rawLimits are the limits of the cases with live as the limit of a
+// principal, and others that they never reach.
+func rawLimits(live int) faucet.RawLimits {
+	return faucet.RawLimits{Live: live, PerTarget: rawMaxPerTarget, PerPrincipalTarget: rawMaxPerTarget}
+}
+
 func newRawRig(t *testing.T, s RawStore) *rawRig {
 	t.Helper()
 	return &rawRig{t: t, s: s, ctx: context.Background(), now: subscriptionBase}
@@ -163,7 +172,7 @@ func (r *rawRig) subscribe(n int, w rawSpec) faucet.Subscription {
 
 func (r *rawRig) subscribeAt(n int, w rawSpec, now time.Time) faucet.Subscription {
 	r.t.Helper()
-	row, err := r.s.UpsertSubscription(r.ctx, newRawSubscription(n, w, now.Add(time.Hour)), now, rawMaxLive)
+	row, err := r.s.UpsertRawSubscription(r.ctx, newRawSubscription(n, w, now.Add(time.Hour)), now, rawLimits(rawMaxLive))
 	require.NoError(r.t, err)
 	return row
 }
@@ -172,7 +181,7 @@ func (r *rawRig) subscribeAt(n int, w rawSpec, now time.Time) faucet.Subscriptio
 func (r *rawRig) open(w rawSpec) faucet.RawLease {
 	r.t.Helper()
 	lease := newRawLease(r.leases.Add(1), w, r.now.Add(time.Hour))
-	_, err := r.s.OpenRawLease(r.ctx, lease, r.now, rawMaxLive)
+	_, err := r.s.OpenRawLease(r.ctx, lease, r.now, rawLimits(rawMaxLive))
 	require.NoError(r.t, err)
 	return lease
 }

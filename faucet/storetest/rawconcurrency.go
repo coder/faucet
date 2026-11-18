@@ -160,7 +160,7 @@ func openRawLeaseKeepsTheLimitUnderConcurrentOpens(t *testing.T, s RawStore) {
 		lease := newRawLease(r.leases.Add(1), rawSpec{}, r.now.Add(time.Hour))
 		opened[lease.ID] = true
 		fns = append(fns, func() error {
-			if _, err := s.OpenRawLease(r.ctx, lease, r.now, maxLive); err != nil {
+			if _, err := s.OpenRawLease(r.ctx, lease, r.now, rawLimits(maxLive)); err != nil {
 				return xerrors.Errorf("open lease: %w", err)
 			}
 			return nil
@@ -272,7 +272,7 @@ func claimRawDeliveryTakesOnlyTheLiveIncarnationUnderChurn(t *testing.T, s RawSt
 	}, func() error {
 		for ingesting.Load() {
 			lease := newRawLease(r.leases.Add(1), rawSpec{}, ingestNow.Add(time.Hour))
-			head, err := s.OpenRawLease(r.ctx, lease, ingestNow, rawMaxLive)
+			head, err := s.OpenRawLease(r.ctx, lease, ingestNow, rawLimits(rawMaxLive))
 			if err != nil {
 				return xerrors.Errorf("open lease: %w", err)
 			}

@@ -107,7 +107,7 @@ func (h *ingestHarness) openLease(w ingestInterest) *ingestLease {
 		ExpiresAt: h.clock.Now().Add(time.Hour),
 	}
 	binary.BigEndian.PutUint64(lease.ID[8:], h.leases.Add(1))
-	head, err := h.store.OpenRawLease(h.ctx, lease, h.clock.Now(), 100)
+	head, err := h.store.OpenRawLease(h.ctx, lease, h.clock.Now(), faucet.RawLimits{Live: 100, PerTarget: 1000, PerPrincipalTarget: 1000})
 	require.NoError(h.t, err)
 	return &ingestLease{h: h, after: head, read: faucet.RawRead{
 		Lease: lease.ID, Key: lease.Key, RepoID: lease.RepoID, Limit: 2000, MaxBytes: 64 << 20,
@@ -569,6 +569,26 @@ func TestRawIngestSize(t *testing.T) {
 			require.Contains(t, line, "event_too_large")
 		})
 	}
+
+	t.Run("UnionTooLargeServesTheFieldsThatFit", func(t *testing.T) {
+		t.Parallel()
+		h := newIngestHarness(t)
+		large := h.subscribe(ingestInterest{fields: []string{"big", "ref"}})
+		small := h.subscribe(ingestInterest{fields: []string{"ref"}})
+		lease := h.openLease(ingestInterest{fields: []string{"repository.id"}})
+		code, _ := h.post("push", "d-1", body)
+		require.Equal(t, http.StatusOK, code)
+
+		claims := h.claims()
+		require.Len(t, claims, 1)
+		require.Equal(t, small.KeyHash, claims[0].Ref.Key)
+		require.Equal(t, []string{"ref", "repository.id"}, claims[0].Event.Fields, "the body holds only the fields of the interests that get the event")
+		require.JSONEq(t, `{"ref":"refs/heads/main","repository":{"id":42}}`, string(lease.poll().Events[0].Body))
+		gap, ok, err := h.store.ClaimRawGap(h.ctx, h.clock.Now(), time.Minute, nil)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Equal(t, large.KeyHash, gap.Ref.Key)
+	})
 
 	t.Run("UnionWhenEveryInterestHasFields", func(t *testing.T) {
 		t.Parallel()

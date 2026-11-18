@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"math"
 	"regexp"
 	"slices"
 	"strconv"
@@ -331,28 +332,74 @@ func decodeRawCursor(cursor string) (pos int64, lease RawLeaseID, hasLease bool,
 	return pos, lease, true, true
 }
 
-// rawDocument is a webhook payload that is a JSON object. Its members are
-// read once, for the envelope and for every projection.
+// rawDocument is a webhook payload that is a JSON object.
 type rawDocument struct {
-	body    []byte
-	members map[string]json.RawMessage
+	body []byte
+	root *rawValue
+}
+
+// rawValue is one JSON value of a payload. An object or an array is split into
+// its members or elements the first time a projection reads into it, and kept
+// split, so that the projections of one payload parse each value once.
+type rawValue struct {
+	raw      json.RawMessage
+	split    bool
+	members  map[string]*rawValue
+	elements []*rawValue
 }
 
 func parseRawDocument(body []byte) (rawDocument, bool) {
-	var members map[string]json.RawMessage
-	if err := json.Unmarshal(body, &members); err != nil || members == nil {
+	root := &rawValue{raw: bytes.TrimLeft(body, " \t\r\n")}
+	if _, ok := root.object(); !ok {
 		return rawDocument{}, false
 	}
-	return rawDocument{body: body, members: members}, true
+	return rawDocument{body: body, root: root}, true
+}
+
+// object returns the members of an object, and false for any other value.
+func (v *rawValue) object() (map[string]*rawValue, bool) {
+	if !bytes.HasPrefix(v.raw, []byte("{")) {
+		return nil, false
+	}
+	if !v.split {
+		v.split = true
+		var members map[string]json.RawMessage
+		if json.Unmarshal(v.raw, &members) == nil {
+			v.members = make(map[string]*rawValue, len(members))
+			for name, raw := range members {
+				v.members[name] = &rawValue{raw: raw}
+			}
+		}
+	}
+	return v.members, v.members != nil
+}
+
+// array returns the elements of an array, and false for any other value.
+func (v *rawValue) array() ([]*rawValue, bool) {
+	if !bytes.HasPrefix(v.raw, []byte("[")) {
+		return nil, false
+	}
+	if !v.split {
+		v.split = true
+		var elements []json.RawMessage
+		if json.Unmarshal(v.raw, &elements) == nil {
+			v.elements = make([]*rawValue, len(elements))
+			for i, raw := range elements {
+				v.elements[i] = &rawValue{raw: raw}
+			}
+		}
+	}
+	return v.elements, v.elements != nil
 }
 
 func (d rawDocument) envelope() (repoID int64, action string, ok bool) {
+	members, _ := d.root.object()
 	var repository map[string]json.RawMessage
-	if json.Unmarshal(d.members["repository"], &repository) != nil ||
+	if r, found := members["repository"]; !found || json.Unmarshal(r.raw, &repository) != nil ||
 		json.Unmarshal(repository["id"], &repoID) != nil || repoID <= 0 {
 		return 0, "", false
 	}
-	if json.Unmarshal(d.members["action"], &action) != nil {
+	if a, found := members["action"]; !found || json.Unmarshal(a.raw, &action) != nil {
 		action = ""
 	}
 	return repoID, action, true
@@ -361,11 +408,19 @@ func (d rawDocument) envelope() (repoID int64, action string, ok bool) {
 // project copies each selected value as the payload's own bytes, because a
 // decoded and encoded value could differ in escapes and number spellings.
 func (d rawDocument) project(fields []string) []byte {
-	out, selected := appendProjectedObject(nil, d.members, newFieldTrie(fields))
-	if !selected {
-		return []byte("{}")
-	}
+	out, _ := d.projectWithin(fields, math.MaxInt)
 	return out
+}
+
+// projectWithin is project when the projection is at most limit bytes. A
+// longer one is cut short, and fits is false.
+func (d rawDocument) projectWithin(fields []string, limit int) (out []byte, fits bool) {
+	members, _ := d.root.object()
+	out, selected := appendProjectedObject(nil, members, newFieldTrie(fields), limit)
+	if !selected {
+		out = []byte("{}")
+	}
+	return out, len(out) <= limit
 }
 
 func projectFields(body []byte, fields []string) ([]byte, error) {
@@ -409,7 +464,9 @@ func newFieldTrie(fields []string) fieldTrie {
 	return root
 }
 
-func appendProjectedObject(out []byte, members map[string]json.RawMessage, trie fieldTrie) ([]byte, bool) {
+// appendProjectedObject and appendProjectedValue stop once out is longer than
+// limit, because the caller then only needs to know that it is too long.
+func appendProjectedObject(out []byte, members map[string]*rawValue, trie fieldTrie, limit int) ([]byte, bool) {
 	start := len(out)
 	out = append(out, '{')
 	selected := false
@@ -424,12 +481,15 @@ func appendProjectedObject(out []byte, members map[string]json.RawMessage, trie 
 		}
 		out = append(append(out, marshalRaw(name)...), ':')
 		if sub := trie[name]; sub == nil {
-			out = append(out, value...)
-		} else if out, ok = appendProjectedValue(out, value, sub); !ok {
+			out = append(out, value.raw...)
+		} else if out, ok = appendProjectedValue(out, value, sub, limit); !ok {
 			out = out[:mark]
 			continue
 		}
 		selected = true
+		if len(out) > limit {
+			return out, true
+		}
 	}
 	if !selected {
 		return out[:start], false
@@ -439,40 +499,36 @@ func appendProjectedObject(out []byte, members map[string]json.RawMessage, trie 
 
 // appendProjectedValue keeps an element of an array that is an object as {}
 // when the paths select nothing in it, so the elements keep their positions.
-func appendProjectedValue(out []byte, value json.RawMessage, trie fieldTrie) ([]byte, bool) {
-	switch {
-	case bytes.HasPrefix(value, []byte("{")):
-		var members map[string]json.RawMessage
-		if json.Unmarshal(value, &members) != nil {
-			return out, false
-		}
-		return appendProjectedObject(out, members, trie)
-	case bytes.HasPrefix(value, []byte("[")):
-		var elements []json.RawMessage
-		if json.Unmarshal(value, &elements) != nil {
-			return out, false
-		}
-		start := len(out)
-		out = append(out, '[')
-		kept := 0
-		for _, element := range elements {
-			var members map[string]json.RawMessage
-			if !bytes.HasPrefix(element, []byte("{")) || json.Unmarshal(element, &members) != nil {
-				continue
-			}
-			if kept > 0 {
-				out = append(out, ',')
-			}
-			var selected bool
-			if out, selected = appendProjectedObject(out, members, trie); !selected {
-				out = append(out, "{}"...)
-			}
-			kept++
-		}
-		if kept == 0 {
-			return out[:start], false
-		}
-		return append(out, ']'), true
+func appendProjectedValue(out []byte, value *rawValue, trie fieldTrie, limit int) ([]byte, bool) {
+	if members, ok := value.object(); ok {
+		return appendProjectedObject(out, members, trie, limit)
 	}
-	return out, false
+	elements, ok := value.array()
+	if !ok {
+		return out, false
+	}
+	start := len(out)
+	out = append(out, '[')
+	kept := 0
+	for _, element := range elements {
+		members, ok := element.object()
+		if !ok {
+			continue
+		}
+		if kept > 0 {
+			out = append(out, ',')
+		}
+		var selected bool
+		if out, selected = appendProjectedObject(out, members, trie, limit); !selected {
+			out = append(out, "{}"...)
+		}
+		kept++
+		if len(out) > limit {
+			return out, true
+		}
+	}
+	if kept == 0 {
+		return out[:start], false
+	}
+	return append(out, ']'), true
 }

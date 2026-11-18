@@ -3,6 +3,7 @@ package faucet
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"time"
@@ -126,7 +127,7 @@ func (s *Service) subscribeRaw(ctx context.Context, wh *webhookState, entry *raw
 	}
 	now := s.clock.Now()
 	expiresAt := now.Add(req.ttl).Truncate(time.Second)
-	row, err := s.store.UpsertSubscription(ctx, Subscription{
+	row, err := s.raw.UpsertRawSubscription(ctx, Subscription{
 		KeyHash:       key,
 		Principal:     principal.Login,
 		CallbackURL:   req.callbackURL,
@@ -138,12 +139,21 @@ func (s *Service) subscribeRaw(ctx context.Context, wh *webhookState, entry *raw
 		Cursor:        math.MaxInt64,
 		ExpiresAt:     expiresAt,
 		RotationGrace: min(rotationGrace, expiresAt.Sub(now)),
-	}, now, maxLiveSubscriptions)
+	}, now, RawLimits{Live: maxLiveSubscriptions, PerTarget: maxRawInterestsPerTarget, PerPrincipalTarget: maxRawInterestsPerLogin})
 	switch {
 	case xerrors.Is(err, ErrSubscriptionLimit):
 		logger.Info(ctx, "subscribe refused, limit reached", slog.F("login", principal.Login))
 		return nil, rpcError(codeResourceExhausted, "subscription limit reached",
 			map[string]any{"limit": "subscriptions", "max": maxLiveSubscriptions})
+	case xerrors.Is(err, ErrRawInterestLimit):
+		logger.Info(ctx, "subscribe refused, raw interest limit reached", slog.F("login", principal.Login))
+		return nil, rawInterestLimitError(entry, req.args.Repo)
+	case xerrors.Is(err, ErrRawShareLimit):
+		logger.Info(ctx, "subscribe refused, raw subscription limit of the login reached", slog.F("login", principal.Login))
+		return nil, rpcError(codeResourceExhausted,
+			fmt.Sprintf("raw subscription limit reached: this login has %d live subscriptions of %s of %s, the most that one login may hold",
+				maxRawInterestsPerLogin, entry.name, req.args.Repo),
+			map[string]any{"limit": "raw_subscriptions", "max": maxRawInterestsPerLogin})
 	case err != nil:
 		return nil, subscriptionStoreError(ctx, logger, err)
 	}

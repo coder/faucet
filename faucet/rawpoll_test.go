@@ -220,9 +220,10 @@ func TestTheLeasesOfOneLoginAreLimitedAndTheOnePolledLongestAgoEnds(t *testing.T
 	first := h.open()
 	h.clock.Advance(time.Second)
 	second := h.open("fields", []string{"ref"})
-	for range 98 {
+	events := faucet.RawEventNames()
+	for i := range 98 {
 		h.clock.Advance(time.Second)
-		h.open()
+		require.Regexp(t, rawPollCursor, h.pollRaw("github."+events[i%len(events)], repoArgs("fields", []string{"x"}), "").Cursor)
 	}
 	h.clock.Advance(time.Second)
 	require.False(t, h.pollRaw("github.push", repoArgs(), first.Cursor).Truncated, "the login holds 100 leases, and the first is polled again")

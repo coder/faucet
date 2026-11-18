@@ -212,14 +212,73 @@ func (s *fakeStore) RawHead(ctx context.Context) (int64, error) {
 	return s.rawHeadLocked(), nil
 }
 
-func (s *fakeStore) OpenRawLease(ctx context.Context, lease faucet.RawLease, now time.Time, maxLive int) (int64, error) {
+func (s *fakeStore) UpsertRawSubscription(ctx context.Context, sub faucet.Subscription, now time.Time, limits faucet.RawLimits) (faucet.Subscription, error) {
 	err := s.beginRaw(ctx)
 	defer s.mu.Unlock()
-	switch {
-	case err != nil:
+	if err == nil {
+		err = limits.Validate()
+	}
+	if err != nil {
+		return faucet.Subscription{}, err
+	}
+	event, ok := strings.CutPrefix(sub.EventType, fakeRawPrefix)
+	if !ok {
+		return faucet.Subscription{}, xerrors.Errorf("%q is not a raw event name", sub.EventType)
+	}
+	return s.upsertSubscriptionLocked(sub, now, limits.Live, func() error {
+		count := s.rawTargetLocked(sub.Principal, event, sub.RepoID, now, sub.KeyHash, nil)
+		switch {
+		case count.ownSubscriptions >= limits.PerPrincipalTarget:
+			return faucet.ErrRawShareLimit
+		case count.interests >= limits.PerTarget:
+			return faucet.ErrRawInterestLimit
+		}
+		return nil
+	})
+}
+
+type fakeRawTarget struct {
+	interests, ownSubscriptions int
+	// ownOldest is the principal's live lease of the target polled longest ago.
+	ownOldest *fakeRawLease
+	ownLeases int
+}
+
+// rawTargetLocked counts the live raw subscriptions of event and repoID under
+// another key than except, and their live leases but ended.
+func (s *fakeStore) rawTargetLocked(principal, event string, repoID int64, now time.Time, except faucet.SubscriptionKeyHash, ended map[faucet.RawLeaseID]bool) fakeRawTarget {
+	var t fakeRawTarget
+	for key, sub := range s.subs {
+		if key != except && sub.EventType == fakeRawPrefix+event && sub.RepoID == repoID && sub.ExpiresAt.After(now) {
+			t.interests++
+			if sub.Principal == principal {
+				t.ownSubscriptions++
+			}
+		}
+	}
+	for id, l := range s.rawLeases {
+		if ended[id] || l.lease.Event != event || l.lease.RepoID != repoID || !l.lease.ExpiresAt.After(now) {
+			continue
+		}
+		t.interests++
+		if l.lease.Principal == principal {
+			t.ownLeases++
+			if t.ownOldest == nil || l.polledAt.Before(t.ownOldest.polledAt) || l.polledAt.Equal(t.ownOldest.polledAt) && bytes.Compare(id[:], t.ownOldest.lease.ID[:]) < 0 {
+				t.ownOldest = l
+			}
+		}
+	}
+	return t
+}
+
+func (s *fakeStore) OpenRawLease(ctx context.Context, lease faucet.RawLease, now time.Time, limits faucet.RawLimits) (int64, error) {
+	err := s.beginRaw(ctx)
+	defer s.mu.Unlock()
+	if err == nil {
+		err = limits.Validate()
+	}
+	if err != nil {
 		return 0, err
-	case maxLive <= 0:
-		return 0, xerrors.Errorf("max live leases must be positive, got %d", maxLive)
 	}
 	if err := lease.Validate(now); err != nil {
 		return 0, err
@@ -230,12 +289,13 @@ func (s *fakeStore) OpenRawLease(ctx context.Context, lease faucet.RawLease, now
 	var (
 		live   int
 		oldest *fakeRawLease
+		ended  = map[faucet.RawLeaseID]bool{}
 	)
 	for id, l := range s.rawLeases {
 		switch {
 		case l.lease.Principal != lease.Principal:
 		case !l.lease.ExpiresAt.After(now):
-			delete(s.rawLeases, id)
+			ended[id] = true
 		default:
 			live++
 			if oldest == nil || l.polledAt.Before(oldest.polledAt) || l.polledAt.Equal(oldest.polledAt) && bytes.Compare(id[:], oldest.lease.ID[:]) < 0 {
@@ -243,8 +303,19 @@ func (s *fakeStore) OpenRawLease(ctx context.Context, lease faucet.RawLease, now
 			}
 		}
 	}
-	if live >= maxLive {
-		delete(s.rawLeases, oldest.lease.ID)
+	if live >= limits.Live {
+		ended[oldest.lease.ID] = true
+	}
+	target := s.rawTargetLocked(lease.Principal, lease.Event, lease.RepoID, now, faucet.SubscriptionKeyHash{}, ended)
+	if target.ownLeases >= limits.PerPrincipalTarget {
+		ended[target.ownOldest.lease.ID] = true
+		target.interests--
+	}
+	if target.interests >= limits.PerTarget {
+		return 0, faucet.ErrRawInterestLimit
+	}
+	for id := range ended {
+		delete(s.rawLeases, id)
 	}
 	lease.Actions, lease.Fields = slices.Clone(lease.Actions), slices.Clone(lease.Fields)
 	head := s.rawHeadLocked()

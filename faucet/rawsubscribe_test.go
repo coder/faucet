@@ -40,7 +40,7 @@ func storeRawEvent(t *testing.T, store *fakeStore, now time.Time, n uint64) int6
 		Event: "fork", RepoID: otherRepoID, ExpiresAt: now.Add(time.Hour),
 	}
 	binary.BigEndian.PutUint64(lease.ID[8:], n)
-	_, err := store.OpenRawLease(ctx, lease, now, 100)
+	_, err := store.OpenRawLease(ctx, lease, now, faucet.RawLimits{Live: 100, PerTarget: 1000, PerPrincipalTarget: 1000})
 	require.NoError(t, err)
 	res, err := store.IngestRaw(ctx, faucet.RawDelivery{DeliveryID: fmt.Sprintf("head-%d", n), Event: "fork", RepoID: otherRepoID}, now,
 		func([]faucet.RawInterest) faucet.RawPlan {
@@ -222,13 +222,14 @@ func TestRawAndTypedSubscriptionsShareTheLimitOfAPrincipal(t *testing.T) {
 
 	h := newWebhookHarness(t, withRawStore)
 	secret := newSecret(t, 32)
+	events := faucet.RawEventNames()
 	for i := range 100 {
 		url := fmt.Sprintf("%s/%d", callbackURL, i)
 		if i%2 == 0 {
 			h.subscribe(subscribeTo(repoArgs(), url, secret))
 			continue
 		}
-		h.subscribe(rawSubscribeTo("github.push", repoArgs(), url, secret))
+		h.subscribe(rawSubscribeTo("github."+events[i%len(events)], repoArgs(), url, secret))
 	}
 
 	rpcErr := h.subscribeError(rawSubscribeTo("github.push", repoArgs(), callbackURL+"/one-more", secret))

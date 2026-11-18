@@ -198,6 +198,48 @@ func (q *Queries) ClearRawBodies(ctx context.Context, clearBefore sql.NullTime) 
 	return result.RowsAffected()
 }
 
+const countRawInterests = `-- name: CountRawInterests :one
+WITH subs AS (
+  SELECT s.principal FROM faucet_subscriptions s
+  WHERE s.repo_id = $2 AND s.event_type = 'github.' || $3::text
+    AND s.expires_at > $4 AND s.key_hash IS DISTINCT FROM $5::bytea
+), leases AS (
+  SELECT l.principal FROM faucet_raw_leases l
+  WHERE l.repo_id = $2 AND l.event = $3::text AND l.expires_at > $4
+)
+SELECT
+  ((SELECT COUNT(*) FROM subs) + (SELECT COUNT(*) FROM leases))::bigint AS interests,
+  (SELECT COUNT(*) FROM subs WHERE subs.principal = $1::text)::bigint AS own_subscriptions,
+  (SELECT COUNT(*) FROM leases WHERE leases.principal = $1::text)::bigint AS own_leases
+`
+
+type CountRawInterestsParams struct {
+	Principal string
+	RepoID    int64
+	Event     string
+	Now       time.Time
+	ExceptKey []byte
+}
+
+type CountRawInterestsRow struct {
+	Interests        int64
+	OwnSubscriptions int64
+	OwnLeases        int64
+}
+
+func (q *Queries) CountRawInterests(ctx context.Context, arg CountRawInterestsParams) (CountRawInterestsRow, error) {
+	row := q.db.QueryRowContext(ctx, countRawInterests,
+		arg.Principal,
+		arg.RepoID,
+		arg.Event,
+		arg.Now,
+		arg.ExceptKey,
+	)
+	var i CountRawInterestsRow
+	err := row.Scan(&i.Interests, &i.OwnSubscriptions, &i.OwnLeases)
+	return i, err
+}
+
 const deleteExpiredRawLeases = `-- name: DeleteExpiredRawLeases :execrows
 DELETE FROM faucet_raw_leases
 WHERE id IN (
@@ -272,6 +314,54 @@ WHERE (lease_id, raw_event_id) IN (
 func (q *Queries) DeleteRawUnreadOf(ctx context.Context, leaseIds [][]byte) error {
 	_, err := q.db.ExecContext(ctx, deleteRawUnreadOf, pq.Array(leaseIds))
 	return err
+}
+
+const endOldestRawLeaseOfTarget = `-- name: EndOldestRawLeaseOfTarget :many
+DELETE FROM faucet_raw_leases l
+WHERE l.id IN (
+  SELECT o.id FROM faucet_raw_leases o
+  WHERE o.principal = $1 AND o.repo_id = $2 AND o.event = $3
+    AND o.expires_at > $4
+  ORDER BY o.polled_at, o.id
+  LIMIT 1
+  FOR UPDATE SKIP LOCKED
+)
+RETURNING l.id
+`
+
+type EndOldestRawLeaseOfTargetParams struct {
+	Principal string
+	RepoID    int64
+	Event     string
+	Now       time.Time
+}
+
+func (q *Queries) EndOldestRawLeaseOfTarget(ctx context.Context, arg EndOldestRawLeaseOfTargetParams) ([][]byte, error) {
+	rows, err := q.db.QueryContext(ctx, endOldestRawLeaseOfTarget,
+		arg.Principal,
+		arg.RepoID,
+		arg.Event,
+		arg.Now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items [][]byte
+	for rows.Next() {
+		var id []byte
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const endRawDelivery = `-- name: EndRawDelivery :execrows
@@ -532,6 +622,20 @@ SELECT pg_advisory_xact_lock(hashtextextended($1::text, 1))
 
 func (q *Queries) LockRawLeases(ctx context.Context, principal string) error {
 	_, err := q.db.ExecContext(ctx, lockRawLeases, principal)
+	return err
+}
+
+const lockRawTarget = `-- name: LockRawTarget :exec
+SELECT pg_advisory_xact_lock(hashtextextended($1::text || '/' || $2::bigint::text, 2))
+`
+
+type LockRawTargetParams struct {
+	Event  string
+	RepoID int64
+}
+
+func (q *Queries) LockRawTarget(ctx context.Context, arg LockRawTargetParams) error {
+	_, err := q.db.ExecContext(ctx, lockRawTarget, arg.Event, arg.RepoID)
 	return err
 }
 

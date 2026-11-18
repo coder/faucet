@@ -11,6 +11,39 @@ import (
 // RawLeaseID names one poll lease. The poll cursor carries it.
 type RawLeaseID [16]byte
 
+var (
+	// ErrRawInterestLimit is returned by RawStore.OpenRawLease and
+	// RawStore.UpsertRawSubscription when an event of a repository already
+	// has RawLimits.PerTarget live subscriptions and poll leases.
+	ErrRawInterestLimit = xerrors.New("raw interest limit reached")
+	// ErrRawShareLimit is returned by RawStore.UpsertRawSubscription when the
+	// principal already holds RawLimits.PerPrincipalTarget live subscriptions
+	// of the event of the repository.
+	ErrRawShareLimit = xerrors.New("raw subscription limit of the principal reached")
+)
+
+// RawLimits bound the raw interests that RawStore.OpenRawLease and
+// RawStore.UpsertRawSubscription store. Each must be positive.
+type RawLimits struct {
+	// Live is the most live leases, or subscriptions, of one principal.
+	Live int
+	// PerTarget is the most live subscriptions and leases of one event of one
+	// repository.
+	PerTarget int
+	// PerPrincipalTarget is the most live leases, and the most live
+	// subscriptions, of one event of one repository that one principal holds,
+	// so that no principal takes all of PerTarget.
+	PerPrincipalTarget int
+}
+
+// Validate checks that every limit is positive.
+func (l RawLimits) Validate() error {
+	if l.Live <= 0 || l.PerTarget <= 0 || l.PerPrincipalTarget <= 0 {
+		return xerrors.Errorf("raw limits must be positive, got %+v", l)
+	}
+	return nil
+}
+
 // RawEvent is one stored GitHub delivery of an event that no typed family
 // stores.
 type RawEvent struct {
@@ -296,9 +329,10 @@ type RawWant struct {
 // RawStore persists the GitHub events that no typed family stores, for the
 // interests that want them: live webhook subscriptions of a raw event name,
 // and poll leases. It must be backed by the same database as the Store,
-// because it reads the subscriptions that Store.UpsertSubscription wrote.
-// A raw subscription is such a row with Cursor math.MaxInt64, which keeps
-// the event log's delivery queue from ever reading it.
+// because the Store's methods read, renew and delete the subscriptions that
+// UpsertRawSubscription writes. A raw subscription is a row of the Store with
+// Cursor math.MaxInt64, which keeps the event log's delivery queue from ever
+// reading it.
 //
 // A raw subscription's event is its EventType without the "github." prefix,
 // and its actions and fields are the actions and fields members of its
@@ -328,13 +362,28 @@ type RawStore interface {
 	IngestRaw(ctx context.Context, d RawDelivery, now time.Time, plan func([]RawInterest) RawPlan) (RawIngest, error)
 	// RawHead returns the highest raw ID stored, or 0.
 	RawHead(ctx context.Context) (int64, error)
+	// UpsertRawSubscription is Store.UpsertSubscription for a raw
+	// subscription, with limits.Live as maxLive, and two more limits for the
+	// event of sub's EventType and sub.RepoID, which count live rows under
+	// other keys than sub's: with limits.PerPrincipalTarget subscriptions of
+	// the principal it returns ErrRawShareLimit, and with limits.PerTarget
+	// subscriptions and leases it returns ErrRawInterestLimit. Either writes
+	// nothing. Concurrent calls of it and OpenRawLease never pass PerTarget
+	// together.
+	UpsertRawSubscription(ctx context.Context, sub Subscription, now time.Time, limits RawLimits) (Subscription, error)
 	// OpenRawLease stores lease, which starts at the head: it holds no unread
 	// event, and its acknowledged position is the head, which the call
 	// returns. It deletes the principal's expired leases first. When the
-	// principal then holds maxLive live leases, the one polled longest ago
-	// ends, with its unread events, to make room. maxLive must be positive,
-	// and a lease ID that is already stored is an error.
-	OpenRawLease(ctx context.Context, lease RawLease, now time.Time, maxLive int) (head int64, err error)
+	// principal then holds limits.Live live leases, the one polled longest
+	// ago ends, with its unread events, to make room, and so does its one of
+	// lease.Event and lease.RepoID polled longest ago when it holds
+	// limits.PerPrincipalTarget of those. A lease that another call holds may
+	// be passed over, so a principal can hold one more for a moment. When the
+	// event and repository then have limits.PerTarget live subscriptions and
+	// leases, it returns ErrRawInterestLimit and changes nothing. Concurrent
+	// calls of it and UpsertRawSubscription never pass PerTarget together. A
+	// lease ID that is already stored is an error.
+	OpenRawLease(ctx context.Context, lease RawLease, now time.Time, limits RawLimits) (head int64, err error)
 	// ReadRawLease serves one poll. found is false, and nothing changes,
 	// unless a lease with q.Lease, q.Key and q.RepoID is live at q.Now. For
 	// such a lease it raises the acknowledged position to q.After, sets the

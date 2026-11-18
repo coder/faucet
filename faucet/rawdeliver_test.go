@@ -352,16 +352,18 @@ func TestDeliverDueTellsARawSubscriptionOfAnEventTooLargeToSend(t *testing.T) {
 	d.advance(time.Second)
 	missed := d.pushRaw(map[string]any{"blob": strings.Repeat("x", 300<<10)})
 	require.Zero(t, d.rawQueued, "no delivery is queued for an event over 256 KiB")
-	sent := d.pushRaw(nil)
 
 	res := d.deliverDue()
 	require.Equal(t, 1, res.GapsSent)
 	require.Empty(t, res.GaveUp)
-	require.Equal(t, 1, res.Delivered)
+	require.Zero(t, res.Claimed)
 	gaps := d.rcv.envelopesOf("/hook", "gap")
 	require.Len(t, gaps, 1)
 	members := d.requireEnvelope(gaps[0], "gap", ep.secret, sub.ID)
 	require.JSONEq(t, fmt.Sprintf(`"r1.%d"`, missed), string(members["cursor"]), "the cursor is the event that the subscription missed")
+
+	sent := d.pushRaw(nil)
+	require.Equal(t, 1, d.deliverDue().Delivered, "the next event that fits is delivered")
 	requests := d.rcv.requests("/hook")
 	require.Equal(t, fmt.Sprintf("r1.%d", sent-1), requests[len(requests)-1].body(t).Cursor)
 }

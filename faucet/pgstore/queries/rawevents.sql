@@ -65,6 +65,35 @@ SELECT COALESCE(MAX(id), 0)::bigint AS head FROM faucet_raw_events;
 -- name: LockRawLeases :exec
 SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg(principal)::text, 1));
 
+-- name: LockRawTarget :exec
+SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg(event)::text || '/' || sqlc.arg(repo_id)::bigint::text, 2));
+
+-- name: CountRawInterests :one
+WITH subs AS (
+  SELECT s.principal FROM faucet_subscriptions s
+  WHERE s.repo_id = sqlc.arg(repo_id) AND s.event_type = 'github.' || sqlc.arg(event)::text
+    AND s.expires_at > sqlc.arg(now) AND s.key_hash IS DISTINCT FROM sqlc.narg(except_key)::bytea
+), leases AS (
+  SELECT l.principal FROM faucet_raw_leases l
+  WHERE l.repo_id = sqlc.arg(repo_id) AND l.event = sqlc.arg(event)::text AND l.expires_at > sqlc.arg(now)
+)
+SELECT
+  ((SELECT COUNT(*) FROM subs) + (SELECT COUNT(*) FROM leases))::bigint AS interests,
+  (SELECT COUNT(*) FROM subs WHERE subs.principal = sqlc.arg(principal)::text)::bigint AS own_subscriptions,
+  (SELECT COUNT(*) FROM leases WHERE leases.principal = sqlc.arg(principal)::text)::bigint AS own_leases;
+
+-- name: EndOldestRawLeaseOfTarget :many
+DELETE FROM faucet_raw_leases l
+WHERE l.id IN (
+  SELECT o.id FROM faucet_raw_leases o
+  WHERE o.principal = sqlc.arg(principal) AND o.repo_id = sqlc.arg(repo_id) AND o.event = sqlc.arg(event)
+    AND o.expires_at > sqlc.arg(now)
+  ORDER BY o.polled_at, o.id
+  LIMIT 1
+  FOR UPDATE SKIP LOCKED
+)
+RETURNING l.id;
+
 -- name: EndRawLeasesOf :many
 WITH live AS (
   SELECT COUNT(*) AS leases FROM faucet_raw_leases v WHERE v.principal = sqlc.arg(principal) AND v.expires_at > sqlc.arg(now)

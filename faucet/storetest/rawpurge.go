@@ -151,7 +151,7 @@ func purgeRawEventsDeletesExpiredLeasesWithTheirUnreadEvents(t *testing.T, s Raw
 	live := r.open(rawSpec{})
 	expiresAt := r.now.Add(time.Minute)
 	expiring := newRawLease(r.leases.Add(1), rawSpec{}, expiresAt)
-	_, err := s.OpenRawLease(r.ctx, expiring, r.now, rawMaxLive)
+	_, err := s.OpenRawLease(r.ctx, expiring, r.now, rawLimits(rawMaxLive))
 	require.NoError(t, err)
 	shared := r.push()
 	only := r.store(r.newDelivery(), func(interests []faucet.RawInterest) faucet.RawPlan {
@@ -249,7 +249,7 @@ func rawWantsListsWhatLiveRawInterestsWantOnce(t *testing.T, s RawStore) {
 	r.open(rawSpec{})
 	r.open(rawSpec{event: "issues", repoID: rawRepo + 1, actions: []string{"labeled"}})
 	r.subscribeAt(3, rawSpec{event: "release"}, at.Add(-time.Hour))
-	_, err = s.OpenRawLease(r.ctx, newRawLease(r.leases.Add(1), rawSpec{event: "fork"}, at), r.now, rawMaxLive)
+	_, err = s.OpenRawLease(r.ctx, newRawLease(r.leases.Add(1), rawSpec{event: "fork"}, at), r.now, rawLimits(rawMaxLive))
 	require.NoError(t, err)
 
 	require.ElementsMatch(t, []faucet.RawWant{
@@ -325,7 +325,7 @@ func openRawLeaseRefusesAnInvalidLease(t *testing.T, s RawStore) {
 	for name, spoil := range bad {
 		lease := newRawLease(r.leases.Add(1), rawSpec{}, r.now.Add(time.Hour))
 		spoil(&lease)
-		_, err := s.OpenRawLease(r.ctx, lease, r.now, rawMaxLive)
+		_, err := s.OpenRawLease(r.ctx, lease, r.now, rawLimits(rawMaxLive))
 		require.Error(t, err, "a lease with %s is refused", name)
 	}
 	require.Empty(t, r.purgeWantsAt(r.now.Add(-time.Minute)), "a refused lease is not stored")
@@ -334,7 +334,7 @@ func openRawLeaseRefusesAnInvalidLease(t *testing.T, s RawStore) {
 
 func openRawLeaseRefusesAMaxLiveOfZero(t *testing.T, s RawStore) {
 	r := newRawRig(t, s)
-	_, err := s.OpenRawLease(r.ctx, newRawLease(r.leases.Add(1), rawSpec{}, r.now.Add(time.Hour)), r.now, 0)
+	_, err := s.OpenRawLease(r.ctx, newRawLease(r.leases.Add(1), rawSpec{}, r.now.Add(time.Hour)), r.now, rawLimits(0))
 	require.Error(t, err, "maxLive must be positive")
 	require.Empty(t, r.purgeWantsAt(r.now), "a refused lease is not stored")
 	require.Nil(t, r.interestsAt(r.newDelivery(), r.now), "a refused lease wants nothing")
@@ -366,7 +366,7 @@ func readRawLeaseRefusesAnInvalidRead(t *testing.T, s RawStore) {
 
 func purgeRawEventsRefusesAZeroNow(t *testing.T, s RawStore) {
 	r := newRawRig(t, s)
-	_, err := s.OpenRawLease(r.ctx, newRawLease(r.leases.Add(1), rawSpec{}, r.now.Add(time.Minute)), r.now, rawMaxLive)
+	_, err := s.OpenRawLease(r.ctx, newRawLease(r.leases.Add(1), rawSpec{}, r.now.Add(time.Minute)), r.now, rawLimits(rawMaxLive))
 	require.NoError(t, err)
 	id := r.push()
 	future := time.Now().Add(time.Hour)
