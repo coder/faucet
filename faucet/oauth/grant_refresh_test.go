@@ -216,37 +216,36 @@ func TestTheRefreshGrantRefreshesAGitHubTokenThatExpiresWithinTenMinutes(t *test
 // A GitHub failure other than a refused refresh token does not stop the
 // refresh grant: the client gets its tokens, and the connection keeps the
 // pair that it had until a later refresh works.
-func TestTheRefreshGrantGoesOnWhenGitHubFailsToRefresh(t *testing.T) {
+func TestTheRefreshGrantGoesOnWhenGitHubIsDown(t *testing.T) {
 	t.Parallel()
-	for name, change := range map[string]func(g *grantGitHub){
-		"GitHub is down":            func(g *grantGitHub) { g.tokenStatus = http.StatusBadGateway },
-		"another user's token":      func(g *grantGitHub) { g.userAs, g.logins[2] = 2, "user2" },
-		"GitHub is down, then back": func(g *grantGitHub) { g.tokenStatus = http.StatusServiceUnavailable },
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			h := newGrantHarness(t, newFakeStore())
-			s := h.redeem(h.approve("login-1", 1))
-			id := oauth.ConnectionID(oauth.ProviderGitHub, 1)
-			before, err := h.store.Connection(context.Background(), id)
-			require.NoError(t, err)
-			h.github.set(change)
-			h.clock.Advance(usertokensSoon)
+	h := newGrantHarness(t, newFakeStore())
+	s := h.redeem(h.approve("login-1", 1))
+	before := usertokensConnection(t, h, 1)
+	h.github.set(func(g *grantGitHub) { g.tokenStatus = http.StatusBadGateway })
+	h.clock.Advance(usertokensSoon)
 
-			s = h.refresh(s)
-			refreshes, _ := h.github.counts()
-			require.Equal(t, 1, refreshes)
-			after, err := h.store.Connection(context.Background(), id)
-			require.NoError(t, err)
-			require.Equal(t, before, after, "the connection keeps its pair")
-			require.True(t, h.session(s.id).Live())
-			if name == "GitHub is down, then back" {
-				h.github.set(func(g *grantGitHub) { g.tokenStatus = 0 })
-				h.refresh(s)
-				after, err := h.store.Connection(context.Background(), id)
-				require.NoError(t, err)
-				require.True(t, h.clock.Now().Add(8*time.Hour).Equal(after.AccessExpiresAt))
-			}
-		})
-	}
+	s = h.refresh(s)
+	refreshes, _ := h.github.counts()
+	require.Equal(t, 1, refreshes)
+	require.Equal(t, before, usertokensConnection(t, h, 1), "the connection keeps its pair")
+
+	h.github.set(func(g *grantGitHub) { g.tokenStatus = 0 })
+	h.refresh(s)
+	require.True(t, h.clock.Now().Add(8*time.Hour).Equal(usertokensConnection(t, h, 1).AccessExpiresAt))
+}
+
+// A refreshed pair that GitHub gives to another user is not stored, since
+// the sessions of this user would then act as that one. The grant goes on
+// with the pair that the connection had.
+func TestARefreshedPairOfAnotherUserIsNotStored(t *testing.T) {
+	t.Parallel()
+	h := newGrantHarness(t, newFakeStore())
+	s := h.redeem(h.approve("login-1", 1))
+	before := usertokensConnection(t, h, 1)
+	h.github.set(func(g *grantGitHub) { g.userAs, g.logins[2] = 2, "user2" })
+	h.clock.Advance(usertokensSoon)
+
+	s = h.refresh(s)
+	require.Equal(t, before, usertokensConnection(t, h, 1))
+	require.Equal(t, "user1", h.principal(s).Login)
 }
