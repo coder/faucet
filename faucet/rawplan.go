@@ -11,8 +11,9 @@ const (
 	// A lease at it misses the next events, and its next poll says truncated.
 	maxUnreadPerLease = 1000
 	// maxRawInterestsPerTarget is the most live subscriptions and poll leases
-	// of one raw event of one repository. It bounds what an ingest of that
-	// event plans and writes.
+	// of one raw event of one target. One delivery can reach the interests of
+	// its repository, of its owner and of all, so an ingest plans and writes
+	// at most three times as many.
 	maxRawInterestsPerTarget = 100
 	// maxRawInterestsPerLogin is the most live poll leases, and the most live
 	// subscriptions, of one raw event of one target that one login holds,
