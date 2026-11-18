@@ -21,6 +21,10 @@ const (
 	base64Suffix = "?="
 )
 
+// MaxRequestBodyBytes is the most bytes of an MCP request body that faucet
+// reads. A host passes it as StreamableHTTPOptions.MaxRequestBodyBytes as well.
+const MaxRequestBodyBytes = 256 << 10
+
 var nameMethods = []string{"events/poll", "events/stream", "events/subscribe", "events/unsubscribe"}
 
 // RequireEventName wraps an MCP Streamable HTTP handler. It answers 400 with
@@ -28,14 +32,14 @@ var nameMethods = []string{"events/poll", "events/stream", "events/subscribe", "
 // missing or differs from params.name. The SDK checks the header for tools,
 // resources and prompts only. A host that serves Service.Register over HTTP
 // puts this in front of the SDK handler. The wrapper reads each body whole, up
-// to mcp.DefaultMaxRequestBodyBytes, and answers 413 beyond that.
+// to MaxRequestBodyBytes, and answers 413 beyond that.
 func RequireEventName(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			next.ServeHTTP(w, r)
 			return
 		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, mcp.DefaultMaxRequestBodyBytes))
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes))
 		if err != nil {
 			var tooLarge *http.MaxBytesError
 			if errors.As(err, &tooLarge) {

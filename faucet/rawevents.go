@@ -191,6 +191,7 @@ func rawArgumentsSchema() json.RawMessage {
 	properties["actions"] = map[string]any{
 		"type":        "array",
 		"minItems":    1,
+		"maxItems":    maxListItems,
 		"items":       map[string]any{"type": "string"},
 		"description": "Only deliveries whose action is one of these. Without it, every action, and events that have none.",
 	}

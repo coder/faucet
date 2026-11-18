@@ -13,11 +13,9 @@ import (
 	"github.com/coder/faucet/faucet"
 )
 
-// listLimit is the most items of a list argument, and fieldsLimit the most
-// fields of a raw name.
 const (
-	listLimit   = 100
-	fieldsLimit = 32
+	listLimit       = 100
+	fieldPathsLimit = 32
 )
 
 func TestEveryListInAnInputSchemaDeclaresMaxItems(t *testing.T) {
@@ -45,8 +43,6 @@ func TestEveryListInAnInputSchemaDeclaresMaxItems(t *testing.T) {
 	require.Empty(t, unbounded, "a list without maxItems lets one request make a read compare each event with every item")
 }
 
-// listsWithoutMaxItems returns the path of every array schema in node that
-// declares no maxItems.
 func listsWithoutMaxItems(path string, node any) []string {
 	var found []string
 	switch n := node.(type) {
@@ -103,7 +99,7 @@ func TestEveryListArgumentHoldsItsLimitAndRefusesOneMore(t *testing.T) {
 		{"ci.run_completed", "repos", listLimit, numbered("coder/repo-")},
 		{"github.push", "actions", listLimit, numbered("action-")},
 		{"github.push", "repos", listLimit, numbered("coder/repo-")},
-		{"github.push", "fields", fieldsLimit, numbered("field")},
+		{"github.push", "fields", fieldPathsLimit, numbered("field")},
 	}
 	for _, tt := range tests {
 		t.Run(cmp.Or(tt.event, "wait_for_github_events")+" "+tt.list, func(t *testing.T) {
