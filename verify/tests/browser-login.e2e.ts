@@ -55,6 +55,7 @@ describe('browser login', () => {
       const hidden = await started.loginAgent('/github/mcp', clientId, { repo: `hidden/r${repoId}`, types: ['ci.run_completed'] });
 
       const asked = (await hooks.requests()).filter((r) => r.path === `/repos/${repo}`);
+      const checks = JSON.parse(await started.sql(`select json_agg(t) from (select connection_id, repo, repo_id from faucet_access_checks) t`));
       const known = [...waited.tokens, ...hidden.tokens, ...(await started.appLog()).tokens];
       expect(waited.code, waited.stderr).toBe(0);
       expect(waited.result?.isError, JSON.stringify(waited.result?.content)).not.toBe(true);
@@ -64,6 +65,9 @@ describe('browser login', () => {
       expect(hidden.code, hidden.stderr).toBe(0);
       expect(hidden.result?.isError, 'a repository that the person cannot read is refused').toBe(true);
       expect(hidden.result?.content?.[0]?.text).toContain('repository not found or not accessible');
+      expect(checks, 'faucet stored the check that passed, and nothing for the denial').toEqual([
+        { connection_id: 'github:4242', repo: repo.toLowerCase(), repo_id: repoId },
+      ]);
       expect(output()).toMatch(/wait denied.*login=verify-person/);
       expect([waited.tokens, hidden.tokens].map((t) => t.filter((v) => TOKEN.test(v)).length), 'each login held an access and a refresh token').toEqual([2, 2]);
       for (const [name, text] of [['faucet output', output()], ['app log', appLog()]]) {
@@ -136,6 +140,7 @@ describe('browser login', () => {
   test("the agent's session keeps working after a refresh, and the replaced refresh token trades again within 30 seconds and ends the session after", async ({
     faucet,
     documents,
+    hooks,
   }) => {
     await faucet.withFaucet({}, async (started) => {
       const repoId = newRepoId();
@@ -145,6 +150,7 @@ describe('browser login', () => {
 
       const agent = await started.loginAgent('/github/mcp', clientId, { repo: `verify/r${repoId}`, types: ['ci.run_completed'], refresh: true });
 
+      const asked = (await hooks.requests()).filter((r) => r.path === `/repos/verify/r${repoId}`);
       const exchanges = (await started.appLog()).exchanges.slice(before);
       const session = `select id from faucet_user_sessions where client_id = '${clientId}'`;
       const endedInGrace = await started.sql(`select ended_at is not null from faucet_user_sessions where client_id = '${clientId}'`);
@@ -160,6 +166,10 @@ describe('browser login', () => {
         { grant: 'refresh_token', answer: 'issued' },
       ]);
       expect(endedInGrace, 'the session lives on').toBe('f');
+      expect(
+        asked.length,
+        'GitHub answered the first call and the check that each refresh makes again; the call after the refresh took the stored check',
+      ).toBe(3);
 
       // A use 30 seconds or more after the first one ends the session. The test moves the first use back instead of waiting.
       const replaced = agent.tokens.find((t) => t.startsWith('fcr_')) ?? '';
