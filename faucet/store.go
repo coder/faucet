@@ -272,9 +272,10 @@ type Store interface {
 	// refresh of a live one leaves the read position alone.
 
 	// ScanTargets returns the live subscriptions at now that hold fewer than
-	// maxPending unsent deliveries and have something to read: an event of
-	// their repository and event type above their read position, or a purge
-	// mark above it. The ones furthest behind come first, at most limit.
+	// maxPending unsent deliveries and have something to read: an event that
+	// their target covers, of their event types, above their read position,
+	// or a purge mark above it. The ones furthest behind come first, at most
+	// limit.
 	ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32) ([]ScanTarget, error)
 	// EnqueueDeliveries queues e.Deliveries and moves the subscription's read
 	// position to e.NewScannedThrough in one transaction, and only if the
