@@ -425,6 +425,12 @@ func finishRawLocked(ctx context.Context, q *database.Queries, ref faucet.Delive
 	if f.Kind != faucet.FinishRetry {
 		result.Removed = 1
 	}
+	if f.Gap {
+		err = q.RaiseRawGaps(ctx, database.RaiseRawGapsParams{Through: ref.EventID, KeyHashes: [][]byte{ref.Key[:]}, Incarnations: []time.Time{ref.Incarnation}})
+		if err != nil {
+			return faucet.FinishResult{}, xerrors.Errorf("raise raw gap: %w", err)
+		}
+	}
 	switch {
 	case f.Kind == faucet.FinishDelivered:
 		err = q.RecordDeliverySuccess(ctx, database.RecordDeliverySuccessParams{Now: sql.NullTime{Time: now, Valid: true}, KeyHash: ref.Key[:]})

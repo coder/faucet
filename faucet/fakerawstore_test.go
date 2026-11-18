@@ -453,6 +453,9 @@ func (s *fakeStore) FinishRawDelivery(ctx context.Context, ref faucet.DeliveryRe
 		delete(s.rawOutbox, k)
 		result.Removed = 1
 	}
+	if f.Gap {
+		s.raiseRawGapLocked(fakeRawGapKey{ref.Key, ref.Incarnation.UnixNano()}, ref.EventID)
+	}
 	switch {
 	case f.Kind == faucet.FinishDelivered:
 		sub.Status = faucet.DeliveryStatus{LastDeliveryAt: now}

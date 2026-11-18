@@ -345,29 +345,51 @@ func TestDeliverDueTellsARawSubscriptionWhichEventsItMissedAtItsLimit(t *testing
 	require.Equal(t, fmt.Sprintf("r1.%d", next-1), requests[len(requests)-1].body(t).Cursor)
 }
 
+// An event over 256 KiB is never queued, and one whose payload fits and
+// whose webhook body does not ends at its first attempt. Either way the
+// subscription learns that it missed the event, and the cursor of the next
+// event passes it.
 func TestDeliverDueTellsARawSubscriptionOfAnEventTooLargeToSend(t *testing.T) {
 	t.Parallel()
 
-	d := newRawDeliverHarness(t)
-	ep := d.endpoint("/hook")
-	sub := d.subscribeRaw("github.push", ep)
-	d.advance(time.Second)
-	missed := d.pushRaw(map[string]any{"blob": strings.Repeat("x", 300<<10)})
-	require.Zero(t, d.rawQueued, "no delivery is queued for an event over 256 KiB")
+	for name, tc := range map[string]struct {
+		blob int
+		// queued is 1 when the event is queued and ends as event_too_large
+		// when a run builds its body.
+		queued int
+	}{
+		"the payload is over 256 KiB":                             {300 << 10, 0},
+		"the payload fits, and the body that carries it does not": {256<<10 - len(rawPayload(repoID, "", map[string]any{"blob": ""})), 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d := newRawDeliverHarness(t)
+			ep := d.endpoint("/hook")
+			sub := d.subscribeRaw("github.push", ep)
+			d.advance(time.Second)
+			missed := d.pushRaw(map[string]any{"blob": strings.Repeat("x", tc.blob)})
+			require.Equal(t, tc.queued, d.rawQueued)
 
-	res := d.deliverDue()
-	require.Equal(t, 1, res.GapsSent)
-	require.Empty(t, res.GaveUp)
-	require.Zero(t, res.Claimed)
-	gaps := d.rcv.envelopesOf("/hook", "gap")
-	require.Len(t, gaps, 1)
-	members := d.requireEnvelope(gaps[0], "gap", ep.secret, sub.ID)
-	require.JSONEq(t, fmt.Sprintf(`"r1.%d"`, missed), string(members["cursor"]), "the cursor is the event that the subscription missed")
-
-	sent := d.pushRaw(nil)
-	require.Equal(t, 1, d.deliverDue().Delivered, "the next event that fits is delivered")
-	requests := d.rcv.requests("/hook")
-	require.Equal(t, fmt.Sprintf("r1.%d", sent-1), requests[len(requests)-1].body(t).Cursor)
+			first := d.deliverDue()
+			require.Equal(t, tc.queued, first.Claimed)
+			require.Equal(t, tc.queued, first.GaveUp[faucet.GiveUpEventTooLarge])
+			require.Len(t, first.GaveUp, tc.queued)
+			sent := d.pushRaw(nil)
+			second := d.deliverDue()
+			require.Equal(t, 1, second.Delivered, "the next event that fits is delivered")
+			// A gap that the run wrote can go out in the same run or the next.
+			require.Equal(t, 1, first.GapsSent+second.GapsSent)
+			gaps := d.rcv.envelopesOf("/hook", "gap")
+			require.Len(t, gaps, 1, "the subscription learns that it missed the event")
+			members := d.requireEnvelope(gaps[0], "gap", ep.secret, sub.ID)
+			require.JSONEq(t, fmt.Sprintf(`"r1.%d"`, missed), string(members["cursor"]), "the cursor is the event that the subscription missed")
+			// The requests without a type are the events.
+			events := d.rcv.envelopesOf("/hook", "")
+			require.Len(t, events, 1, "nothing goes out for the event that is too large")
+			require.Equal(t, fmt.Sprintf("r1.%d", sent-1), events[0].body(t).Cursor)
+			require.Zero(t, d.deliverDue().GapsSent, "the gap is sent once")
+		})
+	}
 }
 
 // A purge takes the payload of an event whose delivery waits: a run that

@@ -15,7 +15,7 @@ import (
 var giveUpMeanings = map[string]string{
 	"endpoint_gone":              "The endpoint answered `410 Gone`. This ends the delivery, not the subscription.",
 	"endpoint_payload_too_large": "The endpoint answered `413`. This ends the delivery, not the subscription.",
-	"event_too_large":            "The body would be over {faucet.maxEventBodyBytes:KiB}, so faucet never sent it.",
+	"event_too_large":            "The body would be over {faucet.maxEventBodyBytes:KiB}, so faucet never sent it. A raw subscription gets a gap.",
 	"event_malformed":            "Faucet could not build a body from the stored event.",
 	"attempts_exhausted":         "All {faucet.MaxDeliveryAttempts} attempts failed.",
 	"window_expired":             "The next attempt would come more than {faucet.DeliveryWindow} after the event was queued.",

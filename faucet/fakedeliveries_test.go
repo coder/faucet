@@ -252,6 +252,9 @@ func (s *fakeStore) FinishDelivery(_ context.Context, ref faucet.DeliveryRef, no
 	if err := f.Validate(); err != nil {
 		return faucet.FinishResult{}, err
 	}
+	if f.Gap {
+		return faucet.FinishResult{}, xerrors.New("a typed delivery owes no gap of its own")
+	}
 	sub, ok := s.subs[ref.Key]
 	k := fakeDeliveryKey{ref.Key, ref.EventID}
 	d := s.deliveries[k]

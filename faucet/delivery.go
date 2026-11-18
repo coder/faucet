@@ -206,6 +206,12 @@ type Finish struct {
 	Failure CallbackReason
 	// Unreadable is the sealed secret that could not be opened, for FinishDead.
 	Unreadable []byte
+	// Gap owes the subscription a gap through the delivery's event, for a
+	// FinishGiveUp of a raw delivery that faucet could not send.
+	// RawStore.FinishRawDelivery writes it with the end of the delivery, and
+	// Store.FinishDelivery refuses it: a typed subscription learns of missed
+	// events from the purge mark.
+	Gap bool
 }
 
 // Validate checks the fields a caller supplies to Store.FinishDelivery.
@@ -219,6 +225,8 @@ func (f Finish) Validate() error {
 		return xerrors.New("a give-up carries no retry time or sealed secret, and its failure must be a category")
 	case f.Kind == FinishDead && (len(f.Unreadable) == 0 || !f.RetryAt.IsZero() || f.Failure != ""):
 		return xerrors.New("a dead delivery needs the sealed secret and nothing else")
+	case f.Gap && f.Kind != FinishGiveUp:
+		return xerrors.New("only a give-up owes a gap")
 	case f.Kind < FinishDelivered || f.Kind > FinishDead:
 		return xerrors.New("unknown finish kind")
 	}

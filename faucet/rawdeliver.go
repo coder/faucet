@@ -65,9 +65,13 @@ func (r *deliveryRun) rawOutbound(claim RawDeliveryClaim) outbound {
 				logger.Error(ctx, "the stored raw event cannot be sent", slog.Error(err))
 				return nil, giveUp(GiveUpEventMalformed), false
 			}
-			return encodeWebhookBody(webhookBody{
+			body, outcome, ok := encodeWebhookBody(webhookBody{
 				EventID: messageID, Name: claim.EventType, Timestamp: claim.Event.ReceivedAt, Data: data, Cursor: encodeRawCursor(claim.Watermark),
 			})
+			// The data fit at ingest and the body that carries it does not:
+			// the subscription is owed a gap, as for data that does not fit.
+			outcome.finish.Gap = outcome.reason == GiveUpEventTooLarge
+			return body, outcome, ok
 		},
 		finish: s.raw.FinishRawDelivery,
 	}

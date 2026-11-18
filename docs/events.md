@@ -81,6 +81,7 @@ A poller or a subscriber learns when it missed an event:
 | A poller left an event unread for over 60 minutes, and a purge dropped its payload | `truncated: true` on the poll that passes it |
 | A delivery waited for over 60 minutes, as while `/cron/deliver` was down, and a purge dropped its payload | a `gap` [control message](webhooks.md#control-messages) |
 | The payload, or the `fields` of it, is over 256 KiB | `truncated: true` for a poller, a `gap` [control message](webhooks.md#control-messages) for a subscription |
+| The payload, or the `fields` of it, fits in 256 KiB, and the webhook body that carries it does not | a `gap` [control message](webhooks.md#control-messages) |
 | A raw subscription holds 100 unsent deliveries, and one more arrived | a `gap` [control message](webhooks.md#control-messages) |
 
 ## The GitHub webhook

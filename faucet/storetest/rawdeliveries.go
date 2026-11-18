@@ -16,6 +16,7 @@ var rawDeliverySubtests = []rawSubtest{
 	{"ClaimRawDeliveryWatermarkStaysBelowTheLowestUnsentDelivery", claimRawDeliveryWatermarkStaysBelowTheLowestUnsentDelivery},
 	{"FinishRawDeliveryRetriesOrEndsAndRecordsTheStatus", finishRawDeliveryRetriesOrEndsAndRecordsTheStatus},
 	{"FinishRawDeliveryRefusesAnAttemptThatIsNotTheCurrentOne", finishRawDeliveryRefusesAnAttemptThatIsNotTheCurrentOne},
+	{"FinishRawDeliveryThatOwesAGapWritesItWithTheEnd", finishRawDeliveryThatOwesAGapWritesItWithTheEnd},
 	{"ClaimRawDeliveryPassesOverTheOriginsItIsToldTo", claimRawDeliveryPassesOverTheOriginsItIsToldTo},
 	{"FinishRawDeliveryDeadDeletesTheSubscriptionOnlyForTheSameSealedSecret", finishRawDeliveryDeadDeletesTheSubscriptionOnlyForTheSameSealedSecret},
 	{"ClaimRawDeliveryNeedsALiveSubscription", claimRawDeliveryNeedsALiveSubscription},
@@ -239,6 +240,37 @@ func finishRawDeliveryRefusesAnAttemptThatIsNotTheCurrentOne(t *testing.T, s Raw
 	require.Equal(t, faucet.DeliveryStatus{}, r.deliveryStatus(1, rawSpec{}), "a refused finish writes no status")
 	again := r.mustClaim(r.now.Add(2 * testLease))
 	require.EqualValues(t, 3, again.Ref.Attempt, "the delivery is still queued, with its lease as it was")
+}
+
+func finishRawDeliveryThatOwesAGapWritesItWithTheEnd(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	sub := r.subscribe(1, rawSpec{})
+	r.subscribe(2, rawSpec{})
+	first, second := r.push(), r.push()
+	claims := r.claimAll(r.now)
+	missed := deliveryOf(t, claims, sub, first).Ref
+
+	_, err := s.FinishRawDelivery(r.ctx, missed, r.now, faucet.Finish{Kind: faucet.FinishRetry, RetryAt: r.now.Add(time.Minute), Failure: faucet.CallbackTimeout, Gap: true})
+	require.Error(t, err, "only a give-up owes a gap")
+	notCurrent := missed
+	notCurrent.Attempt++
+	require.Equal(t, faucet.FinishResult{}, r.finish(notCurrent, r.now, faucet.Finish{Kind: faucet.FinishGiveUp, Gap: true}))
+	_, ok := r.claimGap(r.now)
+	require.False(t, ok, "a finish that is refused or not accepted owes no gap")
+
+	require.Equal(t, faucet.FinishResult{Accepted: true, Removed: 1}, r.finish(missed, r.now, faucet.Finish{Kind: faucet.FinishGiveUp, Gap: true}))
+	gap := r.deliveryMustClaimGap(r.now)
+	require.Equal(t, sub.KeyHash, gap.Ref.Key)
+	require.True(t, sub.CreatedAt.Equal(gap.Ref.Incarnation), "got %s", gap.Ref.Incarnation)
+	require.Equal(t, first, gap.Ref.Through, "the gap runs through the event of the delivery")
+	_, ok = r.claimGap(r.now)
+	require.False(t, ok, "the other subscription, whose delivery of the event waits, is owed no gap")
+	require.Equal(t, faucet.DeliveryStatus{}, r.deliveryStatus(1, rawSpec{}), "a give-up without a failure writes no status")
+
+	require.True(t, r.finish(deliveryOf(t, claims, sub, second).Ref, r.now, faucet.Finish{Kind: faucet.FinishGiveUp, Gap: true}).Accepted)
+	require.NoError(t, s.FinishRawGap(r.ctx, gap.Ref))
+	grown := r.deliveryMustClaimGap(r.now)
+	require.Equal(t, second, grown.Ref.Through, "a gap owed while another was claimed stays owed, through the newer event")
 }
 
 func claimRawDeliveryPassesOverTheOriginsItIsToldTo(t *testing.T, s RawStore) {

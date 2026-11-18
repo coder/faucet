@@ -401,7 +401,9 @@ type RawStore interface {
 	ClaimRawDelivery(ctx context.Context, now time.Time, lease time.Duration, skip []string) (claim RawDeliveryClaim, ok bool, err error)
 	// FinishRawDelivery is Store.FinishDelivery for raw deliveries. A
 	// FinishDead that deletes the subscription also ends the other raw
-	// deliveries of that incarnation, and Removed counts them.
+	// deliveries of that incarnation, and Removed counts them. A give-up with
+	// Gap owes the subscription a gap through the delivery's raw ID, written
+	// with the end of the delivery.
 	FinishRawDelivery(ctx context.Context, ref DeliveryRef, now time.Time, f Finish) (FinishResult, error)
 	// ClaimRawGap is Store.ClaimGap for the gaps that IngestRaw recorded. The
 	// claim's Through is the highest raw ID that the subscription missed.
