@@ -23,6 +23,9 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 	require.Equal(t, 24*time.Hour, authRequestRetention, "the docs say \"a day\"")
 	require.Equal(t, 24*time.Hour, accessCheckRetention, "the docs say \"a day\"")
 	require.InDelta(t, 0.5, recheckShare, 0, "the docs say \"half of what is left\"")
+	require.Equal(t, time.Second, minWorkloadTokenLifetime, "the docs say \"at least a second away\"")
+	require.Equal(t, time.Minute, workloadClockLeeway, "the docs say \"at most a minute ahead\"")
+	require.Equal(t, time.Minute, keyFetchInterval, "the docs say \"once a minute\", \"for a minute\" and \"after a minute\"")
 
 	for _, p := range []struct {
 		file, format string
@@ -74,6 +77,19 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/browser-login.md", "Faucet keeps a denial only as a marker for %d minutes", []any{minutes(accessDenialRetention)}},
 		{"docs/browser-login.md", "After those %d minutes, every session that could take that pass", []any{minutes(accessDenialRetention)}},
 		{"docs/security.md", "Faucet keeps a denial only as a marker for %d minutes", []any{minutes(accessDenialRetention)}},
+		{"docs/service-accounts.md", "Its `exp` is at least a second away, and its `nbf` and `iat`, when it has them, are at most a minute ahead of faucet's clock.", nil},
+		{"docs/service-accounts.md", "Faucet's token lasts %d minutes, or until the platform's token expires", []any{minutes(accessTokenLifetime)}},
+		{"docs/service-accounts.md", "works until it expires, %d minutes at most", []any{minutes(accessTokenLifetime)}},
+		{"docs/service-accounts.md", "`Retry-After: %d`", []any{seconds(keyFetchInterval)}},
+		{"docs/service-accounts.md", "Ask again after a minute.", nil},
+		{"docs/security.md", "It then mints its own token, which lasts %d minutes and never past the platform's token.", []any{minutes(accessTokenLifetime)}},
+		{"docs/security.md", "must arrive within %d seconds together, and each must be %d KiB at most", []any{seconds(keyFetchTimeout), MaxKeyDocumentBytes >> 10}},
+		{"docs/security.md", "Faucet keeps an issuer's keys for %d minutes**, so a key that the issuer drops stops working within %d minutes", []any{minutes(keySetLifetime), minutes(keySetLifetime)}},
+		{"docs/security.md", "at most once a minute per issuer", nil},
+		{"docs/security.md", "It keeps the keys of up to %d issuers.", []any{maxCachedKeySets}},
+		{"docs/security.md", "keeps the keys that faucet holds** until their %d minutes end", []any{minutes(keySetLifetime)}},
+		{"docs/security.md", "Faucet keeps the failure for a minute, so while an issuer fails", nil},
+		{"docs/security.md", "`Retry-After: %d`", []any{seconds(keyFetchInterval)}},
 	} {
 		doc, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(p.file)))
 		require.NoError(t, err)
