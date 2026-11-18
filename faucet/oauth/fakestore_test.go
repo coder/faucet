@@ -384,16 +384,16 @@ func (s *fakeStore) RotateSession(_ context.Context, r oauth.Rotation) (oauth.Se
 	defer s.mu.Unlock()
 	presented, ok := s.refresh[r.Presented]
 	session := s.sessions[presented.SessionID]
-	if !ok || !session.Live() || !holdsAll(session, r) || presented.Used() && !presented.UsedAt.After(r.UsedAfter) {
+	if !ok || !session.Live() || !holdsAll(session, r) || presented.Retired() || presented.Used() && !presented.UsedAt.After(r.UsedAfter) {
 		return oauth.Session{}, oauth.ErrUnknownSession
 	}
 	if err := s.checkNewTokens(r.Next, r.Access); err != nil {
 		return oauth.Session{}, err
 	}
 	for hash, o := range s.refresh {
-		forgotten := o.Used() && !o.UsedAt.After(r.UsedAfter) || !o.Used() && !o.IssuedAt.After(r.UsedAfter)
-		if o.SessionID == session.ID && hash != r.Presented && forgotten {
-			delete(s.refresh, hash)
+		if o.SessionID == session.ID && hash != r.Presented && !o.Used() && !o.Retired() && !o.IssuedAt.After(r.UsedAfter) {
+			o.RetiredAt = r.Now
+			s.refresh[hash] = o
 		}
 	}
 	if !presented.Used() {

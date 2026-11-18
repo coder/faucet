@@ -114,6 +114,7 @@ type FaucetRefreshToken struct {
 	SessionID string
 	IssuedAt  time.Time
 	UsedAt    sql.NullTime
+	RetiredAt sql.NullTime
 }
 
 type FaucetRepo struct {

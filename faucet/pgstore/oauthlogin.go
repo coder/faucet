@@ -198,6 +198,7 @@ func (s *Store) SessionByRefreshToken(ctx context.Context, refresh oauth.TokenHa
 		SessionID: row.FaucetRefreshToken.SessionID,
 		IssuedAt:  row.FaucetRefreshToken.IssuedAt,
 		UsedAt:    row.FaucetRefreshToken.UsedAt.Time,
+		RetiredAt: row.FaucetRefreshToken.RetiredAt.Time,
 	}
 	return sessionOf(row.FaucetUserSession), token, nil
 }

@@ -235,6 +235,9 @@ func (s *Server) refreshToken(r *http.Request, form url.Values) (tokenResponse, 
 	switch {
 	case !session.Live():
 		return tokenResponse{}, errSessionEnded
+	case token.Retired():
+		// The client holds a later token, so this one has another holder.
+		return tokenResponse{}, s.endSession(ctx, session.ID, now, errSessionEnded, "a retired refresh token came, its session ended", slog.F("client_id", session.ClientID))
 	case token.Used() && !token.UsedAt.After(usedAfter):
 		// The token has two holders, and one of them is not the client (R14).
 		return tokenResponse{}, s.endSession(ctx, session.ID, now, errSessionEnded, "a refresh token came again after its reuse grace, its session ended", slog.F("client_id", session.ClientID))
@@ -269,8 +272,8 @@ func (s *Server) refreshToken(r *http.Request, form url.Values) (tokenResponse, 
 	switch {
 	case xerrors.Is(err, ErrUnknownSession):
 		// Since the read, the session ended, or a use of another of its
-		// tokens forgot this one: the token had two holders (R14).
-		return tokenResponse{}, s.endSession(ctx, session.ID, now, errSessionEnded, "a refresh token was forgotten while it was traded, its session ended", slog.F("client_id", session.ClientID))
+		// tokens retired this one: the token had two holders (R14).
+		return tokenResponse{}, s.endSession(ctx, session.ID, now, errSessionEnded, "a refresh token was retired while it was traded, its session ended", slog.F("client_id", session.ClientID))
 	case err != nil:
 		return tokenResponse{}, xerrors.Errorf("rotate the session: %w", err)
 	}

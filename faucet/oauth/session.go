@@ -32,7 +32,8 @@ func (s Session) Live() bool { return s.EndedAt.IsZero() }
 // RefreshToken is a refresh token of a session as a store keeps it: its
 // hash, never the token. A client trades it for the next one. It can trade
 // it again within refreshReuseGrace of its first use, since parallel
-// requests send one token at once. A later use ends the session.
+// requests send one token at once. A store keeps every token of a session
+// until the session goes, so a later use, however late, ends the session.
 type RefreshToken struct {
 	Hash      TokenHash
 	SessionID string
@@ -40,10 +41,16 @@ type RefreshToken struct {
 	// UsedAt is when a client first traded the token, zero while it is
 	// unused.
 	UsedAt time.Time
+	// RetiredAt is when a refresh of another token retired this one unused,
+	// because no client still holds it. Zero while it is not retired.
+	RetiredAt time.Time
 }
 
 // Used reports whether a client traded t.
 func (t RefreshToken) Used() bool { return !t.UsedAt.IsZero() }
+
+// Retired reports whether a refresh retired t unused.
+func (t RefreshToken) Retired() bool { return !t.RetiredAt.IsZero() }
 
 // Rotation is one use of a refresh token: the session gets the next refresh
 // token and the next access token.

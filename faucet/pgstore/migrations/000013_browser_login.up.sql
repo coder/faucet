@@ -63,14 +63,17 @@ CREATE TABLE faucet_user_sessions (
 );
 CREATE INDEX faucet_user_sessions_connection_idx ON faucet_user_sessions (connection_id) WHERE ended_at IS NULL;
 
--- faucet_refresh_tokens holds the SHA-256 of each refresh token of a session
--- that a client may still hold, never the token. used_at is when a client
--- first traded it for the next one. A use 30 seconds or more after that
--- ends the session.
+-- faucet_refresh_tokens holds the SHA-256 of each refresh token that a
+-- session gave out, never the token, until the session goes. used_at is when
+-- a client first traded it for the next one, and a use 30 seconds or more
+-- after that ends the session. retired_at is when a refresh of another token
+-- retired it unused, and any use of it then ends the session.
 CREATE TABLE faucet_refresh_tokens (
   token_hash bytea PRIMARY KEY CHECK (octet_length(token_hash) = 32),
   session_id text NOT NULL REFERENCES faucet_user_sessions (id) ON DELETE CASCADE,
   issued_at timestamptz NOT NULL,
-  used_at timestamptz
+  used_at timestamptz,
+  retired_at timestamptz,
+  CHECK (used_at IS NULL OR retired_at IS NULL)
 );
 CREATE INDEX faucet_refresh_tokens_session_idx ON faucet_refresh_tokens (session_id);

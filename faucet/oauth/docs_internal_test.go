@@ -53,7 +53,7 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/browser-login.md", "| Until the session ends or goes unused for %d days.", []any{days(sessionIdleLifetime)}},
 		{"docs/browser-login.md", "`/cron/purge` deletes it a day after its last update", nil},
 		{"docs/security.md", "once the session ended or went unused for %d days", []any{days(sessionIdleLifetime)}},
-		{"docs/security.md", "deletes a user's pair a day after no session", nil},
+		{"docs/security.md", "`/cron/purge` deletes it a day after its last update", nil},
 	} {
 		doc, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(p.file)))
 		require.NoError(t, err)

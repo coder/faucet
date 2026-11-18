@@ -42,10 +42,10 @@ var loginSubtests = []struct {
 	{"ConsentApproveRedeemAndRotateValidateInput", consentApproveRedeemAndRotateValidateInput},
 	{"AHashThatAnotherRowHoldsIsRefusedAndChangesNothing", aHashThatAnotherRowHoldsIsRefusedAndChangesNothing},
 	// Sessions.
-	{"ARefreshTokenIsFoundUntilARotationForgetsIt", aRefreshTokenIsFoundUntilARotationForgetsIt},
+	{"ARefreshTokenIsFoundUntilItsSessionGoes", aRefreshTokenIsFoundUntilItsSessionGoes},
 	{"RotateTradesTheTokenAndStoresTheNextAccessToken", rotateTradesTheTokenAndStoresTheNextAccessToken},
 	{"RotateTradesAUsedTokenAgainWithinItsGrace", rotateTradesAUsedTokenAgainWithinItsGrace},
-	{"RotateForgetsTheTokensThatNoClientStillHolds", rotateForgetsTheTokensThatNoClientStillHolds},
+	{"RotateRetiresTheUnusedTokensThatNoClientStillHolds", rotateRetiresTheUnusedTokensThatNoClientStillHolds},
 	{"RotateRefusesATokenUsedBeforeItsGraceAnEndedSessionAndAnUnknownToken", rotateRefusesATokenUsedBeforeItsGraceAnEndedSessionAndAnUnknownToken},
 	{"RotateRefusesAnAccessTokenWithAScopeThatTheSessionLacks", rotateRefusesAnAccessTokenWithAScopeThatTheSessionLacks},
 	{"EveryRotationOfOneTokenAtOnceTradesIt", everyRotationOfOneTokenAtOnceTradesIt},
@@ -281,13 +281,14 @@ func requireRefreshToken(t *testing.T, s oauth.Store, want oauth.RefreshToken, m
 	require.Equal(t, want.SessionID, session.ID, msgAndArgs...)
 	require.True(t, want.IssuedAt.Equal(got.IssuedAt), "issued_at: want %v, got %v", want.IssuedAt, got.IssuedAt)
 	require.True(t, want.UsedAt.Equal(got.UsedAt), "used_at: want %v, got %v", want.UsedAt, got.UsedAt)
-	got.IssuedAt, got.UsedAt = want.IssuedAt, want.UsedAt
+	require.True(t, want.RetiredAt.Equal(got.RetiredAt), "retired_at: want %v, got %v", want.RetiredAt, got.RetiredAt)
+	got.IssuedAt, got.UsedAt, got.RetiredAt = want.IssuedAt, want.UsedAt, want.RetiredAt
 	require.Equal(t, want, got, msgAndArgs...)
 }
 
-// requireForgotten checks that the store holds no refresh token with this
-// hash.
-func requireForgotten(t *testing.T, s oauth.Store, refresh oauth.TokenHash, msgAndArgs ...any) {
+// requireNoRefreshToken checks that the store holds no refresh token with
+// this hash.
+func requireNoRefreshToken(t *testing.T, s oauth.Store, refresh oauth.TokenHash, msgAndArgs ...any) {
 	t.Helper()
 	_, _, err := s.SessionByRefreshToken(context.Background(), refresh)
 	require.ErrorIs(t, err, oauth.ErrUnknownSession, msgAndArgs...)
@@ -887,7 +888,7 @@ func aHashThatAnotherRowHoldsIsRefusedAndChangesNothing(t *testing.T, s oauth.St
 	}
 }
 
-func aRefreshTokenIsFoundUntilARotationForgetsIt(t *testing.T, s oauth.Store) {
+func aRefreshTokenIsFoundUntilItsSessionGoes(t *testing.T, s oauth.Store) {
 	ctx := context.Background()
 	now := loginNow()
 	session := newSession(t, s, "req-1", connectionAt(1, now), now)
@@ -901,13 +902,13 @@ func aRefreshTokenIsFoundUntilARotationForgetsIt(t *testing.T, s oauth.Store) {
 	require.NoError(t, err)
 	requireSameSession(t, rotated, got)
 	for _, unknown := range []oauth.TokenHash{{}, refreshOf("unknown"), accessOf("req-1")} {
-		requireForgotten(t, s, unknown)
+		requireNoRefreshToken(t, s, unknown)
 	}
 
 	second := rotationOf(first.Next, "third", now.Add(2*time.Minute))
 	_, err = s.RotateSession(ctx, second)
 	require.NoError(t, err)
-	requireForgotten(t, s, first.Presented, "a token used before the grace is forgotten")
+	requireRefreshToken(t, s, oauth.RefreshToken{Hash: first.Presented, SessionID: session.ID, IssuedAt: now, UsedAt: first.Now}, "a token used before the grace")
 	requireRefreshToken(t, s, oauth.RefreshToken{Hash: first.Next, SessionID: session.ID, IssuedAt: first.Now, UsedAt: second.Now})
 
 	require.NoError(t, s.EndSession(ctx, session.ID, now.Add(3*time.Minute)))
@@ -974,10 +975,11 @@ func rotateTradesAUsedTokenAgainWithinItsGrace(t *testing.T, s oauth.Store) {
 	requireSessionIs(t, s, want)
 }
 
-// A rotation forgets the tokens of its session that the client no longer
-// holds: the ones used, or unused and issued, at or before the start of the
-// grace. It keeps the presented one, and the tokens of other sessions.
-func rotateForgetsTheTokensThatNoClientStillHolds(t *testing.T, s oauth.Store) {
+// A rotation retires the unused tokens of its session that the client no
+// longer holds: those issued at or before the start of the grace. A retired
+// token trades no more. The rotation keeps every used token as it is, and
+// the tokens of other sessions.
+func rotateRetiresTheUnusedTokensThatNoClientStillHolds(t *testing.T, s oauth.Store) {
 	ctx := context.Background()
 	now := loginNow()
 	c := connectionAt(1, now)
@@ -999,15 +1001,26 @@ func rotateForgetsTheTokensThatNoClientStillHolds(t *testing.T, s oauth.Store) {
 	kept.UsedAfter = second.Now
 	_, err := s.RotateSession(ctx, kept)
 	require.NoError(t, err)
-	requireForgotten(t, s, first.Presented, "used before the grace")
-	requireForgotten(t, s, twin.Next, "unused and issued before the grace")
-	requireForgotten(t, s, first.Next, "used at the start of the grace")
-	requireForgotten(t, s, late.Next, "unused and issued at the start of the grace")
-	requireRefreshToken(t, s, oauth.RefreshToken{Hash: second.Next, SessionID: session.ID, IssuedAt: second.Now, UsedAt: fourth.Now}, "used after the start of the grace")
-	requireRefreshToken(t, s, oauth.RefreshToken{Hash: third.Next, SessionID: session.ID, IssuedAt: third.Now}, "unused and issued after the start of the grace")
-	requireRefreshToken(t, s, oauth.RefreshToken{Hash: kept.Presented, SessionID: session.ID, IssuedAt: fourth.Now, UsedAt: kept.Now}, "the presented token")
-	requireRefreshToken(t, s, oauth.RefreshToken{Hash: kept.Next, SessionID: session.ID, IssuedAt: kept.Now}, "the next token")
+	for name, want := range map[string]oauth.RefreshToken{
+		"used before the grace":                       {Hash: first.Presented, IssuedAt: now, UsedAt: t1},
+		"unused and issued before the grace":          {Hash: twin.Next, IssuedAt: t1, RetiredAt: kept.Now},
+		"used at the start of the grace":              {Hash: first.Next, IssuedAt: t1, UsedAt: second.Now},
+		"unused and issued at the start of the grace": {Hash: late.Next, IssuedAt: second.Now, RetiredAt: kept.Now},
+		"used after the start of the grace":           {Hash: second.Next, IssuedAt: second.Now, UsedAt: fourth.Now},
+		"unused and issued after the start":           {Hash: third.Next, IssuedAt: third.Now},
+		"the presented token":                         {Hash: kept.Presented, IssuedAt: fourth.Now, UsedAt: kept.Now},
+		"the next token":                              {Hash: kept.Next, IssuedAt: kept.Now},
+	} {
+		want.SessionID = session.ID
+		requireRefreshToken(t, s, want, name)
+	}
 	requireRefreshToken(t, s, oauth.RefreshToken{Hash: refreshOf(other.ID), SessionID: other.ID, IssuedAt: now}, "a token of another session")
+
+	afterRetirement := rotationOf(twin.Next, "after retirement", kept.Now.Add(time.Second))
+	_, err = s.RotateSession(ctx, afterRetirement)
+	require.ErrorIs(t, err, oauth.ErrUnknownSession, "a retired token")
+	requireNoTokens(t, s, afterRetirement.Next, afterRetirement.Access)
+	requireRefreshToken(t, s, oauth.RefreshToken{Hash: twin.Next, SessionID: session.ID, IssuedAt: t1, RetiredAt: kept.Now})
 }
 
 func rotateRefusesATokenUsedBeforeItsGraceAnEndedSessionAndAnUnknownToken(t *testing.T, s oauth.Store) {
@@ -1134,7 +1147,7 @@ func deleteEndedSessionsDeletesTheEndedAndTheIdleWithTheirTokens(t *testing.T, s
 	for _, gone := range []oauth.Session{ended, idle} {
 		_, err := s.Session(ctx, gone.ID)
 		require.ErrorIs(t, err, oauth.ErrUnknownSession, gone.ID)
-		requireForgotten(t, s, refreshOf(gone.ID), gone.ID)
+		requireNoRefreshToken(t, s, refreshOf(gone.ID), gone.ID)
 	}
 	for _, kept := range []oauth.Session{live, almostIdle, endsLater} {
 		requireSessionIs(t, s, kept)
