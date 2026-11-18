@@ -189,6 +189,8 @@ func (s *Server) readAuthorization(ctx context.Context, rawQuery string) (AuthRe
 		// A name in another script can look like a known host on the
 		// consent page.
 		return AuthRequest{}, badAuthorization("the host of client_id must be ASCII: write an internationalized name in its xn-- form")
+	case hostKey(clientID) == hostKey(s.issuer):
+		return AuthRequest{}, badAuthorization("client_id must not be on faucet's own host: faucet does not fetch documents from itself")
 	}
 	doc, err := s.login.documents.fetch(ctx, clientID)
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -162,6 +163,33 @@ func checkClientID(clientID string) error {
 		return xerrors.New("the client ID must hold no . or .. path segment")
 	}
 	return nil
+}
+
+// defaultPorts are the ports that a URL of each scheme names when it names
+// none.
+var defaultPorts = map[string]string{"http": "80", "https": "443"}
+
+// hostKey names the host of rawURL so that two URLs of one host give the
+// same key: the host name in lower case without a final dot, then the port
+// unless it is the default of the scheme. It is empty for a URL with no
+// host.
+func hostKey(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	name := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if name == "" {
+		return ""
+	}
+	port := u.Port()
+	if n, err := strconv.Atoi(port); err == nil {
+		port = strconv.Itoa(n)
+	}
+	if port == "" || port == defaultPorts[u.Scheme] {
+		return name
+	}
+	return net.JoinHostPort(name, port)
 }
 
 func parseClientDocument(clientID string, body []byte) (clientDocument, error) {
