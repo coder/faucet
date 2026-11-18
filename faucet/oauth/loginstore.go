@@ -18,6 +18,9 @@ var (
 	// ErrUnknownConnection means that the store holds no connection with
 	// that ID.
 	ErrUnknownConnection = xerrors.New("no such connection")
+	// ErrTooManyAuthRequests means that the store holds as many live pending
+	// requests as a limit allows.
+	ErrTooManyAuthRequests = xerrors.New("too many pending authorization requests")
 )
 
 // LoginStore keeps the browser logins: authorization requests, the sessions
@@ -27,8 +30,13 @@ var (
 // storetest.RunOAuth checks an implementation.
 type LoginStore interface {
 	// InsertAuthRequest stores r, a new pending request. It fails when r is
-	// not valid, or when the store holds a request with the same ID.
-	InsertAuthRequest(ctx context.Context, r AuthRequest) error
+	// not valid, or when the store holds a request with the same ID. It
+	// returns ErrTooManyAuthRequests, and stores nothing, when the store
+	// holds limits.PerClientHost live pending requests whose client host is
+	// r's, or limits.Total live pending requests in all: requests in state
+	// pending that have not expired at r.CreatedAt. Inserts that run at once
+	// may pass a limit by as many as run at once.
+	InsertAuthRequest(ctx context.Context, r AuthRequest, limits AuthRequestLimits) error
 	// ConsentAuthRequest records that the user pressed Continue: the
 	// pending request with this ID and this browser hash that has not
 	// expired at now gets githubState, the hash of the state that faucet

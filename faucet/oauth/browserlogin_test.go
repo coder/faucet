@@ -152,12 +152,12 @@ func TestPurgeDeletesTheAuthRequestsThatExpiredADayAgo(t *testing.T) {
 	}
 	old := request("old", now.Add(-24*time.Hour-time.Second))
 	recent := request("recent", now.Add(-23*time.Hour))
-	require.NoError(t, store.InsertAuthRequest(ctx, old))
-	require.NoError(t, store.InsertAuthRequest(ctx, recent))
+	require.NoError(t, store.InsertAuthRequest(ctx, old, roomyLimits))
+	require.NoError(t, store.InsertAuthRequest(ctx, recent, roomyLimits))
 
 	res, err := server.Purge(ctx)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, res.ExpiredAuthRequests)
-	require.Error(t, store.InsertAuthRequest(ctx, recent), "the recent request is still there")
-	require.NoError(t, store.InsertAuthRequest(ctx, old), "the old request is gone")
+	require.Error(t, store.InsertAuthRequest(ctx, recent, roomyLimits), "the recent request is still there")
+	require.NoError(t, store.InsertAuthRequest(ctx, old, roomyLimits), "the old request is gone")
 }

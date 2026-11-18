@@ -17,7 +17,7 @@ var _ oauth.LoginStore = (*Store)(nil)
 
 // InsertAuthRequest implements oauth.LoginStore. A second request with the
 // same ID fails on the primary key.
-func (s *Store) InsertAuthRequest(ctx context.Context, r oauth.AuthRequest) (err error) {
+func (s *Store) InsertAuthRequest(ctx context.Context, r oauth.AuthRequest, _ oauth.AuthRequestLimits) (err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if err := r.Validate(); err != nil {
 		return xerrors.Errorf("validate authorization request: %w", err)

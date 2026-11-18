@@ -29,7 +29,28 @@ const (
 	authRequestLifetime = 10 * time.Minute
 	// codeLifetime is how long a client has to redeem its code.
 	codeLifetime = 60 * time.Second
+
+	// maxPendingPerClientHost bounds the logins in progress of the clients
+	// of one host. One client, such as an editor's, serves every user of an
+	// organization, so it is far above what one organization starts in the
+	// 10 minutes that a login stays pending.
+	maxPendingPerClientHost = 100
+	// maxPendingAuthRequests bounds all logins in progress, so that the
+	// requests that anyone can send grow the store by a bounded amount.
+	maxPendingAuthRequests = 1000
 )
+
+// AuthRequestLimits bound the live pending requests that a store holds:
+// those in state pending that have not expired.
+type AuthRequestLimits struct {
+	// PerClientHost bounds the live pending requests of one client host.
+	PerClientHost int
+	// Total bounds all live pending requests.
+	Total int
+}
+
+// pendingLimits are the limits of the authorization endpoint.
+var pendingLimits = AuthRequestLimits{PerClientHost: maxPendingPerClientHost, Total: maxPendingAuthRequests}
 
 // AuthRequest is one browser login of a client, from its authorization
 // request to the code that it redeems. A store keeps the hash of every
@@ -67,6 +88,11 @@ type AuthRequest struct {
 	// approved one 60 seconds after its approval.
 	ExpiresAt time.Time
 }
+
+// ClientHost is the host of r's client ID, which the limits of pending
+// requests count by: the host name in lower case without a final dot, then
+// the port unless it is the default of the scheme.
+func (r AuthRequest) ClientHost() string { return hostKey(r.ClientID) }
 
 // Validate reports whether a store may keep r as a new request: a pending
 // one that holds nothing of the later steps.

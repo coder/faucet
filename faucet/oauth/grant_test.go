@@ -288,7 +288,7 @@ func (h *grantHarness) approveFor(id string, userID int64, login string) grantLo
 		RedirectURI: grantRedirectURI, Resource: login, Scopes: bothScopes,
 		CodeChallenge: base64.RawURLEncoding.EncodeToString(challenge[:]), BrowserHash: browser,
 		CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
-	}))
+	}, roomyLimits))
 	require.NoError(h.t, h.store.ConsentAuthRequest(ctx, id, browser, state, now))
 	require.NoError(h.t, h.store.ApproveAuthRequest(ctx, oauth.Approval{
 		RequestID: id, GitHubState: state, Connection: h.connection(userID), Code: oauth.HashToken(l.code),

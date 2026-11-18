@@ -174,7 +174,7 @@ func cloneConnection(c oauth.Connection) oauth.Connection {
 	return c
 }
 
-func (s *fakeStore) InsertAuthRequest(_ context.Context, r oauth.AuthRequest) error {
+func (s *fakeStore) InsertAuthRequest(_ context.Context, r oauth.AuthRequest, _ oauth.AuthRequestLimits) error {
 	if err := r.Validate(); err != nil {
 		return err
 	}

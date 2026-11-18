@@ -160,7 +160,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	now := s.clock.Now()
 	request.ID, request.State, request.BrowserHash = id, AuthRequestPending, HashToken(browser)
 	request.CreatedAt, request.ExpiresAt = now, now.Add(authRequestLifetime)
-	if err := s.store.InsertAuthRequest(ctx, request); err != nil {
+	if err := s.store.InsertAuthRequest(ctx, request, pendingLimits); err != nil {
 		s.refuse(w, r, failure(xerrors.Errorf("store the authorization request: %w", err)), host)
 		return
 	}
