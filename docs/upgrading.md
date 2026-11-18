@@ -2,6 +2,10 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## To faucet's own document client
+
+This came in [#60](https://github.com/coder/faucet/pull/60). It matters to a host that embeds faucet. `oauth.BrowserLogin.Documents` is now a `faucet.HTTPClientOptions`, not an `*http.Client`: faucet builds the client that fetches client ID metadata documents itself, with `faucet.NewHTTPClient`, because the client of the login chooses their URL. Leave it at its zero value in production. Before, a host that passed a client of its own, such as `http.DefaultClient`, let anyone who opened `/oauth/authorize` make faucet fetch from the host's network and follow redirects. `AllowInsecureLoopback` exists for tests only.
+
 ## To stored repository checks (migration `000015_access_checks`)
 
 This came in [#56](https://github.com/coder/faucet/pull/56). Faucet stores the repository checks of browser logins, so a poll or a wait of a browser login asks GitHub only when no check newer than its session's last refresh answers (see [browser-login.md](browser-login.md#how-faucet-checks-a-repository)). Each refresh of a browser login asks GitHub again about up to 50 repositories, which can make the refresh take up to 5 seconds longer. The migration adds `faucet_access_checks`, which stays empty until a browser login checks a repository. `/cron/purge` deletes a stored check a day after a session last used it, and a stored denial 15 minutes after its check, and counts both in `unused_access_checks`, which is 0 while the browser login is off.

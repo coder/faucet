@@ -280,7 +280,7 @@ func newLoginHarness(t *testing.T) *loginHarness {
 				Client: &http.Client{Timeout: 5 * time.Second},
 			},
 			Keys:      h.keys,
-			Documents: faucet.NewHTTPClient(faucet.HTTPClientOptions{AllowInsecureLoopback: true, RootCAs: pool}),
+			Documents: faucet.HTTPClientOptions{AllowInsecureLoopback: true, RootCAs: pool},
 		},
 		Repos: faucet.TokenAuthorizer{BaseURL: h.github.URL, Client: h.github.Client()},
 	})

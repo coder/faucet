@@ -1,9 +1,11 @@
 package oauth_test
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"sync/atomic"
 	"testing"
@@ -11,14 +13,17 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"cdr.dev/slog/v3"
+	"github.com/coder/faucet/faucet"
 	"github.com/coder/faucet/faucet/oauth"
 	"github.com/coder/quartz"
 )
 
-type countingTransport struct{ requests atomic.Int64 }
+// countingResolver counts the host names that the document client looks up,
+// and finds none.
+type countingResolver struct{ lookups atomic.Int64 }
 
-func (c *countingTransport) RoundTrip(*http.Request) (*http.Response, error) {
-	c.requests.Add(1)
+func (c *countingResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	c.lookups.Add(1)
 	return nil, errors.New("this test has no network")
 }
 
@@ -26,9 +31,9 @@ func (c *countingTransport) RoundTrip(*http.Request) (*http.Response, error) {
 // such a document can name another one on faucet's host in turn.
 func TestAClientIDOnFaucetsOwnHostIsRefusedWithoutAFetch(t *testing.T) {
 	t.Parallel()
-	documents := &countingTransport{}
+	documents := &countingResolver{}
 	login := testBrowserLogin(t, "https://github.example.com")
-	login.Documents = &http.Client{Transport: documents}
+	login.Documents = faucet.HTTPClientOptions{Resolver: documents}
 	server, err := oauth.NewServer(oauth.ServerDeps{
 		Store: newFakeStore(), Clock: quartz.NewMock(t), Logger: slog.Make(), Issuer: issuer, Resources: []string{resource}, Login: login, Repos: noRepos,
 	})
@@ -47,13 +52,13 @@ func TestAClientIDOnFaucetsOwnHostIsRefusedWithoutAFetch(t *testing.T) {
 		"https://faucet.example.com.:0443/oauth/authorize?client_id=x",
 	} {
 		page := authorize(clientID)
-		require.Zero(t, documents.requests.Load(), "%s is not fetched", clientID)
+		require.Zero(t, documents.lookups.Load(), "%s is not fetched", clientID)
 		require.Equal(t, http.StatusBadRequest, page.Code, clientID)
 		require.Contains(t, page.Body.String(), "client_id must not be on faucet&#39;s own host", clientID)
 	}
 
 	page := authorize("https://faucet.example.com:8443/client.json")
-	require.EqualValues(t, 1, documents.requests.Load(), "another port is another host")
+	require.EqualValues(t, 1, documents.lookups.Load(), "another port is another host")
 	require.Contains(t, page.Body.String(), "faucet could not fetch the client&#39;s document")
 }
 

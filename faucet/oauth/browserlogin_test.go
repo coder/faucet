@@ -38,7 +38,7 @@ func testBrowserLogin(t *testing.T, githubURL string) *oauth.BrowserLogin {
 			Client: &http.Client{Timeout: 5 * time.Second},
 		},
 		Keys:      testTokenKeys(t),
-		Documents: faucet.NewHTTPClient(faucet.HTTPClientOptions{AllowInsecureLoopback: true}),
+		Documents: faucet.HTTPClientOptions{AllowInsecureLoopback: true},
 	}
 }
 
@@ -84,12 +84,11 @@ func TestWithoutABrowserLoginTheMetadataNamesNoClientDocuments(t *testing.T) {
 func TestNewServerRefusesABrowserLoginThatLacksAPart(t *testing.T) {
 	t.Parallel()
 	for name, mutate := range map[string]func(*oauth.BrowserLogin){
-		"no client ID":       func(l *oauth.BrowserLogin) { l.GitHub.ClientID = "" },
-		"no client secret":   func(l *oauth.BrowserLogin) { l.GitHub.ClientSecret = "" },
-		"a plain http host":  func(l *oauth.BrowserLogin) { l.GitHub.WebURL = "http://github.example.com" },
-		"no API URL":         func(l *oauth.BrowserLogin) { l.GitHub.APIURL = "" },
-		"no token key":       func(l *oauth.BrowserLogin) { l.Keys = oauth.TokenKeys{} },
-		"no document client": func(l *oauth.BrowserLogin) { l.Documents = nil },
+		"no client ID":      func(l *oauth.BrowserLogin) { l.GitHub.ClientID = "" },
+		"no client secret":  func(l *oauth.BrowserLogin) { l.GitHub.ClientSecret = "" },
+		"a plain http host": func(l *oauth.BrowserLogin) { l.GitHub.WebURL = "http://github.example.com" },
+		"no API URL":        func(l *oauth.BrowserLogin) { l.GitHub.APIURL = "" },
+		"no token key":      func(l *oauth.BrowserLogin) { l.Keys = oauth.TokenKeys{} },
 	} {
 		login := testBrowserLogin(t, "https://github.example.com")
 		mutate(login)
