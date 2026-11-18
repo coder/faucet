@@ -103,7 +103,7 @@ A delivery that a run takes and that doesn't succeed ends with one of these reas
 | `endpoint_gone` | The endpoint answered `410 Gone`. This ends the delivery, not the subscription. |
 | `endpoint_payload_too_large` | The endpoint answered `413`. This ends the delivery, not the subscription. |
 | `event_too_large` | The body would be over 256 KiB, so faucet never sent it. A raw subscription gets a gap. |
-| `event_malformed` | Faucet could not build a body from the stored event. |
+| `event_malformed` | Faucet could not build a body from the stored event. A raw subscription gets a gap. |
 | `attempts_exhausted` | All 5 attempts failed. |
 | `window_expired` | The next attempt would come more than 15 minutes after the event was queued. |
 | `event_purged` | A retention purge deleted the event before the delivery ended, or, for a raw event, a purge dropped its payload. A raw subscription then gets a gap. |
