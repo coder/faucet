@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"time"
 
+	"github.com/lib/pq"
 	"golang.org/x/xerrors"
 
 	"github.com/coder/faucet/faucet"
@@ -211,7 +212,7 @@ func (s *Store) RotateSession(ctx context.Context, r oauth.Rotation) (_ oauth.Se
 		UsedAfter:       r.UsedAfter,
 	})
 	switch {
-	case xerrors.Is(err, sql.ErrNoRows), isCheckViolation(err):
+	case xerrors.Is(err, sql.ErrNoRows), violatesUsedOrRetired(err):
 		// A check fails when a rotation of another token of the session
 		// retired this one while this rotation waited for it: the token
 		// is retired, and the statement changed nothing.
@@ -220,6 +221,18 @@ func (s *Store) RotateSession(ctx context.Context, r oauth.Rotation) (_ oauth.Se
 		return oauth.Session{}, xerrors.Errorf("rotate session: %w", err)
 	}
 	return sessionOf(database.FaucetUserSession(row)), nil
+}
+
+// usedOrRetiredConstraint is the check that no refresh token is both used
+// and retired.
+const usedOrRetiredConstraint = "faucet_refresh_tokens_used_or_retired"
+
+// violatesUsedOrRetired reports whether err is lib/pq's error for a row that
+// breaks usedOrRetiredConstraint (SQLSTATE 23514). Any other violated check
+// is a failure of the store.
+func violatesUsedOrRetired(err error) bool {
+	var pqErr *pq.Error
+	return xerrors.As(err, &pqErr) && pqErr.Code == "23514" && pqErr.Constraint == usedOrRetiredConstraint
 }
 
 // EndSession implements oauth.LoginStore.

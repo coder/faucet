@@ -38,14 +38,6 @@ func New(db *sql.DB) *Store {
 // driver.ErrBadConn or sql.ErrTxDone, and a narrower test would report those as
 // store failures. A real failure at the same instant then reads as incomplete.
 // The next run reports it only if the failure lasts.
-// isCheckViolation reports whether err is a violated check constraint
-// (SQLSTATE 23514), with lib/pq, pgx or any driver whose errors have
-// SQLState.
-func isCheckViolation(err error) bool {
-	var coded interface{ SQLState() string }
-	return xerrors.As(err, &coded) && coded.SQLState() == "23514"
-}
-
 func endedBy(ctx context.Context, err error) error {
 	if err == nil || ctx.Err() == nil || xerrors.Is(err, ctx.Err()) {
 		return err
