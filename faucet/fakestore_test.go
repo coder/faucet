@@ -83,6 +83,24 @@ func (s *fakeStore) RepositoryByName(_ context.Context, fullName string) (faucet
 	return found.repo, nil
 }
 
+func (s *fakeStore) OwnerByLogin(_ context.Context, login string) (faucet.Owner, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.repoErr != nil {
+		return faucet.Owner{}, s.repoErr
+	}
+	var found *fakeRepo
+	for i, r := range s.repos {
+		if strings.EqualFold(r.repo.OwnerLogin, login) && (found == nil || r.seenAt.After(found.seenAt) || r.seenAt.Equal(found.seenAt) && r.repo.ID > found.repo.ID) {
+			found = &s.repos[i]
+		}
+	}
+	if found == nil {
+		return faucet.Owner{}, faucet.ErrUnknownOwner
+	}
+	return faucet.Owner{ID: found.repo.OwnerID, Login: found.repo.OwnerLogin}, nil
+}
+
 func (s *fakeStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.PollPage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

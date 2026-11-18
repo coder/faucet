@@ -261,6 +261,10 @@ type Store interface {
 	// took its name, it returns the one that took the name latest. It returns
 	// ErrUnknownRepository when no row holds the name.
 	RepositoryByName(ctx context.Context, fullName string) (Repository, error)
+	// OwnerByLogin returns the owner of the repository row, among those whose
+	// owner's login equals login ignoring case, that was seen latest. It
+	// returns ErrUnknownOwner when no row holds the login.
+	OwnerByLogin(ctx context.Context, login string) (Owner, error)
 
 	// The rest of the interface is the delivery queue. A subscription's
 	// deliveries end with it: deleting a subscription deletes the deliveries it

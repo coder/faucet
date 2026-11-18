@@ -53,3 +53,16 @@ func (s *Store) RepositoryByName(ctx context.Context, fullName string) (_ faucet
 	}
 	return faucet.Repository{ID: row.RepoID, OwnerID: row.OwnerID, OwnerLogin: row.OwnerLogin, FullName: row.FullName}, nil
 }
+
+// OwnerByLogin implements faucet.Store.
+func (s *Store) OwnerByLogin(ctx context.Context, login string) (_ faucet.Owner, err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	row, err := s.q.GetOwnerByLogin(ctx, login)
+	switch {
+	case xerrors.Is(err, sql.ErrNoRows):
+		return faucet.Owner{}, faucet.ErrUnknownOwner
+	case err != nil:
+		return faucet.Owner{}, xerrors.Errorf("read owner: %w", err)
+	}
+	return faucet.Owner{ID: row.OwnerID, Login: row.OwnerLogin}, nil
+}

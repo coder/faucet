@@ -10,6 +10,26 @@ import (
 	"time"
 )
 
+const getOwnerByLogin = `-- name: GetOwnerByLogin :one
+SELECT owner_id, owner_login
+FROM faucet_repos
+WHERE lower(owner_login) = lower($1::text)
+ORDER BY seen_at DESC, repo_id DESC
+LIMIT 1
+`
+
+type GetOwnerByLoginRow struct {
+	OwnerID    int64
+	OwnerLogin string
+}
+
+func (q *Queries) GetOwnerByLogin(ctx context.Context, ownerLogin string) (GetOwnerByLoginRow, error) {
+	row := q.db.QueryRowContext(ctx, getOwnerByLogin, ownerLogin)
+	var i GetOwnerByLoginRow
+	err := row.Scan(&i.OwnerID, &i.OwnerLogin)
+	return i, err
+}
+
 const getRepositoryByName = `-- name: GetRepositoryByName :one
 SELECT repo_id, owner_id, owner_login, full_name
 FROM faucet_repos

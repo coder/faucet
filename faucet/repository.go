@@ -14,6 +14,18 @@ import (
 // repository.
 var ErrUnknownRepository = xerrors.New("no delivery has named the repository")
 
+// ErrUnknownOwner means the store has seen no delivery that names a
+// repository of the owner.
+var ErrUnknownOwner = xerrors.New("no delivery has named a repository of the owner")
+
+// Owner is the user or organization that owns a repository, as the signed
+// delivery that the store saw latest names it. GitHub keeps ID when the
+// account is renamed, and Login can later name another account.
+type Owner struct {
+	ID    int64
+	Login string
+}
+
 // Repository is a GitHub repository as a signed delivery names it. GitHub
 // keeps ID when the repository is renamed or moves to another owner, and
 // FullName, written owner/name, can later name another repository.

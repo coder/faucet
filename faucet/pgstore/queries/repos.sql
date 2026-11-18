@@ -17,3 +17,10 @@ FROM faucet_repos
 WHERE lower(full_name) = lower(@full_name::text)
 ORDER BY seen_at DESC, repo_id DESC
 LIMIT 1;
+
+-- name: GetOwnerByLogin :one
+SELECT owner_id, owner_login
+FROM faucet_repos
+WHERE lower(owner_login) = lower(@owner_login::text)
+ORDER BY seen_at DESC, repo_id DESC
+LIMIT 1;

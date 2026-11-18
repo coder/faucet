@@ -18,6 +18,8 @@ var repositorySubtests = []subtest{
 	{"RepositoryByNameIgnoresCaseAndTakesTheLatestHolderOfAName", repositoryByNameIgnoresCaseAndTakesTheLatestHolderOfAName},
 	{"RepositoryByNameOfAnUnseenNameIsUnknown", repositoryByNameOfAnUnseenNameIsUnknown},
 	{"RecordAndRenameRepositoryValidateInput", recordAndRenameRepositoryValidateInput},
+	{"OwnerByLoginIgnoresCaseAndTakesTheOwnerSeenLatest", ownerByLoginIgnoresCaseAndTakesTheOwnerSeenLatest},
+	{"OwnerByLoginOfAnUnseenLoginIsUnknown", ownerByLoginOfAnUnseenLoginIsUnknown},
 }
 
 var repositoryTime = time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
@@ -120,4 +122,35 @@ func recordAndRenameRepositoryValidateInput(t *testing.T, s faucet.Store) {
 		require.Error(t, s.RenameRepository(ctx, bad, "coder/faucet", repositoryTime), "%+v", bad)
 	}
 	requireUnknownName(t, s, "coder/faucet")
+}
+
+// A login can move to another account, as when an organization is renamed
+// and another takes its old name. The repository seen latest decides.
+func ownerByLoginIgnoresCaseAndTakesTheOwnerSeenLatest(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	require.NoError(t, s.RecordRepository(ctx, faucet.Repository{ID: 1, OwnerID: 7, OwnerLogin: "Coder", FullName: "Coder/faucet"}, repositoryTime))
+	require.NoError(t, s.RecordRepository(ctx, faucet.Repository{ID: 2, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/tap"}, repositoryTime.Add(time.Minute)))
+
+	got, err := s.OwnerByLogin(ctx, "CODER")
+	require.NoError(t, err)
+	require.Equal(t, faucet.Owner{ID: 7, Login: "coder"}, got, "the login matches in any case, and the latest row gives the written login")
+
+	require.NoError(t, s.RecordRepository(ctx, faucet.Repository{ID: 3, OwnerID: 9, OwnerLogin: "coder", FullName: "coder/new"}, repositoryTime.Add(time.Hour)))
+	got, err = s.OwnerByLogin(ctx, "coder")
+	require.NoError(t, err)
+	require.Equal(t, faucet.Owner{ID: 9, Login: "coder"}, got, "the account seen latest under the login holds it")
+
+	require.NoError(t, s.RenameRepository(ctx, faucet.Repository{ID: 3, OwnerID: 9, OwnerLogin: "acme", FullName: "acme/new"}, "coder/new", repositoryTime.Add(2*time.Hour)))
+	got, err = s.OwnerByLogin(ctx, "coder")
+	require.NoError(t, err)
+	require.Equal(t, faucet.Owner{ID: 7, Login: "coder"}, got, "a transfer away from the login leaves the rows that still hold it")
+}
+
+func ownerByLoginOfAnUnseenLoginIsUnknown(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	require.NoError(t, s.RecordRepository(ctx, repositoryNamed(1, "coder/faucet"), repositoryTime))
+	for _, login := range []string{"code", "coder2", "faucet", "c%", "_oder", ""} {
+		_, err := s.OwnerByLogin(ctx, login)
+		require.ErrorIs(t, err, faucet.ErrUnknownOwner, login)
+	}
 }
