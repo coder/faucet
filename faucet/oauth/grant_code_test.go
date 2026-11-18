@@ -3,14 +3,17 @@ package oauth_test
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
 
+	"github.com/coder/faucet/faucet"
 	"github.com/coder/faucet/faucet/oauth"
 )
 
@@ -109,4 +112,78 @@ func TestACodeStaysRedeemableAfterARequestThatFailsTheClientOrTheProofCheck(t *t
 
 	reply := h.post(basic(grantClientID, ""), grantCodeForm(l))
 	grantTokens(t, l.id, reply)
+}
+
+// A code that comes again after it was redeemed ends the session that it
+// made (RFC 6749 section 4.1.2), so a stolen code that its client redeemed
+// first takes the session down with it.
+func TestACodeUsedAgainEndsItsSession(t *testing.T) {
+	t.Parallel()
+	h := newGrantHarness(t, newFakeStore())
+	l := h.approve("login-1", 1)
+	s := h.redeem(l)
+	_, err := h.verify(s.access)
+	require.NoError(t, err)
+
+	h.clock.Advance(time.Second)
+	grantRequireRefused(t, h.post("", grantCodeForm(l)), http.StatusBadRequest, "invalid_grant", "the second use")
+	session := h.session(l.id)
+	require.True(t, h.clock.Now().Equal(session.EndedAt), "the session ended")
+	_, err = h.verify(s.access)
+	require.ErrorIs(t, err, faucet.ErrInvalidToken)
+	grantRequireRefused(t, h.post("", grantRefreshForm(s.refresh)), http.StatusBadRequest, "invalid_grant", "the session's refresh token")
+}
+
+// Of two redemptions of one code at once, one gets the tokens and the other
+// ends the session that they make: the code was used twice.
+func TestTwoRedemptionsOfOneCodeAtOnceEndTheSession(t *testing.T) {
+	t.Parallel()
+	h := newGrantHarness(t, newFakeStore())
+	l := h.approve("login-1", 1)
+	start := make(chan struct{})
+	replies := make([]tokenReply, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range replies {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			replies[i], errs[i] = h.send("", grantCodeForm(l))
+		}()
+	}
+	close(start)
+	wg.Wait()
+	require.NoError(t, errors.Join(errs...))
+	statuses := []int{replies[0].status, replies[1].status}
+	require.ElementsMatch(t, []int{http.StatusOK, http.StatusBadRequest}, statuses)
+	require.False(t, h.session(l.id).Live())
+}
+
+// A code lasts 60 seconds from its approval.
+func TestACodeExpiresSixtySecondsAfterItsApproval(t *testing.T) {
+	t.Parallel()
+	h := newGrantHarness(t, newFakeStore())
+	early := h.approve("login-1", 1)
+	late := h.approve("login-2", 1)
+
+	h.clock.Advance(59 * time.Second)
+	h.redeem(early)
+	h.clock.Advance(time.Second)
+	grantRequireRefused(t, h.post("", grantCodeForm(late)), http.StatusBadRequest, "invalid_grant", "an expired code")
+	_, err := h.store.Session(context.Background(), late.id)
+	require.ErrorIs(t, err, oauth.ErrUnknownSession)
+}
+
+// A login for an endpoint that the server does not serve, as after an
+// operator moved it, gets no tokens that it could not use.
+func TestACodeForAnEndpointThatTheServerDoesNotServeGetsNoTokens(t *testing.T) {
+	t.Parallel()
+	h := newGrantHarness(t, newFakeStore())
+	l := h.approveFor("login-1", 1, "https://other.example.com/github/mcp")
+	reply := h.post("", grantCodeForm(l))
+	grantRequireRefused(t, reply, http.StatusBadRequest, "invalid_grant", "an endpoint that the server does not serve")
+	require.Contains(t, reply.body["error_description"], "https://other.example.com/github/mcp, which this server does not serve")
+	_, err := h.store.Session(context.Background(), l.id)
+	require.ErrorIs(t, err, oauth.ErrUnknownSession)
 }

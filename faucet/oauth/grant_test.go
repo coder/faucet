@@ -51,6 +51,9 @@ type grantGitHub struct {
 	tokenStatus, repoStatus int
 	// onRefresh runs when a token request arrives, before the answer.
 	onRefresh func()
+	// userAs, when not zero, is the user ID that GET /user gives for every
+	// live token.
+	userAs int64
 }
 
 func newGrantGitHub(t *testing.T) *grantGitHub {
@@ -158,6 +161,9 @@ func (g *grantGitHub) user(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
+	if g.userAs != 0 {
+		id = g.userAs
+	}
 	grantJSON(w, map[string]any{"id": id, "login": g.logins[id]})
 }
 
@@ -263,6 +269,12 @@ func (h *grantHarness) connection(userID int64) oauth.Connection {
 // clock's time.
 func (h *grantHarness) approve(id string, userID int64) grantLogin {
 	h.t.Helper()
+	return h.approveFor(id, userID, resource)
+}
+
+// approveFor is approve for a login to the endpoint login.
+func (h *grantHarness) approveFor(id string, userID int64, login string) grantLogin {
+	h.t.Helper()
 	ctx := context.Background()
 	now := h.clock.Now()
 	l := grantLogin{id: id, code: grantSecret(h.t), verifier: grantSecret(h.t)}
@@ -270,7 +282,7 @@ func (h *grantHarness) approve(id string, userID int64) grantLogin {
 	browser, state := oauth.HashToken("browser "+id), oauth.HashToken("github state "+id)
 	require.NoError(h.t, h.store.InsertAuthRequest(ctx, oauth.AuthRequest{
 		ID: id, State: oauth.AuthRequestPending, ClientID: grantClientID, ClientName: "Example Agent",
-		RedirectURI: grantRedirectURI, Resource: resource, Scopes: bothScopes,
+		RedirectURI: grantRedirectURI, Resource: login, Scopes: bothScopes,
 		CodeChallenge: base64.RawURLEncoding.EncodeToString(challenge[:]), BrowserHash: browser,
 		CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
 	}))
