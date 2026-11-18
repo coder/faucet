@@ -559,9 +559,12 @@ func (s *fakeStore) StoreAccessCheck(ctx context.Context, c oauth.AccessCheck) e
 	}
 	key := accessCheckKey{c.ConnectionID, c.Repo}
 	if stored, ok := s.checks[key]; ok && c.Denied() && !stored.Denied() {
-		maps.DeleteFunc(s.checks, func(k accessCheckKey, alias oauth.AccessCheck) bool {
-			return k.connectionID == c.ConnectionID && k.repo != c.Repo && alias.RepoID == stored.RepoID && !alias.CheckedAt.After(c.CheckedAt)
-		})
+		for k, alias := range s.checks {
+			if k.connectionID == c.ConnectionID && k.repo != c.Repo && alias.RepoID == stored.RepoID && !alias.CheckedAt.After(c.CheckedAt) {
+				alias.RepoID, alias.CheckedAt = 0, c.CheckedAt
+				s.checks[k] = alias
+			}
+		}
 	}
 	if stored, ok := s.checks[key]; ok {
 		if stored.CheckedAt.After(c.CheckedAt) {

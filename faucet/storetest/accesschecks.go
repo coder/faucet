@@ -379,6 +379,11 @@ func aDenialTakesAwayTheOlderChecksOfTheOtherNamesOfTheRepository(t *testing.T, 
 	requireStale(t, s, session.ID, "org/at", now.Add(3*time.Minute))
 	requireChecks(t, s, c.ID, []oauth.AccessCheck{later, unrelated}, "a check that started after the denial stays, and so does one of another repository")
 	requireChecks(t, s, other.ID, []oauth.AccessCheck{theirs}, "another connection keeps its checks")
+
+	storeCheck(t, s, checkOf(c, "org/new", 11, now.Add(90*time.Second)))
+	requireStale(t, s, session.ID, "org/new", now.Add(3*time.Minute))
+	storeCheck(t, s, checkOf(c, "org/new", 11, now.Add(4*time.Minute)))
+	requireFresh(t, s, session.ID, "org/new", now.Add(5*time.Minute), 11)
 }
 
 func recentAccessChecksAreTheMostRecentlyUsedOfTheConnection(t *testing.T, s oauth.Store) {

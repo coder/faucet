@@ -23,17 +23,19 @@ SELECT repo_id::bigint FROM fresh;
 -- StoreAccessCheck stores a check of a repository by a connection, a pass or
 -- a denial, whose repo_id 0 is stored as NULL, in place of the stored one
 -- unless that one started later. A conflict always updates the row, so no
--- row means no connection. A denial also deletes the connection's checks of
--- the repository that the stored check held under its other names, a
--- repository renamed since, whose lookup started at or before the denial's.
+-- row means no connection. A denial also turns into denials the connection's
+-- checks of the repository that the stored check held under its other names,
+-- a repository renamed since, whose lookup started at or before the
+-- denial's, so that an older pass of one of those names cannot come back.
 WITH aliased AS (
   SELECT a.repo_id
   FROM faucet_access_checks a
   WHERE @repo_id::bigint = 0 AND a.connection_id = @connection_id AND a.repo = @repo::text
     AND a.repo_id IS NOT NULL
 ), aliases AS (
-  DELETE FROM faucet_access_checks a
-  USING aliased d
+  UPDATE faucet_access_checks a
+  SET repo_id = NULL, checked_at = @checked_at::timestamptz
+  FROM aliased d
   WHERE a.connection_id = @connection_id AND a.repo <> @repo::text AND a.repo_id = d.repo_id
     AND a.checked_at <= @checked_at::timestamptz
 )
