@@ -25,7 +25,8 @@ const clientsUsage = `usage:
 
 The commands read DATABASE_URL and faucet's public URL as the server does:
 FAUCET_PUBLIC_URL, or on Vercel production https://$VERCEL_PROJECT_PRODUCTION_URL.
--resource defaults to the public URL and /github/mcp.
+-resource defaults to the public URL and /github/mcp, and must be that
+endpoint when FAUCET_PUBLIC_URL is set.
 A grant is repo:<owner>/<name> for one repository, org:<login> for every
 repository of the user or organization that holds the login now, under any
 later login too, or all for every repository. org:<login>#<account ID> is
@@ -64,7 +65,14 @@ func runClients(ctx context.Context, args []string, getenv func(string) string, 
 	if err := pgstore.CheckSchema(ctx, db); err != nil {
 		return xerrors.Errorf("check the schema: %w", err)
 	}
-	return clientsCommand(ctx, args, pgstore.New(db), publicURL, time.Now(), stdout, stderr)
+	pinned := publicURL
+	if derived {
+		// Production may set FAUCET_PUBLIC_URL to another domain, and an
+		// environment pulled from Vercel lacks it when it is sensitive, so
+		// the derived URL is only the default.
+		pinned = nil
+	}
+	return clientsCommand(ctx, args, pgstore.New(db), publicURL, pinned, time.Now(), stdout, stderr)
 }
 
 // clientStore holds the clients and the subscriptions that services make,
@@ -80,11 +88,11 @@ func isClientsCommand(name string) bool {
 }
 
 // clientsCommand runs one command. publicURL is nil when the server has no
-// public URL.
-func clientsCommand(ctx context.Context, args []string, store clientStore, publicURL *url.URL, now time.Time, stdout, stderr io.Writer) error {
+// public URL, and pinned is publicURL when FAUCET_PUBLIC_URL set it.
+func clientsCommand(ctx context.Context, args []string, store clientStore, publicURL, pinned *url.URL, now time.Time, stdout, stderr io.Writer) error {
 	switch args[0] {
 	case "create":
-		return createClient(ctx, args[1:], store, publicURL, now, stdout, stderr)
+		return createClient(ctx, args[1:], store, publicURL, pinned, now, stdout, stderr)
 	case "list":
 		if len(args) > 1 {
 			return xerrors.New(clientsUsage)
@@ -132,7 +140,7 @@ func (g *grantFlags) Set(v string) error {
 	return nil
 }
 
-func createClient(ctx context.Context, args []string, store clientStore, publicURL *url.URL, now time.Time, stdout, stderr io.Writer) error {
+func createClient(ctx context.Context, args []string, store clientStore, publicURL, pinned *url.URL, now time.Time, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("faucet clients create", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	defaultResource := ""
@@ -149,7 +157,7 @@ func createClient(ctx context.Context, args []string, store clientStore, publicU
 	if flags.NArg() != 1 {
 		return xerrors.New("name one client ID, after the flags\n" + clientsUsage)
 	}
-	if err := checkResource(*resource, publicURL); err != nil {
+	if err := checkResource(*resource, pinned); err != nil {
 		return err
 	}
 	var scopes []faucet.Scope
@@ -183,11 +191,11 @@ func createClient(ctx context.Context, args []string, store clientStore, publicU
 
 // checkResource accepts the URL of faucet's GitHub MCP endpoint: faucet's
 // public URL, in the form FAUCET_PUBLIC_URL takes, and clientEndpoint. With
-// publicURL, it must be that server's, because the server issues no token
-// for another's.
-func checkResource(resource string, publicURL *url.URL) error {
-	if publicURL != nil {
-		if want := publicURL.String() + clientEndpoint; resource != want {
+// pinned, the URL that FAUCET_PUBLIC_URL sets, it must be that server's,
+// because the server issues no token for another's.
+func checkResource(resource string, pinned *url.URL) error {
+	if pinned != nil {
+		if want := pinned.String() + clientEndpoint; resource != want {
 			return xerrors.Errorf("-resource must be %s, the endpoint of %s", want, envPublicURL)
 		}
 		return nil

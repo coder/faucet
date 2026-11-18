@@ -197,7 +197,8 @@ func TestTheClientsCommandTakesTheEndpointOfFAUCETPUBLICURL(t *testing.T) {
 }
 
 // On Vercel production the commands take the public URL as the server does,
-// so a client is made for the endpoint that the server serves.
+// so a client is made for the endpoint that the server serves, unless the
+// operator names another with -resource.
 func TestTheClientsCommandTakesThePublicURLFromVercelAsTheServerDoes(t *testing.T) {
 	t.Parallel()
 	withDB, store := newClientsDatabase(t)
@@ -215,8 +216,16 @@ func TestTheClientsCommandTakesThePublicURLFromVercelAsTheServerDoes(t *testing.
 	c, err := store.Client(context.Background(), "ci-watcher")
 	require.NoError(t, err)
 	require.Equal(t, "https://faucet.example.com/github/mcp", c.Resource)
-	_, _, err = clients(t, getenv, "create", "-resource", "https://other.example.com/github/mcp", "-grant", "repo:coder/faucet", "elsewhere")
-	require.ErrorContains(t, err, "-resource must be https://faucet.example.com/github/mcp")
+	// Production can pin FAUCET_PUBLIC_URL to another domain, and an
+	// environment pulled from Vercel lacks a sensitive value, so the derived
+	// URL is only the default.
+	_, _, err = clients(t, getenv, "create", "-resource", "https://events.example.com/github/mcp", "-grant", "repo:coder/faucet", "pinned")
+	require.NoError(t, err)
+	pinned, err := store.Client(context.Background(), "pinned")
+	require.NoError(t, err)
+	require.Equal(t, "https://events.example.com/github/mcp", pinned.Resource)
+	_, _, err = clients(t, getenv, "create", "-resource", "https://events.example.com/mcp", "-grant", "repo:coder/faucet", "old-path")
+	require.ErrorContains(t, err, "-resource must be faucet's public URL and /github/mcp", "the shape is still checked")
 
 	vercel[envVercelEnv] = "preview"
 	_, _, err = clients(t, getenv, "create", "-grant", "repo:coder/faucet", "preview")
