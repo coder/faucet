@@ -146,6 +146,7 @@ func TestARuleOfAnyOtherIssuerMustPinSub(t *testing.T) {
 func TestARuleNamesAnHTTPSIssuerAndPinsAClaimToAValue(t *testing.T) {
 	t.Parallel()
 	sub := map[string]string{"sub": "system:serviceaccount:ns:sa"}
+	pinsWith := func(name string) map[string]string { return map[string]string{"sub": "a", name: "b"} }
 	for name, c := range map[string]struct {
 		rule oauth.TrustRule
 		want string
@@ -170,8 +171,8 @@ func TestARuleNamesAnHTTPSIssuerAndPinsAClaimToAValue(t *testing.T) {
 		"an escape code in a value":   {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a\x1b[2K"}}, "must be valid UTF-8 with no control character"},
 		"a bidi override in a value":  {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a\u202eb"}}, "must be valid UTF-8 with no control character"},
 		"invalid UTF-8 in a value":    {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "\xff"}}, "must be valid UTF-8 with no control character"},
-		"a newline in a name":         {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a", "x\ny": "b"}}, "must be valid UTF-8 with no control character"},
-		"a name that ends in a space": {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a", "ref ": "b"}}, `a trust rule's claim names cannot start or end with white space, as "ref " does`},
+		"a newline in a name":         {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: pinsWith("x\ny")}, "must be valid UTF-8 with no control character"},
+		"a name that ends in a space": {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: pinsWith("ref ")}, `a trust rule's claim names cannot start or end with white space, as "ref " does`},
 		"a name after a space":        {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"\u00a0sub": "a"}}, "cannot start or end with white space"},
 	} {
 		require.ErrorContains(t, oauth.ValidateTrustRule(c.rule), c.want, name)
