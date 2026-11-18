@@ -34,6 +34,7 @@ func Run(t *testing.T, newStore func(t *testing.T) faucet.Store) {
 		{"PollEventsAppliesFieldFilters", pollEventsAppliesFieldFilters},
 		{"PollEventsReturnsHeadCursorWhenNothingMatches", pollEventsReturnsHeadCursorWhenNothingMatches},
 		{"PollEventsReturnsLastIDWhenPageIsFull", pollEventsReturnsLastIDWhenPageIsFull},
+		{"PollEventsLooksAtNoMoreThanMaxRead", pollEventsLooksAtNoMoreThanMaxRead},
 		{"PollEventsValidatesQuery", pollEventsValidatesQuery},
 		{"CursorAtReturnsHighestIDReceivedBefore", cursorAtReturnsHighestIDReceivedBefore},
 		{"ConcurrentDuplicateDeliveryStoresOnce", concurrentDuplicateDeliveryStoresOnce},
@@ -502,17 +503,38 @@ func pollEventsReturnsLastIDWhenPageIsFull(t *testing.T, s faucet.Store) {
 	}
 }
 
+// MaxRead bounds the events of the target that a read looks at, matching or
+// not, and Next stops at the last of them, so the next read goes on from there.
+func pollEventsLooksAtNoMoreThanMaxRead(t *testing.T, s faucet.Store) {
+	e := seedPollEvents(t, s)
+	q := faucet.PollQuery{Target: faucet.RepoTarget(42), Types: []string{"ci.run_completed"}, HeadSHA: shaA, Limit: 10, MaxRead: 2}
+
+	page := requirePollIDs(t, s, q, e[0])
+	require.Equal(t, e[1].ID, page.Next, "the read stops after two events of the repository")
+	q.After = page.Next
+	page = requirePollIDs(t, s, q)
+	require.Equal(t, e[3].ID, page.Next, "a window without a match still moves the cursor")
+	q.After = page.Next
+	page = requirePollIDs(t, s, q, e[4])
+	require.Equal(t, e[5].ID, page.Next, "with fewer than MaxRead left, the cursor is the head")
+
+	q.After, q.Limit, q.MaxRead = 0, 1, 4
+	page = requirePollIDs(t, s, q, e[0])
+	require.Equal(t, e[0].ID, page.Next, "a full page stops the read first")
+}
+
 func pollEventsValidatesQuery(t *testing.T, s faucet.Store) {
 	good := faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 10}
 	for name, mutate := range map[string]func(q *faucet.PollQuery){
-		"zero repo ID":     func(q *faucet.PollQuery) { q.Target = faucet.RepoTarget(0) },
-		"zero target":      func(q *faucet.PollQuery) { q.Target = faucet.Target{} },
-		"negative repo ID": func(q *faucet.PollQuery) { q.Target = faucet.RepoTarget(-1) },
-		"zero limit":       func(q *faucet.PollQuery) { q.Limit = 0 },
-		"negative limit":   func(q *faucet.PollQuery) { q.Limit = -1 },
-		"negative after":   func(q *faucet.PollQuery) { q.After = -1 },
-		"negative pr":      func(q *faucet.PollQuery) { q.PR = -1 },
-		"unnamed field":    func(q *faucet.PollQuery) { q.Fields = []faucet.FieldFilter{{Values: []string{"main"}}} },
+		"zero repo ID":      func(q *faucet.PollQuery) { q.Target = faucet.RepoTarget(0) },
+		"negative max read": func(q *faucet.PollQuery) { q.MaxRead = -1 },
+		"zero target":       func(q *faucet.PollQuery) { q.Target = faucet.Target{} },
+		"negative repo ID":  func(q *faucet.PollQuery) { q.Target = faucet.RepoTarget(-1) },
+		"zero limit":        func(q *faucet.PollQuery) { q.Limit = 0 },
+		"negative limit":    func(q *faucet.PollQuery) { q.Limit = -1 },
+		"negative after":    func(q *faucet.PollQuery) { q.After = -1 },
+		"negative pr":       func(q *faucet.PollQuery) { q.PR = -1 },
+		"unnamed field":     func(q *faucet.PollQuery) { q.Fields = []faucet.FieldFilter{{Values: []string{"main"}}} },
 	} {
 		q := good
 		mutate(&q)

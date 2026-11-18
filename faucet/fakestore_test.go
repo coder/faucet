@@ -206,12 +206,17 @@ func (s *fakeStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.Po
 	}
 	s.polls = append(s.polls, q)
 
-	var head int64
+	var head, readThrough int64
+	var read int32
 	var page faucet.PollPage
 	for _, e := range s.events {
 		head = max(head, e.ID)
-		if e.ID <= q.After || !q.Target.Covers(e.RepoID, e.OwnerID) || len(page.Events) == int(q.Limit) {
+		if e.ID <= q.After || !q.Target.Covers(e.RepoID, e.OwnerID) || len(page.Events) == int(q.Limit) || readThrough > 0 {
 			continue
+		}
+		read++
+		if read == q.MaxRead {
+			readThrough = e.ID
 		}
 		if len(q.RepoNames) > 0 && !slices.Contains(q.RepoNames, strings.ToLower(e.RepoName)) {
 			continue
@@ -231,6 +236,9 @@ func (s *fakeStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.Po
 	}
 	head = max(head, s.purgeMark)
 	page.Next = max(head, q.After)
+	if readThrough > 0 {
+		page.Next = readThrough
+	}
 	page.PurgedThrough = s.purgeMark
 	if len(page.Events) == int(q.Limit) {
 		page.Next = page.Events[len(page.Events)-1].ID

@@ -146,6 +146,7 @@ func (s *Store) PollEvents(ctx context.Context, q faucet.PollQuery) (_ faucet.Po
 		Pr:         q.PR,
 		Fields:     string(fields),
 		RowLimit:   q.Limit,
+		MaxRead:    q.MaxRead,
 	})
 	if err != nil {
 		return faucet.PollPage{}, xerrors.Errorf("poll events: %w", err)
@@ -155,6 +156,9 @@ func (s *Store) PollEvents(ctx context.Context, q faucet.PollQuery) (_ faucet.Po
 	}
 
 	page := faucet.PollPage{Next: max(rows[0].MaxID, q.After), PurgedThrough: rows[0].PurgedThrough}
+	if rows[0].ReadThrough > 0 {
+		page.Next = rows[0].ReadThrough
+	}
 	for _, row := range rows {
 		if row.ID.Valid {
 			page.Events = append(page.Events, pollRowToEvent(row))

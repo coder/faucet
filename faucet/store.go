@@ -88,6 +88,10 @@ type PollQuery struct {
 	After int64
 	// Limit is the page size. It must be positive.
 	Limit int32
+	// MaxRead, when positive, bounds the events of the Target above After that
+	// the read looks at, in ID order, so the read costs the same however few
+	// of them match. Zero means no bound.
+	MaxRead int32
 }
 
 // Validate checks the fields a caller supplies to Store.PollEvents.
@@ -101,6 +105,8 @@ func (q PollQuery) Validate() error {
 		return xerrors.New("after must not be negative")
 	case q.PR < 0:
 		return xerrors.New("pr must not be negative")
+	case q.MaxRead < 0:
+		return xerrors.New("max read must not be negative")
 	case slices.ContainsFunc(q.Fields, func(f FieldFilter) bool { return f.Field == "" }):
 		return xerrors.New("a field filter must name a field")
 	}
@@ -126,10 +132,12 @@ type PollPage struct {
 	// Events are the matching events in ID order.
 	Events []Event
 	// Next is the cursor to poll with next. It is Events[len(Events)-1].ID
-	// when the page is full. Otherwise it is the highest event ID the store
-	// had when it answered, so a waiter whose repository is quiet does not
-	// rescan other repositories' events. It is never lower than the query's
-	// After or than PurgedThrough.
+	// when the page is full. Otherwise it is the last event that the read
+	// looked at when MaxRead stopped it, and else the highest event ID the
+	// store had when it answered, so a waiter whose repository is quiet does
+	// not rescan other repositories' events. It is never lower than the
+	// query's After, and it is not lower than PurgedThrough unless MaxRead
+	// stopped the read.
 	Next int64
 	// PurgedThrough is the purge mark: the highest event ID any purge has
 	// deleted, or 0. The store reads it in the same snapshot as Events, so a

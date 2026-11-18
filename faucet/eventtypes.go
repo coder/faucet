@@ -336,6 +336,18 @@ var (
 // so maxListItems bounds that work.
 const maxListItems = 100
 
+// withinLimits reports whether every list of a holds at most maxListItems,
+// as the inputSchema holds a list argument to. A subscription stored before
+// the limit can hold more.
+func (a pollArguments) withinLimits() bool {
+	for _, list := range [][]string{a.Repos, a.Actions, a.BaseBranch, a.HeadBranch, a.Conclusion} {
+		if len(list) > maxListItems {
+			return false
+		}
+	}
+	return true
+}
+
 var (
 	repoArgument  = map[string]any{"type": "string", "description": "The repository, written owner/name. Name one of repo, owner and all."}
 	ownerArgument = map[string]any{"type": "string", "description": "Every repository of this owner, a GitHub user or organization login. For service clients whose grants cover the owner."}

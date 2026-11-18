@@ -373,28 +373,43 @@ WITH mark AS (
 ), head AS (
   SELECT GREATEST(COALESCE(MAX(id), 0), (SELECT purged_through FROM mark))::bigint AS max_id
   FROM faucet_events
+), bound AS (
+  SELECT CASE WHEN $1::int > 0 THEN (
+    SELECT e.id FROM faucet_events e
+    WHERE (
+        ($2::text = 'repo' AND e.repo_id = $3::bigint)
+        OR ($2::text = 'owner' AND e.owner_id = $4::bigint AND e.owner_id > 0)
+        OR $2::text = 'all'
+      )
+      AND e.id > $5
+    ORDER BY e.id
+    OFFSET GREATEST($1::int - 1, 0)
+    LIMIT 1
+  ) END AS read_through
 ), page AS (
   SELECT e.id, e.source, e.delivery_id, e.type, e.repo_id, e.prs, e.head_sha, e.data, e.received_at, e.owner_id, e.repo_name FROM faucet_events e
   WHERE (
-      ($1::text = 'repo' AND e.repo_id = $2::bigint)
-      OR ($1::text = 'owner' AND e.owner_id = $3::bigint AND e.owner_id > 0)
-      OR $1::text = 'all'
+      ($2::text = 'repo' AND e.repo_id = $3::bigint)
+      OR ($2::text = 'owner' AND e.owner_id = $4::bigint AND e.owner_id > 0)
+      OR $2::text = 'all'
     )
-    AND (cardinality($4::text[]) = 0 OR lower(e.repo_name) = ANY($4::text[]))
+    AND (cardinality($6::text[]) = 0 OR lower(e.repo_name) = ANY($6::text[]))
     AND e.id > $5
-    AND (cardinality($6::text[]) = 0 OR e.type = ANY($6::text[]))
-    AND ($7::text = '' OR e.head_sha = $7::text)
-    AND ($8::int = 0 OR $8::int = ANY(e.prs))
+    AND e.id <= COALESCE((SELECT read_through FROM bound), 9223372036854775807)
+    AND (cardinality($7::text[]) = 0 OR e.type = ANY($7::text[]))
+    AND ($8::text = '' OR e.head_sha = $8::text)
+    AND ($9::int = 0 OR $9::int = ANY(e.prs))
     AND NOT EXISTS (
-      SELECT 1 FROM jsonb_to_recordset($9::text::jsonb) AS f(field text, matches text[], types text[])
+      SELECT 1 FROM jsonb_to_recordset($10::text::jsonb) AS f(field text, matches text[], types text[])
       WHERE e.type = ANY(f.types) AND NOT COALESCE(e.data ->> f.field = ANY(f.matches), false)
     )
   ORDER BY e.id
-  LIMIT $10
+  LIMIT $11
 )
 SELECT
   head.max_id,
   (SELECT purged_through FROM mark)::bigint AS purged_through,
+  COALESCE((SELECT read_through FROM bound), 0)::bigint AS read_through,
   page.id, page.source, page.delivery_id, page.type, page.repo_id, page.owner_id, page.repo_name, page.prs, page.head_sha,
   COALESCE(page.data, 'null'::jsonb)::jsonb AS data,
   page.received_at
@@ -403,11 +418,12 @@ ORDER BY page.id
 `
 
 type PollEventsParams struct {
+	MaxRead    int32
 	TargetKind string
 	RepoID     int64
 	OwnerID    int64
-	RepoNames  []string
 	AfterID    int64
+	RepoNames  []string
 	Types      []string
 	HeadSha    string
 	Pr         int32
@@ -418,6 +434,7 @@ type PollEventsParams struct {
 type PollEventsRow struct {
 	MaxID         int64
 	PurgedThrough int64
+	ReadThrough   int64
 	ID            sql.NullInt64
 	Source        sql.NullString
 	DeliveryID    sql.NullString
@@ -434,14 +451,17 @@ type PollEventsRow struct {
 // Each kind of target has a branch of its own, so each reads its own index:
 // faucet_events_poll for a repository, faucet_events_owner for an owner, and
 // the primary key for all. An event stored before owners were recorded has
-// owner 0, which no owner target names.
+// owner 0, which no owner target names. With max_read, bound is the ID of the
+// last of the target's events that the read may look at, or NULL (0 in the
+// result) when fewer than max_read are left.
 func (q *Queries) PollEvents(ctx context.Context, arg PollEventsParams) ([]PollEventsRow, error) {
 	rows, err := q.db.QueryContext(ctx, pollEvents,
+		arg.MaxRead,
 		arg.TargetKind,
 		arg.RepoID,
 		arg.OwnerID,
-		pq.Array(arg.RepoNames),
 		arg.AfterID,
+		pq.Array(arg.RepoNames),
 		pq.Array(arg.Types),
 		arg.HeadSha,
 		arg.Pr,
@@ -458,6 +478,7 @@ func (q *Queries) PollEvents(ctx context.Context, arg PollEventsParams) ([]PollE
 		if err := rows.Scan(
 			&i.MaxID,
 			&i.PurgedThrough,
+			&i.ReadThrough,
 			&i.ID,
 			&i.Source,
 			&i.DeliveryID,

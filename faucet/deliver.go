@@ -1,6 +1,7 @@
 package faucet
 
 import (
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -38,6 +39,13 @@ const (
 	// still have theirs.
 	maxScanBatches         = 5
 	maxScanTargetsPerBatch = 200
+	// scanTimeout bounds the reads of one principal's subscriptions in a run.
+	// The reads of a run share the few seconds before the sends need the rest
+	// of its deadline, so one principal must leave most of them to others.
+	scanTimeout = time.Second
+	// scanWindow is how many events of its target one read of a subscription
+	// looks at, matching or not.
+	scanWindow = 10_000
 	// maxEventBodyBytes is the largest body that faucet sends, the delivery
 	// profile of SEP-3415.
 	maxEventBodyBytes = 256 << 10
@@ -117,9 +125,18 @@ type webhookBody struct {
 // A call that dies between a claim and its result leaves the delivery to the
 // next call after the lease, and the attempt counts.
 //
+// The call reads each subscription's events 10,000 at a time and stores its
+// read position after each, and the reads of one principal's subscriptions
+// get a second of the call. A read that runs out of that second is no
+// failure: the result is Incomplete, and the next call goes on from where it
+// stopped. A subscription whose events the call cannot read, because the
+// Store fails, is skipped for the rest of the call, and the call goes on with
+// the others and the sends.
+//
 // The error is the first failure of the Store. The result holds what happened
-// before it. A failure of the RawStore is no error of the call: it is logged
-// and counted in RawFailures, and the run goes on with the typed deliveries.
+// before it, and also what happened after it when the failure was a read. A
+// failure of the RawStore is no error of the call: it is logged and counted in
+// RawFailures, and the run goes on with the typed deliveries.
 // The method has no auth of its own. The host decides who may call it.
 func (s *Service) DeliverDue(ctx context.Context) (DeliverResult, error) {
 	if s.webhook == nil {
@@ -127,13 +144,13 @@ func (s *Service) DeliverDue(ctx context.Context) (DeliverResult, error) {
 	}
 	run := &deliveryRun{svc: s, wh: s.webhook, result: DeliverResult{GaveUp: map[GiveUpReason]int{}}, gate: endpointGate{limit: s.webhook.workersPerOrigin}}
 	if err := run.enqueue(ctx); err != nil {
-		return run.result, run.unlessEnded(ctx, err)
+		return run.result, cmp.Or(run.scanErr, run.unlessEnded(ctx, err))
 	}
 	if err := run.sweepExpired(ctx); err != nil {
-		return run.result, run.unlessEnded(ctx, err)
+		return run.result, cmp.Or(run.scanErr, run.unlessEnded(ctx, err))
 	}
 	run.sweepPreviousSecrets(ctx)
-	err := run.send(ctx)
+	err := cmp.Or(run.scanErr, run.send(ctx))
 	res := run.result
 	logger := s.logger.Debug
 	if res.Claimed > 0 || res.Enqueued > 0 || res.GaveUpTotal() > 0 {
@@ -161,6 +178,10 @@ type deliveryRun struct {
 	// rawDown is set by the first failure of the RawStore, and ends the raw
 	// part of the run.
 	rawDown atomic.Bool
+
+	// scanErr is the first failure of a subscription's read, which the run
+	// returns after the sends. Only enqueue sets it, before the sends start.
+	scanErr error
 }
 
 type endpointGate struct {
@@ -300,8 +321,13 @@ func (r *deliveryRun) unlessEnded(ctx context.Context, err error) error {
 // enqueue reads the events of the subscriptions that have some, in batches
 // that start with the ones furthest behind. It leaves the sends the time they
 // need: it starts no subscription with less than twice minTimeToStart left.
+// The reads of one principal's subscriptions share scanTimeout, so no
+// principal can take the run from the others. A subscription that the run
+// did not read to its end is not read again in the same run.
 func (r *deliveryRun) enqueue(ctx context.Context) error {
 	s := r.svc
+	unfinished := map[SubscriptionKeyHash]bool{}
+	spent := map[string]time.Duration{}
 	for range maxScanBatches {
 		now := s.clock.Now()
 		targets, err := s.store.ScanTargets(ctx, now, MaxPendingDeliveries, maxScanTargetsPerBatch)
@@ -309,13 +335,24 @@ func (r *deliveryRun) enqueue(ctx context.Context) error {
 			return xerrors.Errorf("select subscriptions to scan: %w", err)
 		}
 		for _, target := range targets {
+			if unfinished[target.KeyHash] {
+				continue
+			}
 			if ctx.Err() != nil || r.outOfTimeFor(ctx, 2*minTimeToStart) {
 				r.add(func(res *DeliverResult) { res.Incomplete = true })
 				return nil
 			}
-			if err := r.enqueueFor(ctx, now, target); err != nil {
-				return err
+			left := scanTimeout - spent[target.Principal]
+			if left <= 0 {
+				r.add(func(res *DeliverResult) { res.Incomplete = true })
+				unfinished[target.KeyHash] = true
+				continue
 			}
+			start := time.Now()
+			if !r.scan(ctx, now, target, left) {
+				unfinished[target.KeyHash] = true
+			}
+			spent[target.Principal] += time.Since(start)
 		}
 		if len(targets) < maxScanTargetsPerBatch {
 			return nil
@@ -325,14 +362,60 @@ func (r *deliveryRun) enqueue(ctx context.Context) error {
 	return nil
 }
 
-func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target ScanTarget) error {
-	s := r.svc
-	logger := s.logger.With(slog.F("subscription", target.KeyHash.ID()))
+// scan reads a subscription's events scanWindow at a time and queues each
+// window's matches with the window's end as the new read position, so the
+// time to read a subscription far behind does not grow with how far behind
+// it is, and a read that runs out of time keeps the windows it finished. It
+// reads until it reaches the head, the subscription holds
+// MaxPendingDeliveries, or budget is used up, and reports whether it got to
+// the end. A failure that is not the end of the run's time is kept as the
+// run's error.
+func (r *deliveryRun) scan(ctx context.Context, now time.Time, target ScanTarget, budget time.Duration) bool {
+	logger := r.svc.logger.With(slog.F("subscription", target.KeyHash.ID()))
 	var args pollArguments
-	if err := json.Unmarshal(target.Arguments, &args); err != nil {
-		return r.endUndecodable(ctx, now, target, logger)
+	if err := json.Unmarshal(target.Arguments, &args); err != nil || !args.withinLimits() {
+		if err := r.endUndecodable(ctx, now, target, logger); err != nil {
+			r.scanErr = cmp.Or(r.scanErr, r.unlessEnded(ctx, err))
+			return false
+		}
+		return true
 	}
-	page, err := s.store.PollEvents(ctx, PollQuery{
+	readCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	for {
+		if readCtx.Err() != nil {
+			r.ranOutOfTime(ctx, logger)
+			return false
+		}
+		done, err := r.enqueueWindow(ctx, readCtx, now, &target, args)
+		switch {
+		case err == nil && done:
+			return true
+		case err == nil:
+			continue
+		case ctx.Err() != nil && r.unlessEnded(ctx, err) == nil:
+			return false
+		case readCtx.Err() != nil && xerrors.Is(err, context.DeadlineExceeded):
+			r.ranOutOfTime(ctx, logger)
+			return false
+		}
+		r.scanErr = cmp.Or(r.scanErr, err)
+		logger.Warn(ctx, "skipped a subscription whose events could not be read", slog.Error(err))
+		return false
+	}
+}
+
+func (r *deliveryRun) ranOutOfTime(ctx context.Context, logger slog.Logger) {
+	r.add(func(res *DeliverResult) { res.Incomplete = true })
+	logger.Info(ctx, "a subscription's read ran out of time, and the next run goes on from where it stopped")
+}
+
+// enqueueWindow reads the next window of target's events under readCtx and
+// queues its matches under ctx, so the time of the reads cannot cut a write
+// short. It moves target on, and reports whether the read is done.
+func (r *deliveryRun) enqueueWindow(ctx, readCtx context.Context, now time.Time, target *ScanTarget, args pollArguments) (bool, error) {
+	s := r.svc
+	page, err := s.store.PollEvents(readCtx, PollQuery{
 		Target:    target.Target,
 		Types:     target.EventTypes,
 		HeadSHA:   strings.ToLower(args.SHA),
@@ -341,12 +424,13 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 		RepoNames: args.repoNames(),
 		After:     target.ScannedThrough,
 		Limit:     MaxPendingDeliveries - target.Pending,
+		MaxRead:   scanWindow,
 	})
 	if err != nil {
-		return xerrors.Errorf("read events for a subscription: %w", err)
+		return false, xerrors.Errorf("read events for a subscription: %w", err)
 	}
 	if len(page.Events) == 0 && page.Next == target.ScannedThrough {
-		return nil
+		return true, nil
 	}
 	e := Enqueue{Key: target.KeyHash, ExpectedScannedThrough: target.ScannedThrough, NewScannedThrough: page.Next}
 	gap := target.ScannedThrough < page.PurgedThrough
@@ -358,10 +442,10 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 	}
 	won, err := s.store.EnqueueDeliveries(ctx, now, e)
 	if err != nil {
-		return xerrors.Errorf("queue deliveries: %w", err)
+		return false, xerrors.Errorf("queue deliveries: %w", err)
 	}
 	if !won {
-		return nil
+		return true, nil
 	}
 	r.add(func(res *DeliverResult) {
 		res.Enqueued += len(e.Deliveries)
@@ -369,17 +453,21 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 			res.Gaps++
 		}
 	})
-	return nil
+	target.ScannedThrough = page.Next
+	target.Pending += int32(len(e.Deliveries)) //nolint:gosec // At most MaxPendingDeliveries, the limit of the read.
+	return target.Pending >= MaxPendingDeliveries, nil
 }
 
-// endUndecodable ends the subscription so that no later run reads it again.
+// endUndecodable ends a subscription whose stored arguments do not decode, or
+// hold a list past the limits that a subscription stored before them can
+// hold, so that no later run reads it again.
 func (r *deliveryRun) endUndecodable(ctx context.Context, now time.Time, target ScanTarget, logger slog.Logger) error {
 	_, found, err := r.svc.store.DeleteLiveSubscription(ctx, target.Principal, target.KeyHash, now)
 	if err != nil {
 		return xerrors.Errorf("end a subscription whose arguments do not decode: %w", err)
 	}
 	if found {
-		logger.Error(ctx, "ended a subscription whose stored arguments do not decode", slog.F("deliveries_ended", target.Pending))
+		logger.Error(ctx, "ended a subscription whose stored arguments do not decode or pass the limits", slog.F("deliveries_ended", target.Pending))
 		r.add(func(res *DeliverResult) { res.GaveUp[GiveUpArgumentsUndecodable] += int(target.Pending) })
 	}
 	return nil

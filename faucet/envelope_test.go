@@ -339,17 +339,17 @@ func TestRenewalDuringAGitHubRateLimitKeepsTheSubscriptionAndARealDenialStillEnd
 // scriptedStore lets a test act at two points of a DeliverDue run.
 type scriptedStore struct {
 	faucet.Store
-	onExpire func()
-	pollErr  func(call int) error
-	clearErr error
-
-	mu    sync.Mutex
-	polls int
+	onExpire  func()
+	expireErr error
+	clearErr  error
 }
 
 func (s *scriptedStore) ExpireDeliveries(ctx context.Context, now time.Time) (int64, error) {
 	if s.onExpire != nil {
 		s.onExpire()
+	}
+	if s.expireErr != nil {
+		return 0, s.expireErr
 	}
 	return s.Store.ExpireDeliveries(ctx, now)
 }
@@ -359,19 +359,6 @@ func (s *scriptedStore) ClearExpiredPreviousSecrets(ctx context.Context, now tim
 		return 0, s.clearErr
 	}
 	return s.Store.ClearExpiredPreviousSecrets(ctx, now)
-}
-
-func (s *scriptedStore) PollEvents(ctx context.Context, q faucet.PollQuery) (faucet.PollPage, error) {
-	s.mu.Lock()
-	s.polls++
-	call := s.polls
-	s.mu.Unlock()
-	if s.pollErr != nil {
-		if err := s.pollErr(call); err != nil {
-			return faucet.PollPage{}, err
-		}
-	}
-	return s.Store.PollEvents(ctx, q)
 }
 
 // gappedThenBusy is a subscription that a purge overtook, at slow, and after it
@@ -460,18 +447,17 @@ func TestDeliverDueKeepsAGapThatItDidNotSendForTheNextRun(t *testing.T) {
 
 	t.Run("the run failed after queueing it", func(t *testing.T) {
 		t.Parallel()
+		store := &scriptedStore{}
 		d := newDeliverHarness(t, func(deps *faucet.Deps) {
-			deps.Store = &scriptedStore{Store: deps.Store, pollErr: func(call int) error {
-				if call == 2 {
-					return xerrors.New("database is down")
-				}
-				return nil
-			}}
+			store.Store = deps.Store
+			deps.Store = store
 		})
 		d.ledgerSkip = true
 		d.gappedThenBusy(d.endpoint("/hook"))
 
+		store.expireErr = xerrors.New("database is down")
 		res, err := d.svc.DeliverDue(d.ctx)
+		store.expireErr = nil
 		require.Error(t, err)
 		require.Equal(t, 1, res.Gaps)
 		require.Zero(t, d.rcv.total())
