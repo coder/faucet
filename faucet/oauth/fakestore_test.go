@@ -147,12 +147,6 @@ func (s *fakeStore) DeleteAccessToken(_ context.Context, hash oauth.TokenHash) e
 	return nil
 }
 
-func (s *fakeStore) requestCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.requests)
-}
-
 func (s *fakeStore) tokenCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -180,46 +174,26 @@ func cloneConnection(c oauth.Connection) oauth.Connection {
 	return c
 }
 
-func (s *fakeStore) InsertAuthRequest(_ context.Context, r oauth.AuthRequest, limits oauth.AuthRequestLimits) error {
+func (s *fakeStore) ConsentAuthRequest(_ context.Context, r oauth.AuthRequest, now time.Time) error {
 	if err := r.Validate(); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var ofHost, total int
-	for _, o := range s.requests {
-		if o.State == oauth.AuthRequestPending && o.ExpiresAt.After(r.CreatedAt) {
-			total++
-			if o.ClientHost() == r.ClientHost() {
-				ofHost++
-			}
-		}
-	}
-	if ofHost >= limits.PerClientHost || total >= limits.Total {
-		return oauth.ErrTooManyAuthRequests
-	}
-	if _, ok := s.requests[r.ID]; ok {
-		return xerrors.New("duplicate authorization request ID")
-	}
-	s.requests[r.ID] = cloneAuthRequest(r)
-	return nil
-}
-
-func (s *fakeStore) ConsentAuthRequest(_ context.Context, id string, browser, githubState oauth.TokenHash, now time.Time) error {
-	if githubState == (oauth.TokenHash{}) {
-		return xerrors.New("a consent needs the hash of the GitHub state")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r, ok := s.requests[id]
-	if !ok || r.State != oauth.AuthRequestPending || r.BrowserHash != browser || !r.ExpiresAt.After(now) {
+	stored, ok := s.requests[r.ID]
+	switch {
+	case !r.ExpiresAt.After(now):
 		return oauth.ErrUnknownAuthRequest
-	}
-	if s.requestHolds(id, func(o oauth.AuthRequest) bool { return o.GitHubStateHash == githubState }) {
+	case ok && (stored.State != oauth.AuthRequestPending || stored.BrowserHash != r.BrowserHash || !stored.ExpiresAt.After(now)):
+		return oauth.ErrUnknownAuthRequest
+	case s.requestHolds(r.ID, func(o oauth.AuthRequest) bool { return o.GitHubStateHash == r.GitHubStateHash }):
 		return xerrors.New("duplicate GitHub state hash")
+	case ok:
+		stored.GitHubStateHash = r.GitHubStateHash
+		s.requests[r.ID] = stored
+	default:
+		s.requests[r.ID] = cloneAuthRequest(r)
 	}
-	r.GitHubStateHash = githubState
-	s.requests[id] = r
 	return nil
 }
 

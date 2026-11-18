@@ -21,15 +21,10 @@ var loginSubtests = []struct {
 	run  func(t *testing.T, s oauth.Store)
 }{
 	// Authorization requests.
-	{"AuthRequestStartsPendingAndIsFoundByNoHashYet", authRequestStartsPendingAndIsFoundByNoHashYet},
-	{"InsertAuthRequestRefusesASecondRequestWithTheSameID", insertAuthRequestRefusesASecondRequestWithTheSameID},
-	{"InsertAuthRequestValidatesInput", insertAuthRequestValidatesInput},
-	{"InsertAuthRequestRefusesARequestOverTheLimitOfItsClientHost", insertAuthRequestRefusesARequestOverTheLimitOfItsClientHost},
-	{"InsertAuthRequestRefusesARequestOverTheTotalLimit", insertAuthRequestRefusesARequestOverTheTotalLimit},
-	{"OnlyALivePendingRequestCountsAgainstTheLimits", onlyALivePendingRequestCountsAgainstTheLimits},
-	{"ConsentSetsTheGitHubStateOfAPendingRequestWithThatBrowser", consentSetsTheGitHubStateOfAPendingRequestWithThatBrowser},
-	{"ConsentRefusesAnotherBrowserAnExpiredRequestAndAnUnknownID", consentRefusesAnotherBrowserAnExpiredRequestAndAnUnknownID},
-	{"ALaterConsentReplacesTheGitHubState", aLaterConsentReplacesTheGitHubState},
+	{"ConsentStoresAPendingRequestThatItsGitHubStateFinds", consentStoresAPendingRequestThatItsGitHubStateFinds},
+	{"ConsentValidatesInput", consentValidatesInput},
+	{"ConsentRefusesAnExpiredRequestAndAnotherRequestOfTheID", consentRefusesAnExpiredRequestAndAnotherRequestOfTheID},
+	{"ALaterConsentOfTheSameBrowserReplacesTheGitHubState", aLaterConsentOfTheSameBrowserReplacesTheGitHubState},
 	{"ExpireEndsOnlyAPendingRequest", expireEndsOnlyAPendingRequest},
 	{"ApproveStoresTheConnectionAndTheCodeInOneStep", approveStoresTheConnectionAndTheCodeInOneStep},
 	{"ApproveRefusesAnOutdatedGitHubStateAnExpiredRequestAndASecondApproval", approveRefusesAnOutdatedGitHubStateAnExpiredRequestAndASecondApproval},
@@ -73,9 +68,6 @@ func runOAuthLogin(t *testing.T, newStore func(t *testing.T) oauth.Store) {
 		})
 	}
 }
-
-// roomyLimits are limits that only the tests of the limits reach.
-var roomyLimits = oauth.AuthRequestLimits{PerClientHost: 1000, Total: 1000}
 
 // holdFor is how long a test lets a step that must wait try to get ahead.
 // A store that does not make it wait takes far less.
@@ -168,15 +160,27 @@ func rotationOf(presented oauth.TokenHash, name string, now time.Time) oauth.Rot
 	}
 }
 
-// consentedRequest stores the request with this ID, made at now, and gives
-// it the GitHub state of its ID.
+// consentOf is r once its user pressed Continue: it holds the GitHub state
+// of its ID.
+func consentOf(r oauth.AuthRequest) oauth.AuthRequest {
+	r.GitHubStateHash = githubStateOf(r.ID)
+	return r
+}
+
+// consentAgain is the consent of r's request, from r's browser, that
+// presses Continue again and holds githubState.
+func consentAgain(r oauth.AuthRequest, githubState oauth.TokenHash) oauth.AuthRequest {
+	again := authRequestAt(r.ID, r.CreatedAt)
+	again.BrowserHash, again.GitHubStateHash = r.BrowserHash, githubState
+	return again
+}
+
+// consentedRequest stores the request with this ID, made at now, whose
+// user pressed Continue.
 func consentedRequest(t *testing.T, s oauth.Store, id string, now time.Time) oauth.AuthRequest {
 	t.Helper()
-	ctx := context.Background()
-	r := authRequestAt(id, now)
-	require.NoError(t, s.InsertAuthRequest(ctx, r, roomyLimits))
-	require.NoError(t, s.ConsentAuthRequest(ctx, id, r.BrowserHash, githubStateOf(id), now))
-	r.GitHubStateHash = githubStateOf(id)
+	r := consentOf(authRequestAt(id, now))
+	require.NoError(t, s.ConsentAuthRequest(context.Background(), r, now))
 	return r
 }
 
@@ -305,40 +309,24 @@ func requireNoTokens(t *testing.T, s oauth.Store, refresh, access oauth.TokenHas
 	require.ErrorIs(t, err, oauth.ErrUnknownToken, msgAndArgs...)
 }
 
-func authRequestStartsPendingAndIsFoundByNoHashYet(t *testing.T, s oauth.Store) {
+func consentStoresAPendingRequestThatItsGitHubStateFinds(t *testing.T, s oauth.Store) {
 	ctx := context.Background()
 	now := loginNow()
-	r := authRequestAt("req-1", now)
+	r := consentOf(authRequestAt("req-1", now))
 	r.ClientName, r.ClientState = "", ""
-	require.NoError(t, s.InsertAuthRequest(ctx, r, roomyLimits))
+	other := consentOf(authRequestAt("req-2", now))
+	require.NoError(t, s.ConsentAuthRequest(ctx, r, now))
+	require.NoError(t, s.ConsentAuthRequest(ctx, other, now))
 
-	for _, h := range []oauth.TokenHash{{}, githubStateOf(r.ID), codeOf(r.ID), r.BrowserHash} {
+	requireRequestByGitHubState(t, s, r)
+	requireRequestByGitHubState(t, s, other)
+	for _, h := range []oauth.TokenHash{{}, codeOf(r.ID), r.BrowserHash} {
 		requireNoRequestByGitHubState(t, s, h)
-		requireNoRequestByCode(t, s, h)
+		requireNoRequestByCode(t, s, h, "a pending request has no code")
 	}
-	require.NoError(t, s.ConsentAuthRequest(ctx, r.ID, r.BrowserHash, githubStateOf(r.ID), now))
-	want := r
-	want.GitHubStateHash = githubStateOf(r.ID)
-	requireRequestByGitHubState(t, s, want)
-	requireNoRequestByCode(t, s, oauth.TokenHash{}, "a pending request has no code")
 }
 
-func insertAuthRequestRefusesASecondRequestWithTheSameID(t *testing.T, s oauth.Store) {
-	ctx := context.Background()
-	now := loginNow()
-	first := authRequestAt("req-1", now)
-	require.NoError(t, s.InsertAuthRequest(ctx, first, roomyLimits))
-	second := authRequestAt("req-1", now.Add(time.Second))
-	second.ClientID, second.BrowserHash = "https://other.example.com/client.json", browserOf("another browser")
-	require.Error(t, s.InsertAuthRequest(ctx, second, roomyLimits))
-
-	require.ErrorIs(t, s.ConsentAuthRequest(ctx, first.ID, second.BrowserHash, githubStateOf(first.ID), now), oauth.ErrUnknownAuthRequest)
-	require.NoError(t, s.ConsentAuthRequest(ctx, first.ID, first.BrowserHash, githubStateOf(first.ID), now))
-	first.GitHubStateHash = githubStateOf(first.ID)
-	requireRequestByGitHubState(t, s, first)
-}
-
-func insertAuthRequestValidatesInput(t *testing.T, s oauth.Store) {
+func consentValidatesInput(t *testing.T, s oauth.Store) {
 	ctx := context.Background()
 	now := loginNow()
 	for name, mutate := range map[string]func(*oauth.AuthRequest){
@@ -346,153 +334,87 @@ func insertAuthRequestValidatesInput(t *testing.T, s oauth.Store) {
 		"no state":              func(r *oauth.AuthRequest) { r.State = "" },
 		"another state":         func(r *oauth.AuthRequest) { r.State = oauth.AuthRequestApproved },
 		"no client ID":          func(r *oauth.AuthRequest) { r.ClientID = "" },
-		"a hostless client ID":  func(r *oauth.AuthRequest) { r.ClientID = "client.json" },
 		"no redirect URI":       func(r *oauth.AuthRequest) { r.RedirectURI = "" },
 		"no resource":           func(r *oauth.AuthRequest) { r.Resource = "" },
 		"no code challenge":     func(r *oauth.AuthRequest) { r.CodeChallenge = "" },
 		"no scope":              func(r *oauth.AuthRequest) { r.Scopes = nil },
 		"an unknown scope":      func(r *oauth.AuthRequest) { r.Scopes = []faucet.Scope{"events:everything"} },
 		"no browser hash":       func(r *oauth.AuthRequest) { r.BrowserHash = oauth.TokenHash{} },
-		"a GitHub state":        func(r *oauth.AuthRequest) { r.GitHubStateHash = githubStateOf(r.ID) },
+		"no GitHub state":       func(r *oauth.AuthRequest) { r.GitHubStateHash = oauth.TokenHash{} },
 		"a code":                func(r *oauth.AuthRequest) { r.CodeHash = codeOf(r.ID) },
 		"a connection":          func(r *oauth.AuthRequest) { r.ConnectionID = oauth.ConnectionID(oauth.ProviderGitHub, 1) },
 		"no creation time":      func(r *oauth.AuthRequest) { r.CreatedAt = time.Time{} },
 		"an expiry at creation": func(r *oauth.AuthRequest) { r.ExpiresAt = r.CreatedAt },
 	} {
 		id := "req " + name
-		r := authRequestAt(id, now)
+		r := consentOf(authRequestAt(id, now))
 		mutate(&r)
-		require.Error(t, s.InsertAuthRequest(ctx, r, roomyLimits), name)
+		require.Error(t, s.ConsentAuthRequest(ctx, r, now), name)
 		requireNoRequestByGitHubState(t, s, githubStateOf(id), name)
 		requireNoRequestByCode(t, s, codeOf(id), name)
-		if r.ID != "" {
-			require.NoError(t, s.InsertAuthRequest(ctx, authRequestAt(id, now), roomyLimits), "%s: nothing is stored under the ID", name)
-		}
 	}
 }
 
-// requestOf is authRequestAt(id, created) of the client whose ID is
-// clientID.
-func requestOf(id, clientID string, created time.Time) oauth.AuthRequest {
-	r := authRequestAt(id, created)
-	r.ClientID = clientID
-	return r
-}
-
-func insertAuthRequestRefusesARequestOverTheLimitOfItsClientHost(t *testing.T, s oauth.Store) {
+// A request that has expired is not stored, and a consent stores nothing
+// over another request of its ID: another browser's, one at or after its
+// expiry, or one that went on.
+func consentRefusesAnExpiredRequestAndAnotherRequestOfTheID(t *testing.T, s oauth.Store) {
 	ctx := context.Background()
 	now := loginNow()
-	limits := oauth.AuthRequestLimits{PerClientHost: 2, Total: 10}
-	require.NoError(t, s.InsertAuthRequest(ctx, requestOf("req-1", "https://agent.example.com/a.json", now), limits))
-	require.NoError(t, s.InsertAuthRequest(ctx, requestOf("req-2", "https://agent.example.com/b.json", now), limits))
-
-	for _, clientID := range []string{
-		"https://agent.example.com/c.json",
-		"https://AGENT.Example.com/a.json",
-		"https://agent.example.com./a.json",
-		"https://agent.example.com:443/a.json",
-	} {
-		require.ErrorIs(t, s.InsertAuthRequest(ctx, requestOf("req-3", clientID, now), limits), oauth.ErrTooManyAuthRequests, clientID)
-	}
-	require.NoError(t, s.InsertAuthRequest(ctx, requestOf("req-4", "https://agent.example.com:8443/a.json", now), limits), "another port is another host")
-	require.NoError(t, s.InsertAuthRequest(ctx, requestOf("req-5", "https://other.example.com/a.json", now), limits), "another host")
-	require.NoError(t, s.InsertAuthRequest(ctx, requestOf("req-3", "https://third.example.com/a.json", now), limits), "a refused request stores nothing under its ID")
-}
-
-func insertAuthRequestRefusesARequestOverTheTotalLimit(t *testing.T, s oauth.Store) {
-	ctx := context.Background()
-	now := loginNow()
-	limits := oauth.AuthRequestLimits{PerClientHost: 10, Total: 3}
-	for i := range 3 {
-		clientID := fmt.Sprintf("https://agent%d.example.com/a.json", i)
-		require.NoError(t, s.InsertAuthRequest(ctx, requestOf(fmt.Sprintf("req-%d", i), clientID, now), limits))
-	}
-	require.ErrorIs(t, s.InsertAuthRequest(ctx, requestOf("req-3", "https://agent3.example.com/a.json", now), limits), oauth.ErrTooManyAuthRequests)
-	require.ErrorIs(t, s.InsertAuthRequest(ctx, requestOf("req-3", "https://agent0.example.com/a.json", now), limits), oauth.ErrTooManyAuthRequests)
-}
-
-// A request counts against the limits while it is pending and has not
-// expired at the creation of the new one.
-func onlyALivePendingRequestCountsAgainstTheLimits(t *testing.T, s oauth.Store) {
-	ctx := context.Background()
-	now := loginNow()
-	limits := oauth.AuthRequestLimits{PerClientHost: 1, Total: 1}
-
-	consented := consentedRequest(t, s, "req-1", now)
-	require.ErrorIs(t, s.InsertAuthRequest(ctx, authRequestAt("req-2", now), limits), oauth.ErrTooManyAuthRequests, "a consented request is pending")
-	require.NoError(t, s.ExpireAuthRequest(ctx, consented.ID))
-	require.NoError(t, s.InsertAuthRequest(ctx, authRequestAt("req-2", now), limits), "an expired request does not count")
-
-	require.NoError(t, s.ConsentAuthRequest(ctx, "req-2", browserOf("req-2"), githubStateOf("req-2"), now))
-	approve(t, s, authRequestAt("req-2", now), connectionAt(1, now), now)
-	pending := authRequestAt("req-3", now)
-	require.NoError(t, s.InsertAuthRequest(ctx, pending, limits), "an approved request does not count")
-
-	require.ErrorIs(t, s.InsertAuthRequest(ctx, authRequestAt("req-4", pending.ExpiresAt.Add(-time.Microsecond)), limits), oauth.ErrTooManyAuthRequests, "before its expiry")
-	require.NoError(t, s.InsertAuthRequest(ctx, authRequestAt("req-4", pending.ExpiresAt), limits), "at its expiry a request counts no more")
-}
-
-func consentSetsTheGitHubStateOfAPendingRequestWithThatBrowser(t *testing.T, s oauth.Store) {
-	ctx := context.Background()
-	now := loginNow()
-	a, b := authRequestAt("req-a", now), authRequestAt("req-b", now)
-	require.NoError(t, s.InsertAuthRequest(ctx, a, roomyLimits))
-	require.NoError(t, s.InsertAuthRequest(ctx, b, roomyLimits))
-
-	require.NoError(t, s.ConsentAuthRequest(ctx, a.ID, a.BrowserHash, githubStateOf(a.ID), now.Add(time.Minute)))
-	a.GitHubStateHash = githubStateOf(a.ID)
-	requireRequestByGitHubState(t, s, a)
-	requireNoRequestByGitHubState(t, s, githubStateOf(b.ID), "the other request has no GitHub state")
-
-	require.NoError(t, s.ConsentAuthRequest(ctx, b.ID, b.BrowserHash, githubStateOf(b.ID), now.Add(time.Minute)))
-	b.GitHubStateHash = githubStateOf(b.ID)
-	requireRequestByGitHubState(t, s, b)
-	requireRequestByGitHubState(t, s, a)
-}
-
-func consentRefusesAnotherBrowserAnExpiredRequestAndAnUnknownID(t *testing.T, s oauth.Store) {
-	ctx := context.Background()
-	now := loginNow()
-	r := authRequestAt("req-1", now)
-	require.NoError(t, s.InsertAuthRequest(ctx, r, roomyLimits))
+	r := consentedRequest(t, s, "req-1", now)
 	expired := consentedRequest(t, s, "req-2", now)
 	require.NoError(t, s.ExpireAuthRequest(ctx, expired.ID))
 	expired.State = oauth.AuthRequestExpired
 	approved := approvedRequest(t, s, "req-3", connectionAt(1, now), now)
 
 	attempt := oauth.HashToken("github state of an attempt")
-	for name, try := range map[string]func() error{
-		"another browser": func() error {
-			return s.ConsentAuthRequest(ctx, r.ID, browserOf("another browser"), attempt, now)
+	again := func(of oauth.AuthRequest, change func(*oauth.AuthRequest)) oauth.AuthRequest {
+		a := authRequestAt(of.ID, now)
+		a.GitHubStateHash = attempt
+		if change != nil {
+			change(&a)
+		}
+		return a
+	}
+	for name, try := range map[string]struct {
+		r   oauth.AuthRequest
+		now time.Time
+	}{
+		"another browser":     {again(r, func(a *oauth.AuthRequest) { a.BrowserHash = browserOf("another browser") }), now},
+		"at its expiry":       {again(r, nil), r.ExpiresAt},
+		"after its expiry":    {again(r, nil), r.ExpiresAt.Add(time.Hour)},
+		"an expired request":  {again(expired, nil), now},
+		"an approved request": {again(approved, nil), now},
+		"a new request at its expiry": {
+			again(oauth.AuthRequest{ID: "req-new"}, nil), now.Add(10 * time.Minute),
 		},
-		"at its expiry": func() error { return s.ConsentAuthRequest(ctx, r.ID, r.BrowserHash, attempt, r.ExpiresAt) },
-		"after its expiry": func() error {
-			return s.ConsentAuthRequest(ctx, r.ID, r.BrowserHash, attempt, r.ExpiresAt.Add(time.Hour))
-		},
-		"an expired request":  func() error { return s.ConsentAuthRequest(ctx, expired.ID, expired.BrowserHash, attempt, now) },
-		"an approved request": func() error { return s.ConsentAuthRequest(ctx, approved.ID, approved.BrowserHash, attempt, now) },
-		"an unknown ID":       func() error { return s.ConsentAuthRequest(ctx, "req-unknown", r.BrowserHash, attempt, now) },
 	} {
-		require.ErrorIs(t, try(), oauth.ErrUnknownAuthRequest, name)
+		require.ErrorIs(t, s.ConsentAuthRequest(ctx, try.r, try.now), oauth.ErrUnknownAuthRequest, name)
 		requireNoRequestByGitHubState(t, s, attempt, name)
 	}
+	requireRequestByGitHubState(t, s, r)
 	requireRequestByGitHubState(t, s, expired)
 	requireRequestByCode(t, s, approved)
+	_, err := s.AuthRequestByGitHubState(ctx, githubStateOf("req-new"))
+	require.ErrorIs(t, err, oauth.ErrUnknownAuthRequest)
 
-	require.NoError(t, s.ConsentAuthRequest(ctx, r.ID, r.BrowserHash, attempt, r.ExpiresAt.Add(-time.Microsecond)))
+	require.NoError(t, s.ConsentAuthRequest(ctx, again(r, nil), r.ExpiresAt.Add(-time.Microsecond)))
 	r.GitHubStateHash = attempt
 	requireRequestByGitHubState(t, s, r)
 }
 
-func aLaterConsentReplacesTheGitHubState(t *testing.T, s oauth.Store) {
+// Continue pressed again in the same browser, as after going back to the
+// consent page, replaces the GitHub state and keeps the rest of the request.
+func aLaterConsentOfTheSameBrowserReplacesTheGitHubState(t *testing.T, s oauth.Store) {
 	ctx := context.Background()
 	now := loginNow()
 	r := consentedRequest(t, s, "req-1", now)
-	later := oauth.HashToken("github state of the second Continue")
-	require.NoError(t, s.ConsentAuthRequest(ctx, r.ID, r.BrowserHash, later, now.Add(time.Minute)))
+	later := authRequestAt(r.ID, now)
+	later.ClientName, later.GitHubStateHash = "Another Name", oauth.HashToken("github state of the second Continue")
+	require.NoError(t, s.ConsentAuthRequest(ctx, later, now.Add(time.Minute)))
 
 	requireNoRequestByGitHubState(t, s, githubStateOf(r.ID), "the first state finds the request no more")
-	r.GitHubStateHash = later
+	r.GitHubStateHash = later.GitHubStateHash
 	requireRequestByGitHubState(t, s, r)
 }
 
@@ -515,7 +437,7 @@ func expireEndsOnlyAPendingRequest(t *testing.T, s oauth.Store) {
 	requireRequestByCode(t, s, approved)
 	requireRequestByCode(t, s, redeemed)
 
-	require.ErrorIs(t, s.ConsentAuthRequest(ctx, pending.ID, pending.BrowserHash, oauth.HashToken("another state"), now), oauth.ErrUnknownAuthRequest)
+	require.ErrorIs(t, s.ConsentAuthRequest(ctx, consentAgain(pending, oauth.HashToken("another state")), now), oauth.ErrUnknownAuthRequest)
 	require.ErrorIs(t, s.ApproveAuthRequest(ctx, approvalOf(pending, c, now)), oauth.ErrUnknownAuthRequest)
 	_, err = s.RedeemAuthRequest(ctx, redemptionOf(approved.ID, approved.ID, now))
 	require.NoError(t, err, "an approved request is still redeemed")
@@ -544,10 +466,9 @@ func approveRefusesAnOutdatedGitHubStateAnExpiredRequestAndASecondApproval(t *te
 	c := connectionAt(1, now)
 	r := consentedRequest(t, s, "req-1", now)
 	current := oauth.HashToken("github state of the second Continue")
-	require.NoError(t, s.ConsentAuthRequest(ctx, r.ID, r.BrowserHash, current, now))
+	require.NoError(t, s.ConsentAuthRequest(ctx, consentAgain(r, current), now))
 	r.GitHubStateHash = current
-	unconsented := authRequestAt("req-2", now)
-	require.NoError(t, s.InsertAuthRequest(ctx, unconsented, roomyLimits))
+	other := consentedRequest(t, s, "req-2", now)
 	expired := consentedRequest(t, s, "req-3", now)
 	require.NoError(t, s.ExpireAuthRequest(ctx, expired.ID))
 	expired.State = oauth.AuthRequestExpired
@@ -559,12 +480,11 @@ func approveRefusesAnOutdatedGitHubStateAnExpiredRequestAndASecondApproval(t *te
 	for name, a := range map[string]oauth.Approval{
 		"an outdated GitHub state":        approval(r.ID, githubStateOf(r.ID), now),
 		"another request's GitHub state":  approval(r.ID, githubStateOf(expired.ID), now),
-		"a request with no GitHub state":  approval(unconsented.ID, githubStateOf(unconsented.ID), now),
 		"a request at its expiry":         approval(r.ID, current, r.ExpiresAt),
 		"a request after its expiry":      approval(r.ID, current, r.ExpiresAt.Add(time.Hour)),
 		"an expired request":              approval(expired.ID, githubStateOf(expired.ID), now),
 		"an unknown ID":                   approval("req-unknown", current, now),
-		"another ID with the right state": approval(unconsented.ID, current, now),
+		"another ID with the right state": approval(other.ID, current, now),
 	} {
 		require.ErrorIs(t, s.ApproveAuthRequest(ctx, a), oauth.ErrUnknownAuthRequest, name)
 		requireNoRequestByCode(t, s, attempt, name)
@@ -572,6 +492,7 @@ func approveRefusesAnOutdatedGitHubStateAnExpiredRequestAndASecondApproval(t *te
 		require.ErrorIs(t, err, oauth.ErrUnknownConnection, name)
 	}
 	requireRequestByGitHubState(t, s, r)
+	requireRequestByGitHubState(t, s, other)
 	requireRequestByGitHubState(t, s, expired)
 
 	first := approval(r.ID, current, r.ExpiresAt.Add(-time.Microsecond))
@@ -593,7 +514,7 @@ func aRefusedApprovalLeavesTheConnectionAsItWas(t *testing.T, s oauth.Store) {
 	held := approvedRequest(t, s, "req-1", first, now)
 	again := consentedRequest(t, s, "req-2", now)
 	current := oauth.HashToken("github state of the second Continue")
-	require.NoError(t, s.ConsentAuthRequest(ctx, again.ID, again.BrowserHash, current, now))
+	require.NoError(t, s.ConsentAuthRequest(ctx, consentAgain(again, current), now))
 	again.GitHubStateHash = current
 	newer := connectionAt(1, now.Add(time.Hour))
 	newer.Login = "renamed"
@@ -637,8 +558,7 @@ func redeemMakesTheSessionAndItsFirstAccessTokenFromTheRequest(t *testing.T, s o
 	r := authRequestAt("req-1", now)
 	r.ClientID, r.ClientName = "https://other-agent.example.com/client.json", "Other Agent"
 	r.Resource, r.Scopes = "https://faucet.example.com/mcp", []faucet.Scope{faucet.ScopeEventsRead}
-	require.NoError(t, s.InsertAuthRequest(ctx, r, roomyLimits))
-	require.NoError(t, s.ConsentAuthRequest(ctx, r.ID, r.BrowserHash, githubStateOf(r.ID), now))
+	require.NoError(t, s.ConsentAuthRequest(ctx, consentOf(r), now))
 	require.NoError(t, s.ApproveAuthRequest(ctx, approvalOf(r, c, now)))
 
 	red := redemptionOf(r.ID, "first", now.Add(30*time.Second))
@@ -774,7 +694,7 @@ func consentApproveRedeemAndRotateValidateInput(t *testing.T, s oauth.Store) {
 	c := connectionAt(1, now)
 	r := consentedRequest(t, s, "req-1", now)
 
-	require.Error(t, s.ConsentAuthRequest(ctx, r.ID, r.BrowserHash, oauth.TokenHash{}, now), "a consent with no GitHub state")
+	require.Error(t, s.ConsentAuthRequest(ctx, consentAgain(r, oauth.TokenHash{}), now), "a consent with no GitHub state")
 	requireRequestByGitHubState(t, s, r)
 
 	for name, mutate := range map[string]func(*oauth.Approval){
@@ -840,13 +760,9 @@ func aHashThatAnotherRowHoldsIsRefusedAndChangesNothing(t *testing.T, s oauth.St
 	holder := newSession(t, s, "req-1", c, now)
 	held, err := s.AuthRequestByCode(ctx, codeOf(holder.ID))
 	require.NoError(t, err)
-	r := authRequestAt("req-2", now)
-	require.NoError(t, s.InsertAuthRequest(ctx, r, roomyLimits))
-
-	require.Error(t, s.ConsentAuthRequest(ctx, r.ID, r.BrowserHash, held.GitHubStateHash, now))
+	require.Error(t, s.ConsentAuthRequest(ctx, consentAgain(authRequestAt("req-2", now), held.GitHubStateHash), now))
 	requireRequestByGitHubState(t, s, held)
-	require.NoError(t, s.ConsentAuthRequest(ctx, r.ID, r.BrowserHash, githubStateOf(r.ID), now))
-	r.GitHubStateHash = githubStateOf(r.ID)
+	r := consentedRequest(t, s, "req-2", now)
 
 	a := approvalOf(r, c, now)
 	a.Code = held.CodeHash
@@ -1057,9 +973,8 @@ func rotateRefusesAnAccessTokenWithAScopeThatTheSessionLacks(t *testing.T, s oau
 	c := connectionAt(1, now)
 	r := authRequestAt("req-1", now)
 	r.Scopes = []faucet.Scope{faucet.ScopeEventsRead}
-	require.NoError(t, s.InsertAuthRequest(ctx, r, roomyLimits))
-	require.NoError(t, s.ConsentAuthRequest(ctx, r.ID, r.BrowserHash, githubStateOf(r.ID), now))
-	r.GitHubStateHash = githubStateOf(r.ID)
+	r = consentOf(r)
+	require.NoError(t, s.ConsentAuthRequest(ctx, r, now))
 	approve(t, s, r, c, now)
 	session, err := s.RedeemAuthRequest(ctx, redemptionOf(r.ID, r.ID, now))
 	require.NoError(t, err)
@@ -1423,10 +1338,9 @@ func stepsThatDoNotChangeTheConnectionDoNotWaitForItsRefresh(t *testing.T, s oau
 func loginRowsShareNoSliceWithTheirCaller(t *testing.T, s oauth.Store) {
 	ctx := context.Background()
 	now := loginNow()
-	r, want := authRequestAt("req-1", now), authRequestAt("req-1", now)
-	require.NoError(t, s.InsertAuthRequest(ctx, r, roomyLimits))
+	r, want := consentOf(authRequestAt("req-1", now)), consentOf(authRequestAt("req-1", now))
+	require.NoError(t, s.ConsentAuthRequest(ctx, r, now))
 	r.Scopes[0] = faucet.ScopeEventsSubscribe
-	require.NoError(t, s.ConsentAuthRequest(ctx, want.ID, want.BrowserHash, githubStateOf(want.ID), now))
 	c, wantConnection := connectionAt(1, now), connectionAt(1, now)
 	a := approvalOf(want, c, now)
 	require.NoError(t, s.ApproveAuthRequest(ctx, a))

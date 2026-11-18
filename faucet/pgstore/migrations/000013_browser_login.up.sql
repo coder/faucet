@@ -21,14 +21,13 @@ CREATE TABLE faucet_connections (
 -- authorization request to the code that the client redeems. It keeps the
 -- SHA-256 of the browser's cookie, of the state sent to GitHub and of the
 -- code, never the values. A pending row expires 10 minutes after it was
--- made, and an approved one 60 seconds after its approval. client_host is
--- the host of client_id, by which faucet bounds the pending rows of one
--- host.
+-- made, and an approved one 60 seconds after its approval. A row is made
+-- only when the user presses Continue: the consent page carries the request
+-- sealed until then.
 CREATE TABLE faucet_auth_requests (
   id text PRIMARY KEY CHECK (id <> ''),
   state text NOT NULL CHECK (state IN ('pending', 'approved', 'redeemed', 'expired')),
   client_id text NOT NULL CHECK (client_id <> ''),
-  client_host text NOT NULL CHECK (client_host <> ''),
   client_name text NOT NULL,
   redirect_uri text NOT NULL CHECK (redirect_uri <> ''),
   client_state text NOT NULL,
@@ -46,7 +45,6 @@ CREATE TABLE faucet_auth_requests (
 CREATE UNIQUE INDEX faucet_auth_requests_github_state_idx ON faucet_auth_requests (github_state_hash) WHERE github_state_hash IS NOT NULL;
 CREATE UNIQUE INDEX faucet_auth_requests_code_idx ON faucet_auth_requests (code_hash) WHERE code_hash IS NOT NULL;
 CREATE INDEX faucet_auth_requests_expires_idx ON faucet_auth_requests (expires_at);
-CREATE INDEX faucet_auth_requests_pending_host_idx ON faucet_auth_requests (client_host, expires_at) WHERE state = 'pending';
 
 -- faucet_user_sessions holds the logins that refresh tokens keep alive. id
 -- is the ID of the authorization request that made the session, so a

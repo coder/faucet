@@ -408,20 +408,6 @@ func (b *loginBrowser) post(form url.Values, origins []string, cookies ...*http.
 	return b.do(req)
 }
 
-// follow loads each Location in turn, from a, until an answer is not a
-// redirect, and returns that answer.
-func (b *loginBrowser) follow(a loginAnswer) loginAnswer {
-	b.t.Helper()
-	for range 10 {
-		if a.status != http.StatusFound && a.status != http.StatusSeeOther {
-			return a
-		}
-		a = b.get(a.location(b.t).String())
-	}
-	require.FailNow(b.t, "too many redirects")
-	return a
-}
-
 // cookie returns the browser's cookie for faucet that is named name, or nil.
 func (b *loginBrowser) cookie(name string) *http.Cookie {
 	u, err := url.Parse(b.h.issuer)
@@ -434,7 +420,7 @@ func (b *loginBrowser) cookie(name string) *http.Cookie {
 	return nil
 }
 
-var consentField = regexp.MustCompile(`<input type="hidden" name="(request|token)" value="([^"]*)">`)
+var consentField = regexp.MustCompile(`<input type="hidden" name="(request|login|token)" value="([^"]*)">`)
 
 // loginConsent is the consent page of a login that a browser started: its
 // form and the cookie that the page set.
@@ -462,8 +448,9 @@ func loginFormOf(t *testing.T, page loginAnswer) url.Values {
 	for _, m := range consentField.FindAllStringSubmatch(page.body, -1) {
 		form.Add(m[1], m[2])
 	}
-	require.Len(t, form["request"], 1, page.body)
-	require.Len(t, form["token"], 1, page.body)
+	for _, name := range []string{"request", "login", "token"} {
+		require.Len(t, form[name], 1, page.body)
+	}
 	return form
 }
 
@@ -500,8 +487,9 @@ func (h *loginHarness) loginRequireCode(t *testing.T, a loginAnswer, c loginClie
 // R1: the attacker's server starts a login for the attacker's client, and a
 // page of the attacker makes the victim's browser post the consent form. The
 // victim authorized the App before, so GitHub would send the browser straight
-// back, and the attacker's client would get a code for the victim.
-func TestAConsentThatTheBrowserOfTheLoginDidNotSendIsRefusedAndEndsTheLogin(t *testing.T) {
+// back, and the attacker's client would get a code for the victim. A
+// refused post stores nothing.
+func TestAConsentThatTheBrowserOfTheLoginDidNotSendIsRefusedAndStoresNothing(t *testing.T) {
 	t.Parallel()
 	h := newLoginHarness(t)
 	client := h.newClient("attacker", nil)
@@ -538,9 +526,29 @@ func TestAConsentThatTheBrowserOfTheLoginDidNotSendIsRefusedAndEndsTheLogin(t *t
 		{
 			name: "the right cookie and a wrong form token", origins: []string{h.issuer},
 			form: func(own, other loginConsent) url.Values {
-				return url.Values{"request": {own.id}, "token": {other.form.Get("token")}}
+				return url.Values{"request": {own.id}, "login": {own.form.Get("login")}, "token": {other.form.Get("token")}}
 			},
 			cookies: ownCookie,
+		},
+		{
+			name: "the sealed request of another login", origins: []string{h.issuer}, cookies: ownCookie,
+			form: func(own, other loginConsent) url.Values {
+				return url.Values{"request": {own.id}, "login": {other.form.Get("login")}, "token": {own.form.Get("token")}}
+			},
+		},
+		{
+			name: "a sealed request with a changed character", origins: []string{h.issuer}, cookies: ownCookie,
+			form: func(own, _ loginConsent) url.Values {
+				login := []byte(own.form.Get("login"))
+				login[len(login)-2] ^= 'A' ^ 'B'
+				return url.Values{"request": {own.id}, "login": {string(login)}, "token": {own.form.Get("token")}}
+			},
+		},
+		{
+			name: "no sealed request", origins: []string{h.issuer}, cookies: ownCookie,
+			form: func(own, _ loginConsent) url.Values {
+				return url.Values{"request": {own.id}, "token": {own.form.Get("token")}}
+			},
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -553,8 +561,7 @@ func TestAConsentThatTheBrowserOfTheLoginDidNotSendIsRefusedAndEndsTheLogin(t *t
 			require.Empty(t, forged.header.Values("Set-Cookie"))
 			require.Empty(t, forged.header.Get("Location"))
 
-			later := attacker.follow(attacker.continueWith(own))
-			require.Equal(t, http.StatusForbidden, later.status, "the login is dead: "+later.body)
+			require.False(t, loginHasRequest(h.store, own.id), "the refused post stored nothing")
 			require.Zero(t, h.github.authorizeCount(), "no browser reached GitHub")
 			require.Empty(t, h.agents.received(client.path), "no code reached the attacker's client")
 

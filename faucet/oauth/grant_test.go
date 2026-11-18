@@ -283,13 +283,12 @@ func (h *grantHarness) approveFor(id string, userID int64, login string) grantLo
 	l := grantLogin{id: id, code: grantSecret(h.t), verifier: grantSecret(h.t)}
 	challenge := sha256.Sum256([]byte(l.verifier))
 	browser, state := oauth.HashToken("browser "+id), oauth.HashToken("github state "+id)
-	require.NoError(h.t, h.store.InsertAuthRequest(ctx, oauth.AuthRequest{
+	require.NoError(h.t, h.store.ConsentAuthRequest(ctx, oauth.AuthRequest{
 		ID: id, State: oauth.AuthRequestPending, ClientID: grantClientID, ClientName: "Example Agent",
 		RedirectURI: grantRedirectURI, Resource: login, Scopes: bothScopes,
-		CodeChallenge: base64.RawURLEncoding.EncodeToString(challenge[:]), BrowserHash: browser,
+		CodeChallenge: base64.RawURLEncoding.EncodeToString(challenge[:]), BrowserHash: browser, GitHubStateHash: state,
 		CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
-	}, roomyLimits))
-	require.NoError(h.t, h.store.ConsentAuthRequest(ctx, id, browser, state, now))
+	}, now))
 	require.NoError(h.t, h.store.ApproveAuthRequest(ctx, oauth.Approval{
 		RequestID: id, GitHubState: state, Connection: h.connection(userID), Code: oauth.HashToken(l.code),
 		Now: now, ExpiresAt: now.Add(60 * time.Second),

@@ -1,28 +1,17 @@
--- name: InsertAuthRequest :execrows
--- InsertAuthRequest stores a pending request unless the pending requests
--- that have not expired at its creation reach a limit: those of its client
--- host, or all of them.
-INSERT INTO faucet_auth_requests (
-  id, state, client_id, client_host, client_name, redirect_uri, client_state, resource, scopes, code_challenge, browser_hash, created_at, expires_at
-)
-SELECT @id::text, 'pending', @client_id::text, @client_host::text, @client_name::text, @redirect_uri::text, @client_state::text,
-  @resource::text, @scopes::text[], @code_challenge::text, @browser_hash::bytea, @created_at::timestamptz, @expires_at::timestamptz
-WHERE (
-    SELECT count(*) FROM faucet_auth_requests
-    WHERE state = 'pending' AND client_host = @client_host::text AND expires_at > @created_at::timestamptz
-  ) < @per_client_host::bigint
-  AND (
-    SELECT count(*) FROM faucet_auth_requests
-    WHERE state = 'pending' AND expires_at > @created_at::timestamptz
-  ) < @total::bigint;
-
 -- name: ConsentAuthRequest :execrows
-UPDATE faucet_auth_requests
-SET github_state_hash = @github_state_hash::bytea
-WHERE id = @id
-  AND state = 'pending'
-  AND browser_hash = @browser_hash
-  AND expires_at > @now::timestamptz;
+-- ConsentAuthRequest stores the pending request of a user who pressed
+-- Continue, unless it has expired. When the request is stored already, a
+-- press of Continue in the same browser replaces only its GitHub state.
+INSERT INTO faucet_auth_requests (
+  id, state, client_id, client_name, redirect_uri, client_state, resource, scopes, code_challenge, browser_hash, github_state_hash, created_at, expires_at
+)
+SELECT @id::text, 'pending', @client_id::text, @client_name::text, @redirect_uri::text, @client_state::text,
+  @resource::text, @scopes::text[], @code_challenge::text, @browser_hash::bytea, @github_state_hash::bytea, @created_at::timestamptz, @expires_at::timestamptz
+WHERE @expires_at::timestamptz > @now::timestamptz
+ON CONFLICT (id) DO UPDATE SET github_state_hash = excluded.github_state_hash
+WHERE faucet_auth_requests.state = 'pending'
+  AND faucet_auth_requests.browser_hash = excluded.browser_hash
+  AND faucet_auth_requests.expires_at > @now::timestamptz;
 
 -- name: ExpireAuthRequest :exec
 UPDATE faucet_auth_requests
@@ -30,13 +19,13 @@ SET state = 'expired'
 WHERE id = @id AND state = 'pending';
 
 -- name: GetAuthRequestByGitHubState :one
-SELECT id, state, client_id, client_host, client_name, redirect_uri, client_state, resource, scopes, code_challenge,
+SELECT id, state, client_id, client_name, redirect_uri, client_state, resource, scopes, code_challenge,
   browser_hash, github_state_hash, code_hash, connection_id, created_at, expires_at
 FROM faucet_auth_requests
 WHERE github_state_hash = @github_state_hash;
 
 -- name: GetAuthRequestByCode :one
-SELECT id, state, client_id, client_host, client_name, redirect_uri, client_state, resource, scopes, code_challenge,
+SELECT id, state, client_id, client_name, redirect_uri, client_state, resource, scopes, code_challenge,
   browser_hash, github_state_hash, code_hash, connection_id, created_at, expires_at
 FROM faucet_auth_requests
 WHERE code_hash = @code_hash;

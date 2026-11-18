@@ -147,17 +147,20 @@ func TestPurgeDeletesTheAuthRequestsThatExpiredADayAgo(t *testing.T) {
 		return oauth.AuthRequest{
 			ID: id, State: oauth.AuthRequestPending, ClientID: "https://client.example.com/doc.json", RedirectURI: "http://127.0.0.1/cb",
 			Resource: resource, Scopes: bothScopes, CodeChallenge: "challenge", BrowserHash: oauth.HashToken("browser " + id),
-			CreatedAt: expires.Add(-10 * time.Minute), ExpiresAt: expires,
+			GitHubStateHash: oauth.HashToken("github state " + id), CreatedAt: expires.Add(-10 * time.Minute), ExpiresAt: expires,
 		}
 	}
 	old := request("old", now.Add(-24*time.Hour-time.Second))
 	recent := request("recent", now.Add(-23*time.Hour))
-	require.NoError(t, store.InsertAuthRequest(ctx, old, roomyLimits))
-	require.NoError(t, store.InsertAuthRequest(ctx, recent, roomyLimits))
+	for _, r := range []oauth.AuthRequest{old, recent} {
+		require.NoError(t, store.ConsentAuthRequest(ctx, r, r.CreatedAt))
+	}
 
 	res, err := server.Purge(ctx)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, res.ExpiredAuthRequests)
-	require.Error(t, store.InsertAuthRequest(ctx, recent, roomyLimits), "the recent request is still there")
-	require.NoError(t, store.InsertAuthRequest(ctx, old, roomyLimits), "the old request is gone")
+	_, err = store.AuthRequestByGitHubState(ctx, recent.GitHubStateHash)
+	require.NoError(t, err, "the recent request is still there")
+	_, err = store.AuthRequestByGitHubState(ctx, old.GitHubStateHash)
+	require.ErrorIs(t, err, oauth.ErrUnknownAuthRequest, "the old request is gone")
 }

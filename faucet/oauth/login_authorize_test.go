@@ -26,6 +26,13 @@ func loginStoredRequest(t *testing.T, s *fakeStore, id string) oauth.AuthRequest
 	return cloneAuthRequest(r)
 }
 
+func loginHasRequest(s *fakeStore, id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.requests[id]
+	return ok
+}
+
 func loginRequestCount(s *fakeStore) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -172,7 +179,9 @@ func TestTheEdgesOfAnAuthorizationRequestAreTaken(t *testing.T) {
 		c.edit(q)
 		page := b.authorize(q)
 		require.Equal(t, http.StatusOK, page.status, name)
-		stored := loginStoredRequest(t, h.store, b.consentOf(page).id)
+		consent := b.consentOf(page)
+		require.Equal(t, http.StatusSeeOther, b.continueWith(consent).status, name)
+		stored := loginStoredRequest(t, h.store, consent.id)
 		require.Equal(t, c.scopes, stored.Scopes, name)
 		require.Equal(t, c.state, stored.ClientState, name)
 	}
@@ -207,14 +216,19 @@ func TestTheConsentPageSaysWhoAsksForWhatAndWhereTheBrowserReturns(t *testing.T)
 	require.Empty(t, cookie.Domain)
 	require.Equal(t, 600, cookie.MaxAge)
 
-	stored := loginStoredRequest(t, h.store, consent.id)
+	require.Zero(t, loginRequestCount(h.store), "the page stores nothing")
 	now := h.clock.Now()
+	h.clock.Advance(time.Minute)
+	require.Equal(t, http.StatusSeeOther, b.continueWith(consent).status)
+	stored := loginStoredRequest(t, h.store, consent.id)
+	require.NotEqual(t, oauth.TokenHash{}, stored.GitHubStateHash, "Continue stores the GitHub state")
+	stored.GitHubStateHash = oauth.TokenHash{}
 	require.Equal(t, oauth.AuthRequest{
 		ID: consent.id, State: oauth.AuthRequestPending, ClientID: client.id, ClientName: "Agent agent",
 		RedirectURI: client.redirectURI, ClientState: "agent-state-/cb/agent", Resource: h.resource, Scopes: bothScopes,
 		CodeChallenge: loginS256("agent-verifier-/cb/agent"), BrowserHash: oauth.HashToken(cookie.Value),
 		CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
-	}, stored)
+	}, stored, "the request is the one of the page, sealed in its form")
 }
 
 var inlineScript = regexp.MustCompile(`(?s)<script>(.*?)</script>`)
@@ -304,11 +318,11 @@ func TestAConsentFormThatIsNotASmallFormIsRefused(t *testing.T) {
 	b := h.newBrowser(t)
 	for name, send := range map[string]func(c loginConsent) loginAnswer{
 		"a field twice": func(c loginConsent) loginAnswer {
-			form := url.Values{"request": {c.id, c.id}, "token": c.form["token"]}
+			form := url.Values{"request": {c.id, c.id}, "login": c.form["login"], "token": c.form["token"]}
 			return b.post(form, []string{h.issuer})
 		},
-		"a form over 4 KiB": func(c loginConsent) loginAnswer {
-			form := url.Values{"request": {c.id}, "token": c.form["token"], "pad": {strings.Repeat("p", 4<<10)}}
+		"a form over 16 KiB": func(c loginConsent) loginAnswer {
+			form := url.Values{"request": {c.id}, "login": c.form["login"], "token": c.form["token"], "pad": {strings.Repeat("p", 16<<10)}}
 			return b.post(form, []string{h.issuer})
 		},
 		"a multipart body": func(c loginConsent) loginAnswer {
@@ -326,10 +340,11 @@ func TestAConsentFormThatIsNotASmallFormIsRefused(t *testing.T) {
 		require.Empty(t, refused.header.Get("Location"), name)
 		loginRequirePage(t, refused)
 	}
+	require.Zero(t, loginRequestCount(h.store), "a refused form stores nothing")
 	first, second := b.start(client), b.start(client)
-	b.post(url.Values{"request": {first.id, second.id}, "token": first.form["token"]}, []string{h.issuer})
+	b.post(url.Values{"request": {first.id, second.id}, "login": first.form["login"], "token": first.form["token"]}, []string{h.issuer})
 	for _, c := range []loginConsent{first, second} {
-		require.Equal(t, http.StatusForbidden, b.continueWith(c).status, "a form with a field twice ends every request that it names")
+		require.Equal(t, http.StatusSeeOther, b.continueWith(c).status, "a form with a field twice leaves each login that it names to its own form")
 	}
 	require.Zero(t, h.github.authorizeCount())
 }

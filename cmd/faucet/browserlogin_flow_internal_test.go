@@ -209,7 +209,7 @@ func (s *browserServer) deliver(t *testing.T, delivery string) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
-var browserFormField = regexp.MustCompile(`<input type="hidden" name="(request|token)" value="([^"]+)"`)
+var browserFormField = regexp.MustCompile(`<input type="hidden" name="(request|login|token)" value="([^"]+)"`)
 
 // person is the user at the browser: it opens the authorization URL, reads
 // the consent page, presses Continue, and follows the browser through GitHub
@@ -241,7 +241,7 @@ func (s *browserServer) person(t *testing.T) auth.AuthorizationCodeFetcher {
 		for _, m := range browserFormField.FindAllStringSubmatch(string(body), -1) {
 			form.Set(m[1], m[2])
 		}
-		if page.StatusCode != http.StatusOK || len(form) != 2 {
+		if page.StatusCode != http.StatusOK || len(form) != 3 {
 			return nil, fmt.Errorf("the consent page answered %d: %s", page.StatusCode, body)
 		}
 		post, err := http.NewRequestWithContext(ctx, http.MethodPost, s.URL+oauth.AuthorizePath, strings.NewReader(form.Encode()))

@@ -68,7 +68,7 @@ func (p *person) login(ctx context.Context, args *auth.AuthorizationArgs) (*auth
 	for _, field := range hiddenField.FindAllStringSubmatch(consent.body, -1) {
 		form.Set(field[1], html.UnescapeString(field[2]))
 	}
-	if consent.status != http.StatusOK || action == nil || len(form) != 2 {
+	if consent.status != http.StatusOK || action == nil || len(form) != 3 {
 		return nil, xerrors.Errorf("the consent page answered %d %q", consent.status, consent.heading())
 	}
 	target, err := consent.url.Parse(html.UnescapeString(action[1]))

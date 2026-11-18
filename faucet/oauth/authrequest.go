@@ -29,28 +29,7 @@ const (
 	authRequestLifetime = 10 * time.Minute
 	// codeLifetime is how long a client has to redeem its code.
 	codeLifetime = 60 * time.Second
-
-	// maxPendingPerClientHost bounds the logins in progress of the clients
-	// of one host. One client, such as an editor's, serves every user of an
-	// organization, so the limit is far above what one organization starts
-	// in the 10 minutes that a login stays pending.
-	maxPendingPerClientHost = 100
-	// maxPendingAuthRequests bounds all logins in progress, so that the
-	// requests that anyone can send grow the store by a bounded amount.
-	maxPendingAuthRequests = 1000
 )
-
-// AuthRequestLimits bound the live pending requests that a store holds:
-// those in state pending that have not expired.
-type AuthRequestLimits struct {
-	// PerClientHost bounds the live pending requests of one client host.
-	PerClientHost int
-	// Total bounds all live pending requests.
-	Total int
-}
-
-// pendingLimits are the limits of the authorization endpoint.
-var pendingLimits = AuthRequestLimits{PerClientHost: maxPendingPerClientHost, Total: maxPendingAuthRequests}
 
 // AuthRequest is one browser login of a client, from its authorization
 // request to the code that it redeems. A store keeps the hash of every
@@ -89,13 +68,9 @@ type AuthRequest struct {
 	ExpiresAt time.Time
 }
 
-// ClientHost is the host of r's client ID, which the limits of pending
-// requests count by: the host name in lower case without a final dot, then
-// the port unless it is the default of the scheme.
-func (r AuthRequest) ClientHost() string { return hostKey(r.ClientID) }
-
 // Validate reports whether a store may keep r as a new request: a pending
-// one that holds nothing of the later steps.
+// one whose user pressed Continue, which holds its GitHub state and nothing
+// of the later steps.
 func (r AuthRequest) Validate() error {
 	switch {
 	case r.ID == "":
@@ -104,14 +79,14 @@ func (r AuthRequest) Validate() error {
 		return xerrors.New("a new authorization request is pending")
 	case r.ClientID == "" || r.RedirectURI == "" || r.Resource == "" || r.CodeChallenge == "":
 		return xerrors.New("an authorization request needs a client ID, a redirect URI, a resource and a code challenge")
-	case r.ClientHost() == "":
-		return xerrors.New("the client ID of an authorization request needs a host")
 	case len(r.Scopes) == 0:
 		return xerrors.New("an authorization request needs at least one scope")
 	case r.BrowserHash == TokenHash{}:
 		return xerrors.New("an authorization request needs the hash of its browser cookie")
-	case r.GitHubStateHash != TokenHash{} || r.CodeHash != TokenHash{} || r.ConnectionID != "":
-		return xerrors.New("a new authorization request holds no GitHub state, code or connection")
+	case r.GitHubStateHash == TokenHash{}:
+		return xerrors.New("an authorization request is stored once its user pressed Continue, with the hash of its GitHub state")
+	case r.CodeHash != TokenHash{} || r.ConnectionID != "":
+		return xerrors.New("a new authorization request holds no code or connection")
 	case r.CreatedAt.IsZero() || !r.ExpiresAt.After(r.CreatedAt):
 		return xerrors.New("an authorization request expires after it was made")
 	}

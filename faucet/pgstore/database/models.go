@@ -23,7 +23,6 @@ type FaucetAuthRequest struct {
 	ID              string
 	State           string
 	ClientID        string
-	ClientHost      string
 	ClientName      string
 	RedirectUri     string
 	ClientState     string

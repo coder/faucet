@@ -263,10 +263,11 @@ describe('browser login', () => {
       const stolen = site.url('/steal', 'localhost');
       const clientId = documents.add('attacker', { client_name: 'Coding Agent', redirect_uris: ['http://localhost/steal'] });
       const consent = await started.request(authorizationPath(started, clientId, stolen, 'attacker', randomBytes(32).toString('base64url')));
-      const fields = Object.fromEntries([...consent.body.matchAll(/<input type="hidden" name="(request|token)" value="([^"]+)">/g)].map((m) => [m[1], m[2]]));
+      const fields = Object.fromEntries([...consent.body.matchAll(/<input type="hidden" name="(request|login|token)" value="([^"]+)">/g)].map((m) => [m[1], m[2]]));
       site.serve('/', `<!doctype html><title>Free stickers</title>
 <form method="post" action="${started.baseUrl}/oauth/authorize">
-<input type="hidden" name="request" value="${fields.request}"><input type="hidden" name="token" value="${fields.token}">
+<input type="hidden" name="request" value="${fields.request}"><input type="hidden" name="login" value="${fields.login}">
+<input type="hidden" name="token" value="${fields.token}">
 </form><script>document.forms[0].submit()</script>`);
       const posted = browser.waitForResponse(`${started.baseUrl}/oauth/authorize`);
 
@@ -274,14 +275,14 @@ describe('browser login', () => {
 
       const answer = await posted;
       await expect(screen.getByRole('heading', { name: 'Login stopped' })).toBeVisible();
-      const state = await started.sql(`select state from faucet_auth_requests where id = '${fields.request}'`);
+      const stored = await started.sql(`select count(*) from faucet_auth_requests`);
       expect(consent.status).toBe(200);
-      expect(Object.keys(fields)).toEqual(['request', 'token']);
+      expect(Object.keys(fields)).toEqual(['request', 'login', 'token']);
       expect(answer.status).toBe(403);
       expect(output(), 'the browser sent the Origin of the page that posted the form').toContain("the Origin header is not faucet's issuer");
       expect(githubLogins(await hooks.requests(), started)).toEqual([]);
       expect(site.requests('/steal'), "no code reached the attacker's redirect URI").toEqual([]);
-      expect(state, 'the refused consent ended the login').toBe('expired');
+      expect(stored, 'neither the consent page nor the refused consent stored a request').toBe('0');
     }, { browserLogin: true });
   });
 

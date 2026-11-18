@@ -1,16 +1,12 @@
 package oauth_test
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -18,9 +14,6 @@ import (
 	"github.com/coder/faucet/faucet/oauth"
 	"github.com/coder/quartz"
 )
-
-// roomyLimits are limits that only the tests of the limits reach.
-var roomyLimits = oauth.AuthRequestLimits{PerClientHost: 1 << 20, Total: 1 << 20}
 
 type countingTransport struct{ requests atomic.Int64 }
 
@@ -64,54 +57,6 @@ func TestAClientIDOnFaucetsOwnHostIsRefusedWithoutAFetch(t *testing.T) {
 	require.Contains(t, page.Body.String(), "faucet could not fetch the client&#39;s document")
 }
 
-// loginRequireTooMany checks that a is the page of an authorization request
-// that the limits of logins in progress refused, and that it started
-// nothing.
-func loginRequireTooMany(t *testing.T, a loginAnswer) {
-	t.Helper()
-	require.Equal(t, http.StatusTooManyRequests, a.status)
-	loginRequirePage(t, a)
-	require.Empty(t, a.header.Get("Location"))
-	require.Empty(t, a.header.Values("Set-Cookie"))
-	require.True(t, strings.Contains(a.body, "Try again in a few minutes."), "the page says when to try again")
-}
-
-func TestAClientHostWithTooManyLoginsInProgressGetsAPageThatSaysToTryLater(t *testing.T) {
-	t.Parallel()
-	h := newLoginHarness(t)
-	c := h.newClient("agent", nil)
-	b := h.newBrowser(t)
-	for range oauth.MaxPendingPerClientHost {
-		b.start(c)
-	}
-	loginRequireTooMany(t, b.authorize(h.request(c)))
-	require.Equal(t, oauth.MaxPendingPerClientHost, loginRequestCount(h.store))
-
-	elsewhere := newLoginDocuments(t)
-	other := loginClient{id: elsewhere.URL + "/agent.json", path: "/cb/elsewhere"}
-	other.redirectURI = h.agents.URL + other.path
-	elsewhere.docs["/agent.json"] = map[string]any{"client_id": other.id, "redirect_uris": []string{other.redirectURI}}
-	b.start(other)
-
-	h.clock.Advance(10 * time.Minute)
-	b.start(c)
-}
-
-func TestWithTooManyLoginsInProgressNoClientStartsOne(t *testing.T) {
-	t.Parallel()
-	h := newLoginHarness(t)
-	c := h.newClient("agent", nil)
-	b := h.newBrowser(t)
-	held := loginStoredRequest(t, h.store, b.start(c).id)
-	for i := range oauth.MaxPendingAuthRequests - 1 {
-		r := held
-		r.ID, r.ClientID = fmt.Sprintf("held-%d", i), fmt.Sprintf("https://agent%d.example.com/client.json", i)
-		require.NoError(t, h.store.InsertAuthRequest(context.Background(), r, roomyLimits))
-	}
-	loginRequireTooMany(t, b.authorize(h.request(c)))
-	require.Equal(t, oauth.MaxPendingAuthRequests, loginRequestCount(h.store))
-}
-
 // Showing the consent page stores nothing: the login waits in the page's
 // form, sealed, until its user presses Continue. So the GETs that anyone
 // can send grow no table and use up no limit that real users need.
@@ -124,9 +69,9 @@ func TestTheConsentPageStoresNothingUntilContinue(t *testing.T) {
 	for range 150 {
 		last = b.start(client)
 	}
-	require.Zero(t, h.store.requestCount(), "no request is stored before Continue")
+	require.Zero(t, loginRequestCount(h.store), "no request is stored before Continue")
 
 	a := b.continueWith(last)
 	require.Equal(t, http.StatusSeeOther, a.status, a.body)
-	require.Equal(t, 1, h.store.requestCount(), "Continue stores the request")
+	require.Equal(t, 1, loginRequestCount(h.store), "Continue stores the request")
 }

@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/coder/faucet/faucet"
 )
 
 // keyBytes returns 32 made-up key bytes that start at first and count up, so
@@ -271,5 +274,49 @@ func TestTokenKeysAreNeverPrinted(t *testing.T) {
 				require.NotContains(t, out, base64.StdEncoding.EncodeToString(b)[:12], "%s of %T", verb, value)
 			}
 		}
+	}
+}
+
+// The consent form carries its request sealed, and the request opens only
+// for its own ID and browser, under a key of the ring, as the form sent it.
+func TestASealedRequestOpensOnlyForItsRequestAndBrowser(t *testing.T) {
+	t.Parallel()
+	old := mustParseTokenKeys(t, keyEntry("old", 0x10))
+	rotated := mustParseTokenKeys(t, keyEntry("new", 0x50)+","+keyEntry("old", 0x10))
+	now := time.Now().UTC()
+	r := AuthRequest{
+		ID: "req-1", State: AuthRequestPending, ClientID: "https://agent.example.com/client.json", ClientName: "Agent",
+		RedirectURI: "http://127.0.0.1:1/cb", ClientState: "state", Resource: "https://faucet.example.com/github/mcp",
+		Scopes: []faucet.Scope{faucet.ScopeEventsRead}, CodeChallenge: "challenge", BrowserHash: HashToken("browser"),
+		CreatedAt: now, ExpiresAt: now.Add(authRequestLifetime),
+	}
+	sealed, err := old.sealRequest(r)
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(sealed, "old."), "the value names its key")
+	for _, ring := range []TokenKeys{old, rotated} {
+		opened, err := ring.openRequest(sealed, r.ID, r.BrowserHash)
+		require.NoError(t, err)
+		require.True(t, r.CreatedAt.Equal(opened.CreatedAt) && r.ExpiresAt.Equal(opened.ExpiresAt))
+		opened.CreatedAt, opened.ExpiresAt = r.CreatedAt, r.ExpiresAt
+		require.Equal(t, r, opened)
+	}
+
+	changed := []byte(sealed)
+	changed[len(changed)-3] ^= 'A' ^ 'B'
+	for name, open := range map[string]func() (AuthRequest, error){
+		"another request": func() (AuthRequest, error) { return old.openRequest(sealed, "req-2", r.BrowserHash) },
+		"another browser": func() (AuthRequest, error) { return old.openRequest(sealed, r.ID, HashToken("another browser")) },
+		"a key not held": func() (AuthRequest, error) {
+			return mustParseTokenKeys(t, keyEntry("new", 0x50)).openRequest(sealed, r.ID, r.BrowserHash)
+		},
+		"a changed value": func() (AuthRequest, error) { return old.openRequest(string(changed), r.ID, r.BrowserHash) },
+		"no key ID": func() (AuthRequest, error) {
+			return old.openRequest(strings.TrimPrefix(sealed, "old."), r.ID, r.BrowserHash)
+		},
+		"an empty value":             func() (AuthRequest, error) { return old.openRequest("", r.ID, r.BrowserHash) },
+		"a value that is not base64": func() (AuthRequest, error) { return old.openRequest("old.!!!", r.ID, r.BrowserHash) },
+	} {
+		_, err := open()
+		require.ErrorIs(t, err, ErrUnreadableToken, name)
 	}
 }

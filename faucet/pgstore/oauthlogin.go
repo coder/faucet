@@ -15,55 +15,32 @@ import (
 
 var _ oauth.LoginStore = (*Store)(nil)
 
-// InsertAuthRequest implements oauth.LoginStore. A second request with the
-// same ID fails on the primary key. One statement counts and inserts, so
-// inserts that run at once can each count before another one inserts.
-func (s *Store) InsertAuthRequest(ctx context.Context, r oauth.AuthRequest, limits oauth.AuthRequestLimits) (err error) {
+// ConsentAuthRequest implements oauth.LoginStore in one statement. A
+// GitHub state that another request holds fails on the unique index, so a
+// state finds one request.
+func (s *Store) ConsentAuthRequest(ctx context.Context, r oauth.AuthRequest, now time.Time) (err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if err := r.Validate(); err != nil {
 		return xerrors.Errorf("validate authorization request: %w", err)
 	}
-	n, err := s.q.InsertAuthRequest(ctx, database.InsertAuthRequestParams{
-		ID:            r.ID,
-		ClientID:      r.ClientID,
-		ClientHost:    r.ClientHost(),
-		ClientName:    r.ClientName,
-		RedirectUri:   r.RedirectURI,
-		ClientState:   r.ClientState,
-		Resource:      r.Resource,
-		Scopes:        scopeNames(r.Scopes),
-		CodeChallenge: r.CodeChallenge,
-		BrowserHash:   r.BrowserHash[:],
-		CreatedAt:     r.CreatedAt,
-		ExpiresAt:     r.ExpiresAt,
-		PerClientHost: int64(limits.PerClientHost),
-		Total:         int64(limits.Total),
-	})
-	switch {
-	case err != nil:
-		return xerrors.Errorf("insert authorization request: %w", err)
-	case n == 0:
-		return oauth.ErrTooManyAuthRequests
-	}
-	return nil
-}
-
-// ConsentAuthRequest implements oauth.LoginStore. A GitHub state that another
-// request holds fails on the unique index, so a state finds one request.
-func (s *Store) ConsentAuthRequest(ctx context.Context, id string, browser, githubState oauth.TokenHash, now time.Time) (err error) {
-	defer func() { err = endedBy(ctx, err) }()
-	if githubState == (oauth.TokenHash{}) {
-		return xerrors.New("a consent needs the hash of the GitHub state")
-	}
 	n, err := s.q.ConsentAuthRequest(ctx, database.ConsentAuthRequestParams{
-		GithubStateHash: githubState[:],
-		ID:              id,
-		BrowserHash:     browser[:],
+		ID:              r.ID,
+		ClientID:        r.ClientID,
+		ClientName:      r.ClientName,
+		RedirectUri:     r.RedirectURI,
+		ClientState:     r.ClientState,
+		Resource:        r.Resource,
+		Scopes:          scopeNames(r.Scopes),
+		CodeChallenge:   r.CodeChallenge,
+		BrowserHash:     r.BrowserHash[:],
+		GithubStateHash: r.GitHubStateHash[:],
+		CreatedAt:       r.CreatedAt,
+		ExpiresAt:       r.ExpiresAt,
 		Now:             now,
 	})
 	switch {
 	case err != nil:
-		return xerrors.Errorf("consent to authorization request: %w", err)
+		return xerrors.Errorf("store the consented authorization request: %w", err)
 	case n == 0:
 		return oauth.ErrUnknownAuthRequest
 	}

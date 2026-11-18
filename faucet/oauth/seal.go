@@ -4,11 +4,15 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"golang.org/x/xerrors"
+
+	"github.com/coder/faucet/faucet"
 )
 
 const (
@@ -141,6 +145,73 @@ func (k TokenKeys) open(c Connection, field string, sealed []byte) (string, erro
 		return "", xerrors.Errorf("the %s token does not open under key %q: %w", field, c.KeyID, ErrUnreadableToken)
 	}
 	return string(plain), nil
+}
+
+// pendingLogin is what the consent form carries of a request until its
+// user presses Continue, so that showing the consent page stores nothing.
+type pendingLogin struct {
+	ClientID      string         `json:"client_id"`
+	ClientName    string         `json:"client_name"`
+	RedirectURI   string         `json:"redirect_uri"`
+	ClientState   string         `json:"state"`
+	Resource      string         `json:"resource"`
+	Scopes        []faucet.Scope `json:"scopes"`
+	CodeChallenge string         `json:"code_challenge"`
+	CreatedAt     time.Time      `json:"created_at"`
+	ExpiresAt     time.Time      `json:"expires_at"`
+}
+
+// sealRequest seals the pending request r into the value that its consent
+// form carries: the ID of the first key, a dot, and the sealed request in
+// base64url. Its additional data names r's ID and browser hash, so the
+// value opens only for that request and with the cookie of the browser
+// that got the page.
+func (k TokenKeys) sealRequest(r AuthRequest) (string, error) {
+	if k.sealing == nil {
+		return "", xerrors.New("no token key to seal with")
+	}
+	plain, err := json.Marshal(pendingLogin{
+		ClientID: r.ClientID, ClientName: r.ClientName, RedirectURI: r.RedirectURI, ClientState: r.ClientState,
+		Resource: r.Resource, Scopes: r.Scopes, CodeChallenge: r.CodeChallenge, CreatedAt: r.CreatedAt, ExpiresAt: r.ExpiresAt,
+	})
+	if err != nil {
+		return "", xerrors.Errorf("encode the pending request: %w", err)
+	}
+	sealed := k.sealing.seal(requestAAD(r.ID, r.BrowserHash), string(plain))
+	return k.sealing.id + "." + base64.RawURLEncoding.EncodeToString(sealed), nil
+}
+
+// openRequest reverses sealRequest for the request with this ID and
+// browser hash. It fails, wrapping ErrUnreadableToken, when the value was
+// sealed for another request or browser, or under a key that k does not
+// hold, or was changed.
+func (k TokenKeys) openRequest(value, id string, browser TokenHash) (AuthRequest, error) {
+	keyID, encoded, _ := strings.Cut(value, ".")
+	key := k.byID[keyID]
+	sealed, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
+	switch {
+	case key == nil:
+		return AuthRequest{}, xerrors.Errorf("the pending request is sealed under a key that the token keys do not hold: %w", ErrUnreadableToken)
+	case err != nil || len(sealed) == 0 || sealed[0] != tokenSealVersion:
+		return AuthRequest{}, xerrors.Errorf("the pending request has an unknown layout: %w", ErrUnreadableToken)
+	}
+	plain, err := key.aead.Open(nil, nil, sealed[1:], requestAAD(id, browser))
+	if err != nil {
+		return AuthRequest{}, xerrors.Errorf("the pending request does not open under key %q for this request and browser: %w", keyID, ErrUnreadableToken)
+	}
+	var p pendingLogin
+	if err := json.Unmarshal(plain, &p); err != nil {
+		return AuthRequest{}, xerrors.Errorf("decode the pending request: %w", err)
+	}
+	return AuthRequest{
+		ID: id, State: AuthRequestPending, ClientID: p.ClientID, ClientName: p.ClientName, RedirectURI: p.RedirectURI,
+		ClientState: p.ClientState, Resource: p.Resource, Scopes: p.Scopes, CodeChallenge: p.CodeChallenge,
+		BrowserHash: browser, CreatedAt: p.CreatedAt, ExpiresAt: p.ExpiresAt,
+	}, nil
+}
+
+func requestAAD(id string, browser TokenHash) []byte {
+	return append([]byte("faucet pending request v1\x00"+id+"\x00"), browser[:]...)
 }
 
 func (key *tokenKey) seal(aad []byte, token string) []byte {

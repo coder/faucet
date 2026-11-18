@@ -33,7 +33,9 @@ const (
 	githubStateLabel = "faucet github state v1"
 	githubPKCELabel  = "faucet github pkce v1"
 
-	maxConsentFormBytes = 4 << 10
+	// maxConsentFormBytes holds the sealed request of the form, whose
+	// client ID, redirect URI and client state are 2 KiB each at most.
+	maxConsentFormBytes = 16 << 10
 	maxClientStateBytes = 2048
 )
 
@@ -62,7 +64,7 @@ func badAuthorization(reason string) *refusal {
 func forbiddenConsent(reason string) *refusal {
 	return &refusal{status: http.StatusForbidden, reason: reason, page: errorPage{
 		Title:   "Login stopped",
-		Message: "faucet cannot tell that this browser started this login, so it ended the login. Go back to your agent and start the login again.",
+		Message: "faucet cannot tell that this browser started this login, so the login stops here. Go back to your agent and start the login again.",
 	}}
 }
 
@@ -90,15 +92,6 @@ func githubFailure(status int, err error) *refusal {
 	return &refusal{status: status, err: err, page: errorPage{
 		Title:   "GitHub did not finish the login",
 		Message: "faucet could not get your login from GitHub. Go back to your agent and start the login again.",
-	}}
-}
-
-// tooManyLogins refuses an authorization request while faucet holds as many
-// logins in progress as a limit allows.
-func tooManyLogins() *refusal {
-	return &refusal{status: http.StatusTooManyRequests, reason: "too many logins in progress", page: errorPage{
-		Title:   "Too many logins in progress",
-		Message: "faucet has too many logins in progress to start another one now. Try again in a few minutes.",
 	}}
 }
 
@@ -146,8 +139,9 @@ func (s *Server) browserAuthorizeHandler() http.Handler {
 	})
 }
 
-// authorize checks an authorization request, stores it, gives the browser
-// the request's cookie and shows the consent page.
+// authorize checks an authorization request, gives the browser the
+// request's cookie and shows the consent page. It stores nothing: the form
+// of the page carries the request, sealed, until the user presses Continue.
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	host := slog.F("client_host", clientHost(r.URL.Query().Get("client_id")))
@@ -169,18 +163,14 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	now := s.clock.Now()
 	request.ID, request.State, request.BrowserHash = id, AuthRequestPending, HashToken(browser)
 	request.CreatedAt, request.ExpiresAt = now, now.Add(authRequestLifetime)
-	err = s.store.InsertAuthRequest(ctx, request, pendingLimits)
-	switch {
-	case xerrors.Is(err, ErrTooManyAuthRequests):
-		s.refuse(w, r, tooManyLogins(), host)
-		return
-	case err != nil:
-		s.refuse(w, r, failure(xerrors.Errorf("store the authorization request: %w", err)), host)
+	sealed, err := s.login.keys.sealRequest(request)
+	if err != nil {
+		s.refuse(w, r, failure(xerrors.Errorf("seal the authorization request: %w", err)), host)
 		return
 	}
 	http.SetCookie(w, loginCookie(browserCookieName(id), browser, http.SameSiteStrictMode))
 	s.logger.Debug(ctx, "consent page shown", host, slog.F("request_id", id))
-	writePage(w, http.StatusOK, "consent", newConsentPage(request, derive(consentFormLabel, browser)))
+	writePage(w, http.StatusOK, "consent", newConsentPage(request, sealed, derive(consentFormLabel, browser)))
 }
 
 // readAuthorization parses an authorization request into the fields of a
@@ -249,8 +239,10 @@ func (s *Server) readAuthorization(ctx context.Context, rawQuery string) (AuthRe
 
 // consent takes the form of the consent page. It goes on only when the
 // browser that posts it is the one that got the page: the Origin is faucet's,
-// and the form token belongs to the request's cookie. Any other post ends
-// the login, so a page of another site that posts the form makes nothing.
+// the form token belongs to the request's cookie, and the sealed request
+// opens with that cookie. Only then does it store the request. Any other
+// post stores nothing, so a page of another site that posts the form makes
+// nothing.
 func (s *Server) consent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	form, err := readConsentForm(w, r)
@@ -259,8 +251,12 @@ func (s *Server) consent(w http.ResponseWriter, r *http.Request) {
 		browser, err = s.checkConsent(r, form)
 	}
 	id := form.Get("request")
+	var request AuthRequest
+	if err == nil {
+		request, err = s.login.keys.openRequest(form.Get("login"), id, HashToken(browser))
+	}
 	if err != nil {
-		s.endConsent(w, r, form, err)
+		s.refuseConsent(w, r, form, err)
 		return
 	}
 	g, err := newSecret("")
@@ -269,10 +265,11 @@ func (s *Server) consent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state := derive(githubStateLabel, g)
-	err = s.store.ConsentAuthRequest(ctx, id, HashToken(browser), HashToken(state), s.clock.Now())
+	request.GitHubStateHash = HashToken(state)
+	err = s.store.ConsentAuthRequest(ctx, request, s.clock.Now())
 	switch {
 	case xerrors.Is(err, ErrUnknownAuthRequest):
-		s.endConsent(w, r, form, xerrors.New("no pending request of this browser has this ID, or it has expired"))
+		s.refuseConsent(w, r, form, xerrors.New("the request has expired, or it went on in another state"))
 		return
 	case err != nil:
 		s.refuse(w, r, failure(xerrors.Errorf("record the consent: %w", err)), slog.F("request_id", id))
@@ -284,29 +281,26 @@ func (s *Server) consent(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusSeeOther)
 }
 
-// endConsent refuses a consent and ends every request that its form names.
-func (s *Server) endConsent(w http.ResponseWriter, r *http.Request, form url.Values, reason error) {
+// refuseConsent refuses a consent. It stores nothing, since anyone can post
+// the form.
+func (s *Server) refuseConsent(w http.ResponseWriter, r *http.Request, form url.Values, reason error) {
 	var ids []string
 	for _, id := range form["request"] {
-		if !wellFormedID(id) {
-			continue
-		}
-		ids = append(ids, id)
-		if err := s.store.ExpireAuthRequest(r.Context(), id); err != nil {
-			s.logger.Error(r.Context(), "could not end a refused login", slog.F("request_id", id), slog.Error(err))
+		if wellFormedID(id) {
+			ids = append(ids, id)
 		}
 	}
 	s.refuse(w, r, forbiddenConsent(reason.Error()), slog.F("request_id", ids))
 }
 
-// readConsentForm reads the body of a consent: a form of at most 4 KiB.
+// readConsentForm reads the body of a consent: a form of at most 16 KiB.
 func readConsentForm(w http.ResponseWriter, r *http.Request) (url.Values, error) {
 	if media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || media != "application/x-www-form-urlencoded" {
 		return nil, xerrors.New("the body is not a form")
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxConsentFormBytes))
 	if err != nil {
-		return nil, xerrors.New("the form could not be read, or is over 4 KiB")
+		return nil, xerrors.New("the form could not be read, or is over 16 KiB")
 	}
 	form, err := url.ParseQuery(string(body))
 	if err != nil {

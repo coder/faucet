@@ -75,9 +75,10 @@ type consentScope struct {
 	Name, Description string
 }
 
-// consentPage is what the consent page shows. Every field but RequestID and
-// FormToken comes from the client or its document, and the template escapes
-// each one.
+// consentPage is what the consent page shows. Every field but RequestID,
+// Request and FormToken comes from the client or its document, and the
+// template escapes each one. Request is the sealed request that the form
+// carries until the user presses Continue.
 type consentPage struct {
 	ClientHost   string
 	ClientName   string
@@ -87,15 +88,16 @@ type consentPage struct {
 	RedirectURI  string
 	Action       string
 	RequestID    string
+	Request      string
 	FormToken    string
 	Minutes      int
 	TokenMinutes int
 }
 
-func newConsentPage(r AuthRequest, formToken string) consentPage {
+func newConsentPage(r AuthRequest, sealed, formToken string) consentPage {
 	p := consentPage{
 		ClientHost: clientHost(r.ClientID), ClientName: r.ClientName, ClientID: r.ClientID, Resource: r.Resource,
-		RedirectURI: r.RedirectURI, Action: AuthorizePath, RequestID: r.ID, FormToken: formToken,
+		RedirectURI: r.RedirectURI, Action: AuthorizePath, RequestID: r.ID, Request: sealed, FormToken: formToken,
 		Minutes: int(authRequestLifetime / time.Minute), TokenMinutes: int(accessTokenLifetime / time.Minute),
 	}
 	for _, s := range r.Scopes {
@@ -174,6 +176,7 @@ button:disabled { opacity: .5; cursor: default; }
 <p>Continue takes you to GitHub to log in. faucet keeps the GitHub token that it gets there for you, sealed, and gives this app only its own faucet token, which lasts {{.TokenMinutes}} minutes at a time. The app never sees your GitHub token.</p>
 <form method="post" action="{{.Action}}">
 <input type="hidden" name="request" value="{{.RequestID}}">
+<input type="hidden" name="login" value="{{.Request}}">
 <input type="hidden" name="token" value="{{.FormToken}}">
 <button type="submit" disabled>Continue with GitHub</button>
 </form>
