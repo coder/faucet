@@ -107,3 +107,43 @@ func TestExpireRawDeliveriesCountsEveryDeliveryThatLeavesTheQueue(t *testing.T) 
 	require.EqualValues(t, 1, first+second, "the delivery that left the queue is counted once")
 	require.Zero(t, countRows(t, db, "faucet_raw_deliveries"))
 }
+
+// A poll holds its lease's row until it commits. An open that needs to end a
+// lease to keep a limit waits for it rather than pass it over, so the limit
+// holds while every lease is being polled.
+func TestOpenRawLeaseKeepsItsLimitsWhileEveryLeaseIsPolled(t *testing.T) {
+	t.Parallel()
+	for name, limits := range map[string]faucet.RawLimits{
+		"the leases of a principal":             {Live: 2, PerTarget: 100, PerPrincipalTarget: 100},
+		"the leases of a principal of an event": {Live: 100, PerTarget: 100, PerPrincipalTarget: 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			db := newDatabase(t, testDatabaseURL(t))
+			store := pgstore.New(db)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			now := time.Now().UTC()
+			for n := range byte(2) {
+				_, err := store.OpenRawLease(ctx, rawTestLease(n+1, "octocat", now.Add(time.Hour)), now.Add(time.Duration(n)*time.Second), limits)
+				require.NoError(t, err)
+			}
+
+			poll, err := db.BeginTx(ctx, nil)
+			require.NoError(t, err)
+			defer func() { _ = poll.Rollback() }()
+			_, err = poll.ExecContext(ctx, `SELECT id FROM faucet_raw_leases WHERE principal = 'octocat' FOR UPDATE`)
+			require.NoError(t, err)
+			opened := make(chan error, 1)
+			go func() {
+				_, err := store.OpenRawLease(ctx, rawTestLease(3, "octocat", now.Add(time.Hour)), now.Add(2*time.Second), limits)
+				opened <- err
+			}()
+			time.Sleep(300 * time.Millisecond)
+			require.NoError(t, poll.Commit())
+
+			require.NoError(t, <-opened)
+			require.Equal(t, 2, countRows(t, db, "faucet_raw_leases"), "the open waited for the poll and ended a lease")
+		})
+	}
+}

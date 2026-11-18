@@ -377,12 +377,12 @@ type RawStore interface {
 	// principal then holds limits.Live live leases, the one polled longest
 	// ago ends, with its unread events, to make room, and so does its one of
 	// lease.Event and lease.RepoID polled longest ago when it holds
-	// limits.PerPrincipalTarget of those. A lease that another call holds may
-	// be passed over, so a principal can hold one more for a moment. When the
-	// event and repository then have limits.PerTarget live subscriptions and
-	// leases, it returns ErrRawInterestLimit and changes nothing. Concurrent
-	// calls of it and UpsertRawSubscription never pass PerTarget together. A
-	// lease ID that is already stored is an error.
+	// limits.PerPrincipalTarget of those. A lease that a poll holds is waited
+	// for, so neither limit is passed. When the event and repository then have
+	// limits.PerTarget live subscriptions and leases, it returns
+	// ErrRawInterestLimit and changes nothing. Concurrent calls of it and
+	// UpsertRawSubscription never pass PerTarget together. A lease ID that is
+	// already stored is an error.
 	OpenRawLease(ctx context.Context, lease RawLease, now time.Time, limits RawLimits) (head int64, err error)
 	// ReadRawLease serves one poll. found is false, and nothing changes,
 	// unless a lease with q.Lease, q.Key and q.RepoID is live at q.Now. For

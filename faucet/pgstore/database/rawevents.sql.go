@@ -324,7 +324,7 @@ WHERE l.id IN (
     AND o.expires_at > $4
   ORDER BY o.polled_at, o.id
   LIMIT 1
-  FOR UPDATE SKIP LOCKED
+  FOR UPDATE
 )
 RETURNING l.id
 `
@@ -336,6 +336,8 @@ type EndOldestRawLeaseOfTargetParams struct {
 	Now       time.Time
 }
 
+// The lease to end is waited for, not passed over, when a poll holds it, so
+// that the limit holds. A poll waits for no lock of an open.
 func (q *Queries) EndOldestRawLeaseOfTarget(ctx context.Context, arg EndOldestRawLeaseOfTargetParams) ([][]byte, error) {
 	rows, err := q.db.QueryContext(ctx, endOldestRawLeaseOfTarget,
 		arg.Principal,
@@ -412,7 +414,7 @@ WITH live AS (
     AND (SELECT leases FROM live) >= $3::bigint
   ORDER BY l.polled_at, l.id
   LIMIT 1
-  FOR UPDATE SKIP LOCKED
+  FOR UPDATE
 )
 DELETE FROM faucet_raw_leases l
 WHERE l.id IN (SELECT expired.id FROM expired UNION ALL SELECT oldest.id FROM oldest)
@@ -425,6 +427,8 @@ type EndRawLeasesOfParams struct {
 	MaxLive   int64
 }
 
+// The oldest lease is waited for as in EndOldestRawLeaseOfTarget. An expired
+// lease that another call holds counts toward no limit, so it is passed over.
 func (q *Queries) EndRawLeasesOf(ctx context.Context, arg EndRawLeasesOfParams) ([][]byte, error) {
 	rows, err := q.db.QueryContext(ctx, endRawLeasesOf, arg.Principal, arg.Now, arg.MaxLive)
 	if err != nil {

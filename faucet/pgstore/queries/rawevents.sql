@@ -83,6 +83,8 @@ SELECT
   (SELECT COUNT(*) FROM leases WHERE leases.principal = sqlc.arg(principal)::text)::bigint AS own_leases;
 
 -- name: EndOldestRawLeaseOfTarget :many
+-- The lease to end is waited for, not passed over, when a poll holds it, so
+-- that the limit holds. A poll waits for no lock of an open.
 DELETE FROM faucet_raw_leases l
 WHERE l.id IN (
   SELECT o.id FROM faucet_raw_leases o
@@ -90,11 +92,13 @@ WHERE l.id IN (
     AND o.expires_at > sqlc.arg(now)
   ORDER BY o.polled_at, o.id
   LIMIT 1
-  FOR UPDATE SKIP LOCKED
+  FOR UPDATE
 )
 RETURNING l.id;
 
 -- name: EndRawLeasesOf :many
+-- The oldest lease is waited for as in EndOldestRawLeaseOfTarget. An expired
+-- lease that another call holds counts toward no limit, so it is passed over.
 WITH live AS (
   SELECT COUNT(*) AS leases FROM faucet_raw_leases v WHERE v.principal = sqlc.arg(principal) AND v.expires_at > sqlc.arg(now)
 ), expired AS (
@@ -107,7 +111,7 @@ WITH live AS (
     AND (SELECT leases FROM live) >= sqlc.arg(max_live)::bigint
   ORDER BY l.polled_at, l.id
   LIMIT 1
-  FOR UPDATE SKIP LOCKED
+  FOR UPDATE
 )
 DELETE FROM faucet_raw_leases l
 WHERE l.id IN (SELECT expired.id FROM expired UNION ALL SELECT oldest.id FROM oldest)
