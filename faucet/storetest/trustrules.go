@@ -132,9 +132,17 @@ func addingARuleThatTheClientHoldsReturnsItsID(t *testing.T, s oauth.Store) {
 	otherKey.JWKS = json.RawMessage(`{"keys":[{"use":"sig","kty":"RSA","kid":"rotated","alg":"RS256","n":"3EuwQQ0Y67Iq","e":"AQAB"}]}`)
 	otherIssuer := clusterRule()
 	otherIssuer.Issuer = "https://k8s.wi-test.invalid/"
+	withNumber := func(n string) oauth.TrustRule {
+		r := clusterRule()
+		r.JWKS = json.RawMessage(`{"keys":[{"use":"sig","kty":"RSA","kid":"Tmbipp6k","alg":"RS256","n":"3EuwQQ0Y67Iq","e":"AQAB","v":` + n + `}]}`)
+		return r
+	}
 	ids := map[int64]bool{first: true}
 	for name, r := range map[string]oauth.TrustRule{
 		"another sub": otherSub, "one more claim": moreClaims, "keys from discovery": discovery, "another key": otherKey, "another issuer": otherIssuer,
+		// jsonb keeps the scale of a number, and every digit.
+		"a number": withNumber("1"), "the number at another scale": withNumber("1.0"),
+		"a large number": withNumber("12345678901234567890"), "a large number one above": withNumber("12345678901234567891"),
 	} {
 		id, err := s.AddTrustRule(ctx, "digest-bot", r, at)
 		require.NoError(t, err, name)

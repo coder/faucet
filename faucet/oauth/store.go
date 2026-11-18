@@ -126,11 +126,14 @@ type Store interface {
 
 	// AddTrustRule adds r, at now, to the trust rules of the client with this
 	// ID, live or disabled, and returns the rule's ID, which no other rule
-	// ever gets. When the client holds a rule with the same issuer, and the
-	// same JSON values in Claims and JWKS, already, it returns that rule's ID
-	// and changes nothing. It returns ErrUnknownClient when there is no such
-	// client. It does not run ValidateTrustRule: the caller does, and the
-	// checker again at each use, since a later build can refuse a rule.
+	// ever gets. When the client holds a rule with the same issuer, claims
+	// and key set already, it returns that rule's ID and changes nothing. The
+	// same key set is the same JSON as Postgres holds it in jsonb: white
+	// space, the order of members and a member named twice do not count, but
+	// a number keeps its scale and every digit, so 1 and 1.0 make two rules.
+	// It returns ErrUnknownClient when there is no such client. It does not
+	// run ValidateTrustRule: the caller does, and the checker again at each
+	// use, since a later build can refuse a rule.
 	AddTrustRule(ctx context.Context, clientID string, r TrustRule, now time.Time) (int64, error)
 	// TrustRules returns the trust rules of the client with this ID, in the
 	// order they were added, and none for an unknown client. A rule's JWKS

@@ -217,8 +217,9 @@ func (s *fakeStore) CountTrustRules(context.Context) (map[string]int, error) {
 	return counts, nil
 }
 
-// sameTrustRule reports whether a and b hold the same issuer and the same
-// JSON values, as Postgres compares jsonb.
+// sameTrustRule reports whether a and b hold the same issuer, claims and key
+// set, as AddTrustRule says. It compares numbers by their text, so 1 and 1.0
+// differ as in jsonb, but so do 1e2 and 100, which jsonb holds as one.
 func sameTrustRule(a, b oauth.TrustRule) bool {
 	return a.Issuer == b.Issuer && maps.Equal(a.Claims, b.Claims) && sameJSON(a.JWKS, b.JWKS)
 }
@@ -227,8 +228,16 @@ func sameJSON(a, b json.RawMessage) bool {
 	if len(a) == 0 || len(b) == 0 {
 		return len(a) == len(b)
 	}
-	var x, y any
-	return json.Unmarshal(a, &x) == nil && json.Unmarshal(b, &y) == nil && reflect.DeepEqual(x, y)
+	x, xOK := decodeJSON(a)
+	y, yOK := decodeJSON(b)
+	return xOK && yOK && reflect.DeepEqual(x, y)
+}
+
+func decodeJSON(text json.RawMessage) (any, bool) {
+	d := json.NewDecoder(bytes.NewReader(text))
+	d.UseNumber()
+	var v any
+	return v, d.Decode(&v) == nil
 }
 
 func cloneTrustRule(r oauth.TrustRule) oauth.TrustRule {
