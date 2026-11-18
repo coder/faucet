@@ -4,7 +4,8 @@
 // metadata document alone, plays the person who consents in a browser,
 // calls wait_for_github_events once and prints the result as JSON. With
 // -refresh it then refreshes its token, calls the tool again on the same
-// session, and presents the refresh token that the refresh replaced. With
+// session, and presents the refresh token that the refresh replaced, which
+// faucet trades again within 30 seconds of its first use. With
 // -write-cert it writes the TLS certificate that the tests serve the
 // documents with, and exits. It reads no environment variable.
 package main
@@ -36,8 +37,9 @@ type outcome struct {
 	Result *mcp.CallToolResult `json:"result"`
 	// Refreshed is the answer of the call after the refresh, with -refresh.
 	Refreshed *mcp.CallToolResult `json:"refreshed,omitempty"`
-	// Reused is the error code that the token endpoint gave the refresh
-	// token that the refresh replaced, with -refresh.
+	// Reused is what the token endpoint answered to the refresh token that
+	// the refresh replaced, with -refresh: "issued", or its OAuth error
+	// code.
 	Reused string `json:"reused,omitempty"`
 	// Logins counts the consent pages that the person went through. go-sdk
 	// logs in again when a refresh fails, so a refresh that works leaves it

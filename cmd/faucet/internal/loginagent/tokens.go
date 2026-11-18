@@ -59,7 +59,9 @@ func (r *refresher) expire() (*oauth2.Token, error) {
 }
 
 // present asks the token endpoint for a token with the refresh token of
-// replaced, and returns the OAuth error code that it answers with.
+// replaced, and returns "issued" when it gets one, or the OAuth error code
+// that it answers with. It keeps the tokens it gets, and its source goes on
+// with the ones it had.
 func (r *refresher) present(replaced *oauth2.Token) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -70,7 +72,7 @@ func (r *refresher) present(replaced *oauth2.Token) (string, error) {
 	switch {
 	case err == nil:
 		r.keep(token)
-		return "", xerrors.New("the token endpoint took the refresh token that the refresh replaced")
+		return "issued", nil
 	case !errors.As(err, &refused):
 		return "", xerrors.Errorf("present the replaced refresh token: %w", err)
 	}

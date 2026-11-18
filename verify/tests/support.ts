@@ -843,8 +843,8 @@ export interface LoginAgentRun {
   code: number;
   stderr: string;
   result: ToolResult | null;
-  // refreshed is the result of the call after the refresh, and reused the error code that the token endpoint gave the refresh
-  // token that the refresh replaced. Both are null without args.refresh.
+  // refreshed is the result of the call after the refresh, and reused what the token endpoint answered to the refresh token
+  // that the refresh replaced: 'issued', or its OAuth error code. Both are null without args.refresh.
   refreshed: ToolResult | null;
   reused: string | null;
   // logins counts the consent pages that the agent's person went through.

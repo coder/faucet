@@ -98,7 +98,42 @@ describe('browser login', () => {
     }, { browserLogin: true });
   });
 
-  test("the agent's session keeps working after a refresh, and the replaced refresh token is refused and ends the session", async ({
+  test('an agent logs out by revoking its refresh token, and the purge then deletes the session and the sealed GitHub tokens', async ({
+    faucet,
+    documents,
+  }) => {
+    await faucet.withFaucet({}, async (started) => {
+      const repoId = newRepoId();
+      const clientId = documents.add('logout', AGENT);
+      const agent = await started.loginAgent('/github/mcp', clientId, { repo: `verify/r${repoId}`, types: ['ci.run_completed'] });
+      const refresh = agent.tokens.find((t) => t.startsWith('fcr_')) ?? '';
+      const access = agent.tokens.find((t) => t.startsWith('fct_')) ?? '';
+
+      const revoked = await started.request('/oauth/revoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ token: refresh, client_id: clientId }).toString(),
+      });
+      const call = await started.waitForEvents({ repo: `verify/r${repoId}`, types: ['ci.run_completed'], cursor: 0, timeout_s: 1 }, access);
+      const ended = await started.sql(`select ended_at is not null from faucet_user_sessions where client_id = '${clientId}'`);
+      // The purge deletes a login request, and a connection that nothing names, a day after; the test moves both back a day.
+      await started.sql(`update faucet_connections set updated_at = updated_at - interval '1 day 1 minute';
+        update faucet_auth_requests set expires_at = expires_at - interval '1 day 1 minute'`);
+      const purged = await started.cronJob('purge');
+      const left = await started.sql(`select (select count(*) from faucet_user_sessions) || ' ' || (select count(*) from faucet_refresh_tokens)
+        || ' ' || (select count(*) from faucet_connections)`);
+
+      expect(agent.code, agent.stderr).toBe(0);
+      expect(revoked.status, revoked.body).toBe(200);
+      expect(call.status, 'the access token of the ended session').toBe(401);
+      expect(ended, 'the revocation ended the session').toBe('t');
+      expect(purged.status, purged.body).toBe(200);
+      expect(JSON.parse(purged.body)).toMatchObject({ expired_auth_requests: 1, ended_sessions: 1, unused_connections: 1 });
+      expect(left, 'no session, refresh token or connection is left').toBe('0 0 0');
+    }, { browserLogin: true });
+  });
+
+  test("the agent's session keeps working after a refresh, and the replaced refresh token trades again within 30 seconds and ends the session after", async ({
     faucet,
     documents,
   }) => {
@@ -111,18 +146,32 @@ describe('browser login', () => {
       const agent = await started.loginAgent('/github/mcp', clientId, { repo: `verify/r${repoId}`, types: ['ci.run_completed'], refresh: true });
 
       const exchanges = (await started.appLog()).exchanges.slice(before);
-      const ended = await started.sql(`select ended_at is not null from faucet_user_sessions where client_id = '${clientId}'`);
+      const session = `select id from faucet_user_sessions where client_id = '${clientId}'`;
+      const endedInGrace = await started.sql(`select ended_at is not null from faucet_user_sessions where client_id = '${clientId}'`);
       expect(agent.code, agent.stderr).toBe(0);
       expect(agent.refreshed?.isError, JSON.stringify(agent.refreshed?.content)).not.toBe(true);
       expect(agent.refreshed?.structuredContent?.events).toEqual([expect.objectContaining({ type: 'ci.run_completed', repo_id: repoId })]);
       expect(agent.logins, 'the agent went through the consent page once: the refresh worked').toBe(1);
-      expect(agent.tokens.filter((t) => t.startsWith('fct_')).length, 'the refresh gave a new access token').toBe(2);
-      expect(agent.reused).toBe('invalid_grant');
-      expect(exchanges, "faucet's refresh grant also refreshed the GitHub token, which expires within its margin").toEqual([
+      expect(agent.tokens.filter((t) => t.startsWith('fct_')).length, 'the refresh and the reuse each gave a new access token').toBe(3);
+      expect(agent.reused, 'the replaced refresh token came again within 30 seconds of its first use').toBe('issued');
+      expect(exchanges, "each of faucet's refresh grants also refreshed the GitHub token, which expires within its margin").toEqual([
         { grant: 'authorization_code', answer: 'issued' },
         { grant: 'refresh_token', answer: 'issued' },
+        { grant: 'refresh_token', answer: 'issued' },
       ]);
-      expect(ended, 'the replaced refresh token ended the session').toBe('t');
+      expect(endedInGrace, 'the session lives on').toBe('f');
+
+      // A use 30 seconds or more after the first one ends the session. The test moves the first use back instead of waiting.
+      const replaced = agent.tokens.find((t) => t.startsWith('fcr_')) ?? '';
+      await started.sql(`update faucet_refresh_tokens set used_at = used_at - interval '30 seconds' where used_at is not null and session_id in (${session})`);
+      const late = await started.request('/oauth/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: replaced, client_id: clientId }).toString(),
+      });
+      expect(late.status, late.body).toBe(400);
+      expect((JSON.parse(late.body) as Record<string, unknown>).error).toBe('invalid_grant');
+      expect(await started.sql(`select ended_at is not null from faucet_user_sessions where client_id = '${clientId}'`), 'the late reuse ended the session').toBe('t');
     }, { browserLogin: true });
   });
 
