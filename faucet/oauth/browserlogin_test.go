@@ -133,34 +133,48 @@ func TestPurgeDeletesDeadSessionsAndTheConnectionsThatNoneNames(t *testing.T) {
 	require.NoError(t, err, "the connection of the live session")
 }
 
-// A request stays a day past its expiry, so a code that is used again within
-// that day still ends the session it made.
-func TestPurgeDeletesTheAuthRequestsThatExpiredADayAgo(t *testing.T) {
+// A request without a code goes once it expires, since nothing can come of
+// it. A request with a code stays a day past its expiry, so a code that is
+// used again within that day still ends the session it made.
+func TestPurgeDeletesARequestWithoutACodeOnceItExpiredAndOneWithACodeADayAfter(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := newFakeStore()
-	clock := quartz.NewMock(t)
-	server, err := oauth.NewServer(oauth.ServerDeps{Store: store, Clock: clock, Logger: slog.Make(), Issuer: issuer, Resources: []string{resource}})
-	require.NoError(t, err)
-	now := clock.Now()
-	request := func(id string, expires time.Time) oauth.AuthRequest {
+	h := newGrantHarness(t, newFakeStore())
+	h.redeem(h.approve("login-redeemed", 1))
+	now := h.clock.Now()
+	pending := func(id string, expires time.Time) oauth.AuthRequest {
 		return oauth.AuthRequest{
-			ID: id, State: oauth.AuthRequestPending, ClientID: "https://client.example.com/doc.json", RedirectURI: "http://127.0.0.1/cb",
+			ID: id, State: oauth.AuthRequestPending, ClientID: grantClientID, RedirectURI: grantRedirectURI,
 			Resource: resource, Scopes: bothScopes, CodeChallenge: "challenge", BrowserHash: oauth.HashToken("browser " + id),
-			GitHubStateHash: oauth.HashToken("github state " + id), CreatedAt: expires.Add(-10 * time.Minute), ExpiresAt: expires,
+			GitHubStateHash: oauth.HashToken("github state " + id), CreatedAt: now, ExpiresAt: expires,
 		}
 	}
-	old := request("old", now.Add(-24*time.Hour-time.Second))
-	recent := request("recent", now.Add(-23*time.Hour))
-	for _, r := range []oauth.AuthRequest{old, recent} {
-		require.NoError(t, store.ConsentAuthRequest(ctx, r, r.CreatedAt))
+	gone, given, live := pending("gone", now.Add(10*time.Minute)), pending("given-up", now.Add(10*time.Minute)), pending("live", now.Add(time.Hour))
+	for _, r := range []oauth.AuthRequest{gone, given, live} {
+		require.NoError(t, h.store.ConsentAuthRequest(ctx, r, now))
+	}
+	require.NoError(t, h.store.ExpireAuthRequest(ctx, given.ID))
+	stored := func(r oauth.AuthRequest) bool {
+		_, err := h.store.AuthRequestByGitHubState(ctx, r.GitHubStateHash)
+		return err == nil
+	}
+	redeemed := func() bool {
+		_, err := h.store.AuthRequestByGitHubState(ctx, oauth.HashToken("github state login-redeemed"))
+		return err == nil
 	}
 
-	res, err := server.Purge(ctx)
+	h.clock.Advance(10 * time.Minute)
+	res, err := h.server.Purge(ctx)
 	require.NoError(t, err)
-	require.EqualValues(t, 1, res.ExpiredAuthRequests)
-	_, err = store.AuthRequestByGitHubState(ctx, recent.GitHubStateHash)
-	require.NoError(t, err, "the recent request is still there")
-	_, err = store.AuthRequestByGitHubState(ctx, old.GitHubStateHash)
-	require.ErrorIs(t, err, oauth.ErrUnknownAuthRequest, "the old request is gone")
+	require.EqualValues(t, 2, res.ExpiredAuthRequests)
+	require.False(t, stored(gone), "a pending request goes at its expiry")
+	require.False(t, stored(given), "an expired request goes at its expiry")
+	require.True(t, stored(live), "a pending request stays until its expiry")
+	require.True(t, redeemed(), "a request with a code stays")
+
+	h.clock.Advance(24 * time.Hour)
+	res, err = h.server.Purge(ctx)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, res.ExpiredAuthRequests)
+	require.False(t, redeemed(), "a request with a code goes a day after its expiry")
 }
