@@ -439,14 +439,22 @@ func (b *loginBrowser) start(c loginClient) loginConsent {
 	return b.consentOf(page)
 }
 
-func (b *loginBrowser) consentOf(page loginAnswer) loginConsent {
-	b.t.Helper()
+// loginFormOf reads the form of a consent page.
+func loginFormOf(t *testing.T, page loginAnswer) url.Values {
+	t.Helper()
+	require.Equal(t, http.StatusOK, page.status, page.body)
 	form := url.Values{}
 	for _, m := range consentField.FindAllStringSubmatch(page.body, -1) {
 		form.Add(m[1], m[2])
 	}
-	require.Len(b.t, form["request"], 1, page.body)
-	require.Len(b.t, form["token"], 1, page.body)
+	require.Len(t, form["request"], 1, page.body)
+	require.Len(t, form["token"], 1, page.body)
+	return form
+}
+
+func (b *loginBrowser) consentOf(page loginAnswer) loginConsent {
+	b.t.Helper()
+	form := loginFormOf(b.t, page)
 	id := form.Get("request")
 	cookie := b.cookie("__Host-faucet_" + id)
 	require.NotNil(b.t, cookie, "the consent page sets the cookie of its request")
@@ -458,6 +466,20 @@ func (b *loginBrowser) consentOf(page loginAnswer) loginConsent {
 func (b *loginBrowser) continueWith(c loginConsent) loginAnswer {
 	b.t.Helper()
 	return b.post(c.form, []string{b.h.issuer})
+}
+
+// loginRequireCode checks that a sends the browser to c's redirect URI with
+// a code, the client's state and faucet's issuer, and returns the code.
+func (h *loginHarness) loginRequireCode(t *testing.T, a loginAnswer, c loginClient) string {
+	t.Helper()
+	to := a.location(t)
+	require.Equal(t, c.redirectURI, loginEndpoint(to))
+	q := to.Query()
+	require.NotEmpty(t, q.Get("code"))
+	require.Equal(t, "agent-state-"+c.path, q.Get("state"))
+	require.Equal(t, h.issuer, q.Get("iss"))
+	require.Len(t, q, 3, "the redirect holds the code, the state and the issuer")
+	return q.Get("code")
 }
 
 // R1: the attacker's server starts a login for the attacker's client, and a
@@ -525,5 +547,33 @@ func TestAConsentThatTheBrowserOfTheLoginDidNotSendIsRefusedAndEndsTheLogin(t *t
 			require.Equal(t, http.StatusSeeOther, untouched.status, "the browser's other login still goes to GitHub")
 			require.Equal(t, h.github.URL+"/login/oauth/authorize", loginEndpoint(untouched.location(t)))
 		})
+	}
+}
+
+// R7: two logins in one browser, interleaved at every step, each reach
+// their own client with their own code and state.
+func TestTwoLoginsInOneBrowserEachReachTheirOwnClient(t *testing.T) {
+	t.Parallel()
+	h := newLoginHarness(t)
+	first, second := h.newClient("first", nil), h.newClient("second", nil)
+	b := h.newBrowser(t)
+
+	firstForm, secondForm := loginFormOf(t, b.authorize(h.request(first))), loginFormOf(t, b.authorize(h.request(second)))
+	secondToGitHub := b.post(secondForm, []string{h.issuer})
+	firstToGitHub := b.post(firstForm, []string{h.issuer})
+	secondBack := b.get(secondToGitHub.location(t).String())
+	firstBack := b.get(firstToGitHub.location(t).String())
+	firstToClient := b.get(firstBack.location(t).String())
+	secondToClient := b.get(secondBack.location(t).String())
+
+	firstCode := h.loginRequireCode(t, firstToClient, first)
+	secondCode := h.loginRequireCode(t, secondToClient, second)
+	require.NotEqual(t, firstCode, secondCode)
+	require.Equal(t, http.StatusOK, b.get(firstToClient.location(t).String()).status)
+	require.Equal(t, []string{firstToClient.location(t).RawQuery}, h.agents.received(first.path))
+	for id, code := range map[string]string{firstForm.Get("request"): firstCode, secondForm.Get("request"): secondCode} {
+		stored := loginStoredRequest(t, h.store, id)
+		require.Equal(t, oauth.AuthRequestApproved, stored.State)
+		require.Equal(t, oauth.HashToken(code), stored.CodeHash)
 	}
 }
