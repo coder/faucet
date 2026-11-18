@@ -103,8 +103,10 @@ func TestFaucetRefusesARuleForGitHubActionsOrGitLab(t *testing.T) {
 	}{
 		"https://token.actions.githubusercontent.com":               {github, "token.actions.githubusercontent.com"},
 		"https://token.actions.githubusercontent.com/octo-business": {github, "token.actions.githubusercontent.com"},
-		"https://gitlab.com": {gitlab, "gitlab.com"},
-		"https://GitLab.com": {gitlab, "gitlab.com"},
+		"https://token.actions.octo-corp.ghe.com":                   {github, "token.actions.octo-corp.ghe.com"},
+		"https://Token.Actions.Octo-Corp.GHE.com.":                  {github, "token.actions.octo-corp.ghe.com"},
+		"https://gitlab.com":                                        {gitlab, "gitlab.com"},
+		"https://GitLab.com":                                        {gitlab, "gitlab.com"},
 	} {
 		for _, claims := range []map[string]string{c.pins, {"sub": "repo:octo-org/octo-repo:ref:refs/heads/main"}} {
 			err := oauth.ValidateTrustRule(oauth.TrustRule{Issuer: issuer, Claims: claims})

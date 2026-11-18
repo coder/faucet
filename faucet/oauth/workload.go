@@ -75,7 +75,7 @@ var issuerProfiles = map[string]issuerProfile{
 			{claim: "environment", value: "production", why: "a preview deployment runs any branch, and a development token sits on a laptop for 12 hours"},
 		},
 	},
-	"token.actions.githubusercontent.com": {issuer: notYet("token.actions.githubusercontent.com", "no test has logged in with one, and a rule would have to pin repository_owner_id, repository_id, ref, event_name and job_workflow_ref, as ref alone also matches a pull_request_target or workflow_run run that a fork's pull request starts")},
+	"token.actions.githubusercontent.com": {issuer: notYet("token.actions.githubusercontent.com", githubActionsPins)},
 	"gitlab.com":                          {issuer: notYet("gitlab.com", "no test has logged in with one, and a rule would have to pin namespace_id, project_id and ref_protected=true")},
 }
 
@@ -92,6 +92,8 @@ var unpinnableClaims = map[string]string{
 var otherIssuers = issuerProfile{
 	pins: []requiredPin{{claim: "sub", why: "every workload of the issuer can get a token for faucet, and sub names one of them"}},
 }
+
+const githubActionsPins = "no test has logged in with one, and a rule would have to pin repository_owner_id, repository_id, ref, event_name and job_workflow_ref, as ref alone also matches a pull_request_target or workflow_run run that a fork's pull request starts"
 
 func notYet(host, why string) func(string) error {
 	return func(string) error {
@@ -114,8 +116,14 @@ func vercelTeamIssuer(issuer string) error {
 }
 
 func profileOf(u *url.URL) issuerProfile {
-	if p, ok := issuerProfiles[strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")]; ok {
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if p, ok := issuerProfiles[host]; ok {
 		return p
+	}
+	// GitHub Enterprise Cloud with data residency issues tokens as
+	// https://token.actions.<subdomain>.ghe.com.
+	if sub, ok := strings.CutPrefix(host, "token.actions."); ok && strings.HasSuffix(sub, ".ghe.com") && sub != ".ghe.com" {
+		return issuerProfile{issuer: notYet(host, githubActionsPins)}
 	}
 	return otherIssuers
 }

@@ -115,7 +115,7 @@ Each issuer that faucet knows needs more pins than `sub`, because all of its ten
 | `https://oidc.vercel.com/<team slug>` | `owner_id`, `project_id`, and `environment=production`. Faucet never trusts `https://oidc.vercel.com`, the issuer that every team shares. |
 | Any other, such as a Kubernetes cluster | `sub` |
 
-Faucet refuses a rule for GitHub Actions (`https://token.actions.githubusercontent.com`) or `https://gitlab.com` for now, as no test has logged in with their tokens yet.
+Faucet refuses a rule for GitHub Actions on github.com (`https://token.actions.githubusercontent.com`) or on GitHub Enterprise Cloud with data residency (`https://token.actions.<subdomain>.ghe.com`), or for `https://gitlab.com`, for now, as no test has logged in with their tokens yet. GitHub Enterprise Server and self-managed GitLab issue tokens under their own hosts, so faucet checks a rule for them as any other issuer, with only `sub` required. They are not a supported target: their `sub` alone can match a run that a fork's pull request starts.
 
 ### What faucet checks
 
