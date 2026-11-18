@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/internal/githubapi"
 	"github.com/coder/faucet/faucet/oauth"
 )
 
@@ -750,6 +751,28 @@ func TestARecheckRefreshesAGitHubTokenThatGitHubRejects(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A name that only its lower case makes valid, as the Kelvin sign folds to
+// k, is no repository name: the check refuses it as written, asks GitHub
+// nothing and stores nothing.
+func TestACheckRefusesANameThatOnlyItsLowerCaseMakesValid(t *testing.T) {
+	t.Parallel()
+	h := newGrantHarness(t, newFakeStore())
+	p := h.principal(h.redeem(h.approve("login-1", 1)))
+	access := h.userAccess()
+	const kelvin = "o/\u212Ax"
+	_, _, refused := githubapi.ParseRepo(kelvin)
+	require.Error(t, refused)
+	_, _, err := githubapi.ParseRepo(strings.ToLower(kelvin))
+	require.NoError(t, err, "the lower case of the name is valid")
+
+	for name, check := range map[string]func(oauth.UserAccess, faucet.Principal, string) accessAnswer{"RepoID": h.repoID, "RepoIDFresh": h.repoIDFresh} {
+		got := check(access, p, kelvin)
+		require.EqualError(t, got.err, refused.Error(), name)
+		require.Empty(t, got.asked, name)
+	}
+	require.Empty(t, h.checkedRepos(1))
 }
 
 // A lookup that GitHub fails is neither a pass nor a denial. The refresh

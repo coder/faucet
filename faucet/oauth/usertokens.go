@@ -9,6 +9,7 @@ import (
 
 	"cdr.dev/slog/v3"
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/internal/githubapi"
 	"github.com/coder/quartz"
 )
 
@@ -231,14 +232,19 @@ func NewUserAccess(d UserAccessDeps) (UserAccess, error) {
 // user's GitHub token, refreshed first when it expires within a minute.
 // When GitHub rejects the token, it refreshes the token once and asks once
 // more. A pass becomes the connection's check of the repository. A denial
-// deletes the check, and so does a token that GitHub rejects even after the
-// refresh. A principal that is not an OAuth user is faucet.ErrNoAccess.
+// takes the check away, and so does a token that GitHub rejects even after
+// the refresh. A principal that is not an OAuth user is faucet.ErrNoAccess, and
+// repo must be owner/name as the caller wrote it, before any change of case.
 func (a UserAccess) RepoIDFresh(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
+	repo, err := userRepo(repo)
+	if err != nil {
+		return 0, err
+	}
 	session, err := userSession(p)
 	if err != nil {
 		return 0, err
 	}
-	return a.access.ask(ctx, session, strings.ToLower(repo))
+	return a.access.ask(ctx, session, repo)
 }
 
 // RepoID implements faucet.Authorizer. A check of repo by the user's
@@ -246,11 +252,14 @@ func (a UserAccess) RepoIDFresh(ctx context.Context, p faucet.Principal, repo st
 // session answers, and counts as a use. Otherwise it asks GitHub, as
 // RepoIDFresh does.
 func (a UserAccess) RepoID(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
+	repo, err := userRepo(repo)
+	if err != nil {
+		return 0, err
+	}
 	session, err := userSession(p)
 	if err != nil {
 		return 0, err
 	}
-	repo = strings.ToLower(repo)
 	now := a.access.tokens.clock.Now()
 	id, ok, err := a.access.tokens.store.FreshAccessCheck(ctx, session.SessionID, repo, now, now.Add(-accessCheckUseStep))
 	switch {
@@ -260,6 +269,16 @@ func (a UserAccess) RepoID(ctx context.Context, p faucet.Principal, repo string)
 		return id, nil
 	}
 	return a.access.ask(ctx, session, repo)
+}
+
+// userRepo returns repo, owner/name as the caller wrote it, in lower case,
+// once it is a repository name as written. Lower case alone can make a name
+// valid, as the Kelvin sign folds to k.
+func userRepo(repo string) (string, error) {
+	if _, _, err := githubapi.ParseRepo(repo); err != nil {
+		return "", err
+	}
+	return strings.ToLower(repo), nil
 }
 
 // userSession returns the session of p. A principal that is not an OAuth
