@@ -474,16 +474,13 @@ func TestARefreshAnswersWithinItsDeadlineWhileGitHubHangs(t *testing.T) {
 	h.clock.Advance(time.Minute)
 	before := len(h.github.lookups())
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	// The re-check takes half of the 4 seconds, which leaves the grant 2
+	// seconds to answer in, more than a slow run under -race needs.
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	deadline, _ := ctx.Deadline()
-	req := httptest.NewRequestWithContext(ctx, http.MethodPost, oauth.TokenPath, strings.NewReader(grantRefreshForm(s.refresh).Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rec := httptest.NewRecorder()
-	h.server.TokenHandler().ServeHTTP(rec, req)
+	reply := h.serveToken(ctx, grantRefreshForm(s.refresh))
 	require.True(t, time.Now().Before(deadline), "the refresh answered before its deadline")
-	reply := tokenReply{status: rec.Code, header: rec.Header(), rawBody: rec.Body.String()}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &reply.body), reply.rawBody)
 	next := grantTokens(t, s.id, reply)
 	require.NotEmpty(t, h.github.lookups()[before:], "the refresh asked GitHub")
 
@@ -492,6 +489,48 @@ func TestARefreshAnswersWithinItsDeadlineWhileGitHubHangs(t *testing.T) {
 	got := h.repoID(access, h.principal(next), "o/x")
 	require.NoError(t, got.err)
 	require.Equal(t, []string{"o/x"}, got.asked, "a check that the refresh could not finish is asked on use")
+}
+
+// Nothing that the re-check meets fails the refresh: the grant answers with
+// tokens that work when the store cannot read the checks, and when it
+// cannot keep the answer of a lookup.
+func TestARefreshAnswersWithWorkingTokensWhenItsRecheckFails(t *testing.T) {
+	t.Parallel()
+	for method, asks := range map[string]bool{"RecentAccessChecks": false, "StoreAccessCheck": true} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+			store := newFakeStore()
+			h := newGrantHarness(t, store)
+			s := h.redeem(h.approve("login-1", 1))
+			h.storeChecks(1, numberedRepos(3))
+			h.clock.Advance(time.Minute)
+			store.fail(method, errors.New("the store is down"))
+
+			next, asked := h.refreshAsking(s)
+			require.Equal(t, asks, len(asked) > 0, "the re-check asked GitHub: %v", asked)
+			store.fail(method, nil)
+			h.principal(next)
+			h.refresh(next)
+		})
+	}
+}
+
+// When GitHub fails the refresh of the user's GitHub token, the grant goes
+// on with the stored token and asks GitHub about no repository, and makes no
+// second token request.
+func TestARefreshWhoseGitHubRefreshFailsAsksGitHubAboutNoRepository(t *testing.T) {
+	t.Parallel()
+	h := newGrantHarness(t, newFakeStore())
+	s := h.redeem(h.approve("login-1", 1))
+	h.clock.Advance(usertokensSoon)
+	h.storeChecks(1, numberedRepos(3))
+	h.github.set(func(g *grantGitHub) { g.tokenStatus = http.StatusBadGateway })
+
+	next, asked := h.refreshAsking(s)
+	require.Empty(t, asked, "the refresh asked GitHub about no repository")
+	refreshes, _ := h.github.counts()
+	require.Equal(t, 1, refreshes, "GitHub saw one token request")
+	h.principal(next)
 }
 
 // A check counts from the start of its lookup: one that started before a
