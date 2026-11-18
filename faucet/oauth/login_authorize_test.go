@@ -1,8 +1,11 @@
 package oauth_test
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -42,10 +45,29 @@ func loginRequirePage(t *testing.T, a loginAnswer) {
 func loginRequireHeaders(t *testing.T, a loginAnswer) {
 	t.Helper()
 	require.Equal(t, "no-store", a.header.Get("Cache-Control"))
-	require.Equal(t, "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'", a.header.Get("Content-Security-Policy"))
+	csp := loginCSP(t, a)
+	require.Regexp(t, `^'sha256-[A-Za-z0-9+/]{43}='$`, strings.Join(csp["script-src"], " "), "one script may run, named by its hash")
+	delete(csp, "script-src")
+	require.Equal(t, map[string][]string{
+		"default-src": {"'none'"}, "style-src": {"'unsafe-inline'"}, "frame-ancestors": {"'none'"}, "base-uri": {"'none'"},
+	}, csp)
 	require.Equal(t, "DENY", a.header.Get("X-Frame-Options"))
 	require.Equal(t, "same-origin", a.header.Get("Referrer-Policy"))
 	require.Equal(t, "nosniff", a.header.Get("X-Content-Type-Options"))
+}
+
+// loginCSP returns the directives of the Content-Security-Policy of a, each
+// with its sources.
+func loginCSP(t *testing.T, a loginAnswer) map[string][]string {
+	t.Helper()
+	csp := map[string][]string{}
+	for _, directive := range strings.Split(a.header.Get("Content-Security-Policy"), ";") {
+		fields := strings.Fields(directive)
+		require.NotEmpty(t, fields, "the policy has an empty directive")
+		require.NotContains(t, csp, fields[0], "the policy names a directive twice")
+		csp[fields[0]] = fields[1:]
+	}
+	return csp
 }
 
 // loginSetCookie returns the cookie named name that a sets, or nil.
@@ -174,8 +196,6 @@ func TestTheConsentPageSaysWhoAsksForWhatAndWhereTheBrowserReturns(t *testing.T)
 	require.Contains(t, page.body, "returns to</dt>\n<dd><code>"+client.redirectURI+"</code>")
 	require.Contains(t, page.body, "faucet keeps the GitHub token that it gets there for you, sealed, and gives this app only its own faucet token")
 	require.Contains(t, page.body, `<form method="post" action="/oauth/authorize">`)
-	require.Equal(t, 1, strings.Count(page.body, "<button"))
-	require.Contains(t, page.body, `<button type="submit">Continue with GitHub</button>`)
 
 	consent := b.consentOf(page)
 	cookie := loginSetCookie(t, page, "__Host-faucet_"+consent.id)
@@ -195,6 +215,30 @@ func TestTheConsentPageSaysWhoAsksForWhatAndWhereTheBrowserReturns(t *testing.T)
 		CodeChallenge: loginS256("agent-verifier-/cb/agent"), BrowserHash: oauth.HashToken(cookie.Value),
 		CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
 	}, stored)
+}
+
+var inlineScript = regexp.MustCompile(`(?s)<script>(.*?)</script>`)
+
+// GitHub asks nothing of a user who authorized faucet's App before, so a
+// click on Continue is all that a login needs. A page of another site can
+// open the consent page under a click that the user meant for that page,
+// such as the second click of a double-click. Continue starts disabled, and
+// the one script that the policy lets run turns it on.
+func TestContinueStartsDisabledAndOnlyThePagesOwnScriptMayRun(t *testing.T) {
+	t.Parallel()
+	h := newLoginHarness(t)
+	page := h.newBrowser(t).authorize(h.request(h.newClient("agent", nil)))
+	require.Equal(t, http.StatusOK, page.status, page.body)
+	require.Equal(t, 1, strings.Count(page.body, "<button"))
+	require.Contains(t, page.body, `<button type="submit" disabled>Continue with GitHub</button>`)
+	require.Regexp(t, `(?s)<noscript>.*JavaScript.*</noscript>`, page.body, "a browser without JavaScript says why Continue stays off")
+
+	scripts := inlineScript.FindAllStringSubmatch(page.body, -1)
+	require.Len(t, scripts, 1, "the page has one inline script")
+	require.Equal(t, 1, strings.Count(page.body, "<script"), "and no script of another form")
+	sum := sha256.Sum256([]byte(scripts[0][1]))
+	require.Equal(t, []string{"'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"}, loginCSP(t, page)["script-src"],
+		"the policy lets that script run, and no other")
 }
 
 func TestTheConsentPageOfAClientWithoutANameSaysSo(t *testing.T) {
@@ -217,7 +261,7 @@ func TestTheConsentPageEscapesWhatTheClientWrites(t *testing.T) {
 	page := h.newBrowser(t).authorize(q)
 	require.Equal(t, http.StatusOK, page.status, page.body)
 	require.NotContains(t, page.body, "<img")
-	require.NotContains(t, page.body, "<script")
+	require.NotContains(t, page.body, "<script>alert(2)")
 	require.Contains(t, page.body, "&lt;img src=x onerror=&#34;alert(1)&#34;&gt;")
 }
 

@@ -29,6 +29,10 @@ function authorizationPath(started: Faucet, clientId: string, redirectUri: strin
   })}`;
 }
 
+// ContinueTimes is what the page records about its Continue button: whether it was disabled when the page had loaded, and the
+// times of performance.now() when it appeared and when it was first enabled.
+type ContinueTimes = { disabledAtLoad?: boolean; added?: number; enabled?: number };
+
 // githubLogins are the requests to the stub's authorize page that send the browser back to the callback of started.
 function githubLogins(requests: StubRequest[], started: Faucet): StubRequest[] {
   const callback = `${started.baseUrl}/oauth/github/callback`;
@@ -137,10 +141,28 @@ describe('browser login', () => {
       const state = randomBytes(16).toString('hex');
       const verifier = randomBytes(32).toString('base64url');
 
+      await browser.addInitScript(() => {
+        const times: ContinueTimes = {};
+        (globalThis as unknown as { continueTimes: ContinueTimes }).continueTimes = times;
+        new MutationObserver(() => {
+          const button = document.querySelector('button');
+          if (button === null) return;
+          times.added ??= performance.now();
+          if (!button.disabled) times.enabled ??= performance.now();
+        }).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['disabled'] });
+        addEventListener('load', () => { times.disabledAtLoad = document.querySelector('button')?.disabled; });
+      });
+
       await browser.goto(`${started.baseUrl}${authorizationPath(started, clientId, redirectUri, state, verifier)}`);
       await expect(screen.getByRole('heading', { name: new URL(clientId).host })).toBeVisible();
       await expect(screen.getByText('Coding Agent', { exact: true })).toBeVisible();
-      await screen.getByRole('button', { name: 'Continue with GitHub' }).click();
+      const continueButton = screen.getByRole('button', { name: 'Continue with GitHub' });
+      await expect(continueButton).toBeEnabled();
+      const times = await browser.evaluate(() => {
+        const { disabledAtLoad, added, enabled } = (globalThis as unknown as { continueTimes: ContinueTimes }).continueTimes;
+        return { disabledAtLoad: disabledAtLoad ?? null, waited: added === undefined || enabled === undefined ? null : enabled - added };
+      });
+      await continueButton.click();
       await browser.waitForURL(new RegExp(`^${redirectUri}\\?`));
 
       const landed = new URL(await browser.url());
@@ -152,6 +174,8 @@ describe('browser login', () => {
         }).toString(),
       });
       const answer = JSON.parse(redeemed.body) as Record<string, unknown>;
+      expect(times.disabledAtLoad, 'Continue is off when the page has loaded').toBe(true);
+      expect(times.waited, 'Continue turns on about 500 ms after it appears in a visible, focused page').toBeGreaterThanOrEqual(490);
       expect(landed.searchParams.get('state')).toBe(state);
       expect(landed.searchParams.get('iss')).toBe(started.baseUrl);
       expect(landed.searchParams.get('code')).toMatch(/^[A-Za-z0-9_-]{43}$/);
