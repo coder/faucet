@@ -1,22 +1,52 @@
 # Security model
 
+## Three kinds of caller
+
+Faucet returns events only for repositories that the caller may read. A caller of `/github/mcp` is one of three kinds:
+
+| Caller | Its bearer token | Who decides what it may read | GitHub token that faucet keeps for it |
+| --- | --- | --- | --- |
+| A pasted GitHub token | The caller's GitHub token | GitHub, asked with that token | None. The token lives only for the request. |
+| A [browser login](browser-login.md) | A faucet access token | GitHub, asked with the user's GitHub App token | The user's access token and refresh token, sealed |
+| A [service](service-accounts.md) | A faucet access token | The operator's grants. Faucet asks GitHub nothing. | None |
+
+For a pasted token and for a service, faucet holds no GitHub token of the caller. For a browser login, faucet keeps the user's GitHub App token, sealed with AES-256-GCM under `FAUCET_TOKEN_KEY`, and gives the client its own short-lived token. The client never sees the GitHub token. Whoever holds both faucet's database and `FAUCET_TOKEN_KEY` can open those tokens and act as each of those users within the App's permissions, and with the App's client secret can also refresh them. That is why the App gets read-only permissions.
+
 ## Access to events
 
-Faucet reads events for a caller with the caller's own GitHub token, or, for a service, from the grants that an operator gave it (see [service-accounts.md](service-accounts.md)). Its only GitHub token, `FAUCET_HOOK_TOKEN`, serves redelivery and nothing else (see [Secrets](#secrets)). Every `/github/mcp` request carries the caller's GitHub token as `Authorization: Bearer <token>`. Faucet checks it with `GET /user`, then checks that the same token can read the repository with `GET /repos/{owner}/{name}`. The token lives only for that request, and faucet sends it only to `FAUCET_GITHUB_API_URL`. A repository the token can't read gives the same `Forbidden` error as one that doesn't exist.
+Every `/github/mcp` request carries its bearer token as `Authorization: Bearer <token>`. A bearer that starts with `fct_`, `fcr_` or `fcs_` is a faucet token. Faucet checks it itself and never sends it to GitHub. Faucet mints access tokens for service clients and for the sessions of browser logins, each valid for 15 minutes on the one endpoint it was issued for, and every other faucet token is 401.
 
-To save GitHub rate limit, faucet remembers a successful check for 60 seconds per token and repository. The cache is keyed by the SHA-256 of the token, never the token itself. Failed checks aren't cached, so a new grant works at once. The flip side is that **a revocation can take up to 60 seconds to reach** `events/poll` and the start of a wait. A wait that starts in that window can run for up to 50 more seconds. `events/subscribe` always checks fresh.
+Any other bearer is a GitHub token. Faucet checks it with `GET /user`, then checks that the same token can read the repository with `GET /repos/{owner}/{name}`. The token lives only for that request, and faucet sends it only to `FAUCET_GITHUB_API_URL`. A repository the token can't read gives the same `Forbidden` error as one that doesn't exist.
+
+For a GitHub token, faucet remembers a successful check for 60 seconds per token and repository, to save GitHub rate limit. The cache is keyed by the SHA-256 of the token, never the token itself. Failed checks aren't cached, so a new grant works at once. So **a revocation can take up to 60 seconds to reach** `events/poll` and the start of a wait. A wait that starts in that window can run for up to 50 more seconds. `events/subscribe` always checks fresh.
+
+A browser login is checked with the same `GET /repos/{owner}/{name}`, sent with the GitHub token that faucet keeps for the user. Faucet refreshes that token first when it is about to expire. When GitHub rejects it, faucet refreshes it once and asks again. Faucet remembers none of these checks, so a lost grant counts at the next check, and every check spends one request of the user's GitHub rate limit.
 
 A GitHub rate-limit answer counts as a failed check that the caller can retry, not as a denial.
-
-A bearer that starts with `fct_`, `fcr_` or `fcs_` is a faucet token: faucet checks it itself and never sends it to GitHub. Faucet mints access tokens for service clients only, each valid on the one endpoint it was issued for, and every other faucet token is 401.
 
 One login can hold 10 waits open at once per process. Embedders can change that with `Deps.MaxWaitsPerLogin`.
 
 ## Principals and scopes
 
-A host that embeds faucet tells it who calls. Its `PrincipalFrom` returns a `Principal` from `NewPrincipal` (a caller with a GitHub token, which holds every scope), `NewOAuthUser` or `NewService`. The wait tool and `events/poll` need `events:read`, `events/subscribe` and `events/unsubscribe` need `events:subscribe`, and `events/list` needs none. A `Principal` built by hand, or one whose `Login` changed after a constructor built it, is no kind of caller: every method but `events/list` answers it `authentication required`.
+A host that embeds faucet tells it who calls. Its `PrincipalFrom` returns a `Principal` from `NewPrincipal` (a caller with a GitHub token, which holds every scope), `NewOAuthUser` (a user of a browser login) or `NewService` (a service). The wait tool and `events/poll` need `events:read`, `events/subscribe` and `events/unsubscribe` need `events:subscribe`, and `events/list` needs none. A `Principal` built by hand, or one whose `Login` changed after a constructor built it, is no kind of caller: every method but `events/list` answers it `authentication required`.
 
 An `Authorizer` answers `RepoID`, which may remember, and `RepoIDFresh`, which every renewal calls and which must ask again. One that sends each kind of principal to another `Authorizer` passes both calls on. `TokenAuthorizer` answers a caller without a GitHub token with `ErrNoAccess` and asks GitHub nothing.
+
+## The browser login
+
+These checks keep another site, another browser and another client from finishing a user's login:
+
+- **Another site cannot press Continue.** The consent page sets a cookie for its own login, and its form carries a token derived from that cookie. Faucet goes on only when the post carries the cookie, the matching form token and an `Origin` that equals `FAUCET_PUBLIC_URL`. Any other post ends the login, so a page of another site that posts the form makes nothing, and the user must start again.
+- **Each login has its own cookies.** Their names end with the login's ID, so two logins in one browser do not mix. They are `__Host-` cookies, which only faucet's own origin can set, over `https`.
+- **GitHub's answer counts only in the browser that pressed Continue.** The state that faucet sends to GitHub, and the PKCE verifier of faucet's own exchange with GitHub, both derive from a random value in a second cookie. A callback in another browser is refused.
+- **Faucet redirects to a client only at the end.** `/oauth/authorize` answers every error with a page and never with a redirect, because nothing proves yet that the browser is the user's. Only the callback redirects to a client, and the redirect names faucet in `iss` (RFC 9207).
+- **A code works once, for 60 seconds.** A code that comes back after its redemption ends the session that it made.
+- **PKCE runs both ways.** A client must send an S256 challenge and redeem its code with the verifier. Faucet uses PKCE with GitHub too.
+- **Refresh tokens rotate.** Each refresh gives a new refresh token. A refresh token that comes back after a refresh replaced it ends its session, because the token then has two holders.
+- **Client documents come through the guarded client** of [callback URLs](#callback-urls): `https` and public addresses only, and no redirects. A fetch must end within 3 seconds, and the document must be 5 KiB at most. A document that holds a client secret is refused, because anyone can read it.
+- **The consent page shows the host, not the name.** The host of the client ID is the large text, and the name that the document gives is marked as unchecked, because anyone can write any name in a document. The host must be ASCII, with an internationalized name in its `xn--` form, and the name may hold no control or format character, so that neither can pass for another.
+- **Redirect URIs match exactly.** A request's redirect URI must equal one of the document's byte for byte, and a loopback `http` one may differ in its port only (RFC 8252). The token request must name the same redirect URI. Schemes that a browser runs, such as `javascript`, are refused.
+- **The pages load nothing and run no script,** and no other site can frame them.
 
 ## Callback URLs
 
@@ -33,7 +63,10 @@ A binary built with `-tags faucet_e2e` lets the guarded client reach loopback ov
 ## Secrets
 
 - **Subscriber secrets** are sealed with AES-256-GCM under `FAUCET_WEBHOOK_KEY`, and never returned or logged.
+- **The GitHub tokens of browser logins** are sealed with AES-256-GCM under `FAUCET_TOKEN_KEY`, and never returned or logged. A sealed token names its user and its field in the data that the seal covers, so a token copied to another row or field does not open. Faucet sends the access token only to `FAUCET_GITHUB_API_URL`, and the refresh token only to GitHub's token endpoint at `FAUCET_GITHUB_URL`, and follows no redirect. A token that does not open fails its user's checks and ends no session (see [rotating the key](browser-login.md#rotate-the-token-key)).
+- **`FAUCET_GITHUB_APP_CLIENT_SECRET`** goes only to GitHub's token endpoint, with a user's code or refresh token. Keep it in production only.
 - **`CRON_SECRET`** guards the `/cron/*` routes. With it unset, they answer 503 and run nothing.
-- **Client secrets** of service clients are shown once, when an operator makes the client, and kept only as SHA-256 hashes. So are the access tokens that faucet issues to them, and `/cron/purge` deletes each one once it expires.
-- **`FAUCET_HOOK_TOKEN`** is the one GitHub credential that faucet holds. GitHub offers no grant narrower than one that can also edit or delete the hook, so give it to a machine user and keep it in production only. Faucet uses it for exactly two endpoints: listing a hook's deliveries and asking for a redelivery.
+- **Client secrets** of service clients are shown once, when an operator makes the client, and kept only as SHA-256 hashes.
+- **Faucet's own tokens** are kept only as SHA-256 hashes too: access tokens, refresh tokens, codes, and the cookie values and GitHub state of a login in progress. `/cron/purge` deletes each access token once it expires.
+- **`FAUCET_HOOK_TOKEN`** is the only GitHub token that faucet holds for itself. GitHub offers no grant narrower than one that can also edit or delete the hook, so give it to a machine user and keep it in production only. Faucet uses it for exactly two endpoints: listing a hook's deliveries and asking for a redelivery.
 - Startup errors name a bad variable but never its value.
