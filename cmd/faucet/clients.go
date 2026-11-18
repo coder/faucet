@@ -315,7 +315,16 @@ func trustClient(ctx context.Context, id string, args []string, store oauth.Stor
 	issuer := flags.String("issuer", "", "the issuer of the workload's tokens, as their iss names it, such as https://oidc.vercel.com/<team>")
 	claims := claimFlags{}
 	flags.Var(claims, "claim", "a claim that a token must hold, as <name>=<value>; repeat it for more")
-	jwksFile := flags.String("jwks-file", "", "a file that holds the issuer's JWK Set, for an issuer that faucet cannot reach; without it, faucet fetches the keys that the issuer's discovery document names")
+	var jwksFile string
+	flags.Func("jwks-file", "a file that holds the issuer's JWK Set, for an issuer that faucet cannot reach; without it, faucet fetches the keys that the issuer's discovery document names", func(path string) error {
+		// A shell passes an empty path for an unset variable, and no path
+		// means discovery.
+		if path == "" {
+			return xerrors.New("it names no file: leave -jwks-file out for the keys that the issuer's discovery document names")
+		}
+		jwksFile = path
+		return nil
+	})
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -326,13 +335,13 @@ func trustClient(ctx context.Context, id string, args []string, store oauth.Stor
 		return err
 	}
 	rule := oauth.TrustRule{Issuer: *issuer, Claims: claims}
-	if *jwksFile != "" {
-		jwks, err := os.ReadFile(*jwksFile)
+	if jwksFile != "" {
+		jwks, err := os.ReadFile(jwksFile)
 		switch {
 		case err != nil:
 			return xerrors.Errorf("-jwks-file: %w", err)
 		case len(jwks) == 0:
-			return xerrors.Errorf("-jwks-file %s is empty", *jwksFile)
+			return xerrors.Errorf("-jwks-file %s is empty", jwksFile)
 		}
 		rule.JWKS = jwks
 	}

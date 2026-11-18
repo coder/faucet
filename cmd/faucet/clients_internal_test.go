@@ -449,6 +449,7 @@ func TestTheClientsCommandRefusesATrustRuleThatCannotWork(t *testing.T) {
 		"an aud pin":            {cluster("-claim", "aud=https://faucet.example.com"), "a trust rule cannot pin aud"},
 		"a key set of no file":  {cluster("-jwks-file", filepath.Join(dir, "missing.json")), "-jwks-file: "},
 		"an empty key set":      {cluster("-jwks-file", empty), "-jwks-file " + empty + " is empty"},
+		"a key set of no path":  {cluster("-jwks-file", ""), `invalid value "" for flag -jwks-file: it names no file`},
 		"a private key":         {cluster("-jwks-file", private), "a trust rule's JWKS must hold no private key"},
 		"an unknown client":     {[]string{"trust", "nobody", "-issuer", clusterIssuer, "-claim", "sub=" + clusterAccount}, `there is no client "nobody"`},
 		"a disabled client":     {[]string{"trust", "retired", "-issuer", clusterIssuer, "-claim", "sub=" + clusterAccount}, `client "retired" is disabled, so no workload can act as it`},
