@@ -57,6 +57,8 @@ type githubStub struct {
 	auth       []string
 	userErr    int
 	userHeader http.Header
+	// revoked makes GitHub deny alice o/r.
+	revoked bool
 }
 
 // newGitHubStub knows alice and bob. Alice can read o/r and nobody can see
@@ -68,7 +70,7 @@ func newGitHubStub(t *testing.T) *githubStub {
 		stub.mu.Lock()
 		stub.requests = append(stub.requests, r.URL.Path)
 		stub.auth = append(stub.auth, r.Header.Get("Authorization"))
-		userErr, userHeader := stub.userErr, stub.userHeader
+		userErr, userHeader, revoked := stub.userErr, stub.userHeader, stub.revoked
 		stub.mu.Unlock()
 
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -83,7 +85,7 @@ func newGitHubStub(t *testing.T) *githubStub {
 			w.WriteHeader(http.StatusUnauthorized)
 		case r.URL.Path == "/user":
 			_, _ = fmt.Fprintf(w, `{"login": %q}`, login)
-		case r.URL.Path == "/repos/o/r" && login == "alice":
+		case r.URL.Path == "/repos/o/r" && login == "alice" && !revoked:
 			_, _ = fmt.Fprint(w, `{"id": 42}`)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -125,10 +127,6 @@ func (s *stubStore) pollCount() int {
 	return s.polls
 }
 
-// mcpPaths are the paths of the GitHub events MCP endpoint: /github/mcp, and
-// /mcp, its alias for one release.
-var mcpPaths = []string{"/github/mcp", "/mcp"}
-
 type testServer struct {
 	*httptest.Server
 	github *githubStub
@@ -158,7 +156,7 @@ func newTestServer(t *testing.T, configure ...func(*httptest.Server)) *testServe
 	})
 	require.NoError(t, err)
 
-	srv := httptest.NewUnstartedServer(newRouter(svc, bearers{github: authz}, cronRoutes{}, logger))
+	srv := httptest.NewUnstartedServer(newRouter(svc, bearers{github: authz}, nil, cronRoutes{}, logger))
 	for _, c := range configure {
 		c(srv)
 	}

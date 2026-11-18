@@ -37,6 +37,7 @@ interface RunState {
   webhookKey: string;
   binary: string;
   e2eBinary: string;
+  agentBinary: string;
   cron: CronState;
   receiver: ReceiverState;
 }
@@ -214,7 +215,7 @@ function readReceiverState(value: unknown): ReceiverState {
 function readState(baseUrl: string): RunState {
   const port = Number(new URL(baseUrl).port);
   const state: unknown = JSON.parse(readFileSync(stateFile(port), 'utf8'));
-  const { dbHost, dbPort, psql, secret, githubToken, otherToken, webhookKey, binary, e2eBinary, cron, receiver } = state as Partial<RunState>;
+  const { dbHost, dbPort, psql, secret, githubToken, otherToken, webhookKey, binary, e2eBinary, agentBinary, cron, receiver } = state as Partial<RunState>;
   if (
     typeof dbHost !== 'string' ||
     typeof dbPort !== 'number' ||
@@ -224,11 +225,15 @@ function readState(baseUrl: string): RunState {
     !isSecret(otherToken) ||
     !isSecret(webhookKey) ||
     typeof binary !== 'string' ||
-    typeof e2eBinary !== 'string'
+    typeof e2eBinary !== 'string' ||
+    typeof agentBinary !== 'string'
   ) {
     throw new Error('the run state written by app.mjs is malformed');
   }
-  return { dbHost, dbPort, psql, secret, githubToken, otherToken, webhookKey, binary, e2eBinary, cron: readCronState(cron), receiver: readReceiverState(receiver) };
+  return {
+    dbHost, dbPort, psql, secret, githubToken, otherToken, webhookKey, binary, e2eBinary, agentBinary,
+    cron: readCronState(cron), receiver: readReceiverState(receiver),
+  };
 }
 
 export function freePort(): Promise<number> {
@@ -292,11 +297,11 @@ export class Faucet {
   // withFaucet starts one more faucet on its own database, runs fn against it and stops it. The new faucet has a random
   // CRON_SECRET and webhook mode off. env adds the rest. fn gets the faucet and a function that returns its
   // output so far. opts.e2eBuild runs the binary that was built with -tags faucet_e2e, whose callback client reaches loopback
-  // over http.
+  // over http. opts.publicUrl sets FAUCET_PUBLIC_URL to the new faucet's own URL, which turns on its login server.
   async withFaucet<T>(
     env: Record<string, string>,
     fn: (started: Faucet, output: () => string) => Promise<T>,
-    opts: { e2eBuild?: boolean } = {},
+    opts: { e2eBuild?: boolean; publicUrl?: boolean } = {},
   ): Promise<T> {
     const database = `faucet_${randomBytes(6).toString('hex')}`;
     const port = await freePort();
@@ -314,6 +319,7 @@ export class Faucet {
         PORT: String(port),
         FAUCET_GITHUB_API_URL: cron.stubUrl,
         CRON_SECRET: cronSecret,
+        ...(opts.publicUrl === true ? { FAUCET_PUBLIC_URL: `http://127.0.0.1:${port}` } : {}),
         ...env,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -557,6 +563,40 @@ export class Faucet {
     if (row.previous_secret_enc === null) throw new Error('the row has no previous secret');
     if (this.#target.webhookKey === null) throw new Error('this faucet has no webhook key');
     return openSealedSecret(Buffer.from(this.#target.webhookKey, 'base64'), row.previous_secret_enc, row.key_hash);
+  }
+
+  // clients runs `faucet clients` with args against this faucet's database, as an operator does.
+  async clients(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+    const { dbHost, dbPort } = this.#state;
+    const env = { DATABASE_URL: `postgres://postgres@/${this.#target.database}?${new URLSearchParams({ host: dbHost, port: String(dbPort), sslmode: 'disable' })}` };
+    try {
+      const { stdout, stderr } = await execFileAsync(this.#state.binary, ['clients', ...args], { env });
+      return { code: 0, stdout, stderr };
+    } catch (err) {
+      const failure = err as { code?: unknown; stdout?: string; stderr?: string };
+      return { code: typeof failure.code === 'number' ? failure.code : -1, stdout: failure.stdout ?? '', stderr: failure.stderr ?? '' };
+    }
+  }
+
+  // serviceAgent runs the go-sdk service agent once: it logs in to the endpoint at path with the client ID and secret alone and
+  // calls the wait tool with args.
+  async serviceAgent(
+    path: McpPath,
+    clientId: string,
+    secret: string,
+    args: { repo: string; types: string[]; cursor?: number; timeout?: number },
+  ): Promise<{ code: number; stdout: string; stderr: string }> {
+    const argv = [
+      '-url', `${this.baseUrl}${path}`, '-client-id', clientId, '-repo', args.repo, '-types', args.types.join(','),
+      '-cursor', String(args.cursor ?? 0), '-timeout', String(args.timeout ?? 1),
+    ];
+    try {
+      const { stdout, stderr } = await execFileAsync(this.#state.agentBinary, argv, { env: { FAUCET_CLIENT_SECRET: secret } });
+      return { code: 0, stdout, stderr };
+    } catch (err) {
+      const failure = err as { code?: unknown; stdout?: string; stderr?: string };
+      return { code: typeof failure.code === 'number' ? failure.code : -1, stdout: failure.stdout ?? '', stderr: failure.stderr ?? '' };
+    }
   }
 
   async sql(query: string): Promise<string> {

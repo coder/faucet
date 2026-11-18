@@ -90,10 +90,10 @@ func newRawServer(t *testing.T) *rawServer {
 	cfg := config{secret: testSecret, cronSecret: testCronSecret, retention: 30 * 24 * time.Hour, hookAdmin: hooks}
 	clock := quartz.NewReal()
 	logger := slog.Make(sloghuman.Sink(&syncBuffer{}))
-	svc, redeliverer, err := newServices(cfg, db, authz, clock, logger)
+	svc, redeliverer, err := newServices(cfg, pgstore.New(db), authz, clock, logger)
 	require.NoError(t, err)
 	cron := cronRoutes{secret: []byte(cfg.cronSecret), svc: svc, retention: cfg.retention, redeliverer: redeliverer, clock: clock, logger: logger}
-	srv := httptest.NewServer(newRouter(svc, bearers{github: authz}, cron, logger))
+	srv := httptest.NewServer(newRouter(svc, bearers{github: authz}, nil, cron, logger))
 	t.Cleanup(srv.Close)
 	return &rawServer{
 		testServer:  &testServer{Server: srv, github: github, mcpPath: "/github/mcp"},
@@ -202,7 +202,7 @@ func TestTheServerStoresARawEventOnlyWhileAPollerWantsIt(t *testing.T) {
 	var reply map[string]int64
 	require.NoError(t, json.Unmarshal([]byte(body), &reply), body)
 	require.Equal(t, map[string]int64{
-		"deleted": 0, "purged_through": 0, "expired_subscriptions": 0, "ended_deliveries": 0,
+		"deleted": 0, "purged_through": 0, "expired_subscriptions": 0, "ended_deliveries": 0, "expired_access_tokens": 0,
 		"raw_events_cleared": 1, "raw_events_deleted": 0, "expired_leases": 0,
 	}, reply)
 	var held int

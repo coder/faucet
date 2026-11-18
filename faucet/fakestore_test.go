@@ -24,6 +24,65 @@ func (s *fakeStore) nowLocked() time.Time {
 	return time.Now()
 }
 
+type fakeRepo struct {
+	repo   faucet.Repository
+	seenAt time.Time
+}
+
+func (s *fakeStore) RecordRepository(_ context.Context, repo faucet.Repository, seenAt time.Time) error {
+	return s.writeRepository(repo, func() {
+		if !slices.ContainsFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID }) {
+			s.repos = append(s.repos, fakeRepo{repo: repo, seenAt: seenAt})
+		}
+	})
+}
+
+func (s *fakeStore) RenameRepository(_ context.Context, repo faucet.Repository, from string, seenAt time.Time) error {
+	return s.writeRepository(repo, func() {
+		i := slices.IndexFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID })
+		switch {
+		case i < 0:
+			s.repos = append(s.repos, fakeRepo{repo: repo, seenAt: seenAt})
+		case strings.EqualFold(s.repos[i].repo.FullName, from):
+			s.repos[i] = fakeRepo{repo: repo, seenAt: seenAt}
+		}
+	})
+}
+
+// writeRepository counts a write of repo and, unless it fails, runs write
+// under the lock.
+func (s *fakeStore) writeRepository(repo faucet.Repository, write func()) error {
+	if err := repo.Validate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.repoWrites++
+	if s.repoErr != nil {
+		return s.repoErr
+	}
+	write()
+	return nil
+}
+
+func (s *fakeStore) RepositoryByName(_ context.Context, fullName string) (faucet.Repository, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.repoErr != nil {
+		return faucet.Repository{}, s.repoErr
+	}
+	var found *fakeRepo
+	for i, r := range s.repos {
+		if strings.EqualFold(r.repo.FullName, fullName) && (found == nil || !r.seenAt.Before(found.seenAt)) {
+			found = &s.repos[i]
+		}
+	}
+	if found == nil {
+		return faucet.Repository{}, faucet.ErrUnknownRepository
+	}
+	return found.repo, nil
+}
+
 func (s *fakeStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.PollPage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -201,6 +260,22 @@ func (s *fakeStore) DeleteSubscription(_ context.Context, principal string, key 
 	}
 	s.dropSubscriptionLocked(key)
 	return true, nil
+}
+
+func (s *fakeStore) DeleteSubscriptionsOf(_ context.Context, principal string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return 0, s.err
+	}
+	var n int64
+	for key, row := range s.subs {
+		if row.Principal == principal {
+			s.dropSubscriptionLocked(key)
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (s *fakeStore) DeleteLiveSubscription(_ context.Context, principal string, key faucet.SubscriptionKeyHash, now time.Time) (faucet.Subscription, bool, error) {

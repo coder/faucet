@@ -220,6 +220,10 @@ type Store interface {
 	// unknown key and a row that has expired, which counts as absent. Of
 	// concurrent callers for one row, exactly one gets found=true.
 	DeleteLiveSubscription(ctx context.Context, principal string, key SubscriptionKeyHash, now time.Time) (deleted Subscription, found bool, err error)
+	// DeleteSubscriptionsOf deletes every subscription of principal, live or
+	// not, with the deliveries and gaps that it holds, and returns how many
+	// it deleted. It deletes no other principal's subscription.
+	DeleteSubscriptionsOf(ctx context.Context, principal string) (int64, error)
 	// DeleteExpiredSubscriptions deletes every subscription that expired at or
 	// before now and returns how many it deleted.
 	DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (int64, error)
@@ -227,6 +231,23 @@ type Store interface {
 	// subscription whose PreviousSecretUntil is at or before now, and returns
 	// how many rows it cleared.
 	ClearExpiredPreviousSecrets(ctx context.Context, now time.Time) (int64, error)
+	// RecordRepository records repo, which a signed delivery named, at
+	// seenAt, the time of record, when the store holds no row of its ID. A
+	// row that exists keeps its names, so a replayed or late delivery cannot
+	// move a name back to it. It calls repo.Validate.
+	RecordRepository(ctx context.Context, repo Repository, seenAt time.Time) error
+	// RenameRepository gives the row of repo.ID the names of repo at seenAt
+	// when its FullName is from, ignoring case, and inserts it when there is
+	// no row. A repository event that renamed or transferred the repository
+	// from that name calls it, so a replayed older rename, whose from the row
+	// no longer holds, changes nothing. It calls repo.Validate.
+	RenameRepository(ctx context.Context, repo Repository, from string, seenAt time.Time) error
+	// RepositoryByName returns the repository whose FullName equals fullName,
+	// ignoring case as GitHub does. When more than one row holds the name,
+	// as when a repository was deleted with no event that says so and another
+	// took its name, it returns the one that took the name latest. It returns
+	// ErrUnknownRepository when no row holds the name.
+	RepositoryByName(ctx context.Context, fullName string) (Repository, error)
 
 	// The rest of the interface is the delivery queue. A subscription's
 	// deliveries end with it: deleting a subscription deletes the deliveries it

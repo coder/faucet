@@ -137,6 +137,9 @@ DELETE FROM faucet_subscriptions
 WHERE key_hash = sqlc.arg(key_hash) AND principal = sqlc.arg(principal) AND expires_at > sqlc.arg(now)
 RETURNING *;
 
+-- name: DeleteSubscriptionsOf :execrows
+DELETE FROM faucet_subscriptions WHERE principal = sqlc.arg(principal);
+
 -- name: DeleteExpiredSubscriptions :execrows
 DELETE FROM faucet_subscriptions WHERE expires_at <= sqlc.arg(now);
 

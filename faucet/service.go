@@ -38,6 +38,11 @@ type Deps struct {
 	// typed names only, and the webhook handler ignores those events. It must
 	// be backed by the same database as Store.
 	RawStore RawStore
+	// RecordRepositories makes every signed delivery that names a repository
+	// record it in the store (Store.RecordRepository), so a host that checks
+	// services by repo grants can find a granted repository's ID without
+	// GitHub. A failed write is logged, and the delivery goes on.
+	RecordRepositories bool
 	// MaxWaitsPerLogin caps how many wait_for_github_events calls one login
 	// holds open at once in this process, so a client that opens waits and
 	// drops its connection cannot pile them up. Zero means 10. A negative value
@@ -77,6 +82,7 @@ type Service struct {
 	principalFrom func(context.Context) (Principal, error)
 	clock         quartz.Clock
 	webhook       *webhookState
+	recordRepos   bool
 	waits         *waitLimiter
 	listed        []eventDescriptor
 }
@@ -103,6 +109,7 @@ func New(d Deps) (*Service, error) {
 		authorizer:    d.Authorizer,
 		principalFrom: d.PrincipalFrom,
 		clock:         d.Clock,
+		recordRepos:   d.RecordRepositories,
 		waits:         newWaitLimiter(d.MaxWaitsPerLogin),
 	}
 	delivery := []string{deliveryPoll}

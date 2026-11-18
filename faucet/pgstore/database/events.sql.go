@@ -182,6 +182,18 @@ func (q *Queries) DeleteSubscription(ctx context.Context, arg DeleteSubscription
 	return result.RowsAffected()
 }
 
+const deleteSubscriptionsOf = `-- name: DeleteSubscriptionsOf :execrows
+DELETE FROM faucet_subscriptions WHERE principal = $1
+`
+
+func (q *Queries) DeleteSubscriptionsOf(ctx context.Context, principal string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteSubscriptionsOf, principal)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const eventsAfter = `-- name: EventsAfter :many
 SELECT id, source, delivery_id, type, repo_id, prs, head_sha, data, received_at FROM faucet_events
 WHERE id > $1

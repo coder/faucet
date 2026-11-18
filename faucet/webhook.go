@@ -36,6 +36,9 @@ const (
 //	202 an event faucet ignores: no typed family stores it, and no live
 //	    interest in its raw event name wants it
 //	500 the store failed, so GitHub records a failed delivery
+//
+// With Deps.RecordRepositories, every signed delivery whose payload names a
+// repository records it first, ping and ignored events too.
 func (s *Service) WebhookHandler() http.Handler {
 	return http.HandlerFunc(s.serveWebhook)
 }
@@ -74,6 +77,9 @@ func (s *Service) serveWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	logger := s.logger.With(slog.F("github_event", eventName), slog.F("delivery_id", deliveryID))
 
+	if s.recordRepos {
+		s.recordRepository(r.Context(), logger, eventName, body)
+	}
 	if eventName == "ping" {
 		logger.Debug(r.Context(), "webhook ping")
 		reply(w, http.StatusOK, "pong")

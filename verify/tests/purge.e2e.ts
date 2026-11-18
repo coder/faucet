@@ -12,6 +12,7 @@ interface PurgeReply {
   purged_through: number;
   expired_subscriptions: number;
   ended_deliveries: number;
+  expired_access_tokens: number;
   raw_events_cleared: number;
   raw_events_deleted: number;
   expired_leases: number;
@@ -68,6 +69,7 @@ async function retentionOracle(faucet: Faucet): Promise<PurgeReply> {
     purged_through: Math.max(highest, await faucet.purgeMark()),
     expired_subscriptions: expired,
     ended_deliveries: ended,
+    expired_access_tokens: 0,
     raw_events_cleared: 0,
     raw_events_deleted: 0,
     expired_leases: 0,
@@ -102,6 +104,7 @@ describe('purge', () => {
       purged_through: first.purged_through,
       expired_subscriptions: 0,
       ended_deliveries: 0,
+      expired_access_tokens: 0,
       raw_events_cleared: 0,
       raw_events_deleted: 0,
       expired_leases: 0,

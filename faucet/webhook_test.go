@@ -44,6 +44,10 @@ type fakeStore struct {
 	scanned       map[faucet.SubscriptionKeyHash]int64
 	deliveries    map[fakeDeliveryKey]*fakeDelivery
 	gaps          map[faucet.SubscriptionKeyHash]*fakeGap
+	repos         []fakeRepo
+	repoWrites    int
+	// repoErr fails UpsertRepository and RepositoryByName.
+	repoErr error
 
 	rawEvents     []faucet.RawEvent
 	rawLastID     int64

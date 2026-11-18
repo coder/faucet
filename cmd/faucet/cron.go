@@ -12,6 +12,7 @@ import (
 
 	"cdr.dev/slog/v3"
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/oauth"
 	"github.com/coder/faucet/faucet/redelivery"
 	"github.com/coder/quartz"
 )
@@ -30,8 +31,10 @@ type cronRoutes struct {
 	delivers bool
 	// redeliverer is nil when redelivery is off.
 	redeliverer *redelivery.Runner
-	clock       quartz.Clock
-	logger      slog.Logger
+	// login is nil when faucet's login server is off.
+	login  *oauth.Server
+	clock  quartz.Clock
+	logger slog.Logger
 }
 
 func (c cronRoutes) mount(r chi.Router) {
@@ -53,7 +56,7 @@ func (c cronRoutes) guard(next http.HandlerFunc) http.HandlerFunc {
 		token, ok := bearerToken(r.Header.Get("Authorization"))
 		got := sha256.Sum256([]byte(token))
 		if !ok || subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
-			unauthorized(w)
+			unauthorized(w, "Bearer")
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), cronTimeout)
@@ -70,16 +73,25 @@ func (c cronRoutes) purge(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "purge failed", http.StatusInternalServerError)
 		return
 	}
+	var tokens oauth.PurgeResult
+	if c.login != nil {
+		if tokens, err = c.login.Purge(r.Context()); err != nil {
+			c.logger.Error(r.Context(), "cron purge of the login server failed", slog.Error(err))
+			http.Error(w, "purge failed", http.StatusInternalServerError)
+			return
+		}
+	}
 	writeJSON(w, struct {
 		Deleted              int64 `json:"deleted"`
 		PurgedThrough        int64 `json:"purged_through"`
 		ExpiredSubscriptions int64 `json:"expired_subscriptions"`
 		EndedDeliveries      int64 `json:"ended_deliveries"`
+		ExpiredAccessTokens  int64 `json:"expired_access_tokens"`
 		RawEventsCleared     int64 `json:"raw_events_cleared"`
 		RawEventsDeleted     int64 `json:"raw_events_deleted"`
 		ExpiredLeases        int64 `json:"expired_leases"`
 	}{
-		res.Deleted, res.PurgedThrough, res.ExpiredSubscriptions, res.EndedDeliveries,
+		res.Deleted, res.PurgedThrough, res.ExpiredSubscriptions, res.EndedDeliveries, tokens.ExpiredAccessTokens,
 		res.Raw.Cleared, res.Raw.Deleted, res.Raw.ExpiredLeases,
 	})
 }
