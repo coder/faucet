@@ -15,10 +15,12 @@ import (
 	"github.com/coder/faucet/faucet/oauth"
 )
 
-// A refresh token that a rotation replaced ends its session when it comes
-// again, since one of its two holders is not the client. Two processes that
-// share a refresh token so log each other out (R14): the cost of rotation.
-func TestARotatedOutRefreshTokenEndsItsSession(t *testing.T) {
+// A refresh token comes again within 30 seconds of its first use when
+// requests in parallel send it, and is traded again. After that its use
+// ends the session, since one of its two holders is not the client. Two
+// processes that share a refresh token so log each other out (R14): the
+// cost of rotation.
+func TestARefreshTokenTradesAgainFor30SecondsThenEndsItsSession(t *testing.T) {
 	t.Parallel()
 	h := newGrantHarness(t, newFakeStore())
 	first := h.redeem(h.approve("login-1", 1))
@@ -26,12 +28,19 @@ func TestARotatedOutRefreshTokenEndsItsSession(t *testing.T) {
 	require.NotEqual(t, first.refresh, second.refresh)
 	require.NotEqual(t, first.access, second.access)
 
-	h.clock.Advance(time.Minute)
-	grantRequireRefused(t, h.post("", grantRefreshForm(first.refresh)), http.StatusBadRequest, "invalid_grant", "the rotated-out token")
+	h.clock.Advance(30*time.Second - time.Millisecond)
+	again := h.refresh(first)
+	require.NotEqual(t, second.refresh, again.refresh)
+	require.True(t, h.session("login-1").Live())
+
+	h.clock.Advance(time.Millisecond)
+	grantRequireRefused(t, h.post("", grantRefreshForm(first.refresh)), http.StatusBadRequest, "invalid_grant", "the token 30 seconds after its first use")
 	session := h.session("login-1")
 	require.False(t, session.Live(), "the session ended")
 	require.True(t, h.clock.Now().Equal(session.EndedAt))
-	grantRequireRefused(t, h.post("", grantRefreshForm(second.refresh)), http.StatusBadRequest, "invalid_grant", "the current token of the ended session")
+	for name, s := range map[string]grantSession{"the token of the first use": second, "the token of the second use": again} {
+		grantRequireRefused(t, h.post("", grantRefreshForm(s.refresh)), http.StatusBadRequest, "invalid_grant", name)
+	}
 }
 
 // grantCountingStore counts the reads of a session by its refresh token.
@@ -164,36 +173,51 @@ func TestASessionEndsAfter180DaysWithoutARefresh(t *testing.T) {
 	h.refresh(kept)
 }
 
-// Of two refreshes with one refresh token at once, one rotates, and the
-// other then holds a token that is not current, which ends the session
-// (R14).
-func TestTwoRefreshesWithOneTokenAtOnceEndTheSession(t *testing.T) {
+// Refreshes with one refresh token at once, as the parallel tool calls of
+// an agent make after their access token expired, all get tokens. The
+// session lives on, and the refresh token that the client keeps, whichever
+// it is, works later.
+func TestRefreshesWithOneTokenAtOnceAllGetTokensThatWork(t *testing.T) {
 	t.Parallel()
-	h := newGrantHarness(t, newFakeStore())
-	s := h.redeem(h.approve("login-1", 1))
-	replies := h.raceAll(grantRefreshForm(s.refresh), grantRefreshForm(s.refresh))
-	require.ElementsMatch(t, []int{http.StatusOK, http.StatusBadRequest}, []int{replies[0].status, replies[1].status})
-	require.False(t, h.session(s.id).Live())
+	for kept := range 3 {
+		h := newGrantHarness(t, newFakeStore())
+		got := h.raceRefreshes(h.redeem(h.approve("login-1", 1)), 3)
+		h.clock.Advance(time.Minute)
+		h.refresh(got[kept])
+		require.True(t, h.session("login-1").Live(), "the client kept the token of reply %d", kept)
+	}
 }
 
-// Two refreshes that both read the refresh token as current before either
-// rotates: the one that loses the rotation ends the session, so the tokens
-// that the winner got fail too (R14).
-func TestARefreshThatLosesTheRotationEndsTheSession(t *testing.T) {
+// Two refreshes that both read the refresh token before either trades it
+// both get tokens, and the refresh token that the client keeps works later.
+func TestTwoRefreshesThatReadTheTokenBeforeEitherTradesItBothGetTokens(t *testing.T) {
 	t.Parallel()
-	store := newGrantBarrierStore()
-	h := newGrantHarness(t, store)
-	s := h.redeem(h.approve("login-1", 1))
-	store.hold(2)
-	replies := h.raceAll(grantRefreshForm(s.refresh), grantRefreshForm(s.refresh))
-	require.ElementsMatch(t, []int{http.StatusOK, http.StatusBadRequest}, []int{replies[0].status, replies[1].status})
-	require.False(t, h.session(s.id).Live())
-	for _, reply := range replies {
-		if reply.status == http.StatusOK {
-			won := grantTokens(t, s.id, reply)
-			grantRequireRefused(t, h.post("", grantRefreshForm(won.refresh)), http.StatusBadRequest, "invalid_grant", "the winner's token")
-		}
+	for kept := range 2 {
+		store := newGrantBarrierStore()
+		h := newGrantHarness(t, store)
+		s := h.redeem(h.approve("login-1", 1))
+		store.hold(2)
+		got := h.raceRefreshes(s, 2)
+		h.clock.Advance(time.Minute)
+		h.refresh(got[kept])
+		require.True(t, h.session("login-1").Live(), "the client kept the token of reply %d", kept)
 	}
+}
+
+// raceRefreshes sends n refreshes of s at once. Each must get tokens, and
+// the session must live on.
+func (h *grantHarness) raceRefreshes(s grantSession, n int) []grantSession {
+	h.t.Helper()
+	forms := make([]url.Values, n)
+	for i := range forms {
+		forms[i] = grantRefreshForm(s.refresh)
+	}
+	var got []grantSession
+	for _, reply := range h.raceAll(forms...) {
+		got = append(got, grantTokens(h.t, s.id, reply))
+	}
+	require.True(h.t, h.session(s.id).Live())
+	return got
 }
 
 // The refresh grant refreshes the user's GitHub token when it expires
