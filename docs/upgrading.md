@@ -2,6 +2,20 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## To the browser login (migration `000013_browser_login`)
+
+Nothing changes until you set `FAUCET_GITHUB_APP_CLIENT_ID`, `FAUCET_GITHUB_APP_CLIENT_SECRET` and `FAUCET_TOKEN_KEY` next to `FAUCET_PUBLIC_URL` (see [browser-login.md](browser-login.md)). With only some of them set, the server refuses to start and names the missing ones. Then:
+
+- `/oauth/authorize` shows the consent page and takes its form, the new route `/oauth/github/callback` takes GitHub's answer, and `/oauth/token` also takes the `authorization_code` and `refresh_token` grants. The authorization server metadata lists the new grants and says that faucet takes client ID metadata documents.
+- Faucet keeps the GitHub App tokens of the users who log in, sealed under `FAUCET_TOKEN_KEY` (see [security.md](security.md#three-kinds-of-caller)).
+
+Whether or not you set them:
+
+- The migration adds the tables of the browser login, which stay empty until you do.
+- `/cron/purge` also deletes login requests a day after they expired, and counts them in `expired_auth_requests`, which is 0 while the browser login is off.
+
+A host that embeds faucet: an `oauth.Store` of your own must also implement `oauth.LoginStore` and pass the new `storetest.RunOAuth` subtests. An Instant Rollback past this migration cannot start (see [deploy.md](deploy.md#rolling-back)), and its down migration drops every session and every GitHub token that faucet keeps, so every user must log in again.
+
 ## To service accounts (migration `000011_service_clients_and_repos`)
 
 This came in [#50](https://github.com/coder/faucet/pull/50). Nothing changes until you set `FAUCET_PUBLIC_URL` (see [service-accounts.md](service-accounts.md)). Then:
