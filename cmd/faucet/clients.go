@@ -22,13 +22,19 @@ import (
 	"github.com/coder/faucet/faucet/pgstore"
 )
 
+const (
+	trustUsage   = "faucet clients trust <client-id> -issuer <url> -claim <name>=<value> [-claim ...] [-jwks-file <path>]"
+	trustsUsage  = "faucet clients trusts <client-id>"
+	untrustUsage = "faucet clients untrust <client-id> <rule-id>"
+)
+
 const clientsUsage = `usage:
   faucet clients create [-resource <url>] [-scope <scopes>] [-no-secret] -grant <grant> [-grant ...] <client-id>
   faucet clients list
   faucet clients disable <client-id>
-  faucet clients trust <client-id> -issuer <url> -claim <name>=<value> [-claim ...] [-jwks-file <path>]
-  faucet clients trusts <client-id>
-  faucet clients untrust <client-id> <rule-id>
+  ` + trustUsage + `
+  ` + trustsUsage + `
+  ` + untrustUsage + `
 
 The commands read DATABASE_URL and faucet's public URL as the server does:
 FAUCET_PUBLIC_URL, or on Vercel production https://$VERCEL_PROJECT_PRODUCTION_URL.
@@ -122,20 +128,11 @@ func clientsCommand(ctx context.Context, args []string, store clientStore, publi
 		}
 		return disableClient(ctx, args[1], store, now, stdout)
 	case "trust":
-		if len(args) < 2 {
-			return xerrors.New(clientsUsage)
-		}
-		return trustClient(ctx, args[1], args[2:], store, now, stdout, stderr)
+		return trustClient(ctx, args[1:], store, now, stdout, stderr)
 	case "trusts":
-		if len(args) != 2 {
-			return xerrors.New(clientsUsage)
-		}
-		return listTrustRules(ctx, args[1], store, stdout)
+		return listTrustRules(ctx, args[1:], store, stdout, stderr)
 	case "untrust":
-		if len(args) != 3 {
-			return xerrors.New(clientsUsage)
-		}
-		return untrustClient(ctx, args[1], args[2], store, stdout)
+		return untrustClient(ctx, args[1:], store, stdout, stderr)
 	}
 	return xerrors.New(clientsUsage)
 }
@@ -308,11 +305,32 @@ func sortedClaims(claims map[string]string) []string {
 	return pinned
 }
 
+// commandFlags is the flag set of one command, whose -h prints usage, the
+// command's line of clientsUsage, and its flags.
+func commandFlags(name, usage string, stderr io.Writer) *flag.FlagSet {
+	flags := flag.NewFlagSet("faucet clients "+name, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	flags.Usage = func() {
+		_, _ = fmt.Fprintln(stderr, "usage: "+usage)
+		flags.PrintDefaults()
+	}
+	return flags
+}
+
+// knownClient returns the client with this ID, live or disabled, or an error
+// that says there is none.
+func knownClient(ctx context.Context, store oauth.Store, id string) (oauth.Client, error) {
+	c, err := store.Client(ctx, id)
+	if xerrors.Is(err, oauth.ErrUnknownClient) {
+		return oauth.Client{}, xerrors.Errorf("there is no client %q", id)
+	}
+	return c, err
+}
+
 // trustClient adds a trust rule to a live client. Adding a rule that the
 // client holds prints that rule's ID again.
-func trustClient(ctx context.Context, id string, args []string, store oauth.Store, now time.Time, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("faucet clients trust", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+func trustClient(ctx context.Context, args []string, store oauth.Store, now time.Time, stdout, stderr io.Writer) error {
+	flags := commandFlags("trust", trustUsage, stderr)
 	issuer := flags.String("issuer", "", "the issuer of the workload's tokens, as their iss names it, such as https://oidc.vercel.com/<team>")
 	claims := claimFlags{}
 	flags.Var(claims, "claim", "a claim that a token must hold, as <name>=<value>; repeat it for more")
@@ -326,10 +344,16 @@ func trustClient(ctx context.Context, id string, args []string, store oauth.Stor
 		jwksFile = path
 		return nil
 	})
+	// The client ID comes before the flags, so a flag in its place is -h or
+	// a client ID left out.
+	var id string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		id, args = args[0], args[1:]
+	}
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 {
+	if id == "" || flags.NArg() != 0 {
 		return xerrors.New("name the client ID before the flags, and nothing after them\n" + clientsUsage)
 	}
 	if err := oauth.ValidateClientID(id); err != nil {
@@ -350,10 +374,8 @@ func trustClient(ctx context.Context, id string, args []string, store oauth.Stor
 	if err != nil {
 		return err
 	}
-	c, err := store.Client(ctx, id)
+	c, err := knownClient(ctx, store, id)
 	switch {
-	case xerrors.Is(err, oauth.ErrUnknownClient):
-		return xerrors.Errorf("there is no client %q", id)
 	case err != nil:
 		return err
 	case !c.Live():
@@ -367,15 +389,19 @@ func trustClient(ctx context.Context, id string, args []string, store oauth.Stor
 	return err
 }
 
-func listTrustRules(ctx context.Context, id string, store oauth.Store, stdout io.Writer) error {
+func listTrustRules(ctx context.Context, args []string, store oauth.Store, stdout, stderr io.Writer) error {
+	flags := commandFlags("trusts", trustsUsage, stderr)
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 {
+		return xerrors.New(clientsUsage)
+	}
+	id := flags.Arg(0)
 	if err := oauth.ValidateClientID(id); err != nil {
 		return err
 	}
-	_, err := store.Client(ctx, id)
-	switch {
-	case xerrors.Is(err, oauth.ErrUnknownClient):
-		return xerrors.Errorf("there is no client %q", id)
-	case err != nil:
+	if _, err := knownClient(ctx, store, id); err != nil {
 		return err
 	}
 	rules, err := store.TrustRules(ctx, id)
@@ -400,13 +426,24 @@ func listTrustRules(ctx context.Context, id string, store oauth.Store, stdout io
 	return w.Flush()
 }
 
-func untrustClient(ctx context.Context, id, rawRuleID string, store oauth.Store, stdout io.Writer) error {
+func untrustClient(ctx context.Context, args []string, store oauth.Store, stdout, stderr io.Writer) error {
+	flags := commandFlags("untrust", untrustUsage, stderr)
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 2 {
+		return xerrors.New(clientsUsage)
+	}
+	id := flags.Arg(0)
 	if err := oauth.ValidateClientID(id); err != nil {
 		return err
 	}
-	ruleID, err := strconv.ParseInt(rawRuleID, 10, 64)
+	ruleID, err := strconv.ParseInt(flags.Arg(1), 10, 64)
 	if err != nil || ruleID <= 0 {
 		return xerrors.Errorf("a rule ID is a whole number above 0, as faucet clients trusts %s lists", id)
+	}
+	if _, err := knownClient(ctx, store, id); err != nil {
+		return err
 	}
 	err = store.RemoveTrustRule(ctx, id, ruleID)
 	switch {

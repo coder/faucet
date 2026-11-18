@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -514,6 +515,8 @@ func TestTheClientsCommandRemovesATrustRuleOfThatClientOnly(t *testing.T) {
 
 	_, _, err = clients(t, getenv, "untrust", "ci-watcher", ruleID)
 	require.ErrorContains(t, err, `client "ci-watcher" has no trust rule `+ruleID)
+	_, _, err = clients(t, getenv, "untrust", "digset-bot", ruleID)
+	require.ErrorContains(t, err, `there is no client "digset-bot"`, "a typo in the client ID is no missing rule")
 	for name, args := range map[string][]string{
 		"no rule ID":       {"untrust", "digest-bot"},
 		"a rule ID of 0":   {"untrust", "digest-bot", "0"},
@@ -531,4 +534,27 @@ func TestTheClientsCommandRemovesATrustRuleOfThatClientOnly(t *testing.T) {
 	rules, err := store.TrustRules(ctx, "digest-bot")
 	require.NoError(t, err)
 	require.Len(t, rules, 1, "the rule stays")
+}
+
+func TestTheTrustCommandsPrintTheirUsageForHelp(t *testing.T) {
+	t.Parallel()
+	getenv, _ := newClientsDatabase(t)
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"trust", "--help"}, "usage: faucet clients trust <client-id> -issuer <url> -claim <name>=<value>"},
+		{[]string{"trust", "-h"}, "usage: faucet clients trust <client-id>"},
+		{[]string{"trust", "digest-bot", "-help"}, "usage: faucet clients trust <client-id>"},
+		{[]string{"trusts", "--help"}, "usage: faucet clients trusts <client-id>"},
+		{[]string{"untrust", "-h"}, "usage: faucet clients untrust <client-id> <rule-id>"},
+	} {
+		out, notice, err := clients(t, getenv, c.args...)
+		require.ErrorIs(t, err, flag.ErrHelp, c.args)
+		require.Empty(t, out, c.args)
+		require.Contains(t, notice, c.want, c.args)
+		if c.args[0] == "trust" {
+			require.Contains(t, notice, "-jwks-file", "trust lists its flags")
+		}
+	}
 }
