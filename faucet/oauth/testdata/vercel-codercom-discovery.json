@@ -1,0 +1,31 @@
+{
+  "issuer": "https://oidc.vercel.com/codercom",
+  "jwks_uri": "https://oidc.vercel.com/codercom/.well-known/jwks",
+  "subject_types_supported": [
+    "public",
+    "pairwise"
+  ],
+  "response_types_supported": [
+    "id_token"
+  ],
+  "claims_supported": [
+    "sub",
+    "scope",
+    "aud",
+    "exp",
+    "iat",
+    "iss",
+    "nbf",
+    "project",
+    "project_id",
+    "owner",
+    "owner_id",
+    "environment"
+  ],
+  "id_token_signing_alg_values_supported": [
+    "RS256"
+  ],
+  "scopes_supported": [
+    "openid"
+  ]
+}
