@@ -22,7 +22,7 @@ var rawNames = []string{
 	"github.issue_dependencies", "github.issue_relates_to", "github.issues", "github.label", "github.merge_group",
 	"github.milestone", "github.package", "github.page_build", "github.project", "github.project_card",
 	"github.project_column", "github.public", "github.push", "github.registry_package", "github.release",
-	"github.repository", "github.repository_dispatch", "github.repository_import",
+	"github.repository", "github.repository_import",
 	"github.star", "github.sub_issues", "github.watch", "github.workflow_dispatch",
 }
 

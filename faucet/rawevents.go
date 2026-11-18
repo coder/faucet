@@ -66,7 +66,6 @@ var rawEvents = []rawEvent{
 	{"registry_package", "Registry packages in GitHub Packages that were published or updated."},
 	{"release", "Releases that were created, published, edited, deleted or changed in another way."},
 	{"repository", "Changes to a repository itself, for example one that was renamed, archived, transferred or made public."},
-	{"repository_dispatch", "Custom events that a client sent to the repository dispatch endpoint of the REST API, with the event type it chose as the action."},
 	{"repository_import", "Imports of a repository into GitHub that succeeded, were canceled or failed."},
 	{"star", "Stars that were added to or removed from a repository."},
 	{"sub_issues", "Sub-issues that were added to or removed from a parent issue."},
@@ -76,13 +75,17 @@ var rawEvents = []rawEvent{
 
 // refusedRawEvents are the GitHub events whose payload GitHub shows only to
 // people with more than read access to a repository: security alerts and
-// advisories, deploy keys, collaborators, the teams with access, rulesets with
-// the actors that may bypass them, and protection and security settings. Faucet checks only that a caller can read the repository, so no
-// service offers them, whatever its host lists. Sorted.
+// advisories, deploy keys, collaborators, the teams with access, rulesets
+// with the actors that may bypass them, protection and security settings,
+// and the client payload of a repository dispatch, which its sender sets and
+// no reader of the repository sees. Faucet checks only that a caller can
+// read the repository, so no service offers them, whatever its host lists.
+// Sorted.
 var refusedRawEvents = []string{
 	"branch_protection_configuration", "branch_protection_rule", "code_scanning_alert", "dependabot_alert",
-	"deploy_key", "member", "repository_advisory", "repository_ruleset", "repository_vulnerability_alert",
-	"secret_scanning_alert", "secret_scanning_alert_location", "secret_scanning_scan", "security_and_analysis", "team_add",
+	"deploy_key", "member", "repository_advisory", "repository_dispatch", "repository_ruleset",
+	"repository_vulnerability_alert", "secret_scanning_alert", "secret_scanning_alert_location",
+	"secret_scanning_scan", "security_and_analysis", "team_add",
 }
 
 // RawEventNames returns the GitHub events, such as "push", that a service can

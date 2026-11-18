@@ -188,6 +188,7 @@ describe('startup configuration', () => {
       ['repository_advisory', 'repository_advisory'],
       ['push,secret_scanning_alert', 'secret_scanning_alert'],
       ['push, member', 'member'],
+      ['push,repository_dispatch', 'repository_dispatch'],
     ].map(([events, refused]) => ({
       name: `FAUCET_RAW_EVENTS=${events}`,
       env: { ...valid, FAUCET_RAW_EVENTS: events ?? '' },
