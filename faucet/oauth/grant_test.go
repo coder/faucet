@@ -286,20 +286,35 @@ func (h *grantHarness) approve(id string, userID int64) grantLogin {
 // Authorization header, none when it is empty.
 func (h *grantHarness) post(authorization string, form url.Values) tokenReply {
 	h.t.Helper()
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, h.srv.URL+oauth.TokenPath, strings.NewReader(form.Encode()))
+	reply, err := h.send(authorization, form)
 	require.NoError(h.t, err)
+	return reply
+}
+
+// send is post for a goroutine other than the test's.
+func (h *grantHarness) send(authorization string, form url.Values) (tokenReply, error) {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, h.srv.URL+oauth.TokenPath, strings.NewReader(form.Encode()))
+	if err != nil {
+		return tokenReply{}, err
+	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if authorization != "" {
 		req.Header.Set("Authorization", authorization)
 	}
 	resp, err := h.srv.Client().Do(req)
-	require.NoError(h.t, err)
+	if err != nil {
+		return tokenReply{}, err
+	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
-	require.NoError(h.t, err)
+	if err != nil {
+		return tokenReply{}, err
+	}
 	reply := tokenReply{status: resp.StatusCode, header: resp.Header, rawBody: string(raw)}
-	require.NoError(h.t, json.Unmarshal(raw, &reply.body), "%s", raw)
-	return reply
+	if err := json.Unmarshal(raw, &reply.body); err != nil {
+		return tokenReply{}, fmt.Errorf("decode %q: %w", raw, err)
+	}
+	return reply, nil
 }
 
 // grantCodeForm is the token request of a public client that redeems l.
