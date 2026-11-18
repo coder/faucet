@@ -195,6 +195,9 @@ type deliverHarness struct {
 
 	ledger     faucet.DeliverResult
 	ledgerSkip bool
+	// rawQueued is the raw deliveries that webhook deliveries queued. A run
+	// does not queue them, so they are not in the ledger's Enqueued.
+	rawQueued int
 }
 
 func newDeliverHarness(t *testing.T, mutate ...func(*faucet.Deps)) *deliverHarness {
@@ -210,16 +213,16 @@ func newDeliverHarness(t *testing.T, mutate ...func(*faucet.Deps)) *deliverHarne
 }
 
 // requireEveryDeliveryAccountedFor checks the books at the end of a test: every
-// delivery that the runs queued is delivered, ended with a counted reason, or
-// still queued. A delivery that left the queue without being counted breaks the
-// sum.
+// delivery that the runs queued, and every raw delivery that a webhook
+// delivery queued, is delivered, ended with a counted reason, or still queued.
+// A delivery that left the queue without being counted breaks the sum.
 func (d *deliverHarness) requireEveryDeliveryAccountedFor() {
 	if d.ledgerSkip || d.t.Failed() {
 		return
 	}
-	pending := len(d.store.deliveryRows())
-	require.Equal(d.t, d.ledger.Enqueued, d.ledger.Delivered+d.ledger.GaveUpTotal()+pending,
-		"queued %d, delivered %d, ended %v, still queued %d", d.ledger.Enqueued, d.ledger.Delivered, d.ledger.GaveUp, pending)
+	pending := len(d.store.deliveryRows()) + d.store.rawOutboxRows()
+	require.Equal(d.t, d.ledger.Enqueued+d.rawQueued, d.ledger.Delivered+d.ledger.GaveUpTotal()+pending,
+		"queued %d and %d raw, delivered %d, ended %v, still queued %d", d.ledger.Enqueued, d.rawQueued, d.ledger.Delivered, d.ledger.GaveUp, pending)
 }
 
 func (d *deliverHarness) deliverDueWith(ctx context.Context) faucet.DeliverResult {
