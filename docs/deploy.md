@@ -40,6 +40,7 @@ A preview runs any branch's code, and the Neon integration gives previews the pr
 3. **Deploy by pushing to `main`.** A variable change only applies to deployments built after it. Don't run `vercel deploy` by hand: on a project with no production deployment, it created one.
 
 4. **Point the GitHub webhook** at `https://<production domain>/webhook/github`. Don't put Vercel Deployment Protection on that domain, because GitHub and MCP clients can't pass it.
+5. **With the browser login on, rate limit its consent form at the edge.** Each `POST /oauth/authorize` that carries a valid form stores a login request for 10 minutes, and a script can send faucet's `Origin` and keep the cookie, so faucet bounds the rows only by time (see [security.md](security.md#the-browser-login)). Add a rule under the project's **Firewall** in the same change that sets the browser login's variables: when the request path equals `/oauth/authorize` and the method is `POST`, rate limit by IP, such as 10 requests a minute, and deny the rest with 429. A person presses Continue once per login, so the limit only stops scripts. Leave `GET /oauth/authorize` out of the rule: it stores nothing.
 
 ## Scheduled routes
 

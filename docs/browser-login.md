@@ -24,6 +24,8 @@ For this way in, faucet keeps the user's GitHub App token. It seals the token un
 
    When one of the last three is set without the others, or without `FAUCET_PUBLIC_URL`, the server refuses to start and names the missing variables. On Vercel, set them for Production only, and the client secret and the key as sensitive. Keep a copy of `FAUCET_TOKEN_KEY` outside Vercel. Vercel does not show a sensitive value again, and a [rotation](#rotate-the-token-key) needs the old key.
 
+5. Rate limit `POST /oauth/authorize` per IP at the edge, such as with a Vercel Firewall rule (see [deploy.md](deploy.md#setup)). Faucet stores a row for each consent that a script posts, and relies on that limit to bound them.
+
 ## What the user sees
 
 ```mermaid
