@@ -178,6 +178,65 @@ func TestMCPEventsPollDeniesARepoTheCallerCannotSee(t *testing.T) {
 	srv.requireNoToken(t, "a denial", denied.Message)
 }
 
+// TestMCPTakesOneMessagePerRequest uses 2025-03-26, the last protocol version
+// that lets a body batch requests, for the SDK client and for the batch.
+func TestMCPTakesOneMessagePerRequest(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	srv := newTestServer(t)
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	require.NoError(t, mcp.AddSendingCustomMethod[*eventsParams, *eventsResult](client, "events/poll"))
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint:             srv.URL + srv.mcpPath,
+		HTTPClient:           &http.Client{Transport: eventNameTransport{next: bearerTransport{aliceToken, srv.Client().Transport}}},
+		DisableStandaloneSSE: true,
+	}, &mcp.ClientSessionOptions{ProtocolVersion: "2025-03-26"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = session.Close() })
+	require.Equal(t, "2025-03-26", session.InitializeResult().ProtocolVersion)
+
+	tools, err := session.ListTools(ctx, nil)
+	require.NoError(t, err)
+	require.Len(t, tools.Tools, 1)
+	res, err := call(ctx, session, "o/r", nil)
+	require.NoError(t, err)
+	require.Contains(t, toolText(t, res), `"cursor":8`)
+	head, err := callEvents(ctx, session, "events/poll", pollParams("o/r", nil))
+	require.NoError(t, err)
+	var cursor string
+	require.NoError(t, json.Unmarshal(head["cursor"], &cursor))
+	polled, err := callEvents(ctx, session, "events/poll", pollParams("o/r", &cursor))
+	require.NoError(t, err)
+	require.Contains(t, string(polled["events"]), `"eventId":"d"`)
+
+	poll := func(id string) string {
+		return `{"jsonrpc":"2.0","id":` + id + `,"method":"events/poll","params":{"name":"ci.run_completed","arguments":{"repo":"o/r"},"cursor":"` + cursor + `"}}`
+	}
+	polls := srv.store.pollCount()
+	for _, version := range []string{"", "2025-03-26"} {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+srv.mcpPath, strings.NewReader(`[`+poll("1")+`,`+poll("2")+`]`))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("Authorization", "Bearer "+aliceToken)
+		req.Header.Set("Mcp-Name", "ci.run_completed")
+		if version != "" {
+			req.Header.Set("Mcp-Protocol-Version", version)
+		}
+		resp, err := srv.Client().Do(req)
+		require.NoError(t, err)
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		require.NoError(t, err)
+
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "version %q: %s", version, body)
+		require.JSONEq(t, `{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"faucet takes one JSON-RPC message per request, as a JSON object"}}`, string(body))
+	}
+	require.Equal(t, polls, srv.store.pollCount(), "a refused batch reads no events")
+}
+
 func TestMCPEventsListIsSafeForConcurrentRequests(t *testing.T) {
 	t.Parallel()
 
