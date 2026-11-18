@@ -41,6 +41,8 @@ An agent asks for events of one `repo` by name, optionally narrowed by `sha`, `p
 | `pr.review_threads` | `pull_request_review_thread` | none |
 <!-- END generated:events -->
 
+The other GitHub events of a repository, such as `push`, `release` and `issues`, are offered raw as `github.<event>`. Faucet stores one only while a subscription or a poller wants it (see [raw events](docs/events.md#raw-events)).
+
 Every `/github/mcp` request carries `Authorization: Bearer <GitHub token>`. Faucet reads with the caller's token: it only returns events for repositories that the token can read. The one GitHub token it holds, for redelivery, is optional. See [docs/security.md](docs/security.md).
 
 Faucet also deletes events after a retention period, and it can ask GitHub to [redeliver webhooks that failed](docs/redelivery.md) while it was down.
@@ -97,7 +99,7 @@ Faucet sends nothing on its own between requests. A scheduler calls these with `
 | --- | --- | --- |
 | `GET /cron/deliver` | every minute | Sends due webhooks to subscribers and retries failed ones. |
 | `GET /cron/redeliver` | every 10 minutes | Asks GitHub to resend webhooks that faucet failed to store. |
-| `GET /cron/purge` | hourly | Deletes events past retention, and expired subscriptions. |
+| `GET /cron/purge` | hourly | Deletes events past retention, expired subscriptions and leases, and the raw payloads that nobody waits for. |
 
 [`vercel.json`](vercel.json) sets these schedules for Vercel Cron.
 
