@@ -406,7 +406,6 @@ func (d rawDocument) envelope(deliveryID, event string) (delivery RawDelivery, o
 	if json.Unmarshal(member("action"), &delivery.Action) != nil {
 		delivery.Action = ""
 	}
-	var repository map[string]json.RawMessage
 	if isAbsent(member("repository")) {
 		var organization map[string]json.RawMessage
 		if json.Unmarshal(member("organization"), &organization) != nil ||
@@ -415,6 +414,7 @@ func (d rawDocument) envelope(deliveryID, event string) (delivery RawDelivery, o
 		}
 		return delivery, true
 	}
+	var repository map[string]json.RawMessage
 	if json.Unmarshal(member("repository"), &repository) != nil ||
 		json.Unmarshal(repository["id"], &delivery.RepoID) != nil || delivery.RepoID <= 0 {
 		return RawDelivery{}, false

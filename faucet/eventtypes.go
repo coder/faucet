@@ -348,9 +348,9 @@ var (
 )
 
 // argumentsSchema is the inputSchema of an event name: the target and the
-// filters of the name. It offers pr and sha unless the family's events name no pull
-// request or no head commit (no family means both), actions when it is given
-// them, and the field filters it is given.
+// filters of the name. It offers pr and sha unless the family's events name
+// no pull request or no head commit (no family means both), actions when it
+// is given them, and the field filters it is given.
 func argumentsSchema(f *family, actions, filters []string) json.RawMessage {
 	properties := targetProperties()
 	if f == nil || !f.noPRs {

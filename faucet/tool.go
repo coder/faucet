@@ -69,18 +69,20 @@ type waitOutput struct {
 // ServerCapabilities so that clients learn the server speaks Events.
 //
 // The tool returns the events of one repository that match its filters, as
-// soon as there are any, or none when timeout_s runs out. Either way it
-// returns a cursor, and passing that cursor to the next call resumes exactly
-// where this one stopped, as long as repo and the filters stay the same: the
-// cursor is the newest event of any repository, so an event at or below it that
-// matches only a new filter is never returned. Without a cursor it starts at
-// the present, or ten minutes back when sha is set.
+// soon as there are any, or none when timeout_s runs out. A service client
+// may name every repository of an owner, or every repository, instead. Either
+// way it returns a cursor, and passing that cursor to the next call resumes
+// exactly where this one stopped, as long as the target and the filters stay
+// the same: the cursor is the newest event of any repository, so an event at
+// or below it that matches only a new filter is never returned. Without a
+// cursor it starts at the present, or ten minutes back when sha is set.
 func (s *Service) Register(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: toolName,
 		Description: "Wait for GitHub events on a repository, such as a CI run finishing or a pull request review, " +
-			"and return them as soon as they arrive. Returns no events and a cursor when timeout_s runs out; " +
-			"call again with that cursor and the same repo and filters to keep waiting. When truncated is true, a retention purge deleted events after " +
+			"and return them as soon as they arrive. Name the repository with repo; a service client may name owner or all instead, and narrow them with repos. " +
+			"Returns no events and a cursor when timeout_s runs out; " +
+			"call again with that cursor and the same target and filters to keep waiting. When truncated is true, a retention purge deleted events after " +
 			"the cursor you passed, so some may be missing. Event names: " + strings.Join(catalogNames(), ", ") + ". " +
 			"A family such as pr.activity covers every action of one GitHub event. Each event's type is its exact type, such as pr.closed. " +
 			"actions and the field filters narrow only the families in types that offer them, and leave the other names whole; " +
