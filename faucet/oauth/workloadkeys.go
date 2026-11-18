@@ -37,7 +37,7 @@ const (
 
 // errIssuerKeys is the error of an issuer whose keys faucet cannot check a
 // token with yet.
-var errIssuerKeys = xerrors.New("faucet could not fetch the keys of the subject token's issuer")
+var errIssuerKeys = xerrors.New("faucet holds no key of the subject token's issuer for it yet")
 
 // issuerKeysError wraps errIssuerKeys for the keys of issuer that hold no
 // key of a token's kid: the last fetch failed, or it ended less than
@@ -51,7 +51,7 @@ type issuerKeysError struct {
 }
 
 func (e issuerKeysError) Error() string {
-	why := "the keys lack the token's kid, and faucet fetched them less than a minute ago"
+	why := "faucet fetched its keys less than a minute ago, and they lack the token's kid"
 	if e.fetch != nil {
 		why = e.fetch.Error()
 	}

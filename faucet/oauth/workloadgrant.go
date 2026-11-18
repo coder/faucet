@@ -115,14 +115,13 @@ func (s *Server) exchangeAnswer(ctx context.Context, clientID string, err error)
 			description: "faucet cannot get the key of the subject token from its issuer yet: try again after Retry-After seconds",
 		}
 	case xerrors.As(err, &refusal), xerrors.As(err, &token) && !token.signed:
-		s.logger.Info(ctx, "a token exchange was refused", slog.F("client_id", clientID), slog.F("reason", err.Error()))
-		return errWorkloadRefused
+		answer = errWorkloadRefused
 	case xerrors.As(err, &token):
 		answer = badRequest("invalid_request", err.Error())
 	case !xerrors.As(err, &answer):
 		return err
 	}
-	s.logger.Info(ctx, "a token exchange was refused", slog.F("client_id", clientID), slog.F("reason", answer.description))
+	s.logger.Info(ctx, "a token exchange was refused", slog.F("client_id", clientID), slog.F("reason", err.Error()))
 	return answer
 }
 
