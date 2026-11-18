@@ -254,9 +254,10 @@ func run() error {
 	db.SetConnMaxIdleTime(maxConnIdleTime)
 
 	clock := quartz.NewReal()
-	github := faucet.NewAccessCache(faucet.TokenAuthorizer{BaseURL: cfg.githubAPI, Client: &http.Client{Timeout: githubTimeout}}, clock)
+	githubAPI := faucet.TokenAuthorizer{BaseURL: cfg.githubAPI, Client: &http.Client{Timeout: githubTimeout}}
+	github := faucet.NewAccessCache(githubAPI, clock)
 	store := pgstore.New(db)
-	tokens, login, authorizer, err := newLogin(cfg.publicURL, store, github, clock, logger)
+	tokens, login, authorizer, err := newLogin(cfg.publicURL, cfg.browserLogin, store, github, githubAPI, clock, logger)
 	if err != nil {
 		return err
 	}
@@ -303,15 +304,25 @@ type loginStore interface {
 // newLogin returns the bearer check, the login server and the Authorizer of
 // the server. Without a public URL there is no login server: every bearer
 // goes to GitHub, and GitHub answers for every repository. With one, faucet's
-// own tokens verify too, and a service is checked by its grants.
-func newLogin(publicURL *url.URL, store loginStore, github *faucet.AccessCache, clock quartz.Clock, logger slog.Logger) (bearers, *oauth.Server, faucet.Authorizer, error) {
+// own tokens verify too, and a service is checked by its grants. With a
+// browser login, a user who logged in through it is checked by GitHub with
+// the GitHub token that faucet keeps for them: repos asks GitHub, and
+// remembers nothing.
+func newLogin(publicURL *url.URL, browser *oauth.BrowserLogin, store loginStore, github *faucet.AccessCache, repos oauth.RepoChecker, clock quartz.Clock, logger slog.Logger) (bearers, *oauth.Server, faucet.Authorizer, error) {
 	if publicURL == nil {
 		tokens, err := newBearers(github, nil, "")
 		return tokens, nil, github, err
 	}
-	verifier, err := oauth.NewVerifier(store, clock, map[oauth.SubjectKind]oauth.SubjectResolver{
-		oauth.SubjectService: oauth.ServiceResolver(store),
-	})
+	subjects := map[oauth.SubjectKind]oauth.SubjectResolver{oauth.SubjectService: oauth.ServiceResolver(store)}
+	authorizer := kindAuthorizer{github: github}
+	if browser != nil {
+		users, err := oauth.NewUserAccess(oauth.UserAccessDeps{Store: store, Clock: clock, Logger: logger, Login: *browser, Repos: repos})
+		if err != nil {
+			return bearers{}, nil, nil, xerrors.Errorf("create the access check of the browser login: %w", err)
+		}
+		subjects[oauth.SubjectUser], authorizer.user = oauth.UserResolver(store), users
+	}
+	verifier, err := oauth.NewVerifier(store, clock, subjects)
 	if err != nil {
 		return bearers{}, nil, nil, xerrors.Errorf("create the token verifier: %w", err)
 	}
@@ -323,27 +334,35 @@ func newLogin(publicURL *url.URL, store loginStore, github *faucet.AccessCache, 
 	for i, path := range mcpPaths {
 		resources[i] = tokens.resource(path)
 	}
-	login, err := oauth.NewServer(oauth.ServerDeps{Store: store, Clock: clock, Logger: logger, Issuer: publicURL.String(), Resources: resources})
+	login, err := oauth.NewServer(oauth.ServerDeps{
+		Store: store, Clock: clock, Logger: logger, Issuer: publicURL.String(), Resources: resources, Login: browser,
+	})
 	if err != nil {
 		return bearers{}, nil, nil, xerrors.Errorf("create the login server: %w", err)
 	}
-	services, err := oauth.NewServiceAccess(store, store)
-	if err != nil {
+	if authorizer.service, err = oauth.NewServiceAccess(store, store); err != nil {
 		return bearers{}, nil, nil, err
 	}
-	return tokens, login, kindAuthorizer{github: github, service: services}, nil
+	return tokens, login, authorizer, nil
 }
 
 // kindAuthorizer sends the check of a service to the Authorizer of services,
-// and every other principal's to GitHub's.
+// that of a user who logged in through a browser to the Authorizer of such
+// users, and every other principal's to GitHub's.
 type kindAuthorizer struct {
 	github  faucet.Authorizer
 	service faucet.Authorizer
+	// user is nil when the browser login is off. No token verifies as such
+	// a user then.
+	user faucet.Authorizer
 }
 
 func (a kindAuthorizer) of(p faucet.Principal) faucet.Authorizer {
 	if _, ok := p.ServiceClient(); ok {
 		return a.service
+	}
+	if _, ok := p.OAuthSession(); ok && a.user != nil {
+		return a.user
 	}
 	return a.github
 }
@@ -449,6 +468,7 @@ func newRouter(svc *faucet.Service, tokens bearers, login *oauth.Server, cron cr
 		r.Handle("/.well-known/oauth-protected-resource/mcp", protectedResource(tokens, "/mcp"))
 		r.Handle("/.well-known/oauth-authorization-server", login.MetadataHandler())
 		r.Handle("/oauth/authorize", login.AuthorizeHandler())
+		r.Handle("/oauth/github/callback", login.GitHubCallbackHandler())
 		r.Handle("/oauth/token", login.TokenHandler())
 	}
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {

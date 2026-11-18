@@ -76,7 +76,7 @@ func newLoginServer(t *testing.T, configure ...func(*loginConfig)) *loginServer 
 	if cfg.logins != nil {
 		logins = cfg.logins(store)
 	}
-	tokens, login, authorizer, err := newLogin(publicURL, logins, cache, clock, logger)
+	tokens, login, authorizer, err := newLogin(publicURL, nil, logins, cache, nil, clock, logger)
 	require.NoError(t, err)
 	svc, err := faucet.New(faucet.Deps{
 		Store: store, Secret: []byte(testSecret), Logger: logger, Authorizer: authorizer, PrincipalFrom: principalFrom, Clock: clock,
