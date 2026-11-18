@@ -58,6 +58,8 @@ func TestTheMetadataOfABrowserLoginNamesItsGrantsAndClientDocuments(t *testing.T
 	require.Equal(t, []any{"authorization_code", "client_credentials", "refresh_token"}, m["grant_types_supported"])
 	require.Equal(t, []any{"code"}, m["response_types_supported"])
 	require.Equal(t, []any{"client_secret_basic", "none"}, m["token_endpoint_auth_methods_supported"])
+	require.Equal(t, issuer+"/oauth/revoke", m["revocation_endpoint"])
+	require.Equal(t, []any{"client_secret_basic", "none"}, m["revocation_endpoint_auth_methods_supported"])
 	require.Equal(t, []any{"S256"}, m["code_challenge_methods_supported"])
 	require.Equal(t, true, m["client_id_metadata_document_supported"])
 	require.Equal(t, true, m["authorization_response_iss_parameter_supported"])
@@ -97,6 +99,38 @@ func TestNewServerRefusesABrowserLoginThatLacksAPart(t *testing.T) {
 		require.Error(t, err, name)
 		require.NotContains(t, err.Error(), "app-secret", name)
 	}
+}
+
+// A session that ended, or went unused for 180 days, goes with its refresh
+// tokens. A connection that no session and no request names goes too, with
+// the GitHub tokens that faucet kept for its user.
+func TestPurgeDeletesDeadSessionsAndTheConnectionsThatNoneNames(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h := newGrantHarness(t, newFakeStore())
+	live := h.redeem(h.approve("login-live", 1))
+	ended := h.redeem(h.approve("login-ended", 2))
+	idle := h.redeem(h.approve("login-idle", 3))
+	require.NoError(t, h.store.EndSession(ctx, ended.id, h.clock.Now()))
+
+	h.clock.Advance(180*24*time.Hour - time.Minute)
+	live = h.refresh(live)
+	h.clock.Advance(time.Minute)
+	_, err := h.server.Purge(ctx)
+	require.NoError(t, err)
+
+	for name, s := range map[string]grantSession{"an ended session": ended, "an idle session": idle} {
+		_, err := h.store.Session(ctx, s.id)
+		require.ErrorIs(t, err, oauth.ErrUnknownSession, name)
+		grantRequireRefused(t, h.post("", grantRefreshForm(s.refresh)), http.StatusBadRequest, "invalid_grant", name)
+	}
+	for _, user := range []int64{2, 3} {
+		_, err := h.store.Connection(ctx, oauth.ConnectionID(oauth.ProviderGitHub, user))
+		require.ErrorIs(t, err, oauth.ErrUnknownConnection, "user %d", user)
+	}
+	h.refresh(live)
+	_, err = h.store.Connection(ctx, oauth.ConnectionID(oauth.ProviderGitHub, 1))
+	require.NoError(t, err, "the connection of the live session")
 }
 
 // A request stays a day past its expiry, so a code that is used again within

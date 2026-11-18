@@ -190,6 +190,7 @@ type grantHarness struct {
 	clock  *quartz.Mock
 	github *grantGitHub
 	login  *oauth.BrowserLogin
+	server *oauth.Server
 	srv    *httptest.Server
 
 	mu       sync.Mutex
@@ -211,6 +212,7 @@ func newGrantHarness(t *testing.T, store oauth.Store) *grantHarness {
 		Resources: []string{resource, issuer + "/mcp"}, Login: h.login,
 	})
 	require.NoError(t, err)
+	h.server = server
 	token := server.TokenHandler()
 	mux := http.NewServeMux()
 	mux.Handle("POST "+oauth.TokenPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

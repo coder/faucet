@@ -115,14 +115,16 @@ func TestTheMetadataNamesTheGrantTable(t *testing.T) {
 	var got map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
 	require.Equal(t, map[string]any{
-		"issuer":                                issuer,
-		"authorization_endpoint":                issuer + "/oauth/authorize",
-		"token_endpoint":                        issuer + "/oauth/token",
-		"scopes_supported":                      []any{"events:read", "events:subscribe"},
-		"response_types_supported":              []any{},
-		"grant_types_supported":                 []any{"client_credentials"},
-		"token_endpoint_auth_methods_supported": []any{"client_secret_basic"},
-		"code_challenge_methods_supported":      []any{"S256"},
+		"issuer":                                     issuer,
+		"authorization_endpoint":                     issuer + "/oauth/authorize",
+		"token_endpoint":                             issuer + "/oauth/token",
+		"scopes_supported":                           []any{"events:read", "events:subscribe"},
+		"response_types_supported":                   []any{},
+		"grant_types_supported":                      []any{"client_credentials"},
+		"token_endpoint_auth_methods_supported":      []any{"client_secret_basic"},
+		"code_challenge_methods_supported":           []any{"S256"},
+		"revocation_endpoint":                        issuer + "/oauth/revoke",
+		"revocation_endpoint_auth_methods_supported": []any{"client_secret_basic"},
 	}, got)
 }
 
