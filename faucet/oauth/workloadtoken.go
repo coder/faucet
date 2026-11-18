@@ -75,8 +75,8 @@ func (c *workloadChecker) check(ctx context.Context, rules []TrustRule, token, a
 	if header.KeyID == "" {
 		return workloadMatch{}, refuseToken("its header must name its key in kid")
 	}
-	// The unverified iss only picks the rules, and with them the keys, whose
-	// signature then covers the same claims.
+	// The unverified iss only picks the rules, and with them the keys. match
+	// checks the verified iss again.
 	var unverified struct {
 		Issuer string `json:"iss"`
 	}
@@ -125,6 +125,8 @@ func (c *workloadChecker) match(ctx context.Context, rule trustRule, jws *jose.J
 		return time.Time{}, refuseSigned("its claims must be a JSON object, with the registered claims of RFC 7519 in their types")
 	}
 	switch {
+	case registered.Issuer != rule.Issuer:
+		return time.Time{}, refuseSigned("its iss must be the rule's issuer")
 	case len(registered.Audience) != 1 || registered.Audience[0] != audience:
 		return time.Time{}, refuseSigned("its aud must be " + audience + " alone")
 	case registered.Expiry == nil:

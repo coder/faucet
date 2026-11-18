@@ -700,6 +700,28 @@ func TestTheFirstRuleThatMatchesWins(t *testing.T) {
 	}
 }
 
+// match takes a token only when its verified iss is the rule's issuer,
+// whatever picked the rule.
+func TestAMatchNeedsTheVerifiedIssToBeTheRulesIssuer(t *testing.T) {
+	t.Parallel()
+	clock := quartz.NewMock(t)
+	now := clock.Now()
+	c := newWorkloadChecker(&http.Client{}, clock)
+	rule, err := parseTrustRule(testKubernetesRule(t, publicJWK(testRSAKey(), testKID)))
+	require.NoError(t, err)
+	for iss, ok := range map[any]bool{testKubernetesIssuer: true, testKubernetesIssuer + "/": false, "https://issuer.example.com": false, nil: false} {
+		claims := kubernetesClaims(now)
+		claims["iss"] = iss
+		jws := must(jose.ParseSignedCompact(signToken(t, jose.RS256, testRSAKey(), testKID, claims), workloadAlgorithms))
+		_, err := c.match(context.Background(), rule, jws, jws.Signatures[0].Header, testAudience, now)
+		if ok {
+			require.NoError(t, err, iss)
+			continue
+		}
+		requireTokenRefused(t, err, "its iss must be the rule's issuer", iss)
+	}
+}
+
 // Of the rules that a token fails, check answers for the one that tells the
 // most: keys that faucet could not fetch, as the token may match once they
 // come, then a refusal after the token's signature verified.
