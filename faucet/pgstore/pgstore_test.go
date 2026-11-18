@@ -233,7 +233,7 @@ func TestTheRawEventsMigrationGoesDownAndUpAroundTheEventLog(t *testing.T) {
 	// down before them and up after them.
 	migrate := func(direction string) {
 		t.Helper()
-		files := []string{"000013_owner_targets", "000012_raw_events"}
+		files := []string{"000014_owner_targets", "000012_raw_events"}
 		if direction == "up" {
 			slices.Reverse(files)
 		}
@@ -360,7 +360,7 @@ func TestTheOwnerTargetsMigrationGoesDownToRepositoryRowsAndUpAgain(t *testing.T
 		return n
 	}
 
-	runMigrationFile(t, db, "000013_owner_targets.down.sql")
+	runMigrationFile(t, db, "000014_owner_targets.down.sql")
 	require.Equal(t, 1, count(`SELECT COUNT(*) FROM faucet_subscriptions WHERE repo_id = 42`), "the repository's subscription stays")
 	require.Equal(t, 1, count(`SELECT COUNT(*) FROM faucet_subscriptions`), "the owner and all subscriptions are gone")
 	require.Equal(t, 1, count(`SELECT COUNT(*) FROM faucet_raw_leases`), "so are the owner and all leases")
@@ -370,7 +370,7 @@ func TestTheOwnerTargetsMigrationGoesDownToRepositoryRowsAndUpAgain(t *testing.T
 	_, err = db.ExecContext(ctx, `UPDATE faucet_subscriptions SET repo_id = 0`)
 	require.Error(t, err, "a subscription needs a repository again")
 
-	runMigrationFile(t, db, "000013_owner_targets.up.sql")
+	runMigrationFile(t, db, "000014_owner_targets.up.sql")
 	targets, err := store.ScanTargets(ctx, now, 100, 100)
 	require.NoError(t, err)
 	require.Len(t, targets, 1)
