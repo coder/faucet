@@ -66,6 +66,18 @@ var issuerProfiles = map[string]issuerProfile{
 			{claim: "environment", value: "production", why: "a preview deployment runs any branch, and a development token sits on a laptop for 12 hours"},
 		},
 	},
+	"token.actions.githubusercontent.com": {
+		pins: []requiredPin{
+			{claim: "repository_owner_id", why: "the workflows of every GitHub account get their tokens from this issuer, an owner can choose the parts of sub, and the name of a renamed or deleted account can pass to another, so only the owner ID tells the accounts apart"},
+			{claim: "repository_id", why: "every repository of the owner can get a token for faucet, and the name of a renamed or deleted repository can pass to another, so only the repository ID names one"},
+		},
+	},
+	"gitlab.com": {
+		pins: []requiredPin{
+			{claim: "namespace_id", why: "the jobs of every group and user of gitlab.com get their tokens from this issuer, a project can choose the parts of sub, and the path of a renamed namespace can pass to another, so only the namespace ID tells the namespaces apart"},
+			{claim: "project_id", why: "every project of the namespace can get a token for faucet, and only the project ID names one project of gitlab.com"},
+		},
+	},
 }
 
 var otherIssuers = issuerProfile{

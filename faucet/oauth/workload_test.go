@@ -91,6 +91,33 @@ func TestFaucetTrustsOnlyTheIssuerOfOneVercelTeam(t *testing.T) {
 	}
 }
 
+// Every GitHub account and every gitlab.com namespace gets its tokens from
+// the same issuer, and both let a repository choose the parts of sub, so a
+// rule pins the IDs of the owner and of the repository.
+func TestARuleForGitHubActionsOrGitLabMustPinTheOwnerAndRepositoryIDs(t *testing.T) {
+	t.Parallel()
+	for issuer, ids := range map[string][2]string{
+		"https://token.actions.githubusercontent.com":               {"repository_owner_id", "repository_id"},
+		"https://token.actions.githubusercontent.com/octo-business": {"repository_owner_id", "repository_id"},
+		"https://gitlab.com": {"namespace_id", "project_id"},
+	} {
+		owner, repository := ids[0], ids[1]
+		rule := func(claims map[string]string) oauth.TrustRule { return oauth.TrustRule{Issuer: issuer, Claims: claims} }
+		require.NoError(t, oauth.ValidateTrustRule(rule(map[string]string{owner: "65", repository: "74"})), issuer)
+		for _, c := range []struct {
+			claims map[string]string
+			want   string
+		}{
+			{map[string]string{"sub": "environment:production"}, owner},
+			{map[string]string{owner: "65"}, repository},
+			{map[string]string{repository: "74", "sub": "repo:octo-org/octo-repo:ref:refs/heads/main"}, owner},
+		} {
+			err := oauth.ValidateTrustRule(rule(c.claims))
+			require.ErrorContains(t, err, "a trust rule for "+issuer+" must pin "+c.want+": ", issuer)
+		}
+	}
+}
+
 func TestARuleOfAnyOtherIssuerMustPinSub(t *testing.T) {
 	t.Parallel()
 	const issuer = "https://container.googleapis.com/v1/projects/p/locations/l/clusters/c"
