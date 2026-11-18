@@ -123,7 +123,7 @@ Faucet keeps no subscriber's token, so it only sees revoked access **when the su
 
 Faucet also sends two bodies with a top-level `type` and no `eventId` or `data`. They carry the same headers and signature. Each send gets a fresh `webhook-id` and is attempted once.
 
-- `{"type":"gap","cursor":"v1.<n>"}`: a retention purge deleted events that the subscription hadn't read yet. The check ignores the `sha`, `pr` and field filter arguments, so a filtered subscription can get a gap for an event that its filter would have dropped. Treat it like `truncated: true` and persist the `cursor`. A gap can arrive more than once, so deduplicate gaps by `cursor` and keep the highest. A raw subscription gets a gap, with a cursor `r1.<n>`, for the events that arrived while it held 100 unsent deliveries.
+- `{"type":"gap","cursor":"v1.<n>"}`: a retention purge deleted events that the subscription hadn't read yet. The check ignores the `sha`, `pr` and field filter arguments, so a filtered subscription can get a gap for an event that its filter would have dropped. Treat it like `truncated: true` and persist the `cursor`. A gap can arrive more than once, so deduplicate gaps by `cursor` and keep the highest. A raw subscription gets a gap, with a cursor `r1.<n>`, for the events that arrived while it held 100 unsent deliveries, and for an event whose payload, or the `fields` of it, is over 256 KiB.
 - `{"type":"terminated","error":{"code":-32024,"message":"Forbidden","data":{"reason":"Access revoked"}}}`: a renewal found that the token can no longer read the repository, so the subscription was deleted. Delivery is at most once.
 
 ## Secret rotation

@@ -49,7 +49,6 @@ var rawIngestSubtests = []rawSubtest{
 	{"IngestRawMatchesOnRepositoryEventLivenessAndAction", ingestRawMatchesOnRepositoryEventLivenessAndAction},
 	{"IngestRawWritesWhatThePlanSays", ingestRawWritesWhatThePlanSays},
 	{"IngestRawStoresTheBodyAndFieldsByteForByte", ingestRawStoresTheBodyAndFieldsByteForByte},
-	{"IngestRawStoresAGiveUpWithoutABody", ingestRawStoresAGiveUpWithoutABody},
 	{"IngestRawReportsADuplicateAndWritesNothing", ingestRawReportsADuplicateAndWritesNothing},
 	{"IngestRawRefusesAnInvalidPlan", ingestRawRefusesAnInvalidPlan},
 	{"IngestRawAssignsRisingIDsAndReceivedAtNeverGoesBack", ingestRawAssignsRisingIDsAndReceivedAtNeverGoesBack},
@@ -476,7 +475,6 @@ func ingestRawWritesWhatThePlanSays(t *testing.T, s RawStore) {
 	claim := claims[0]
 	require.Equal(t, faucet.DeliveryRef{Key: served.KeyHash, EventID: id, Attempt: 1, Incarnation: claim.Ref.Incarnation}, claim.Ref)
 	require.True(t, claim.Ref.Incarnation.Equal(served.CreatedAt))
-	require.Empty(t, claim.GiveUp)
 	require.True(t, claim.EnqueuedAt.Equal(r.now), "a delivery is enqueued at the time of the ingest")
 	require.NotNil(t, claim.Event)
 	require.Equal(t, id, claim.Event.ID)
@@ -545,18 +543,6 @@ func ingestRawStoresTheBodyAndFieldsByteForByte(t *testing.T, s RawStore) {
 	}
 }
 
-func ingestRawStoresAGiveUpWithoutABody(t *testing.T, s RawStore) {
-	r := newRawRig(t, s)
-	sub := r.subscribe(1, rawSpec{})
-	id := r.store(r.newDelivery(), func([]faucet.RawInterest) faucet.RawPlan {
-		return faucet.RawPlan{Deliveries: []faucet.RawOutbox{{Key: sub.KeyHash, Incarnation: sub.CreatedAt, GiveUp: faucet.GiveUpEventTooLarge}}}
-	})
-	claim := r.mustClaim(r.now)
-	require.Equal(t, id, claim.Ref.EventID)
-	require.Equal(t, faucet.GiveUpEventTooLarge, claim.GiveUp)
-	require.Nil(t, claim.Event, "the plan had no body")
-}
-
 func ingestRawReportsADuplicateAndWritesNothing(t *testing.T, s RawStore) {
 	r := newRawRig(t, s)
 	sub, lease := r.subscribe(1, rawSpec{}), r.open(rawSpec{})
@@ -605,10 +591,6 @@ func ingestRawRefusesAnInvalidPlan(t *testing.T, s RawStore) {
 		"field paths without a body":   {Fields: []string{"ref"}},
 		"a delivery without a body":    {Deliveries: []faucet.RawOutbox{delivery}},
 		"an unread event without body": {Unread: []faucet.RawLeaseID{lease.ID}},
-		"another give-up reason": {
-			Body:       rawBody,
-			Deliveries: []faucet.RawOutbox{{Key: sub.KeyHash, Incarnation: sub.CreatedAt, GiveUp: faucet.GiveUpEndpointGone}},
-		},
 	} {
 		require.Error(t, plan.Validate(), name)
 		_, err := s.IngestRaw(r.ctx, d, r.now, func([]faucet.RawInterest) faucet.RawPlan { return plan })

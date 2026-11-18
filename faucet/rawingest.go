@@ -27,14 +27,9 @@ func (s *Service) serveRawWebhook(w http.ResponseWriter, r *http.Request, logger
 	}
 
 	var plan RawPlan
-	var fullLeases int
+	var missed rawMisses
 	res, err := s.raw.IngestRaw(r.Context(), d, s.clock.Now(), func(interests []RawInterest) RawPlan {
-		plan = planRawIngest(doc, interests)
-		for _, in := range interests {
-			if in.IsLease && in.Pending >= maxUnreadPerLease {
-				fullLeases++
-			}
-		}
+		plan, missed = planRawIngest(doc, interests)
 		return plan
 	})
 	switch {
@@ -57,17 +52,18 @@ func (s *Service) serveRawWebhook(w http.ResponseWriter, r *http.Request, logger
 	}
 	// A lease's loss has no other counter, and a gap is sent later, so these
 	// lines are the record of an event that an interest missed.
-	if n := len(plan.Lost) - fullLeases; n > 0 {
-		logger.Warn(r.Context(), "raw event missed by leases",
-			slog.F("raw_id", res.ID), slog.F("count", n), slog.F("reason", GiveUpEventTooLarge))
-	}
-	if fullLeases > 0 {
-		logger.Warn(r.Context(), "raw event missed by leases",
-			slog.F("raw_id", res.ID), slog.F("count", fullLeases), slog.F("reason", "unread_limit"))
-	}
-	if n := len(plan.Gaps); n > 0 {
-		logger.Warn(r.Context(), "raw event missed by subscriptions",
-			slog.F("raw_id", res.ID), slog.F("count", n), slog.F("reason", "pending_limit"))
+	for _, m := range []struct {
+		msg, reason string
+		count       int
+	}{
+		{"raw event missed by leases", string(GiveUpEventTooLarge), missed.leasesTooLarge},
+		{"raw event missed by leases", "unread_limit", missed.leasesFull},
+		{"raw event missed by subscriptions", "pending_limit", missed.subscriptionsFull},
+		{"raw event missed by subscriptions", string(GiveUpEventTooLarge), missed.subscriptionsTooLarge},
+	} {
+		if m.count > 0 {
+			logger.Warn(r.Context(), m.msg, slog.F("raw_id", res.ID), slog.F("count", m.count), slog.F("reason", m.reason))
+		}
 	}
 	reply(w, http.StatusOK, "stored")
 }

@@ -242,7 +242,6 @@ func TestRawIngestMatchOrDrop(t *testing.T) {
 		claims := h.claims()
 		require.Len(t, claims, 1)
 		require.Equal(t, sub.KeyHash, claims[0].Ref.Key)
-		require.Empty(t, claims[0].GiveUp)
 		require.NotNil(t, claims[0].Event)
 		require.Equal(t, body, []byte(claims[0].Event.Body))
 	})
@@ -547,16 +546,29 @@ func TestRawIngestSize(t *testing.T) {
 		require.NotContains(t, h.logs.String(), "[warn]")
 	})
 
-	t.Run("SubscriptionWithoutFields", func(t *testing.T) {
-		t.Parallel()
-		h := newIngestHarness(t)
-		h.subscribe(ingestInterest{})
-		code, _ := h.post("push", "d-1", body)
-		require.Equal(t, http.StatusOK, code)
-		claims := h.claims()
-		require.Len(t, claims, 1)
-		require.Equal(t, faucet.GiveUpEventTooLarge, claims[0].GiveUp)
-	})
+	for name, interest := range map[string]ingestInterest{
+		"SubscriptionWithoutFields":    {},
+		"SubscriptionWithLargeFields":  {fields: []string{"big"}},
+		"SubscriptionWithLargeAndMore": {fields: []string{"big", "ref"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newIngestHarness(t)
+			sub := h.subscribe(interest)
+			code, _ := h.post("push", "d-1", body)
+			require.Equal(t, http.StatusOK, code)
+
+			require.Empty(t, h.claims(), "no delivery is queued for an event that the subscription cannot get")
+			gap, ok, err := h.store.ClaimRawGap(h.ctx, h.clock.Now(), time.Minute, nil)
+			require.NoError(t, err)
+			require.True(t, ok, "the subscription is owed a gap")
+			require.Equal(t, sub.KeyHash, gap.Ref.Key)
+			require.Equal(t, h.head(), gap.Ref.Through, "the gap runs through the event")
+			line := logLine(t, h.logs.String(), "raw event missed by subscriptions")
+			require.Contains(t, line, "count=1")
+			require.Contains(t, line, "event_too_large")
+		})
+	}
 
 	t.Run("UnionWhenEveryInterestHasFields", func(t *testing.T) {
 		t.Parallel()

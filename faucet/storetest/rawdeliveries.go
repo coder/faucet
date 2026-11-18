@@ -14,7 +14,6 @@ var rawDeliverySubtests = []rawSubtest{
 	{"ClaimRawDeliveryTakesTheDueTimeThenTheRawIDAndHoldsItForTheLease", claimRawDeliveryTakesTheDueTimeThenTheRawIDAndHoldsItForTheLease},
 	{"ClaimRawDeliveryReturnsTheSubscriptionAndTheStoredEvent", claimRawDeliveryReturnsTheSubscriptionAndTheStoredEvent},
 	{"ClaimRawDeliveryWatermarkStaysBelowTheLowestUnsentDelivery", claimRawDeliveryWatermarkStaysBelowTheLowestUnsentDelivery},
-	{"ClaimRawDeliveryCarriesThePlannedGiveUp", claimRawDeliveryCarriesThePlannedGiveUp},
 	{"FinishRawDeliveryRetriesOrEndsAndRecordsTheStatus", finishRawDeliveryRetriesOrEndsAndRecordsTheStatus},
 	{"FinishRawDeliveryRefusesAnAttemptThatIsNotTheCurrentOne", finishRawDeliveryRefusesAnAttemptThatIsNotTheCurrentOne},
 	{"ClaimRawDeliveryPassesOverTheOriginsItIsToldTo", claimRawDeliveryPassesOverTheOriginsItIsToldTo},
@@ -102,7 +101,6 @@ func claimRawDeliveryReturnsTheSubscriptionAndTheStoredEvent(t *testing.T, s Raw
 	require.Equal(t, []byte("sealed-1"), claim.PreviousSecretEnc, "and the secret that the delivery is also signed with")
 	require.True(t, r.now.Add(5*time.Minute).Equal(claim.PreviousSecretUntil), "got %s", claim.PreviousSecretUntil)
 	require.Equal(t, rawRepo, claim.RepoID)
-	require.Empty(t, claim.GiveUp)
 
 	require.NotNil(t, claim.Event, "the event and its body are stored")
 	require.Equal(t, id, claim.Event.ID)
@@ -136,23 +134,6 @@ func claimRawDeliveryWatermarkStaysBelowTheLowestUnsentDelivery(t *testing.T, s 
 	for _, id := range []int64{first, second, third} {
 		require.Equal(t, first-1, deliveryOf(t, claims, behind, id).Watermark, "another subscription's sent delivery does not move this one's watermark")
 	}
-}
-
-func claimRawDeliveryCarriesThePlannedGiveUp(t *testing.T, s RawStore) {
-	r := newRawRig(t, s)
-	sub := r.subscribe(1, rawSpec{})
-	tooLarge := r.store(r.newDelivery(), func(interests []faucet.RawInterest) faucet.RawPlan {
-		in := subscriptionInterest(t, interests, sub)
-		return faucet.RawPlan{Deliveries: []faucet.RawOutbox{{Key: in.Subscription, Incarnation: in.Incarnation, GiveUp: faucet.GiveUpEventTooLarge}}}
-	})
-	served := r.push()
-
-	claims := r.claimAll(r.now)
-	require.Equal(t, []int64{tooLarge, served}, deliveryRefIDs(claims))
-	require.Equal(t, faucet.GiveUpEventTooLarge, claims[0].GiveUp, "the claim ends the delivery with the reason the plan set")
-	require.Nil(t, claims[0].Event, "a plan without a body stores no body to send")
-	require.Empty(t, claims[1].GiveUp)
-	require.NotNil(t, claims[1].Event)
 }
 
 // deliveryStatus refreshes the nth raw subscription and returns what it has

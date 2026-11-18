@@ -52,6 +52,7 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/events.md", "of it, is over %d KiB", []any{kib(maxEventBodyBytes)}},
 		{"docs/events.md", "A raw subscription holds %d unsent deliveries", []any{MaxPendingDeliveries}},
 		{"docs/webhooks.md", "while it held %d unsent deliveries", []any{MaxPendingDeliveries}},
+		{"docs/webhooks.md", "the `fields` of it, is over %d KiB", []any{kib(maxEventBodyBytes)}},
 		{"docs/webhooks.md", "url not verified here in the last %d minutes", []any{minutes(callbackVerificationTTL)}},
 		{"docs/webhooks.md", "verified that login and URL in the last %d minutes", []any{minutes(callbackVerificationTTL)}},
 		{"docs/webhooks.md", "remembers a success for that login and URL for %d minutes", []any{minutes(callbackVerificationTTL)}},

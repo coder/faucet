@@ -92,12 +92,10 @@ func writeRawPlan(ctx context.Context, q *database.Queries, id int64, now time.T
 			Now:          now,
 			KeyHashes:    make([][]byte, 0, len(p.Deliveries)),
 			Incarnations: make([]time.Time, 0, len(p.Deliveries)),
-			GiveUps:      make([]string, 0, len(p.Deliveries)),
 		}
 		for _, o := range p.Deliveries {
 			params.KeyHashes = append(params.KeyHashes, o.Key[:])
 			params.Incarnations = append(params.Incarnations, o.Incarnation)
-			params.GiveUps = append(params.GiveUps, string(o.GiveUp))
 		}
 		if err := q.InsertRawDeliveries(ctx, params); err != nil {
 			return xerrors.Errorf("insert raw deliveries: %w", err)
@@ -288,7 +286,6 @@ func (s *Store) ClaimRawDelivery(ctx context.Context, now time.Time, lease time.
 		PreviousSecretUntil: row.PreviousSecretUntil.Time,
 		RepoID:              row.RepoID,
 		Watermark:           row.Watermark,
-		GiveUp:              faucet.GiveUpReason(row.GiveUp.String),
 	}
 	if row.StoredEventID.Valid {
 		claim.Event = &faucet.RawEvent{

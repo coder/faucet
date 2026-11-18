@@ -50,7 +50,6 @@ type FaucetRawDelivery struct {
 	KeyHash       []byte
 	Incarnation   time.Time
 	RawEventID    int64
-	GiveUp        sql.NullString
 	EnqueuedAt    time.Time
 	NextAttemptAt time.Time
 	Attempts      int32

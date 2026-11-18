@@ -36,8 +36,6 @@ func (r *deliveryRun) rawOutbound(claim RawDeliveryClaim) outbound {
 		secrets: sealedSecrets{current: claim.SecretEnc, previous: claim.PreviousSecretEnc, previousUntil: claim.PreviousSecretUntil},
 		mustEnd: func(ctx context.Context) GiveUpReason {
 			switch ev := claim.Event; {
-			case claim.GiveUp != "":
-				return claim.GiveUp
 			case ev == nil:
 				return GiveUpEventPurged
 			case ev.RepoID != claim.RepoID:
@@ -86,7 +84,7 @@ func rawData(ev RawEvent, fields []string) (json.RawMessage, error) {
 func (r *deliveryRun) rawGaps() gapKind {
 	return gapKind{
 		noun: "raw gap", claim: r.svc.raw.ClaimRawGap, finish: r.svc.raw.FinishRawGap, cursor: encodeRawCursor, through: "missed_through",
-		sent:   "the subscription held the most unsent deliveries when events arrived, the gap envelope was sent",
-		failed: "the subscription held the most unsent deliveries when events arrived, the gap envelope was not delivered",
+		sent:   "the subscription missed raw events, the gap envelope was sent",
+		failed: "the subscription missed raw events, the gap envelope was not delivered",
 	}
 }

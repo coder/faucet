@@ -45,10 +45,10 @@ WITH due AS (
   SET attempts = d.attempts + 1, lease_until = $3
   FROM due
   WHERE d.key_hash = due.key_hash AND d.raw_event_id = due.raw_event_id
-  RETURNING d.key_hash, d.incarnation, d.raw_event_id, d.give_up, d.attempts, d.enqueued_at
+  RETURNING d.key_hash, d.incarnation, d.raw_event_id, d.attempts, d.enqueued_at
 )
 SELECT
-  c.key_hash, c.incarnation, c.raw_event_id, c.give_up, c.attempts, c.enqueued_at,
+  c.key_hash, c.incarnation, c.raw_event_id, c.attempts, c.enqueued_at,
   s.event_type, s.arguments, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.repo_id,
   (SELECT COALESCE(MIN(p.raw_event_id), c.raw_event_id) - 1 FROM faucet_raw_deliveries p WHERE p.key_hash = c.key_hash AND p.incarnation = c.incarnation)::bigint AS watermark,
   e.id AS stored_event_id, e.delivery_id, e.event, e.action, e.repo_id AS event_repo_id, e.body, e.fields, e.received_at
@@ -67,7 +67,6 @@ type ClaimRawDeliveryRow struct {
 	KeyHash             []byte
 	Incarnation         time.Time
 	RawEventID          int64
-	GiveUp              sql.NullString
 	Attempts            int32
 	EnqueuedAt          time.Time
 	EventType           string
@@ -96,7 +95,6 @@ func (q *Queries) ClaimRawDelivery(ctx context.Context, arg ClaimRawDeliveryPara
 		&i.KeyHash,
 		&i.Incarnation,
 		&i.RawEventID,
-		&i.GiveUp,
 		&i.Attempts,
 		&i.EnqueuedAt,
 		&i.EventType,
@@ -402,11 +400,10 @@ func (q *Queries) ExpireRawGaps(ctx context.Context, now time.Time) error {
 }
 
 const insertRawDeliveries = `-- name: InsertRawDeliveries :exec
-INSERT INTO faucet_raw_deliveries (key_hash, incarnation, raw_event_id, give_up, enqueued_at, next_attempt_at)
-SELECT k.key_hash, i.incarnation, $1::bigint, NULLIF(g.give_up, ''), $2::timestamptz, $2::timestamptz
+INSERT INTO faucet_raw_deliveries (key_hash, incarnation, raw_event_id, enqueued_at, next_attempt_at)
+SELECT k.key_hash, i.incarnation, $1::bigint, $2::timestamptz, $2::timestamptz
 FROM unnest($3::bytea[]) WITH ORDINALITY AS k(key_hash, n)
 JOIN unnest($4::timestamptz[]) WITH ORDINALITY AS i(incarnation, n) USING (n)
-JOIN unnest($5::text[]) WITH ORDINALITY AS g(give_up, n) USING (n)
 `
 
 type InsertRawDeliveriesParams struct {
@@ -414,7 +411,6 @@ type InsertRawDeliveriesParams struct {
 	Now          time.Time
 	KeyHashes    [][]byte
 	Incarnations []time.Time
-	GiveUps      []string
 }
 
 func (q *Queries) InsertRawDeliveries(ctx context.Context, arg InsertRawDeliveriesParams) error {
@@ -423,7 +419,6 @@ func (q *Queries) InsertRawDeliveries(ctx context.Context, arg InsertRawDeliveri
 		arg.Now,
 		pq.Array(arg.KeyHashes),
 		pq.Array(arg.Incarnations),
-		pq.Array(arg.GiveUps),
 	)
 	return err
 }

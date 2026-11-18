@@ -3,7 +3,6 @@ package faucet
 import (
 	"context"
 	"encoding/json"
-	"slices"
 	"time"
 
 	"golang.org/x/xerrors"
@@ -78,16 +77,15 @@ type RawInterest struct {
 	Pending int32
 }
 
-// RawOutbox is one delivery that a subscription is to get. A GiveUp ends it
-// with that reason, without a request.
+// RawOutbox is one delivery that a subscription is to get.
 type RawOutbox struct {
 	Key         SubscriptionKeyHash
 	Incarnation time.Time
-	GiveUp      GiveUpReason
 }
 
 // RawGap names a subscription that misses the event and is owed a gap
-// envelope.
+// envelope: it holds the most unsent deliveries, or the event is too large
+// for it.
 type RawGap struct {
 	Key         SubscriptionKeyHash
 	Incarnation time.Time
@@ -102,8 +100,7 @@ type RawPlan struct {
 	// Fields are the field paths that Body holds. Nil with a Body means the
 	// whole payload.
 	Fields []string
-	// Deliveries has one entry per subscription that is served or that ends
-	// with a give-up.
+	// Deliveries has one entry per subscription that is served.
 	Deliveries []RawOutbox
 	// Unread are the leases that get the event.
 	Unread []RawLeaseID
@@ -120,9 +117,7 @@ func (p RawPlan) Validate() error {
 	switch {
 	case p.Fields != nil && p.Body == nil:
 		return xerrors.New("field paths need a body")
-	case slices.ContainsFunc(p.Deliveries, func(o RawOutbox) bool { return o.GiveUp != "" && o.GiveUp != GiveUpEventTooLarge }):
-		return xerrors.New("a raw delivery can only be planned to give up as too large")
-	case p.Body == nil && (len(p.Unread) > 0 || slices.ContainsFunc(p.Deliveries, func(o RawOutbox) bool { return o.GiveUp == "" })):
+	case p.Body == nil && (len(p.Unread) > 0 || len(p.Deliveries) > 0):
 		return xerrors.New("an interest is served, so the plan needs a body")
 	}
 	return nil
@@ -251,8 +246,6 @@ type RawDeliveryClaim struct {
 	RepoID int64
 	// Watermark is the lowest unsent raw ID of the subscription, minus one.
 	Watermark int64
-	// GiveUp ends the delivery with this reason, without a request.
-	GiveUp GiveUpReason
 	// Event is nil when the event is gone or its body is cleared.
 	Event *RawEvent
 }

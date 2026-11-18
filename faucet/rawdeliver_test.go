@@ -184,10 +184,6 @@ func TestDeliverDueEndsEveryRawDeliveryItCannotSendWithAReason(t *testing.T) {
 		reason faucet.GiveUpReason
 		run    func(d *deliverHarness, ep hookEndpoint) faucet.DeliverResult
 	}{
-		"the payload is over 256 KiB when it arrives": {faucet.GiveUpEventTooLarge, func(d *deliverHarness, _ hookEndpoint) faucet.DeliverResult {
-			d.pushRaw(map[string]any{"blob": strings.Repeat("x", 300<<10)})
-			return d.deliverDue()
-		}},
 		"the payload fits and the body with its envelope does not": {faucet.GiveUpEventTooLarge, func(d *deliverHarness, _ hookEndpoint) faucet.DeliverResult {
 			room := 256<<10 - len(rawPayload(repoID, "", map[string]any{"blob": ""}))
 			d.pushRaw(map[string]any{"blob": strings.Repeat("x", room)})
@@ -335,7 +331,7 @@ func TestDeliverDueTellsARawSubscriptionWhichEventsItMissedAtItsLimit(t *testing
 	require.Len(t, members, 2, "a gap body has a type and a cursor and nothing else")
 	require.JSONEq(t, fmt.Sprintf(`"r1.%d"`, missed), string(members["cursor"]), "the cursor is the newest event that the subscription missed")
 	line := logLine(t, d.logs.String(), "the gap envelope was sent")
-	require.Contains(t, line, "held the most unsent deliveries")
+	require.Contains(t, line, "the subscription missed raw events")
 	require.Contains(t, line, fmt.Sprintf("missed_through=%d", missed))
 	require.NotContains(t, line, "purged", "no purge is behind this gap")
 
@@ -345,6 +341,29 @@ func TestDeliverDueTellsARawSubscriptionWhichEventsItMissedAtItsLimit(t *testing
 	require.Equal(t, 1, res.Delivered, "with room again, the next event is delivered")
 	requests := d.rcv.requests("/hook")
 	require.Equal(t, fmt.Sprintf("r1.%d", next-1), requests[len(requests)-1].body(t).Cursor)
+}
+
+func TestDeliverDueTellsARawSubscriptionOfAnEventTooLargeToSend(t *testing.T) {
+	t.Parallel()
+
+	d := newRawDeliverHarness(t)
+	ep := d.endpoint("/hook")
+	sub := d.subscribeRaw("github.push", ep)
+	d.advance(time.Second)
+	missed := d.pushRaw(map[string]any{"blob": strings.Repeat("x", 300<<10)})
+	require.Zero(t, d.rawQueued, "no delivery is queued for an event over 256 KiB")
+	sent := d.pushRaw(nil)
+
+	res := d.deliverDue()
+	require.Equal(t, 1, res.GapsSent)
+	require.Empty(t, res.GaveUp)
+	require.Equal(t, 1, res.Delivered)
+	gaps := d.rcv.envelopesOf("/hook", "gap")
+	require.Len(t, gaps, 1)
+	members := d.requireEnvelope(gaps[0], "gap", ep.secret, sub.ID)
+	require.JSONEq(t, fmt.Sprintf(`"r1.%d"`, missed), string(members["cursor"]), "the cursor is the event that the subscription missed")
+	requests := d.rcv.requests("/hook")
+	require.Equal(t, fmt.Sprintf("r1.%d", sent-1), requests[len(requests)-1].body(t).Cursor)
 }
 
 func TestDeliverDueDoesNotSendARawGapASecondTimeWhenTheEndpointRefusesIt(t *testing.T) {

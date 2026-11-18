@@ -24,13 +24,11 @@ CREATE INDEX faucet_raw_events_received ON faucet_raw_events (received_at);
 -- One row per raw delivery that has not ended. It has no foreign key, so the
 -- insert of a delivery never locks a subscription. incarnation is the
 -- created_at of the subscription that the event matched: a row whose
--- subscription is gone, expired or made again is never claimed. give_up ends
--- the delivery with that reason, without a request.
+-- subscription is gone, expired or made again is never claimed.
 CREATE TABLE faucet_raw_deliveries (
   key_hash        bytea NOT NULL CHECK (octet_length(key_hash) = 32),
   incarnation     timestamptz NOT NULL,
   raw_event_id    bigint NOT NULL CHECK (raw_event_id > 0),
-  give_up         text CHECK (give_up IN ('event_too_large')),
   enqueued_at     timestamptz NOT NULL,
   next_attempt_at timestamptz NOT NULL,
   attempts        integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
@@ -41,9 +39,9 @@ CREATE TABLE faucet_raw_deliveries (
 CREATE INDEX faucet_raw_deliveries_due ON faucet_raw_deliveries (next_attempt_at, raw_event_id);
 CREATE INDEX faucet_raw_deliveries_event ON faucet_raw_deliveries (raw_event_id);
 
--- A gap envelope that a raw subscription is owed, because it held the most
--- unsent deliveries when an event arrived. through is the highest raw ID that
--- it missed.
+-- A gap envelope that a raw subscription is owed, because it missed an
+-- event: it held the most unsent deliveries when the event arrived, or the
+-- event was too large for it. through is the highest raw ID that it missed.
 CREATE TABLE faucet_raw_gaps (
   key_hash    bytea NOT NULL CHECK (octet_length(key_hash) = 32),
   incarnation timestamptz NOT NULL,

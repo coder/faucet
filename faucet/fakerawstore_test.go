@@ -23,7 +23,6 @@ type fakeRawOutboxKey struct {
 
 type fakeRawOutbox struct {
 	incarnation time.Time
-	giveUp      faucet.GiveUpReason
 	enqueuedAt  time.Time
 	nextAttempt time.Time
 	attempts    int32
@@ -182,7 +181,7 @@ func (s *fakeStore) IngestRaw(ctx context.Context, d faucet.RawDelivery, now tim
 		Body: slices.Clone(p.Body), Fields: slices.Clone(p.Fields), ReceivedAt: s.rawReceivedAt,
 	})
 	for _, o := range p.Deliveries {
-		s.rawOutbox[fakeRawOutboxKey{o.Key, id}] = &fakeRawOutbox{incarnation: o.Incarnation, giveUp: o.GiveUp, enqueuedAt: now, nextAttempt: now}
+		s.rawOutbox[fakeRawOutboxKey{o.Key, id}] = &fakeRawOutbox{incarnation: o.Incarnation, enqueuedAt: now, nextAttempt: now}
 	}
 	for _, g := range p.Gaps {
 		k := fakeRawGapKey{g.Key, g.Incarnation.UnixNano()}
@@ -352,7 +351,6 @@ func (s *fakeStore) ClaimRawDelivery(ctx context.Context, now time.Time, lease t
 		PreviousSecretUntil: sub.PreviousSecretUntil,
 		RepoID:              sub.RepoID,
 		Watermark:           watermark - 1,
-		GiveUp:              bestRow.giveUp,
 	}
 	if ev, ok := s.rawEventLocked(best.rawID); ok && ev.Body != nil {
 		claim.Event = &ev
