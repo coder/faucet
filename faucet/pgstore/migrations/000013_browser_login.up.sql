@@ -44,11 +44,9 @@ CREATE UNIQUE INDEX faucet_auth_requests_github_state_idx ON faucet_auth_request
 CREATE UNIQUE INDEX faucet_auth_requests_code_idx ON faucet_auth_requests (code_hash) WHERE code_hash IS NOT NULL;
 CREATE INDEX faucet_auth_requests_expires_idx ON faucet_auth_requests (expires_at);
 
--- faucet_user_sessions holds the logins that a refresh token keeps alive.
--- id is the ID of the authorization request that made the session, so a
--- request makes one session at most. refresh_hash is the SHA-256 of the
--- current refresh token, and previous_refresh_hash that of the one the last
--- rotation replaced: a client that presents it again ends the session.
+-- faucet_user_sessions holds the logins that refresh tokens keep alive. id
+-- is the ID of the authorization request that made the session, so a
+-- request makes one session at most.
 CREATE TABLE faucet_user_sessions (
   id text PRIMARY KEY CHECK (id <> ''),
   client_id text NOT NULL CHECK (client_id <> ''),
@@ -56,10 +54,19 @@ CREATE TABLE faucet_user_sessions (
   connection_id text NOT NULL REFERENCES faucet_connections (id),
   resource text NOT NULL CHECK (resource <> ''),
   scopes text[] NOT NULL CHECK (cardinality(scopes) > 0),
-  refresh_hash bytea NOT NULL UNIQUE CHECK (octet_length(refresh_hash) = 32),
-  previous_refresh_hash bytea CHECK (octet_length(previous_refresh_hash) = 32),
   refreshed_at timestamptz NOT NULL,
   ended_at timestamptz
 );
-CREATE INDEX faucet_user_sessions_previous_refresh_idx ON faucet_user_sessions (previous_refresh_hash) WHERE previous_refresh_hash IS NOT NULL;
 CREATE INDEX faucet_user_sessions_connection_idx ON faucet_user_sessions (connection_id) WHERE ended_at IS NULL;
+
+-- faucet_refresh_tokens holds the SHA-256 of each refresh token of a session
+-- that a client may still hold, never the token. used_at is when a client
+-- first traded it for the next one. A use 30 seconds or more after that
+-- ends the session.
+CREATE TABLE faucet_refresh_tokens (
+  token_hash bytea PRIMARY KEY CHECK (octet_length(token_hash) = 32),
+  session_id text NOT NULL REFERENCES faucet_user_sessions (id) ON DELETE CASCADE,
+  issued_at timestamptz NOT NULL,
+  used_at timestamptz
+);
+CREATE INDEX faucet_refresh_tokens_session_idx ON faucet_refresh_tokens (session_id);

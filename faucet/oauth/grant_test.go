@@ -371,6 +371,16 @@ func (h *grantHarness) session(id string) oauth.Session {
 	return s
 }
 
+// refreshToken returns the stored refresh token of the session with this
+// ID that refresh is.
+func (h *grantHarness) refreshToken(id, refresh string) oauth.RefreshToken {
+	h.t.Helper()
+	session, token, err := h.store.SessionByRefreshToken(context.Background(), oauth.HashToken(refresh))
+	require.NoError(h.t, err)
+	require.Equal(h.t, id, session.ID)
+	return token
+}
+
 func grantRequireRefused(t *testing.T, reply tokenReply, status int, code, name string) {
 	t.Helper()
 	require.Equal(t, status, reply.status, "%s: %s", name, reply.rawBody)
@@ -420,10 +430,10 @@ func (s *grantBarrierStore) AuthRequestByCode(ctx context.Context, code oauth.To
 	return r, err
 }
 
-func (s *grantBarrierStore) SessionByRefreshToken(ctx context.Context, refresh oauth.TokenHash) (oauth.Session, bool, error) {
-	session, current, err := s.Store.SessionByRefreshToken(ctx, refresh)
+func (s *grantBarrierStore) SessionByRefreshToken(ctx context.Context, refresh oauth.TokenHash) (oauth.Session, oauth.RefreshToken, error) {
+	session, token, err := s.Store.SessionByRefreshToken(ctx, refresh)
 	s.arrive()
-	return session, current, err
+	return session, token, err
 }
 
 // raceAll sends each form at once.

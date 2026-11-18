@@ -23,6 +23,11 @@ const (
 	// when the refresh grant issues tokens. The grant refreshes a token that
 	// expires sooner, so the access check seldom has to.
 	githubRefreshMargin = 10 * time.Minute
+	// refreshReuseGrace is how long after its first use a refresh token
+	// still trades for tokens. The parallel requests of one client send
+	// the same token, and only a use after the grace counts as a second
+	// holder.
+	refreshReuseGrace = 30 * time.Second
 )
 
 var (
@@ -202,8 +207,8 @@ func validVerifier(v string) bool {
 // refreshToken is the refresh_token grant (RFC 6749 section 6) of a browser
 // login: the client trades its refresh token for the next one and a new
 // access token. A refused request changes nothing, except that a refresh
-// token presented again after its rotation, and one whose session went
-// unused for 180 days, end the session.
+// token used again more than refreshReuseGrace after its first use, and one
+// whose session went unused for 180 days, end the session.
 func (s *Server) refreshToken(r *http.Request, form url.Values) (tokenResponse, error) {
 	ctx := r.Context()
 	clientID, err := publicClient(r, form)
@@ -218,7 +223,7 @@ func (s *Server) refreshToken(r *http.Request, form url.Values) (tokenResponse, 
 		return tokenResponse{}, errUnknownRefreshToken
 	}
 	presentedHash := HashToken(presented)
-	session, current, err := s.store.SessionByRefreshToken(ctx, presentedHash)
+	session, token, err := s.store.SessionByRefreshToken(ctx, presentedHash)
 	switch {
 	case xerrors.Is(err, ErrUnknownSession):
 		return tokenResponse{}, errUnknownRefreshToken
@@ -226,12 +231,13 @@ func (s *Server) refreshToken(r *http.Request, form url.Values) (tokenResponse, 
 		return tokenResponse{}, xerrors.Errorf("read the session of the refresh token: %w", err)
 	}
 	now := s.clock.Now()
+	usedAfter := now.Add(-refreshReuseGrace)
 	switch {
 	case !session.Live():
 		return tokenResponse{}, errSessionEnded
-	case !current:
+	case token.Used() && !token.UsedAt.After(usedAfter):
 		// The token has two holders, and one of them is not the client (R14).
-		return tokenResponse{}, s.endSession(ctx, session.ID, now, errSessionEnded, "a rotated-out refresh token came again, its session ended", slog.F("client_id", session.ClientID))
+		return tokenResponse{}, s.endSession(ctx, session.ID, now, errSessionEnded, "a refresh token came again after its reuse grace, its session ended", slog.F("client_id", session.ClientID))
 	case !now.Before(session.RefreshedAt.Add(sessionIdleLifetime)):
 		return tokenResponse{}, s.endSession(ctx, session.ID, now, errSessionEnded, "a session went unused for 180 days, it ended", slog.F("client_id", session.ClientID))
 	case session.ClientID != clientID:
@@ -246,8 +252,8 @@ func (s *Server) refreshToken(r *http.Request, form url.Values) (tokenResponse, 
 		return tokenResponse{}, err
 	}
 	// The GitHub token is refreshed before the rotation, never after: a
-	// failure after the rotation would leave the client with the previous
-	// token, which ends its session when it tries again.
+	// failure after the rotation would leave the client with a used token,
+	// which ends its session when it tries again after the grace.
 	if err := s.freshenGitHubToken(ctx, session); err != nil {
 		return tokenResponse{}, err
 	}
@@ -258,17 +264,17 @@ func (s *Server) refreshToken(r *http.Request, form url.Values) (tokenResponse, 
 	now = s.clock.Now()
 	rotated, err := s.store.RotateSession(ctx, Rotation{
 		Presented: presentedHash, Next: HashToken(tokens.refresh), Access: HashToken(tokens.access),
-		AccessExpiresAt: now.Add(accessTokenLifetime), Scopes: scopes, Now: now,
+		AccessExpiresAt: now.Add(accessTokenLifetime), Scopes: scopes, UsedAfter: usedAfter, Now: now,
 	})
 	switch {
 	case xerrors.Is(err, ErrUnknownSession):
-		// Since the read, another request rotated the token or the session
-		// ended: the token had two holders (R14).
-		return tokenResponse{}, s.endSession(ctx, session.ID, now, errSessionEnded, "a refresh token lost the race to rotate it, its session ended", slog.F("client_id", session.ClientID))
+		// Since the read, the session ended, or a use of another of its
+		// tokens forgot this one: the token had two holders (R14).
+		return tokenResponse{}, s.endSession(ctx, session.ID, now, errSessionEnded, "a refresh token was forgotten while it was traded, its session ended", slog.F("client_id", session.ClientID))
 	case err != nil:
 		return tokenResponse{}, xerrors.Errorf("rotate the session: %w", err)
 	}
-	s.logger.Debug(ctx, "session refreshed", slog.F("session_id", rotated.ID), slog.F("client_id", rotated.ClientID), slog.F("connection_id", rotated.ConnectionID))
+	s.logger.Debug(ctx, "session refreshed", slog.F("session_id", rotated.ID), slog.F("client_id", rotated.ClientID), slog.F("connection_id", rotated.ConnectionID), slog.F("reused", token.Used()))
 	return tokens.response(scopes), nil
 }
 

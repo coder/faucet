@@ -20,6 +20,7 @@ type fakeStore struct {
 	clients     []oauth.Client
 	requests    map[string]oauth.AuthRequest
 	sessions    map[string]oauth.Session
+	refresh     map[oauth.TokenHash]oauth.RefreshToken
 	connections map[string]oauth.Connection
 	// connectionLocks holds a lock per connection ID, which RefreshConnection
 	// holds while its callback runs and ApproveAuthRequest takes, as the row
@@ -35,6 +36,7 @@ func newFakeStore() *fakeStore {
 		tokens:          map[oauth.TokenHash]oauth.AccessToken{},
 		requests:        map[string]oauth.AuthRequest{},
 		sessions:        map[string]oauth.Session{},
+		refresh:         map[oauth.TokenHash]oauth.RefreshToken{},
 		connections:     map[string]oauth.Connection{},
 		connectionLocks: map[string]*sync.Mutex{},
 	}
@@ -289,7 +291,7 @@ func (s *fakeStore) RedeemAuthRequest(_ context.Context, red oauth.Redemption) (
 	if !found {
 		return oauth.Session{}, oauth.ErrUnknownAuthRequest
 	}
-	if err := s.checkNewTokens(r.ID, red.Refresh, red.Access); err != nil {
+	if err := s.checkNewTokens(red.Refresh, red.Access); err != nil {
 		return oauth.Session{}, err
 	}
 	if _, ok := s.sessions[r.ID]; ok {
@@ -297,11 +299,12 @@ func (s *fakeStore) RedeemAuthRequest(_ context.Context, red oauth.Redemption) (
 	}
 	session := oauth.Session{
 		ID: r.ID, ClientID: r.ClientID, ClientName: r.ClientName, ConnectionID: r.ConnectionID,
-		Resource: r.Resource, Scopes: slices.Clone(r.Scopes), RefreshHash: red.Refresh, RefreshedAt: red.Now,
+		Resource: r.Resource, Scopes: slices.Clone(r.Scopes), RefreshedAt: red.Now,
 	}
 	r.State = oauth.AuthRequestRedeemed
 	s.requests[r.ID] = r
 	s.sessions[r.ID] = session
+	s.refresh[red.Refresh] = oauth.RefreshToken{Hash: red.Refresh, SessionID: r.ID, IssuedAt: red.Now}
 	s.tokens[red.Access] = oauth.AccessToken{
 		Hash: red.Access, ExpiresAt: red.AccessExpiresAt, Scopes: slices.Clone(r.Scopes),
 		Resource: r.Resource, SubjectKind: oauth.SubjectUser, Subject: r.ID,
@@ -309,14 +312,12 @@ func (s *fakeStore) RedeemAuthRequest(_ context.Context, red oauth.Redemption) (
 	return cloneSession(session), nil
 }
 
-// checkNewTokens refuses a refresh hash that a session other than id holds
-// as its current one, and an access hash that a token holds, as the unique
-// indexes in Postgres do.
-func (s *fakeStore) checkNewTokens(id string, refresh, access oauth.TokenHash) error {
-	for otherID, o := range s.sessions {
-		if otherID != id && o.RefreshHash == refresh {
-			return xerrors.New("duplicate refresh token hash")
-		}
+// checkNewTokens refuses a refresh hash that a refresh token holds, and an
+// access hash that an access token holds, as the primary keys in Postgres
+// do.
+func (s *fakeStore) checkNewTokens(refresh, access oauth.TokenHash) error {
+	if _, ok := s.refresh[refresh]; ok {
+		return xerrors.New("duplicate refresh token hash")
 	}
 	if _, ok := s.tokens[access]; ok {
 		return xerrors.New("duplicate token hash")
@@ -324,25 +325,14 @@ func (s *fakeStore) checkNewTokens(id string, refresh, access oauth.TokenHash) e
 	return nil
 }
 
-func (s *fakeStore) SessionByRefreshToken(_ context.Context, refresh oauth.TokenHash) (oauth.Session, bool, error) {
+func (s *fakeStore) SessionByRefreshToken(_ context.Context, refresh oauth.TokenHash) (oauth.Session, oauth.RefreshToken, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if refresh == (oauth.TokenHash{}) {
-		return oauth.Session{}, false, oauth.ErrUnknownSession
+	token, ok := s.refresh[refresh]
+	if !ok {
+		return oauth.Session{}, oauth.RefreshToken{}, oauth.ErrUnknownSession
 	}
-	var previous []oauth.Session
-	for _, session := range s.sessions {
-		switch refresh {
-		case session.RefreshHash:
-			return cloneSession(session), true, nil
-		case session.PreviousRefreshHash:
-			previous = append(previous, session)
-		}
-	}
-	if len(previous) == 0 {
-		return oauth.Session{}, false, oauth.ErrUnknownSession
-	}
-	return cloneSession(previous[0]), false, nil
+	return cloneSession(s.sessions[token.SessionID]), token, nil
 }
 
 func (s *fakeStore) Session(_ context.Context, id string) (oauth.Session, error) {
@@ -372,20 +362,26 @@ func (s *fakeStore) RotateSession(_ context.Context, r oauth.Rotation) (oauth.Se
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var session oauth.Session
-	found := false
-	for _, o := range s.sessions {
-		if o.RefreshHash == r.Presented && o.Live() && holdsAll(o, r) {
-			session, found = o, true
-		}
-	}
-	if !found {
+	presented, ok := s.refresh[r.Presented]
+	session := s.sessions[presented.SessionID]
+	if !ok || !session.Live() || !holdsAll(session, r) || presented.Used() && !presented.UsedAt.After(r.UsedAfter) {
 		return oauth.Session{}, oauth.ErrUnknownSession
 	}
-	if err := s.checkNewTokens(session.ID, r.Next, r.Access); err != nil {
+	if err := s.checkNewTokens(r.Next, r.Access); err != nil {
 		return oauth.Session{}, err
 	}
-	session.PreviousRefreshHash, session.RefreshHash, session.RefreshedAt = r.Presented, r.Next, r.Now
+	for hash, o := range s.refresh {
+		forgotten := o.Used() && !o.UsedAt.After(r.UsedAfter) || !o.Used() && !o.IssuedAt.After(r.UsedAfter)
+		if o.SessionID == session.ID && hash != r.Presented && forgotten {
+			delete(s.refresh, hash)
+		}
+	}
+	if !presented.Used() {
+		presented.UsedAt = r.Now
+		s.refresh[r.Presented] = presented
+	}
+	s.refresh[r.Next] = oauth.RefreshToken{Hash: r.Next, SessionID: session.ID, IssuedAt: r.Now}
+	session.RefreshedAt = r.Now
 	s.sessions[session.ID] = session
 	s.tokens[r.Access] = oauth.AccessToken{
 		Hash: r.Access, ExpiresAt: r.AccessExpiresAt, Scopes: slices.Clone(r.Scopes),

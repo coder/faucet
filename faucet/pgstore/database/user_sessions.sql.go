@@ -46,7 +46,7 @@ func (q *Queries) EndSession(ctx context.Context, arg EndSessionParams) error {
 }
 
 const getSession = `-- name: GetSession :one
-SELECT id, client_id, client_name, connection_id, resource, scopes, refresh_hash, previous_refresh_hash, refreshed_at, ended_at
+SELECT id, client_id, client_name, connection_id, resource, scopes, refreshed_at, ended_at
 FROM faucet_user_sessions
 WHERE id = $1
 `
@@ -61,8 +61,6 @@ func (q *Queries) GetSession(ctx context.Context, id string) (FaucetUserSession,
 		&i.ConnectionID,
 		&i.Resource,
 		pq.Array(&i.Scopes),
-		&i.RefreshHash,
-		&i.PreviousRefreshHash,
 		&i.RefreshedAt,
 		&i.EndedAt,
 	)
@@ -70,20 +68,17 @@ func (q *Queries) GetSession(ctx context.Context, id string) (FaucetUserSession,
 }
 
 const getSessionByRefreshHash = `-- name: GetSessionByRefreshHash :one
-SELECT faucet_user_sessions.id, faucet_user_sessions.client_id, faucet_user_sessions.client_name, faucet_user_sessions.connection_id, faucet_user_sessions.resource, faucet_user_sessions.scopes, faucet_user_sessions.refresh_hash, faucet_user_sessions.previous_refresh_hash, faucet_user_sessions.refreshed_at, faucet_user_sessions.ended_at, (refresh_hash = $1::bytea)::boolean AS is_current
-FROM faucet_user_sessions
-WHERE refresh_hash = $1::bytea OR previous_refresh_hash = $1::bytea
-ORDER BY is_current DESC
-LIMIT 1
+SELECT faucet_user_sessions.id, faucet_user_sessions.client_id, faucet_user_sessions.client_name, faucet_user_sessions.connection_id, faucet_user_sessions.resource, faucet_user_sessions.scopes, faucet_user_sessions.refreshed_at, faucet_user_sessions.ended_at, faucet_refresh_tokens.token_hash, faucet_refresh_tokens.session_id, faucet_refresh_tokens.issued_at, faucet_refresh_tokens.used_at
+FROM faucet_refresh_tokens
+JOIN faucet_user_sessions ON faucet_user_sessions.id = faucet_refresh_tokens.session_id
+WHERE faucet_refresh_tokens.token_hash = $1::bytea
 `
 
 type GetSessionByRefreshHashRow struct {
-	FaucetUserSession FaucetUserSession
-	IsCurrent         bool
+	FaucetUserSession  FaucetUserSession
+	FaucetRefreshToken FaucetRefreshToken
 }
 
-// A hash is the current token of one session at most, and a session that
-// holds it as its current token wins over one that holds it as its previous.
 func (q *Queries) GetSessionByRefreshHash(ctx context.Context, refreshHash []byte) (GetSessionByRefreshHashRow, error) {
 	row := q.db.QueryRowContext(ctx, getSessionByRefreshHash, refreshHash)
 	var i GetSessionByRefreshHashRow
@@ -94,63 +89,81 @@ func (q *Queries) GetSessionByRefreshHash(ctx context.Context, refreshHash []byt
 		&i.FaucetUserSession.ConnectionID,
 		&i.FaucetUserSession.Resource,
 		pq.Array(&i.FaucetUserSession.Scopes),
-		&i.FaucetUserSession.RefreshHash,
-		&i.FaucetUserSession.PreviousRefreshHash,
 		&i.FaucetUserSession.RefreshedAt,
 		&i.FaucetUserSession.EndedAt,
-		&i.IsCurrent,
+		&i.FaucetRefreshToken.TokenHash,
+		&i.FaucetRefreshToken.SessionID,
+		&i.FaucetRefreshToken.IssuedAt,
+		&i.FaucetRefreshToken.UsedAt,
 	)
 	return i, err
 }
 
 const rotateSession = `-- name: RotateSession :one
 WITH rotated AS (
-  UPDATE faucet_user_sessions
-  SET previous_refresh_hash = refresh_hash,
-    refresh_hash = $1::bytea,
-    refreshed_at = $2::timestamptz
-  WHERE refresh_hash = $3::bytea AND ended_at IS NULL AND $4::text[] <@ scopes
-  RETURNING id, client_id, client_name, connection_id, resource, scopes, refresh_hash, previous_refresh_hash, refreshed_at, ended_at
-), new_token AS (
+  UPDATE faucet_user_sessions s
+  SET refreshed_at = $1::timestamptz
+  FROM faucet_refresh_tokens t
+  WHERE t.token_hash = $2::bytea AND s.id = t.session_id
+    AND (t.used_at IS NULL OR t.used_at > $3::timestamptz)
+    AND s.ended_at IS NULL AND $4::text[] <@ s.scopes
+  RETURNING s.id, s.client_id, s.client_name, s.connection_id, s.resource, s.scopes, s.refreshed_at, s.ended_at
+), used AS (
+  UPDATE faucet_refresh_tokens t
+  SET used_at = coalesce(t.used_at, $1::timestamptz)
+  FROM rotated r
+  WHERE t.token_hash = $2::bytea AND t.session_id = r.id
+), forgotten AS (
+  DELETE FROM faucet_refresh_tokens t
+  USING rotated r
+  WHERE t.session_id = r.id AND t.token_hash <> $2::bytea
+    AND coalesce(t.used_at, t.issued_at) <= $3::timestamptz
+), next_refresh AS (
+  INSERT INTO faucet_refresh_tokens (token_hash, session_id, issued_at)
+  SELECT $5::bytea, r.id, $1::timestamptz
+  FROM rotated r
+), next_access AS (
   INSERT INTO faucet_access_tokens (token_hash, expires_at, scopes, resource, subject_kind, subject)
-  SELECT $5::bytea, $6::timestamptz, $4::text[], r.resource, 'user', r.id
+  SELECT $6::bytea, $7::timestamptz, $4::text[], r.resource, 'user', r.id
   FROM rotated r
 )
-SELECT id, client_id, client_name, connection_id, resource, scopes, refresh_hash, previous_refresh_hash, refreshed_at, ended_at
+SELECT id, client_id, client_name, connection_id, resource, scopes, refreshed_at, ended_at
 FROM rotated
 `
 
 type RotateSessionParams struct {
-	NextHash        []byte
 	Now             time.Time
 	PresentedHash   []byte
+	UsedAfter       time.Time
 	Scopes          []string
+	NextHash        []byte
 	AccessHash      []byte
 	AccessExpiresAt time.Time
 }
 
 type RotateSessionRow struct {
-	ID                  string
-	ClientID            string
-	ClientName          string
-	ConnectionID        string
-	Resource            string
-	Scopes              []string
-	RefreshHash         []byte
-	PreviousRefreshHash []byte
-	RefreshedAt         time.Time
-	EndedAt             sql.NullTime
+	ID           string
+	ClientID     string
+	ClientName   string
+	ConnectionID string
+	Resource     string
+	Scopes       []string
+	RefreshedAt  time.Time
+	EndedAt      sql.NullTime
 }
 
-// RotateSession swaps the refresh token of the live session that holds the
-// presented one, and issues the next access token, in one statement. The
-// token holds no scope that the session lacks.
+// RotateSession trades the presented refresh token of a live session for
+// the next one, forgets the session's tokens that no client still holds,
+// and issues the next access token, in one statement. The presented token
+// is unused, or its first use came after used_after. The access token holds
+// no scope that the session lacks.
 func (q *Queries) RotateSession(ctx context.Context, arg RotateSessionParams) (RotateSessionRow, error) {
 	row := q.db.QueryRowContext(ctx, rotateSession,
-		arg.NextHash,
 		arg.Now,
 		arg.PresentedHash,
+		arg.UsedAfter,
 		pq.Array(arg.Scopes),
+		arg.NextHash,
 		arg.AccessHash,
 		arg.AccessExpiresAt,
 	)
@@ -162,8 +175,6 @@ func (q *Queries) RotateSession(ctx context.Context, arg RotateSessionParams) (R
 		&i.ConnectionID,
 		&i.Resource,
 		pq.Array(&i.Scopes),
-		&i.RefreshHash,
-		&i.PreviousRefreshHash,
 		&i.RefreshedAt,
 		&i.EndedAt,
 	)

@@ -56,33 +56,37 @@ type LoginStore interface {
 	AuthRequestByCode(ctx context.Context, code TokenHash) (AuthRequest, error)
 	// RedeemAuthRequest moves the approved request whose code has the hash
 	// r.Code, and which has not expired at r.Now, to redeemed. In the same
-	// step it stores the session of the request and the session's first
-	// access token, and returns the session. The session has the request's
-	// ID, client, connection, resource and scopes, the refresh hash
-	// r.Refresh, and was refreshed at r.Now. The access token has the hash
-	// r.Access, expires at r.AccessExpiresAt, holds the request's resource
-	// and scopes, and its subject is the session. Otherwise it returns
-	// ErrUnknownAuthRequest and changes nothing. It fails when r is not
-	// valid.
+	// step it stores the session of the request, its first refresh token
+	// and its first access token, and returns the session. The session has
+	// the request's ID, client, connection, resource and scopes, and was
+	// refreshed at r.Now. The refresh token has the hash r.Refresh and was
+	// issued at r.Now. The access token has the hash r.Access, expires at
+	// r.AccessExpiresAt, holds the request's resource and scopes, and its
+	// subject is the session. Otherwise it returns ErrUnknownAuthRequest
+	// and changes nothing. It fails when r is not valid, or when a stored
+	// token has one of the hashes.
 	RedeemAuthRequest(ctx context.Context, r Redemption) (Session, error)
 
-	// SessionByRefreshToken returns the session that the refresh token with
-	// this hash belongs to, live or ended. current says whether the token
-	// is the session's current one. It is false for the token that the last
-	// rotation replaced. It returns ErrUnknownSession for any other hash.
-	SessionByRefreshToken(ctx context.Context, refresh TokenHash) (s Session, current bool, err error)
+	// SessionByRefreshToken returns the refresh token with this hash and
+	// the session that it belongs to, live or ended. It returns
+	// ErrUnknownSession for a hash that the store does not hold.
+	SessionByRefreshToken(ctx context.Context, refresh TokenHash) (Session, RefreshToken, error)
 	// Session returns the session with this ID, live or ended, or
 	// ErrUnknownSession.
 	Session(ctx context.Context, id string) (Session, error)
-	// RotateSession gives the live session whose current refresh token has
-	// the hash r.Presented the next one: r.Presented becomes the previous
-	// hash, r.Next the current one, and the session was refreshed at r.Now.
-	// In the same step it stores the session's next access token, with the
-	// hash r.Access, the scopes r.Scopes and the session's resource, and
-	// returns the session as it is after. When no live session has that
-	// current refresh token, or the session lacks a scope of r.Scopes, it
-	// returns ErrUnknownSession and changes nothing. It fails when r is not
-	// valid.
+	// RotateSession trades the refresh token r.Presented of a live session
+	// for r.Next. It applies when the token is unused, or when its first
+	// use came after r.UsedAfter. In one step it marks r.Presented used at
+	// r.Now unless it was used already, stores r.Next unused and issued at
+	// r.Now, sets the session's refreshed time to r.Now, stores the next
+	// access token, with the hash r.Access, the scopes r.Scopes and the
+	// session's resource, and returns the session as it is after. In the
+	// same step it forgets the session's other refresh tokens that no
+	// client still holds: those used at or before r.UsedAfter, and those
+	// unused and issued at or before it. When no live session holds such
+	// a token, or the session lacks a scope of r.Scopes, it returns
+	// ErrUnknownSession and changes nothing. It fails when r is not valid,
+	// or when a stored token has one of the next hashes.
 	RotateSession(ctx context.Context, r Rotation) (Session, error)
 	// EndSession ends the live session with this ID at now. A session that
 	// ended already keeps its time, and an unknown ID is no error.

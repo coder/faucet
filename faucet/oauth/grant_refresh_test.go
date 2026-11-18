@@ -49,7 +49,7 @@ type grantCountingStore struct {
 	sessionReads atomic.Int64
 }
 
-func (s *grantCountingStore) SessionByRefreshToken(ctx context.Context, refresh oauth.TokenHash) (oauth.Session, bool, error) {
+func (s *grantCountingStore) SessionByRefreshToken(ctx context.Context, refresh oauth.TokenHash) (oauth.Session, oauth.RefreshToken, error) {
 	s.sessionReads.Add(1)
 	return s.Store.SessionByRefreshToken(ctx, refresh)
 }
@@ -96,7 +96,7 @@ func TestARefreshTokenStaysUsableAfterARefusedRefresh(t *testing.T) {
 	}
 	session := h.session(s.id)
 	require.True(t, session.Live())
-	require.Equal(t, oauth.HashToken(s.refresh), session.RefreshHash)
+	require.False(t, h.refreshToken(s.id, s.refresh).Used(), "the refresh token is unused")
 
 	form := grantRefreshForm(s.refresh)
 	form.Del("client_id")

@@ -51,7 +51,7 @@ func TestAGoSDKClientRedeemsItsCodeWithBasicCredentialsInOneRequest(t *testing.T
 		Resource: resource, SubjectKind: oauth.SubjectUser, Subject: "login-1",
 	}, stored)
 	session := h.session("login-1")
-	require.Equal(t, oauth.HashToken(token.RefreshToken), session.RefreshHash)
+	require.False(t, h.refreshToken("login-1", token.RefreshToken).Used())
 	require.Equal(t, grantClientID, session.ClientID)
 	require.Equal(t, oauth.ConnectionID(oauth.ProviderGitHub, 1), session.ConnectionID)
 }

@@ -108,6 +108,13 @@ type FaucetRedeliveryScan struct {
 	ClearAt      sql.NullTime
 }
 
+type FaucetRefreshToken struct {
+	TokenHash []byte
+	SessionID string
+	IssuedAt  time.Time
+	UsedAt    sql.NullTime
+}
+
 type FaucetRepo struct {
 	RepoID     int64
 	OwnerID    int64
@@ -150,14 +157,12 @@ type FaucetSubscription struct {
 }
 
 type FaucetUserSession struct {
-	ID                  string
-	ClientID            string
-	ClientName          string
-	ConnectionID        string
-	Resource            string
-	Scopes              []string
-	RefreshHash         []byte
-	PreviousRefreshHash []byte
-	RefreshedAt         time.Time
-	EndedAt             sql.NullTime
+	ID           string
+	ClientID     string
+	ClientName   string
+	ConnectionID string
+	Resource     string
+	Scopes       []string
+	RefreshedAt  time.Time
+	EndedAt      sql.NullTime
 }

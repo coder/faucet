@@ -60,7 +60,7 @@ func TestSessionsOfOneUserThatRefreshAtOnceRefreshTheGitHubTokenOnce(t *testing.
 				require.NotEqual(t, s.access, next.access, s.id)
 				session := h.session(s.id)
 				require.True(t, session.Live(), s.id)
-				require.Equal(t, oauth.HashToken(next.refresh), session.RefreshHash, s.id)
+				require.False(t, h.refreshToken(s.id, next.refresh).Used(), s.id)
 			}
 			c, err := h.store.Connection(context.Background(), oauth.ConnectionID(oauth.ProviderGitHub, 1))
 			require.NoError(t, err)
@@ -324,7 +324,7 @@ func TestAGitHubTokenThatDoesNotOpenChangesNothing(t *testing.T) {
 	require.Equal(t, []int{0, 0}, []int{refreshes, checks}, "GitHub was not asked")
 	session := h.session(s.id)
 	require.True(t, session.Live())
-	require.Equal(t, oauth.HashToken(s.refresh), session.RefreshHash)
+	require.False(t, h.refreshToken(s.id, s.refresh).Used(), "the refresh token is unused")
 	require.Equal(t, wrong, usertokensConnection(t, h, 1))
 
 	usertokensReplace(t, h, good)

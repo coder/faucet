@@ -168,24 +168,30 @@ func (s *Store) RedeemAuthRequest(ctx context.Context, r oauth.Redemption) (_ oa
 	case err != nil:
 		return oauth.Session{}, xerrors.Errorf("redeem authorization request: %w", err)
 	}
-	return sessionOf(database.FaucetUserSession(row))
+	return sessionOf(database.FaucetUserSession(row)), nil
 }
 
 // SessionByRefreshToken implements oauth.LoginStore.
-func (s *Store) SessionByRefreshToken(ctx context.Context, refresh oauth.TokenHash) (_ oauth.Session, _ bool, err error) {
+func (s *Store) SessionByRefreshToken(ctx context.Context, refresh oauth.TokenHash) (_ oauth.Session, _ oauth.RefreshToken, err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	row, err := s.q.GetSessionByRefreshHash(ctx, refresh[:])
 	switch {
 	case xerrors.Is(err, sql.ErrNoRows):
-		return oauth.Session{}, false, oauth.ErrUnknownSession
+		return oauth.Session{}, oauth.RefreshToken{}, oauth.ErrUnknownSession
 	case err != nil:
-		return oauth.Session{}, false, xerrors.Errorf("read session by refresh token: %w", err)
+		return oauth.Session{}, oauth.RefreshToken{}, xerrors.Errorf("read session by refresh token: %w", err)
 	}
-	session, err := sessionOf(row.FaucetUserSession)
+	hash, err := tokenHashOf(row.FaucetRefreshToken.TokenHash)
 	if err != nil {
-		return oauth.Session{}, false, err
+		return oauth.Session{}, oauth.RefreshToken{}, xerrors.Errorf("refresh token of session %q: %w", row.FaucetUserSession.ID, err)
 	}
-	return session, row.IsCurrent, nil
+	token := oauth.RefreshToken{
+		Hash:      hash,
+		SessionID: row.FaucetRefreshToken.SessionID,
+		IssuedAt:  row.FaucetRefreshToken.IssuedAt,
+		UsedAt:    row.FaucetRefreshToken.UsedAt.Time,
+	}
+	return sessionOf(row.FaucetUserSession), token, nil
 }
 
 // Session implements oauth.LoginStore.
@@ -198,7 +204,7 @@ func (s *Store) Session(ctx context.Context, id string) (_ oauth.Session, err er
 	case err != nil:
 		return oauth.Session{}, xerrors.Errorf("read session: %w", err)
 	}
-	return sessionOf(row)
+	return sessionOf(row), nil
 }
 
 // RotateSession implements oauth.LoginStore in one statement: a
@@ -216,6 +222,7 @@ func (s *Store) RotateSession(ctx context.Context, r oauth.Rotation) (_ oauth.Se
 		AccessHash:      r.Access[:],
 		AccessExpiresAt: r.AccessExpiresAt,
 		Scopes:          scopeNames(r.Scopes),
+		UsedAfter:       r.UsedAfter,
 	})
 	switch {
 	case xerrors.Is(err, sql.ErrNoRows):
@@ -223,7 +230,7 @@ func (s *Store) RotateSession(ctx context.Context, r oauth.Rotation) (_ oauth.Se
 	case err != nil:
 		return oauth.Session{}, xerrors.Errorf("rotate session: %w", err)
 	}
-	return sessionOf(database.FaucetUserSession(row))
+	return sessionOf(database.FaucetUserSession(row)), nil
 }
 
 // EndSession implements oauth.LoginStore.
@@ -342,27 +349,17 @@ func authRequestOf(row database.FaucetAuthRequest) (oauth.AuthRequest, error) {
 	}, nil
 }
 
-func sessionOf(row database.FaucetUserSession) (oauth.Session, error) {
-	current, err := tokenHashOf(row.RefreshHash)
-	if err != nil {
-		return oauth.Session{}, xerrors.Errorf("session %q: %w", row.ID, err)
-	}
-	previous, err := tokenHashOf(row.PreviousRefreshHash)
-	if err != nil {
-		return oauth.Session{}, xerrors.Errorf("session %q: %w", row.ID, err)
-	}
+func sessionOf(row database.FaucetUserSession) oauth.Session {
 	return oauth.Session{
-		ID:                  row.ID,
-		ClientID:            row.ClientID,
-		ClientName:          row.ClientName,
-		ConnectionID:        row.ConnectionID,
-		Resource:            row.Resource,
-		Scopes:              scopesOf(row.Scopes),
-		RefreshHash:         current,
-		PreviousRefreshHash: previous,
-		RefreshedAt:         row.RefreshedAt,
-		EndedAt:             row.EndedAt.Time,
-	}, nil
+		ID:           row.ID,
+		ClientID:     row.ClientID,
+		ClientName:   row.ClientName,
+		ConnectionID: row.ConnectionID,
+		Resource:     row.Resource,
+		Scopes:       scopesOf(row.Scopes),
+		RefreshedAt:  row.RefreshedAt,
+		EndedAt:      row.EndedAt.Time,
+	}
 }
 
 // connectionOf copies the row's tokens, so two connections made from one row

@@ -8,8 +8,8 @@ import (
 	"github.com/coder/faucet/faucet"
 )
 
-// Session is the login of a user's client. A refresh token keeps it alive,
-// and each use of the token replaces it.
+// Session is the login of a user's client. Its refresh tokens keep it
+// alive, and each use of one gives the next.
 type Session struct {
 	// ID is the ID of the authorization request that made the session.
 	ID         string
@@ -20,13 +20,7 @@ type Session struct {
 	// Resource is the one endpoint that the session's tokens are for.
 	Resource string
 	Scopes   []faucet.Scope
-	// RefreshHash is the hash of the current refresh token.
-	RefreshHash TokenHash
-	// PreviousRefreshHash is the hash of the refresh token that the last
-	// rotation replaced, zero before the first rotation. A client that
-	// presents that token again ends the session.
-	PreviousRefreshHash TokenHash
-	// RefreshedAt is when the session got its current refresh token.
+	// RefreshedAt is when the session last gave out a refresh token.
 	RefreshedAt time.Time
 	// EndedAt is when the session ended, zero while it is live.
 	EndedAt time.Time
@@ -34,6 +28,22 @@ type Session struct {
 
 // Live reports whether s has not ended.
 func (s Session) Live() bool { return s.EndedAt.IsZero() }
+
+// RefreshToken is a refresh token of a session as a store keeps it: its
+// hash, never the token. A client trades it for the next one. It can trade
+// it again within refreshReuseGrace of its first use, since parallel
+// requests send one token at once. A later use ends the session.
+type RefreshToken struct {
+	Hash      TokenHash
+	SessionID string
+	IssuedAt  time.Time
+	// UsedAt is when a client first traded the token, zero while it is
+	// unused.
+	UsedAt time.Time
+}
+
+// Used reports whether a client traded t.
+func (t RefreshToken) Used() bool { return !t.UsedAt.IsZero() }
 
 // Rotation is one use of a refresh token: the session gets the next refresh
 // token and the next access token.
@@ -46,7 +56,11 @@ type Rotation struct {
 	Access          TokenHash
 	AccessExpiresAt time.Time
 	Scopes          []faucet.Scope
-	Now             time.Time
+	// UsedAfter starts the reuse grace: a presented token that a client
+	// traded already is traded again only when its first use came after
+	// UsedAfter.
+	UsedAfter time.Time
+	Now       time.Time
 }
 
 // Validate reports whether a store may apply r.
@@ -60,6 +74,8 @@ func (r Rotation) Validate() error {
 		return xerrors.New("an access token needs at least one scope")
 	case r.Now.IsZero() || !r.AccessExpiresAt.After(r.Now):
 		return xerrors.New("an access token expires after it was issued")
+	case r.UsedAfter.IsZero() || r.UsedAfter.After(r.Now):
+		return xerrors.New("a rotation needs the start of the reuse grace, at or before its time")
 	}
 	for _, s := range r.Scopes {
 		if _, err := faucet.ParseScope(string(s)); err != nil {

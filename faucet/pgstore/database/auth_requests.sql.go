@@ -100,16 +100,20 @@ WITH redeemed AS (
     AND expires_at > $2::timestamptz
   RETURNING id, client_id, client_name, connection_id, resource, scopes
 ), new_session AS (
-  INSERT INTO faucet_user_sessions (id, client_id, client_name, connection_id, resource, scopes, refresh_hash, refreshed_at)
-  SELECT r.id, r.client_id, r.client_name, r.connection_id, r.resource, r.scopes, $3::bytea, $2::timestamptz
+  INSERT INTO faucet_user_sessions (id, client_id, client_name, connection_id, resource, scopes, refreshed_at)
+  SELECT r.id, r.client_id, r.client_name, r.connection_id, r.resource, r.scopes, $2::timestamptz
   FROM redeemed r
-  RETURNING id, client_id, client_name, connection_id, resource, scopes, refresh_hash, previous_refresh_hash, refreshed_at, ended_at
+  RETURNING id, client_id, client_name, connection_id, resource, scopes, refreshed_at, ended_at
+), new_refresh AS (
+  INSERT INTO faucet_refresh_tokens (token_hash, session_id, issued_at)
+  SELECT $3::bytea, s.id, $2::timestamptz
+  FROM new_session s
 ), new_token AS (
   INSERT INTO faucet_access_tokens (token_hash, expires_at, scopes, resource, subject_kind, subject)
   SELECT $4::bytea, $5::timestamptz, s.scopes, s.resource, 'user', s.id
   FROM new_session s
 )
-SELECT id, client_id, client_name, connection_id, resource, scopes, refresh_hash, previous_refresh_hash, refreshed_at, ended_at
+SELECT id, client_id, client_name, connection_id, resource, scopes, refreshed_at, ended_at
 FROM new_session
 `
 
@@ -122,20 +126,19 @@ type ExchangeCodeParams struct {
 }
 
 type ExchangeCodeRow struct {
-	ID                  string
-	ClientID            string
-	ClientName          string
-	ConnectionID        string
-	Resource            string
-	Scopes              []string
-	RefreshHash         []byte
-	PreviousRefreshHash []byte
-	RefreshedAt         time.Time
-	EndedAt             sql.NullTime
+	ID           string
+	ClientID     string
+	ClientName   string
+	ConnectionID string
+	Resource     string
+	Scopes       []string
+	RefreshedAt  time.Time
+	EndedAt      sql.NullTime
 }
 
 // ExchangeCode redeems the code, makes the session from the request's row
-// and issues the session's first access token, in one statement.
+// and issues the session's first refresh token and first access token, in
+// one statement.
 func (q *Queries) ExchangeCode(ctx context.Context, arg ExchangeCodeParams) (ExchangeCodeRow, error) {
 	row := q.db.QueryRowContext(ctx, exchangeCode,
 		arg.CodeHash,
@@ -152,8 +155,6 @@ func (q *Queries) ExchangeCode(ctx context.Context, arg ExchangeCodeParams) (Exc
 		&i.ConnectionID,
 		&i.Resource,
 		pq.Array(&i.Scopes),
-		&i.RefreshHash,
-		&i.PreviousRefreshHash,
 		&i.RefreshedAt,
 		&i.EndedAt,
 	)
