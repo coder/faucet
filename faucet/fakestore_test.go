@@ -29,8 +29,13 @@ type fakeRepo struct {
 	seenAt time.Time
 }
 
+type fakeRepoOwner struct {
+	login  string
+	seenAt time.Time
+}
+
 func (s *fakeStore) RecordRepository(_ context.Context, repo faucet.Repository, seenAt time.Time) error {
-	return s.writeRepository(repo, func() {
+	return s.writeRepository(repo, seenAt, func() {
 		if !slices.ContainsFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID }) {
 			s.repos = append(s.repos, fakeRepo{repo: repo, seenAt: seenAt})
 		}
@@ -38,7 +43,7 @@ func (s *fakeStore) RecordRepository(_ context.Context, repo faucet.Repository, 
 }
 
 func (s *fakeStore) RenameRepository(_ context.Context, repo faucet.Repository, from string, seenAt time.Time) error {
-	return s.writeRepository(repo, func() {
+	return s.writeRepository(repo, seenAt, func() {
 		i := slices.IndexFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID })
 		switch {
 		case i < 0:
@@ -49,9 +54,35 @@ func (s *fakeStore) RenameRepository(_ context.Context, repo faucet.Repository, 
 	})
 }
 
-// writeRepository counts a write of repo and, unless it fails, runs write
-// under the lock.
-func (s *fakeStore) writeRepository(repo faucet.Repository, write func()) error {
+func (s *fakeStore) RecordOwner(_ context.Context, owner faucet.Owner, seenAt time.Time) error {
+	if err := owner.Validate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.repoWrites++
+	if s.repoErr != nil {
+		return s.repoErr
+	}
+	s.recordOwnerLocked(owner, seenAt)
+	return nil
+}
+
+// recordOwnerLocked gives owner its login, which every other account gives
+// up.
+func (s *fakeStore) recordOwnerLocked(owner faucet.Owner, seenAt time.Time) {
+	if s.owners == nil {
+		s.owners = map[int64]fakeRepoOwner{}
+	}
+	maps.DeleteFunc(s.owners, func(id int64, o fakeRepoOwner) bool {
+		return id != owner.ID && strings.EqualFold(o.login, owner.Login)
+	})
+	s.owners[owner.ID] = fakeRepoOwner{login: owner.Login, seenAt: seenAt}
+}
+
+// writeRepository counts a write of repo and, unless it fails, records its
+// owner and runs write under the lock.
+func (s *fakeStore) writeRepository(repo faucet.Repository, seenAt time.Time, write func()) error {
 	if err := repo.Validate(); err != nil {
 		return err
 	}
@@ -61,6 +92,7 @@ func (s *fakeStore) writeRepository(repo faucet.Repository, write func()) error 
 	if s.repoErr != nil {
 		return s.repoErr
 	}
+	s.recordOwnerLocked(faucet.Owner{ID: repo.OwnerID, Login: repo.OwnerLogin}, seenAt)
 	write()
 	return nil
 }
@@ -71,16 +103,24 @@ func (s *fakeStore) RepositoryByName(_ context.Context, fullName string) (faucet
 	if s.repoErr != nil {
 		return faucet.Repository{}, s.repoErr
 	}
+	login, name, _ := strings.Cut(fullName, "/")
+	id, owner, ok := s.ownerLocked(login)
+	if !ok {
+		return faucet.Repository{}, faucet.ErrUnknownRepository
+	}
 	var found *fakeRepo
 	for i, r := range s.repos {
-		if strings.EqualFold(r.repo.FullName, fullName) && (found == nil || !r.seenAt.Before(found.seenAt)) {
+		_, held, _ := strings.Cut(r.repo.FullName, "/")
+		if r.repo.OwnerID == id && strings.EqualFold(held, name) &&
+			(found == nil || r.seenAt.After(found.seenAt) || r.seenAt.Equal(found.seenAt) && r.repo.ID > found.repo.ID) {
 			found = &s.repos[i]
 		}
 	}
 	if found == nil {
 		return faucet.Repository{}, faucet.ErrUnknownRepository
 	}
-	return found.repo, nil
+	_, held, _ := strings.Cut(found.repo.FullName, "/")
+	return faucet.Repository{ID: found.repo.ID, OwnerID: id, OwnerLogin: owner.login, FullName: owner.login + "/" + held}, nil
 }
 
 func (s *fakeStore) OwnerByLogin(_ context.Context, login string) (faucet.Owner, error) {
@@ -89,16 +129,21 @@ func (s *fakeStore) OwnerByLogin(_ context.Context, login string) (faucet.Owner,
 	if s.repoErr != nil {
 		return faucet.Owner{}, s.repoErr
 	}
-	var found *fakeRepo
-	for i, r := range s.repos {
-		if strings.EqualFold(r.repo.OwnerLogin, login) && (found == nil || r.seenAt.After(found.seenAt) || r.seenAt.Equal(found.seenAt) && r.repo.ID > found.repo.ID) {
-			found = &s.repos[i]
-		}
-	}
-	if found == nil {
+	id, owner, ok := s.ownerLocked(login)
+	if !ok {
 		return faucet.Owner{}, faucet.ErrUnknownOwner
 	}
-	return faucet.Owner{ID: found.repo.OwnerID, Login: found.repo.OwnerLogin}, nil
+	return faucet.Owner{ID: id, Login: owner.login}, nil
+}
+
+// ownerLocked returns the account that holds login, which is at most one.
+func (s *fakeStore) ownerLocked(login string) (int64, fakeRepoOwner, bool) {
+	for id, o := range s.owners {
+		if strings.EqualFold(o.login, login) {
+			return id, o, true
+		}
+	}
+	return 0, fakeRepoOwner{}, false
 }
 
 func (s *fakeStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.PollPage, error) {

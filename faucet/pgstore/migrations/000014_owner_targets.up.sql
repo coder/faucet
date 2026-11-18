@@ -44,6 +44,29 @@ ALTER TABLE faucet_raw_leases
     OR (target_kind = 'all' AND repo_id = 0 AND owner_id = 0)
   );
 
--- An owner target names its owner by login, and the lookup takes the row
--- that was seen latest.
-CREATE INDEX faucet_repos_owner_login_idx ON faucet_repos (lower(owner_login), seen_at DESC);
+-- faucet_owners holds the login that each account had in the latest signed
+-- delivery that named it. GitHub sends no event for each repository of an
+-- account that it renames, so the rows of faucet_repos keep the login that
+-- they were first seen under, and only this table says which account holds
+-- a login now. One login names one account: the account seen latest under a
+-- login takes it from any other, which then has no row until it is seen
+-- again. The table starts with the latest login of each account in
+-- faucet_repos.
+CREATE TABLE faucet_owners (
+  owner_id bigint PRIMARY KEY CHECK (owner_id > 0),
+  login text NOT NULL CHECK (login <> ''),
+  seen_at timestamptz NOT NULL
+);
+CREATE UNIQUE INDEX faucet_owners_login ON faucet_owners (lower(login));
+INSERT INTO faucet_owners (owner_id, login, seen_at)
+SELECT DISTINCT ON (lower(owner_login)) owner_id, owner_login, seen_at
+FROM (
+  SELECT DISTINCT ON (owner_id) owner_id, owner_login, seen_at
+  FROM faucet_repos
+  ORDER BY owner_id, seen_at DESC, repo_id DESC
+) latest
+ORDER BY lower(owner_login), seen_at DESC, owner_id DESC;
+
+-- A lookup by name finds the account of the login first, then its
+-- repositories.
+CREATE INDEX faucet_repos_owner ON faucet_repos (owner_id);

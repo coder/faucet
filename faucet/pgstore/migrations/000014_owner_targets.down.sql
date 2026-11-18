@@ -1,4 +1,5 @@
-DROP INDEX faucet_repos_owner_login_idx;
+DROP INDEX faucet_repos_owner;
+DROP TABLE faucet_owners;
 
 DELETE FROM faucet_raw_leases WHERE target_kind <> 'repo';
 ALTER TABLE faucet_raw_leases

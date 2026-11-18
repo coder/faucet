@@ -247,23 +247,35 @@ type Store interface {
 	// RecordRepository records repo, which a signed delivery named, at
 	// seenAt, the time of record, when the store holds no row of its ID. A
 	// row that exists keeps its names, so a replayed or late delivery cannot
-	// move a name back to it. It calls repo.Validate.
+	// move a name back to it. It records the login of repo's owner as
+	// RecordOwner does. It calls repo.Validate.
 	RecordRepository(ctx context.Context, repo Repository, seenAt time.Time) error
 	// RenameRepository gives the row of repo.ID the names of repo at seenAt
 	// when its FullName is from, ignoring case, and inserts it when there is
 	// no row. A repository event that renamed or transferred the repository
 	// from that name calls it, so a replayed older rename, whose from the row
-	// no longer holds, changes nothing. It calls repo.Validate.
+	// no longer holds, changes nothing. It records the login of repo's owner
+	// as RecordOwner does. It calls repo.Validate.
 	RenameRepository(ctx context.Context, repo Repository, from string, seenAt time.Time) error
-	// RepositoryByName returns the repository whose FullName equals fullName,
-	// ignoring case as GitHub does. When more than one row holds the name,
-	// as when a repository was deleted with no event that says so and another
-	// took its name, it returns the one that took the name latest. It returns
-	// ErrUnknownRepository when no row holds the name.
+	// RecordOwner records that a signed delivery named the account owner.ID
+	// with owner.Login at seenAt. The account keeps the login of its latest
+	// delivery, because GitHub sends no event for each repository of an
+	// account that it renames. One login names one account, ignoring case:
+	// another account that held the login gives it up, and holds no login
+	// until a delivery names it again. It calls owner.Validate.
+	RecordOwner(ctx context.Context, owner Owner, seenAt time.Time) error
+	// RepositoryByName returns the repository written fullName, ignoring case
+	// as GitHub does: a repository whose name, as it was first seen or renamed
+	// to, is the name part, of the account that holds the owner part as its
+	// login now. When more than one row holds the name, as when a repository
+	// was deleted with no event that says so and another took its name, it
+	// returns the one that took the name latest. The result's names are the
+	// ones that it matched. It returns ErrUnknownRepository when no row holds
+	// the name.
 	RepositoryByName(ctx context.Context, fullName string) (Repository, error)
-	// OwnerByLogin returns the owner of the repository row, among those whose
-	// owner's login equals login ignoring case, that was seen latest. It
-	// returns ErrUnknownOwner when no row holds the login.
+	// OwnerByLogin returns the account that holds login now, ignoring case,
+	// with the login as its latest delivery wrote it. It returns
+	// ErrUnknownOwner when no account holds it.
 	OwnerByLogin(ctx context.Context, login string) (Owner, error)
 
 	// The rest of the interface is the delivery queue. A subscription's

@@ -26,6 +26,19 @@ type Owner struct {
 	Login string
 }
 
+// Validate reports whether a store may keep o.
+func (o Owner) Validate() error {
+	switch {
+	case o.ID <= 0:
+		return xerrors.New("an owner needs a positive ID")
+	case o.Login == "":
+		return xerrors.New("an owner needs a login")
+	case strings.ContainsAny(o.Login, "/\x00"):
+		return xerrors.New("an owner's login holds no slash and no NUL byte")
+	}
+	return nil
+}
+
 // Repository is a GitHub repository as a signed delivery names it. GitHub
 // keeps ID when the repository is renamed or moves to another owner, and
 // FullName, written owner/name, can later name another repository.
@@ -52,26 +65,50 @@ func (r Repository) Validate() error {
 	return nil
 }
 
-// recordRepository records the repository that a signed delivery names, so a
-// service can be granted it by name before faucet stores an event of it.
-// Only a repository event that renames or transfers it, from the name that
-// the store holds, changes the names of a repository the store knows. A
-// failed write is logged, and the delivery goes on: the next one that names
-// the repository writes it.
+// recordRepository records the repository and the organization that a
+// signed delivery names, so a service can be granted them by name before
+// faucet stores an event of them, and so the login of each account follows
+// its latest delivery. Only a repository event that renames or transfers it,
+// from the name that the store holds, changes the names of a repository the
+// store knows. A failed write is logged, and the delivery goes on: the next
+// one that names them writes them.
 func (s *Service) recordRepository(ctx context.Context, logger slog.Logger, eventName string, payload []byte) {
+	now := s.clock.Now()
+	if org, ok := organizationOf(payload); ok {
+		if err := s.store.RecordOwner(ctx, org, now); err != nil {
+			logger.Warn(ctx, "could not record the organization", slog.Error(err))
+		}
+	}
 	named, ok := repositoryOf(eventName, payload)
 	if !ok {
 		return
 	}
 	var err error
 	if named.previous != "" {
-		err = s.store.RenameRepository(ctx, named.repo, named.previous, s.clock.Now())
+		err = s.store.RenameRepository(ctx, named.repo, named.previous, now)
 	} else {
-		err = s.store.RecordRepository(ctx, named.repo, s.clock.Now())
+		err = s.store.RecordRepository(ctx, named.repo, now)
 	}
 	if err != nil {
 		logger.Warn(ctx, "could not record the repository", slog.Error(err))
 	}
+}
+
+// organizationOf returns the organization that a delivery's payload names,
+// as an organization's own events and the events of its repositories do,
+// and false when it names none or names it in a form that Validate refuses.
+func organizationOf(payload []byte) (Owner, bool) {
+	var body struct {
+		Organization *struct {
+			ID    int64  `json:"id"`
+			Login string `json:"login"`
+		} `json:"organization"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil || body.Organization == nil {
+		return Owner{}, false
+	}
+	org := Owner{ID: body.Organization.ID, Login: body.Organization.Login}
+	return org, org.Validate() == nil
 }
 
 // namedRepository is the repository that a delivery names, and the full

@@ -20,6 +20,8 @@ var repositorySubtests = []subtest{
 	{"RecordAndRenameRepositoryValidateInput", recordAndRenameRepositoryValidateInput},
 	{"OwnerByLoginIgnoresCaseAndTakesTheOwnerSeenLatest", ownerByLoginIgnoresCaseAndTakesTheOwnerSeenLatest},
 	{"OwnerByLoginOfAnUnseenLoginIsUnknown", ownerByLoginOfAnUnseenLoginIsUnknown},
+	{"AnOwnerKeepsOnlyTheLoginOfItsLatestDelivery", anOwnerKeepsOnlyTheLoginOfItsLatestDelivery},
+	{"RecordOwnerNamesAnAccountWithoutARepository", recordOwnerNamesAnAccountWithoutARepository},
 }
 
 var repositoryTime = time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
@@ -125,7 +127,9 @@ func recordAndRenameRepositoryValidateInput(t *testing.T, s faucet.Store) {
 }
 
 // A login can move to another account, as when an organization is renamed
-// and another takes its old name. The repository seen latest decides.
+// and another takes its old name. The account seen latest under a login
+// holds it, and the one that held it before gets it back only from a
+// delivery that names it so again.
 func ownerByLoginIgnoresCaseAndTakesTheOwnerSeenLatest(t *testing.T, s faucet.Store) {
 	ctx := context.Background()
 	require.NoError(t, s.RecordRepository(ctx, faucet.Repository{ID: 1, OwnerID: 7, OwnerLogin: "Coder", FullName: "Coder/faucet"}, repositoryTime))
@@ -133,17 +137,39 @@ func ownerByLoginIgnoresCaseAndTakesTheOwnerSeenLatest(t *testing.T, s faucet.St
 
 	got, err := s.OwnerByLogin(ctx, "CODER")
 	require.NoError(t, err)
-	require.Equal(t, faucet.Owner{ID: 7, Login: "coder"}, got, "the login matches in any case, and the latest row gives the written login")
+	require.Equal(t, faucet.Owner{ID: 7, Login: "coder"}, got, "the login matches in any case, and the latest delivery gives the written login")
 
 	require.NoError(t, s.RecordRepository(ctx, faucet.Repository{ID: 3, OwnerID: 9, OwnerLogin: "coder", FullName: "coder/new"}, repositoryTime.Add(time.Hour)))
 	got, err = s.OwnerByLogin(ctx, "coder")
 	require.NoError(t, err)
 	require.Equal(t, faucet.Owner{ID: 9, Login: "coder"}, got, "the account seen latest under the login holds it")
+	requireRepositoryNamed(t, s, "coder/new", faucet.Repository{ID: 3, OwnerID: 9, OwnerLogin: "coder", FullName: "coder/new"})
+	requireUnknownName(t, s, "coder/faucet")
 
-	require.NoError(t, s.RenameRepository(ctx, faucet.Repository{ID: 3, OwnerID: 9, OwnerLogin: "acme", FullName: "acme/new"}, "coder/new", repositoryTime.Add(2*time.Hour)))
-	got, err = s.OwnerByLogin(ctx, "coder")
+	require.NoError(t, s.RecordOwner(ctx, faucet.Owner{ID: 9, Login: "acme"}, repositoryTime.Add(2*time.Hour)))
+	_, err = s.OwnerByLogin(ctx, "coder")
+	require.ErrorIs(t, err, faucet.ErrUnknownOwner, "the account that gave the login up does not get it back")
+	requireUnknownName(t, s, "coder/tap")
+
+	require.NoError(t, s.RecordOwner(ctx, faucet.Owner{ID: 7, Login: "coder"}, repositoryTime.Add(3*time.Hour)))
+	requireRepositoryNamed(t, s, "coder/tap", faucet.Repository{ID: 2, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/tap"})
+}
+
+// An organization's own events name it with no repository.
+func recordOwnerNamesAnAccountWithoutARepository(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	require.NoError(t, s.RecordOwner(ctx, faucet.Owner{ID: 5, Login: "Acme"}, repositoryTime))
+	got, err := s.OwnerByLogin(ctx, "acme")
 	require.NoError(t, err)
-	require.Equal(t, faucet.Owner{ID: 7, Login: "coder"}, got, "a transfer away from the login leaves the rows that still hold it")
+	require.Equal(t, faucet.Owner{ID: 5, Login: "Acme"}, got)
+	requireUnknownName(t, s, "acme/tap")
+
+	for _, bad := range []faucet.Owner{{}, {ID: 5}, {Login: "acme"}, {ID: -1, Login: "acme"}, {ID: 5, Login: "ac/me"}, {ID: 5, Login: "ac\x00me"}} {
+		require.Error(t, s.RecordOwner(ctx, bad, repositoryTime), "%+v", bad)
+	}
+	got, err = s.OwnerByLogin(ctx, "acme")
+	require.NoError(t, err)
+	require.Equal(t, faucet.Owner{ID: 5, Login: "Acme"}, got, "a refused owner changes nothing")
 }
 
 func ownerByLoginOfAnUnseenLoginIsUnknown(t *testing.T, s faucet.Store) {
@@ -153,4 +179,23 @@ func ownerByLoginOfAnUnseenLoginIsUnknown(t *testing.T, s faucet.Store) {
 		_, err := s.OwnerByLogin(ctx, login)
 		require.ErrorIs(t, err, faucet.ErrUnknownOwner, login)
 	}
+}
+
+// An account that GitHub renamed sends no event for each of its
+// repositories, so only its next delivery tells faucet the new login. From
+// then on the old login names no account: whoever takes it at GitHub gets
+// none of the renamed account's repositories, by an org grant or by name.
+func anOwnerKeepsOnlyTheLoginOfItsLatestDelivery(t *testing.T, s faucet.Store) {
+	ctx := context.Background()
+	require.NoError(t, s.RecordRepository(ctx, faucet.Repository{ID: 100, OwnerID: 7, OwnerLogin: "acme", FullName: "acme/private"}, repositoryTime))
+	renamed := faucet.Repository{ID: 100, OwnerID: 7, OwnerLogin: "acme-legacy", FullName: "acme-legacy/private"}
+	require.NoError(t, s.RecordRepository(ctx, renamed, repositoryTime.Add(time.Hour)))
+
+	_, err := s.OwnerByLogin(ctx, "acme")
+	require.ErrorIs(t, err, faucet.ErrUnknownOwner, "the old login names no account")
+	got, err := s.OwnerByLogin(ctx, "acme-legacy")
+	require.NoError(t, err)
+	require.Equal(t, faucet.Owner{ID: 7, Login: "acme-legacy"}, got)
+	requireUnknownName(t, s, "acme/private")
+	requireRepositoryNamed(t, s, "ACME-legacy/private", renamed)
 }

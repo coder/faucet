@@ -12,15 +12,26 @@ SET owner_id = excluded.owner_id, owner_login = excluded.owner_login,
 WHERE lower(faucet_repos.full_name) = lower(@previous_full_name::text);
 
 -- name: GetRepositoryByName :one
-SELECT repo_id, owner_id, owner_login, full_name
-FROM faucet_repos
-WHERE lower(full_name) = lower(@full_name::text)
-ORDER BY seen_at DESC, repo_id DESC
+-- The owner part of the name is the login of the account that holds it now,
+-- and the name part is the one that the row was first seen or renamed under.
+SELECT r.repo_id, r.owner_id, o.login AS owner_login, (o.login || '/' || split_part(r.full_name, '/', 2))::text AS full_name
+FROM faucet_owners o
+JOIN faucet_repos r ON r.owner_id = o.owner_id
+WHERE lower(o.login) = lower(@owner_login::text) AND lower(split_part(r.full_name, '/', 2)) = lower(@name::text)
+ORDER BY r.seen_at DESC, r.repo_id DESC
 LIMIT 1;
 
+-- name: ReleaseOwnerLogin :exec
+-- Another account that held the login gives it up, because one login names
+-- one account.
+DELETE FROM faucet_owners WHERE lower(login) = lower(@login::text) AND owner_id <> @owner_id;
+
+-- name: RecordOwner :exec
+INSERT INTO faucet_owners (owner_id, login, seen_at)
+VALUES (@owner_id, @login, @seen_at)
+ON CONFLICT (owner_id) DO UPDATE SET login = excluded.login, seen_at = excluded.seen_at;
+
 -- name: GetOwnerByLogin :one
-SELECT owner_id, owner_login
-FROM faucet_repos
-WHERE lower(owner_login) = lower(@owner_login::text)
-ORDER BY seen_at DESC, repo_id DESC
-LIMIT 1;
+SELECT owner_id, login
+FROM faucet_owners
+WHERE lower(login) = lower(@login::text);

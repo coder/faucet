@@ -11,32 +11,36 @@ import (
 )
 
 const getOwnerByLogin = `-- name: GetOwnerByLogin :one
-SELECT owner_id, owner_login
-FROM faucet_repos
-WHERE lower(owner_login) = lower($1::text)
-ORDER BY seen_at DESC, repo_id DESC
-LIMIT 1
+SELECT owner_id, login
+FROM faucet_owners
+WHERE lower(login) = lower($1::text)
 `
 
 type GetOwnerByLoginRow struct {
-	OwnerID    int64
-	OwnerLogin string
+	OwnerID int64
+	Login   string
 }
 
-func (q *Queries) GetOwnerByLogin(ctx context.Context, ownerLogin string) (GetOwnerByLoginRow, error) {
-	row := q.db.QueryRowContext(ctx, getOwnerByLogin, ownerLogin)
+func (q *Queries) GetOwnerByLogin(ctx context.Context, login string) (GetOwnerByLoginRow, error) {
+	row := q.db.QueryRowContext(ctx, getOwnerByLogin, login)
 	var i GetOwnerByLoginRow
-	err := row.Scan(&i.OwnerID, &i.OwnerLogin)
+	err := row.Scan(&i.OwnerID, &i.Login)
 	return i, err
 }
 
 const getRepositoryByName = `-- name: GetRepositoryByName :one
-SELECT repo_id, owner_id, owner_login, full_name
-FROM faucet_repos
-WHERE lower(full_name) = lower($1::text)
-ORDER BY seen_at DESC, repo_id DESC
+SELECT r.repo_id, r.owner_id, o.login AS owner_login, (o.login || '/' || split_part(r.full_name, '/', 2))::text AS full_name
+FROM faucet_owners o
+JOIN faucet_repos r ON r.owner_id = o.owner_id
+WHERE lower(o.login) = lower($1::text) AND lower(split_part(r.full_name, '/', 2)) = lower($2::text)
+ORDER BY r.seen_at DESC, r.repo_id DESC
 LIMIT 1
 `
+
+type GetRepositoryByNameParams struct {
+	OwnerLogin string
+	Name       string
+}
 
 type GetRepositoryByNameRow struct {
 	RepoID     int64
@@ -45,8 +49,10 @@ type GetRepositoryByNameRow struct {
 	FullName   string
 }
 
-func (q *Queries) GetRepositoryByName(ctx context.Context, fullName string) (GetRepositoryByNameRow, error) {
-	row := q.db.QueryRowContext(ctx, getRepositoryByName, fullName)
+// The owner part of the name is the login of the account that holds it now,
+// and the name part is the one that the row was first seen or renamed under.
+func (q *Queries) GetRepositoryByName(ctx context.Context, arg GetRepositoryByNameParams) (GetRepositoryByNameRow, error) {
+	row := q.db.QueryRowContext(ctx, getRepositoryByName, arg.OwnerLogin, arg.Name)
 	var i GetRepositoryByNameRow
 	err := row.Scan(
 		&i.RepoID,
@@ -55,6 +61,23 @@ func (q *Queries) GetRepositoryByName(ctx context.Context, fullName string) (Get
 		&i.FullName,
 	)
 	return i, err
+}
+
+const recordOwner = `-- name: RecordOwner :exec
+INSERT INTO faucet_owners (owner_id, login, seen_at)
+VALUES ($1, $2, $3)
+ON CONFLICT (owner_id) DO UPDATE SET login = excluded.login, seen_at = excluded.seen_at
+`
+
+type RecordOwnerParams struct {
+	OwnerID int64
+	Login   string
+	SeenAt  time.Time
+}
+
+func (q *Queries) RecordOwner(ctx context.Context, arg RecordOwnerParams) error {
+	_, err := q.db.ExecContext(ctx, recordOwner, arg.OwnerID, arg.Login, arg.SeenAt)
+	return err
 }
 
 const recordRepository = `-- name: RecordRepository :exec
@@ -79,6 +102,22 @@ func (q *Queries) RecordRepository(ctx context.Context, arg RecordRepositoryPara
 		arg.FullName,
 		arg.SeenAt,
 	)
+	return err
+}
+
+const releaseOwnerLogin = `-- name: ReleaseOwnerLogin :exec
+DELETE FROM faucet_owners WHERE lower(login) = lower($1::text) AND owner_id <> $2
+`
+
+type ReleaseOwnerLoginParams struct {
+	Login   string
+	OwnerID int64
+}
+
+// Another account that held the login gives it up, because one login names
+// one account.
+func (q *Queries) ReleaseOwnerLogin(ctx context.Context, arg ReleaseOwnerLoginParams) error {
+	_, err := q.db.ExecContext(ctx, releaseOwnerLogin, arg.Login, arg.OwnerID)
 	return err
 }
 

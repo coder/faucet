@@ -280,3 +280,44 @@ func TestAServicePollsTheRawEventsOfAnOrganization(t *testing.T) {
 	require.Equal(t, []string{"of-the-org", "of-new-repo"}, ids(poll(owner, &ownerOpened.Cursor)))
 	require.Equal(t, []string{"of-the-org", "of-new-repo", "of-another-org"}, ids(poll(all, &allOpened.Cursor)))
 }
+
+// waitError calls the wait tool for ci.run_completed with arguments and
+// returns the text of the error that it answers.
+func waitError(ctx context.Context, t *testing.T, session *mcp.ClientSession, arguments map[string]any) string {
+	t.Helper()
+	arguments = maps.Clone(arguments)
+	arguments["types"] = []string{"ci.run_completed"}
+	arguments["timeout_s"] = 1
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "wait_for_github_events", Arguments: arguments})
+	require.NoError(t, err)
+	require.True(t, res.IsError, "the wait is refused: %s", toolText(t, res))
+	return toolText(t, res)
+}
+
+// An organization that GitHub renamed gives up its old login, and whoever
+// takes the login next at GitHub must not read the renamed organization's
+// repositories through an org grant of it, by owner or by name. The
+// renamed organization's own deliveries tell faucet the new login.
+func TestAnOrgGrantOfALoginThatItsAccountGaveUpReadsNothing(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	srv := newLoginServer(t)
+	oldSecret := srv.client(t, "old-login", "/github/mcp", bothScopes, "org:coder")
+	newSecret := srv.client(t, "new-login", "/github/mcp", bothScopes, "org:coder-legacy")
+	srv.deliverRunOf(t, "existing-1", coderExisting)
+	renamed, err := json.Marshal(map[string]any{
+		"action": "renamed", "organization": map[string]any{"id": coderID, "login": "coder-legacy"},
+		"changes": map[string]any{"login": map[string]any{"from": "coder"}},
+	})
+	require.NoError(t, err)
+	srv.postAnswered(t, "organization", "renamed-1", renamed, http.StatusAccepted)
+
+	old := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, srv.token(t, "old-login", oldSecret))
+	require.Contains(t, waitError(ctx, t, old, map[string]any{"owner": "coder"}), "faucet has received no webhook delivery from a repository of coder yet")
+	require.Contains(t, waitError(ctx, t, old, map[string]any{"repo": "coder/existing"}), "faucet has received no webhook delivery from coder/existing yet")
+
+	renamedOrg := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, srv.token(t, "new-login", newSecret))
+	waitFor(ctx, t, renamedOrg, map[string]any{"owner": "coder-legacy"})
+	waitFor(ctx, t, renamedOrg, map[string]any{"repo": "coder-legacy/existing"})
+}

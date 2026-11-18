@@ -114,6 +114,13 @@ func (s *loginServer) deliver(t *testing.T, delivery string) {
 // 200.
 func (s *loginServer) post(t *testing.T, event, delivery string, body []byte) {
 	t.Helper()
+	s.postAnswered(t, event, delivery, body, http.StatusOK)
+}
+
+// postAnswered posts a signed delivery and requires that faucet answers it
+// with status.
+func (s *loginServer) postAnswered(t *testing.T, event, delivery string, body []byte, status int) {
+	t.Helper()
 	mac := hmac.New(sha256.New, []byte(testSecret))
 	_, _ = mac.Write(body)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, s.URL+"/webhook/github", bytes.NewReader(body))
@@ -124,7 +131,7 @@ func (s *loginServer) post(t *testing.T, event, delivery string, body []byte) {
 	resp, err := s.Client().Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, status, resp.StatusCode)
 }
 
 // connectService connects to the endpoint at path as go-sdk's client

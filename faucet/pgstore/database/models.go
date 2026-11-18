@@ -74,6 +74,12 @@ type FaucetEvent struct {
 	RepoName   string
 }
 
+type FaucetOwner struct {
+	OwnerID int64
+	Login   string
+	SeenAt  time.Time
+}
+
 type FaucetPurgeMark struct {
 	ID            bool
 	PurgedThrough int64
