@@ -169,3 +169,20 @@ func TestFaucetKeepsAtMostMaxCachedDocumentsAndDropsTheOneThatExpiresFirst(t *te
 	b.start(clients[0])
 	require.Equal(t, 2, h.docs.fetchCount(clients[0]), "the first document made room for the last")
 }
+
+// Failed fetches are kept apart from documents, so that many bad client IDs
+// push out no document.
+func TestFailedFetchesPushOutNoDocument(t *testing.T) {
+	t.Parallel()
+	h := newLoginHarness(t)
+	b := h.newBrowser(t)
+	good := h.newClient("agent", nil)
+	h.docs.serveWith(good, http.Header{"Cache-Control": {"max-age=60"}})
+	b.start(good)
+	for i := range oauth.MaxCachedDocuments + 1 {
+		bad := loginClient{id: fmt.Sprintf("%s/missing%d.json", h.docs.URL, i), redirectURI: h.agents.URL + "/cb/missing", path: "/cb/missing"}
+		require.Equal(t, http.StatusBadRequest, b.authorize(h.request(bad)).status)
+	}
+	b.start(good)
+	require.Equal(t, 1, h.docs.fetchCount(good), "the document is kept")
+}

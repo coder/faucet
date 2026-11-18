@@ -32,6 +32,12 @@ const (
 	// whatever its headers allow, so that a change to the document shows
 	// within this time.
 	maxDocumentAge = 5 * time.Minute
+	// failedFetchAge is how long faucet keeps the failure of a fetch, so
+	// that a bad client ID costs one fetch a minute however often it comes.
+	failedFetchAge = time.Minute
+	// maxFailedFetches bounds how many failures faucet keeps. They have a
+	// store of their own, so that many bad client IDs push out no document.
+	maxFailedFetches = 256
 )
 
 // errClientDocument is the error of a client ID, or of the client ID
@@ -74,26 +80,26 @@ func newDocumentFetcher(client *http.Client, clock quartz.Clock) documentFetcher
 	return documentFetcher{client: client, cache: newDocumentCache(clock)}
 }
 
-// fetch returns the document of the client whose ID is clientID, from the
-// cache while it is fresh. Every error wraps errClientDocument.
+// fetch returns the document of the client whose ID is clientID, through
+// the cache. Every error but the end of ctx wraps errClientDocument.
 func (f documentFetcher) fetch(ctx context.Context, clientID string) (clientDocument, error) {
-	if doc, ok := f.cache.get(clientID); ok {
-		return doc, nil
-	}
-	doc, header, err := f.read(ctx, clientID)
-	if err != nil {
+	if err := checkClientID(clientID); err != nil {
 		return clientDocument{}, fmt.Errorf("%w: %w", errClientDocument, err)
 	}
-	f.cache.put(clientID, doc, header)
-	return doc, nil
+	return f.cache.fetch(ctx, clientID, func() (clientDocument, http.Header, error) {
+		// The fetch has a timeout of its own, and every caller at once
+		// waits for it, so a caller that leaves does not end it.
+		doc, header, err := f.read(context.WithoutCancel(ctx), clientID)
+		if err != nil {
+			return clientDocument{}, nil, fmt.Errorf("%w: %w", errClientDocument, err)
+		}
+		return doc, header, nil
+	})
 }
 
-// read fetches the document of clientID and checks it. It returns the
-// header of the response with the document.
+// read fetches the document of clientID, which checkClientID passed, and
+// checks it. It returns the header of the response with the document.
 func (f documentFetcher) read(ctx context.Context, clientID string) (clientDocument, http.Header, error) {
-	if err := checkClientID(clientID); err != nil {
-		return clientDocument{}, nil, err
-	}
 	timeout := f.timeout
 	if timeout == 0 {
 		timeout = documentTimeout

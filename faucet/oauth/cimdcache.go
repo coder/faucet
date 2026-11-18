@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"context"
 	"maps"
 	"net/http"
 	"slices"
@@ -13,13 +14,17 @@ import (
 )
 
 // documentCache keeps the client documents that passed every check, so that
-// a client that logs in again soon is not fetched again. It keeps one copy
-// for every user, so it reads the headers as a shared cache of RFC 9111
-// does.
+// a client that logs in again soon is not fetched again, and for a minute
+// the failures of the fetches that did not pass. It keeps one copy for
+// every user, so it reads the headers as a shared cache of RFC 9111 does.
+// Callers that ask at once for a document that it does not hold share one
+// fetch.
 type documentCache struct {
-	clock   quartz.Clock
-	mu      sync.Mutex
-	entries map[string]cachedDocument
+	clock    quartz.Clock
+	mu       sync.Mutex
+	entries  map[string]cachedDocument
+	failures map[string]failedFetch
+	flights  map[string]*documentFlight
 }
 
 type cachedDocument struct {
@@ -27,39 +32,99 @@ type cachedDocument struct {
 	expires time.Time
 }
 
+type failedFetch struct {
+	err     error
+	expires time.Time
+}
+
+// documentFlight is a fetch that callers share. doc and err are set before
+// done closes.
+type documentFlight struct {
+	done chan struct{}
+	doc  clientDocument
+	err  error
+}
+
 func newDocumentCache(clock quartz.Clock) *documentCache {
-	return &documentCache{clock: clock, entries: map[string]cachedDocument{}}
-}
-
-// get returns the document of clientID while it is fresh.
-func (c *documentCache) get(clientID string) (clientDocument, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	e, ok := c.entries[clientID]
-	if !ok || !c.clock.Now().Before(e.expires) {
-		return clientDocument{}, false
+	return &documentCache{
+		clock: clock, entries: map[string]cachedDocument{}, failures: map[string]failedFetch{}, flights: map[string]*documentFlight{},
 	}
-	return e.doc, true
 }
 
-// put keeps doc, which a response with header served just now, for as long
-// as freshFor allows. A full cache drops the document that expires first.
-func (c *documentCache) put(clientID string, doc clientDocument, header http.Header) {
+// fetch returns the document of clientID while it is fresh, and the failure
+// of its last fetch for failedFetchAge after it. Otherwise it calls read,
+// once for all the callers that ask at once, and keeps what read returns.
+// A caller whose ctx ends stops waiting for another caller's read.
+func (c *documentCache) fetch(ctx context.Context, clientID string, read func() (clientDocument, http.Header, error)) (clientDocument, error) {
+	c.mu.Lock()
+	now := c.clock.Now()
+	if e, ok := c.entries[clientID]; ok && now.Before(e.expires) {
+		c.mu.Unlock()
+		return e.doc, nil
+	}
+	if e, ok := c.failures[clientID]; ok && now.Before(e.expires) {
+		c.mu.Unlock()
+		return clientDocument{}, e.err
+	}
+	if fl, ok := c.flights[clientID]; ok {
+		c.mu.Unlock()
+		select {
+		case <-fl.done:
+			return fl.doc, fl.err
+		case <-ctx.Done():
+			return clientDocument{}, ctx.Err()
+		}
+	}
+	fl := &documentFlight{done: make(chan struct{})}
+	c.flights[clientID] = fl
+	c.mu.Unlock()
+
+	doc, header, err := read()
+	c.mu.Lock()
+	delete(c.flights, clientID)
+	if err != nil {
+		c.keepFailureLocked(clientID, err)
+	} else {
+		c.keepLocked(clientID, doc, header)
+	}
+	c.mu.Unlock()
+	fl.doc, fl.err = doc, err
+	close(fl.done)
+	return doc, err
+}
+
+// keepLocked keeps doc, which a response with header served just now, for
+// as long as freshFor allows. A full cache drops the document that expires
+// first. The caller holds c.mu.
+func (c *documentCache) keepLocked(clientID string, doc clientDocument, header http.Header) {
 	now := c.clock.Now()
 	lifetime := freshFor(header, now)
 	if lifetime <= 0 {
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	maps.DeleteFunc(c.entries, func(_ string, e cachedDocument) bool { return !now.Before(e.expires) })
-	if _, ok := c.entries[clientID]; !ok && len(c.entries) >= maxCachedDocuments {
-		first := slices.MinFunc(slices.Collect(maps.Keys(c.entries)), func(a, b string) int {
-			return c.entries[a].expires.Compare(c.entries[b].expires)
+	keep(c.entries, clientID, cachedDocument{doc: doc, expires: now.Add(lifetime)}, maxCachedDocuments, now,
+		func(e cachedDocument) time.Time { return e.expires })
+}
+
+// keepFailureLocked keeps err, the failure of a fetch just now, for
+// failedFetchAge. The caller holds c.mu.
+func (c *documentCache) keepFailureLocked(clientID string, err error) {
+	now := c.clock.Now()
+	keep(c.failures, clientID, failedFetch{err: err, expires: now.Add(failedFetchAge)}, maxFailedFetches, now,
+		func(e failedFetch) time.Time { return e.expires })
+}
+
+// keep puts e in m under key, after it drops the entries that expired at
+// now and, when m holds limit entries, the one that expires first.
+func keep[E any](m map[string]E, key string, e E, limit int, now time.Time, expires func(E) time.Time) {
+	maps.DeleteFunc(m, func(_ string, o E) bool { return !now.Before(expires(o)) })
+	if _, ok := m[key]; !ok && len(m) >= limit {
+		first := slices.MinFunc(slices.Collect(maps.Keys(m)), func(a, b string) int {
+			return expires(m[a]).Compare(expires(m[b]))
 		})
-		delete(c.entries, first)
+		delete(m, first)
 	}
-	c.entries[clientID] = cachedDocument{doc: doc, expires: now.Add(lifetime)}
+	m[key] = e
 }
 
 // freshFor is how long a shared cache may keep a response with header that

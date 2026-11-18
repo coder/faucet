@@ -32,6 +32,8 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/security.md", "A fetch must end within %d seconds, and the document must be %d KiB at most", []any{seconds(documentTimeout), maxDocumentBytes >> 10}},
 		{"docs/security.md", "It keeps up to %d documents, each for as long as its cache headers let a shared cache keep it and %d minutes at most", []any{maxCachedDocuments, minutes(maxDocumentAge)}},
 		{"docs/browser-login.md", "header lets a shared cache keep it, and %d minutes at most, so a change to a document shows within %d minutes", []any{minutes(maxDocumentAge), minutes(maxDocumentAge)}},
+		{"docs/security.md", "Faucet keeps the failure of a fetch for %d minute", []any{minutes(failedFetchAge)}},
+		{"docs/browser-login.md", "It keeps the failure of a fetch for %d minute", []any{minutes(failedFetchAge)}},
 		{"docs/service-accounts.md", "an fct_ access token for %d minutes", []any{minutes(accessTokenLifetime)}},
 		{"docs/browser-login.md", "an access token for %d minutes", []any{minutes(accessTokenLifetime)}},
 		{"docs/browser-login.md", "an fct_ access token for %d minutes", []any{minutes(accessTokenLifetime)}},
