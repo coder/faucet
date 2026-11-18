@@ -412,3 +412,33 @@ func TestATokenRequestWithAnImpossibleClientIDIsUnauthorized(t *testing.T) {
 		require.Contains(t, string(body), `"invalid_client"`, credentials)
 	}
 }
+
+// A browser client reads the discovery documents across origins after a
+// preflight, and the token endpoint takes POST only.
+func TestTheLoginRoutesAnswerTheirMethods(t *testing.T) {
+	t.Parallel()
+	srv := newLoginServer(t)
+	do := func(method, path string) (int, http.Header) {
+		t.Helper()
+		req, err := http.NewRequestWithContext(context.Background(), method, srv.URL+path, nil)
+		require.NoError(t, err)
+		req.Header.Set("Origin", "https://agent.example.com")
+		req.Header.Set("Access-Control-Request-Method", http.MethodGet)
+		req.Header.Set("Access-Control-Request-Headers", "mcp-protocol-version")
+		resp, err := srv.Client().Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		return resp.StatusCode, resp.Header
+	}
+	for _, path := range []string{"/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource/github/mcp", "/.well-known/oauth-protected-resource/mcp"} {
+		status, header := do(http.MethodOptions, path)
+		require.Equal(t, http.StatusNoContent, status, path)
+		require.Equal(t, "*", header.Get("Access-Control-Allow-Origin"), path)
+		require.Contains(t, header.Get("Access-Control-Allow-Headers"), "MCP-Protocol-Version", path)
+		status, _ = do(http.MethodPost, path)
+		require.Equal(t, http.StatusMethodNotAllowed, status, path)
+	}
+	status, header := do(http.MethodGet, "/oauth/token")
+	require.Equal(t, http.StatusMethodNotAllowed, status)
+	require.Equal(t, http.MethodPost, header.Get("Allow"))
+}

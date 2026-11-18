@@ -17,8 +17,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/modelcontextprotocol/go-sdk/auth"
-	"github.com/modelcontextprotocol/go-sdk/oauthex"
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog/v3"
@@ -444,9 +442,9 @@ func newRouter(svc *faucet.Service, tokens bearers, login *oauth.Server, cron cr
 	if login != nil {
 		r.Handle("/.well-known/oauth-protected-resource/github/mcp", protectedResource(tokens, "/github/mcp"))
 		r.Handle("/.well-known/oauth-protected-resource/mcp", protectedResource(tokens, "/mcp"))
-		r.Method(http.MethodGet, "/.well-known/oauth-authorization-server", login.MetadataHandler())
+		r.Handle("/.well-known/oauth-authorization-server", login.MetadataHandler())
 		r.Handle("/oauth/authorize", login.AuthorizeHandler())
-		r.Method(http.MethodPost, "/oauth/token", login.TokenHandler())
+		r.Handle("/oauth/token", login.TokenHandler())
 	}
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok\n")
@@ -457,11 +455,7 @@ func newRouter(svc *faucet.Service, tokens bearers, login *oauth.Server, cron cr
 // protectedResource serves the metadata (RFC 9728) of the MCP endpoint at
 // path, which names faucet's origin as its authorization server.
 func protectedResource(tokens bearers, path string) http.Handler {
-	return auth.ProtectedResourceMetadataHandler(&oauthex.ProtectedResourceMetadata{
-		Resource:             tokens.resource(path),
-		AuthorizationServers: []string{tokens.origin.String()},
-		ScopesSupported:      scopeNames(faucet.AllScopes()),
-	})
+	return oauth.ProtectedResourceHandler(tokens.resource(path), tokens.origin.String())
 }
 
 func scopeNames(scopes []faucet.Scope) []string {

@@ -132,17 +132,9 @@ func metadataOf(issuer string, table map[string]grant) authServerMetadata {
 }
 
 // MetadataHandler serves the authorization server's metadata (RFC 8414) at
-// MetadataPath. Any origin may read it, as browser clients discover it.
+// MetadataPath, as a discovery document.
 func (s *Server) MetadataHandler() http.Handler {
-	body, err := json.Marshal(metadataOf(s.issuer, grants))
-	if err != nil {
-		panic(xerrors.Errorf("encode the authorization server metadata: %w", err))
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(body)
-	})
+	return document(metadataOf(s.issuer, grants))
 }
 
 // PurgeResult is what Server.Purge deleted.
@@ -203,10 +195,15 @@ type tokenResponse struct {
 	Scope       string `json:"scope"`
 }
 
-// TokenHandler serves the token endpoint at TokenPath. It takes the grants
-// of the grant table.
+// TokenHandler serves the token endpoint at TokenPath. It takes POST only,
+// with the grants of the grant table.
 func (s *Server) TokenHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Pragma", "no-cache")
 		resp, err := s.token(w, r)
@@ -369,4 +366,50 @@ func grantedScopes(form url.Values, held []faucet.Scope) ([]faucet.Scope, error)
 		return nil, badRequest("invalid_scope", "the client holds none of the scopes asked for")
 	}
 	return granted, nil
+}
+
+type protectedResourceMetadata struct {
+	Resource             string   `json:"resource"`
+	AuthorizationServers []string `json:"authorization_servers"`
+	ScopesSupported      []string `json:"scopes_supported"`
+}
+
+// ProtectedResourceHandler serves the metadata (RFC 9728) of the endpoint
+// resource, whose authorization server is issuer, as a discovery document.
+func ProtectedResourceHandler(resource, issuer string) http.Handler {
+	m := protectedResourceMetadata{Resource: resource, AuthorizationServers: []string{issuer}}
+	for _, s := range faucet.AllScopes() {
+		m.ScopesSupported = append(m.ScopesSupported, string(s))
+	}
+	return document(m)
+}
+
+// corsAllowHeaders are the request headers that a browser client may send
+// for a discovery document. An MCP client sends MCP-Protocol-Version with
+// every request.
+const corsAllowHeaders = "Content-Type, MCP-Protocol-Version"
+
+// document serves v as JSON to GET and HEAD from any origin, since a
+// discovery document is public, and answers a CORS preflight.
+func document(v any) http.Handler {
+	body, err := json.Marshal(v)
+	if err != nil {
+		panic(xerrors.Errorf("encode a discovery document: %w", err))
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Access-Control-Allow-Origin", "*")
+		switch r.Method {
+		case http.MethodGet, http.MethodHead:
+			h.Set("Content-Type", "application/json")
+			_, _ = w.Write(body)
+		case http.MethodOptions:
+			h.Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+			h.Set("Access-Control-Allow-Headers", corsAllowHeaders)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			h.Set("Allow", "GET, HEAD, OPTIONS")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
 }

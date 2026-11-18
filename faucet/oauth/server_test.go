@@ -399,3 +399,45 @@ func TestAnImpossibleClientIDNeverReachesTheStore(t *testing.T) {
 		require.Equal(t, "invalid_client", reply.body["error"], credentials)
 	}
 }
+
+func serve(h http.Handler, method, target string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), method, target, nil))
+	return rec
+}
+
+// The token endpoint takes POST only, as RFC 6749 section 3.2 says, and the
+// metadata is a document to GET, which a browser client may read across
+// origins after a preflight that sends MCP-Protocol-Version.
+func TestTheEndpointsAnswerOnlyTheirMethods(t *testing.T) {
+	t.Parallel()
+	server, err := oauth.NewServer(oauth.ServerDeps{Store: newFakeStore(), Clock: quartz.NewMock(t), Logger: slog.Make(), Issuer: issuer, Resources: []string{resource}})
+	require.NoError(t, err)
+
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodOptions} {
+		rec := serve(server.TokenHandler(), method, oauth.TokenPath)
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code, method)
+		require.Equal(t, http.MethodPost, rec.Header().Get("Allow"), method)
+	}
+
+	metadata := server.MetadataHandler()
+	require.Equal(t, http.StatusOK, serve(metadata, http.MethodHead, oauth.MetadataPath).Code)
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		rec := serve(metadata, method, oauth.MetadataPath)
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code, method)
+		require.Equal(t, "GET, HEAD, OPTIONS", rec.Header().Get("Allow"), method)
+	}
+	rec := serve(metadata, http.MethodOptions, oauth.MetadataPath)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
+	require.Contains(t, rec.Header().Get("Access-Control-Allow-Headers"), "MCP-Protocol-Version")
+	require.Empty(t, rec.Body.String())
+
+	prm := oauth.ProtectedResourceHandler(resource, issuer)
+	rec = serve(prm, http.MethodGet, "/.well-known/oauth-protected-resource/github/mcp")
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.JSONEq(t, `{"resource":"`+resource+`","authorization_servers":["`+issuer+`"],"scopes_supported":["events:read","events:subscribe"]}`, rec.Body.String())
+	rec = serve(prm, http.MethodOptions, "/.well-known/oauth-protected-resource/github/mcp")
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Contains(t, rec.Header().Get("Access-Control-Allow-Headers"), "MCP-Protocol-Version")
+}
