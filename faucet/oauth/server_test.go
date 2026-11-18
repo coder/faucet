@@ -76,8 +76,6 @@ func (h *tokenHarness) post(authorization string, form url.Values) tokenReply {
 	return h.postWith([]string{authorization}, form)
 }
 
-// postWith sends form to the token endpoint with an Authorization header
-// for each of authorization.
 func (h *tokenHarness) postWith(authorization []string, form url.Values) tokenReply {
 	h.t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, h.srv.URL+oauth.TokenPath, strings.NewReader(form.Encode()))

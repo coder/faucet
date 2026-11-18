@@ -93,8 +93,6 @@ func TestFaucetTrustsOnlyTheIssuerOfOneVercelTeam(t *testing.T) {
 	}
 }
 
-// Faucet takes no token of GitHub Actions or gitlab.com yet, whatever the
-// rule pins.
 func TestFaucetRefusesARuleForGitHubActionsOrGitLab(t *testing.T) {
 	t.Parallel()
 	github := map[string]string{"repository_owner_id": "65", "repository_id": "74", "ref": "refs/heads/main", "event_name": "push", "job_workflow_ref": "octo-org/octo-repo/.github/workflows/digest.yml@refs/heads/main"}

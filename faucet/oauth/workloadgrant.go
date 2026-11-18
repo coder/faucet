@@ -19,18 +19,13 @@ const (
 
 var subjectTokenTypes = []string{"urn:ietf:params:oauth:token-type:jwt", "urn:ietf:params:oauth:token-type:id_token"}
 
-// errWorkloadRefused is the one answer to a token exchange that faucet
-// refuses before the subject token's signature verified under a rule of the
-// client, so that it tells no caller which clients exist or what they
-// trust. The client sends no Authorization header, so the answer is a 400
-// with no challenge (RFC 6749 section 5.2).
+// The client sends no Authorization header, so the answer is a 400 with no
+// challenge (RFC 6749 section 5.2).
 var errWorkloadRefused = &tokenError{
 	status: http.StatusBadRequest, code: "invalid_client",
 	description: "the client takes no such subject token: check client_id and the token, and faucet's log for the reason",
 }
 
-// workloadClientError says why a client takes no token exchange. It is for
-// the log: the caller gets errWorkloadRefused.
 type workloadClientError string
 
 func (e workloadClientError) Error() string { return string(e) }
@@ -57,10 +52,6 @@ func (s *Server) tokenExchange(r *http.Request, form url.Values) (tokenResponse,
 	return resp, nil
 }
 
-// exchange trades the subject token of form for a token of its client. It
-// checks what the form asks for only after the token's signature verified
-// under a rule of the client, so that no answer tells an unverified caller
-// the client's endpoint or scopes.
 func (s *Server) exchange(ctx context.Context, form url.Values) (tokenResponse, error) {
 	c, rules, err := s.workloadClient(ctx, form.Get("client_id"))
 	if err != nil {
@@ -96,8 +87,6 @@ func (s *Server) exchange(ctx context.Context, form url.Values) (tokenResponse, 
 	return resp, nil
 }
 
-// exchangeAnswer is the answer to a token exchange of clientID that failed
-// with err, which it logs with its reason.
 func (s *Server) exchangeAnswer(ctx context.Context, clientID string, err error) error {
 	var keys issuerKeysError
 	var refusal workloadClientError
@@ -125,8 +114,6 @@ func (s *Server) exchangeAnswer(ctx context.Context, clientID string, err error)
 	return answer
 }
 
-// workloadClient returns the client that id names and its trust rules, or a
-// workloadClientError when the client takes no token exchange.
 func (s *Server) workloadClient(ctx context.Context, id string) (Client, []TrustRule, error) {
 	if ValidateClientID(id) != nil {
 		return Client{}, nil, workloadClientError("client_id is not a client ID")

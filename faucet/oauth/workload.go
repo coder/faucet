@@ -66,13 +66,6 @@ type issuerProfile struct {
 
 // issuerProfiles are the profiles of the hosts whose issuers need more than
 // otherIssuers, by host in lower case.
-//
-// GitHub Actions and gitlab.com serve every account from one issuer. A rule
-// for them would pin the owner and the repository by ID, and the code that
-// may log in: GitHub's ref also matches a pull_request_target or
-// workflow_run run that a fork's pull request starts, so also event_name
-// and job_workflow_ref, and gitlab.com's ref_protected=true. No test has
-// logged in with their tokens, so faucet refuses them until one does.
 var issuerProfiles = map[string]issuerProfile{
 	"oidc.vercel.com": {
 		issuer: vercelTeamIssuer,

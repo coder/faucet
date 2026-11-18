@@ -161,13 +161,10 @@ type authServerMetadata struct {
 	// the authorization endpoint: that endpoint takes a client by the URL of
 	// its metadata document, and its redirect back names the issuer (RFC
 	// 9207).
-	ClientIDMetadataDocumentSupported          bool `json:"client_id_metadata_document_supported,omitempty"`
-	AuthorizationResponseIssParameterSupported bool `json:"authorization_response_iss_parameter_supported,omitempty"`
-	// RevocationEndpoint (RFC 7009) takes the clients of the grants that
-	// revoke, authenticated the ways that those grants take them. The token
-	// exchange's clients send no secret, so they cannot revoke.
-	RevocationEndpoint                     string   `json:"revocation_endpoint"`
-	RevocationEndpointAuthMethodsSupported []string `json:"revocation_endpoint_auth_methods_supported"`
+	ClientIDMetadataDocumentSupported          bool     `json:"client_id_metadata_document_supported,omitempty"`
+	AuthorizationResponseIssParameterSupported bool     `json:"authorization_response_iss_parameter_supported,omitempty"`
+	RevocationEndpoint                         string   `json:"revocation_endpoint"`
+	RevocationEndpointAuthMethodsSupported     []string `json:"revocation_endpoint_auth_methods_supported"`
 }
 
 // metadataOf describes the authorization server at issuer that takes the
@@ -375,9 +372,8 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) (tokenResponse, e
 	return g.issue(s, r, form)
 }
 
-// readTokenForm reads the form in the body of a token request. Every
-// parameter but resource and audience, which RFC 8707 and RFC 8693 let a
-// client repeat, appears at most once (RFC 6749 section 3.2).
+// Every parameter but resource and audience, which RFC 8707 and RFC 8693 let
+// a client repeat, appears at most once (RFC 6749 section 3.2).
 func readTokenForm(w http.ResponseWriter, r *http.Request) (url.Values, error) {
 	if media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || media != "application/x-www-form-urlencoded" {
 		return nil, badRequest("invalid_request", "the body is a form, application/x-www-form-urlencoded")

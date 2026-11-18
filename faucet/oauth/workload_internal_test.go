@@ -438,8 +438,6 @@ func TestTheTokenMustBeValidNow(t *testing.T) {
 	}
 }
 
-// A token that acts for another party (RFC 8693 section 4.1) is not the
-// workload's own.
 func TestATokenWithAnActClaimIsRefused(t *testing.T) {
 	t.Parallel()
 	clock := quartz.NewMock(t)

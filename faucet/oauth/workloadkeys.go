@@ -35,19 +35,12 @@ const (
 	discoveryPath    = "/.well-known/openid-configuration"
 )
 
-// errIssuerKeys is the error of an issuer whose keys faucet cannot check a
-// token with yet.
 var errIssuerKeys = xerrors.New("faucet holds no key of the subject token's issuer for it yet")
 
-// issuerKeysError wraps errIssuerKeys for the keys of issuer that hold no
-// key of a token's kid: the last fetch failed, or it ended less than
-// keyFetchInterval ago and the keys lack the kid. Faucet fetches them again
-// from retryAt.
 type issuerKeysError struct {
 	issuer  string
 	retryAt time.Time
-	// fetch is the error of the last fetch, nil when it worked.
-	fetch error
+	fetch   error
 }
 
 func (e issuerKeysError) Error() string {
@@ -116,12 +109,6 @@ func newKeySource(client *http.Client, clock quartz.Clock) *keySource {
 	return &keySource{client: client, clock: clock, sets: map[string]fetchedKeySet{}, flights: map[string]*keySetFlight{}}
 }
 
-// keySet returns the keys of issuer, for a token whose header names kid. It
-// fetches them when the keys that it holds, which last keySetLifetime from
-// the fetch that got them, lack kid, unless a fetch of issuer ended less than
-// keyFetchInterval ago: then it returns an issuerKeysError. A fetch that
-// fails keeps the keys. It starts no fetch once ctx has ended, and every
-// error but the end of ctx is an issuerKeysError.
 func (s *keySource) keySet(ctx context.Context, issuer, kid string) (jose.JSONWebKeySet, error) {
 	s.mu.Lock()
 	now := s.clock.Now()

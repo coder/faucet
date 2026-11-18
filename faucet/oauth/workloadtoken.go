@@ -29,11 +29,6 @@ const workloadClockLeeway = time.Minute
 // never expires.
 const minWorkloadTokenLifetime = time.Second
 
-// maxSubjectTokenLifetime is the longest that a subject token may live, from
-// the earlier of its iat and nbf to its exp. Faucet asks no platform whether
-// the workload of a token still exists, so this bounds how long a token
-// that outlives it logs in, such as one that kubectl create token --duration
-// made for a service account.
 const maxSubjectTokenLifetime = 24 * time.Hour
 
 // workloadAlgorithms are the signatures that faucet takes from an outside
@@ -61,8 +56,6 @@ type workloadMatch struct {
 	Expires time.Time
 }
 
-// lifetime is how long a faucet token for m lasts when faucet mints it at
-// now.
 func (m workloadMatch) lifetime(now time.Time) time.Duration {
 	return min(accessTokenLifetime, m.Expires.Sub(now))
 }

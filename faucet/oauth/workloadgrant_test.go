@@ -119,9 +119,6 @@ type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// A fetch of the keys takes time, so faucet reads its clock again before it
-// mints: the token's lifetime starts then, and a subject token that expires
-// during the fetch gets no token.
 func TestAWorkloadTokenLastsFromItsMint(t *testing.T) {
 	t.Parallel()
 	for left, want := range map[time.Duration]int{10 * time.Second: 7, 3 * time.Second: 0} {
@@ -157,7 +154,6 @@ var waitForKeys = map[string]any{
 	"error": "temporarily_unavailable", "error_description": "faucet cannot get the key of the subject token from its issuer yet: try again after Retry-After seconds",
 }
 
-// Retry-After gives the seconds until faucet fetches the keys again.
 func TestATokenExchangeWaitsWhileTheKeysOfItsIssuerFail(t *testing.T) {
 	t.Parallel()
 	h, failKeys := newWorkloadHarness(t)
@@ -175,8 +171,6 @@ func TestATokenExchangeWaitsWhileTheKeysOfItsIssuerFail(t *testing.T) {
 	require.Equal(t, "45", reply.header.Get("Retry-After"), "the failure is kept for a minute")
 }
 
-// Within a minute of a fetch, a kid that the keys lack may be a key that
-// the issuer added since, so the workload waits for the next fetch.
 func TestATokenExchangeWaitsForTheNextFetchForAKidThatTheKeysLack(t *testing.T) {
 	t.Parallel()
 	h, _ := newWorkloadHarness(t)
@@ -240,9 +234,6 @@ func TestATokenExchangeCarriesNoSecretAndNoActor(t *testing.T) {
 	}
 }
 
-// The answers about the endpoint and the scopes come only after the subject
-// token's signature verified, so that they tell an unverified caller nothing
-// about the client.
 func TestATokenExchangeIsForTheClientsEndpoint(t *testing.T) {
 	t.Parallel()
 	h, _ := newWorkloadHarness(t)
@@ -280,16 +271,10 @@ func TestATokenExchangeIsForTheClientsEndpoint(t *testing.T) {
 	require.Equal(t, map[string]any{"error": "invalid_target", "error_description": "the tokens of this client are for " + resource}, reply.body, "each audience must be the client's endpoint")
 }
 
-// refusedExchange is the one answer to a token exchange that faucet refuses
-// before the subject token's signature verified under a rule of the client.
 var refusedExchange = map[string]any{
 	"error": "invalid_client", "error_description": "the client takes no such subject token: check client_id and the token, and faucet's log for the reason",
 }
 
-// Before the subject token's signature verifies under a rule of the client,
-// every refusal gets one answer, so that no caller learns which clients
-// exist, which endpoint they are for or which issuers they trust. The log
-// says why. After it verifies, the answer says why.
 func TestATokenExchangeNeedsALiveClientThatTrustsTheToken(t *testing.T) {
 	t.Parallel()
 	h, _ := newWorkloadHarness(t)
@@ -337,7 +322,6 @@ func TestATokenExchangeNeedsALiveClientThatTrustsTheToken(t *testing.T) {
 	require.NotContains(t, h.logs.String(), token)
 }
 
-// logged reports whether a line of logs holds each of parts.
 func logged(logs string, parts ...string) bool {
 	for line := range strings.Lines(logs) {
 		if !slices.ContainsFunc(parts, func(p string) bool { return !strings.Contains(line, p) }) {
