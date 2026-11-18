@@ -52,6 +52,9 @@ type trustRule struct {
 // and why.
 type requiredPin struct {
 	claim, value, why string
+	// refuse returns why the pin cannot take a value, or nil. Nil takes every
+	// value.
+	refuse func(value string) error
 }
 
 // issuerProfile is what faucet requires of a rule for the issuers of one
@@ -79,7 +82,7 @@ var issuerProfiles = map[string]issuerProfile{
 		pins: []requiredPin{
 			{claim: "repository_owner_id", why: "the workflows of every GitHub account get their tokens from this issuer, an owner can choose the parts of sub, and the name of a renamed or deleted account can pass to another, so only the owner ID tells the accounts apart"},
 			{claim: "repository_id", why: "every repository of the owner can get a token for faucet, and the name of a renamed or deleted repository can pass to another, so only the repository ID names one"},
-			{claim: "ref", why: "a workflow on any branch of the repository, or on a pull request from one, can get a token for faucet, so the rule names the ref whose code may act as the client, such as refs/heads/main"},
+			{claim: "ref", why: "a workflow on any branch of the repository, or on a pull request from one, can get a token for faucet, so the rule names the ref whose code may act as the client, such as refs/heads/main", refuse: pullRequestRef},
 		},
 	},
 	"gitlab.com": {
@@ -103,6 +106,15 @@ var unpinnableClaims = map[string]string{
 
 var otherIssuers = issuerProfile{
 	pins: []requiredPin{{claim: "sub", why: "every workload of the issuer can get a token for faucet, and sub names one of them"}},
+}
+
+// pullRequestRef refuses the ref of a GitHub pull request, refs/pull/<n>/merge
+// or refs/pull/<n>/head.
+func pullRequestRef(ref string) error {
+	if strings.HasPrefix(ref, "refs/pull/") {
+		return xerrors.New("a workflow on a pull request's ref runs the code of the pull request, which its author chose and no one need have reviewed: pin the ref of a branch or a tag, such as refs/heads/main")
+	}
+	return nil
 }
 
 const vercelTeamIssuerPrefix = "https://oidc.vercel.com/"
@@ -185,6 +197,10 @@ func parseTrustRule(r TrustRule) (trustRule, error) {
 			return trustRule{}, xerrors.Errorf("a trust rule for %s must pin %s: %s", r.Issuer, pin.claim, pin.why)
 		case pin.value != "" && got != pin.value:
 			return trustRule{}, xerrors.Errorf("a trust rule for %s must pin %s=%s: %s", r.Issuer, pin.claim, pin.value, pin.why)
+		case pin.refuse != nil:
+			if err := pin.refuse(got); err != nil {
+				return trustRule{}, xerrors.Errorf("a trust rule for %s cannot pin %s=%s: %w", r.Issuer, pin.claim, got, err)
+			}
 		}
 	}
 	rule := trustRule{TrustRule: r}

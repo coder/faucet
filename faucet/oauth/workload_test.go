@@ -129,6 +129,13 @@ func TestARuleForGitHubActionsOrGitLabMustPinTheOwnerTheRepositoryAndTheCode(t *
 	err := oauth.ValidateTrustRule(oauth.TrustRule{Issuer: actions, Claims: tag})
 	require.ErrorContains(t, err, "must pin ref: a workflow on any branch of the repository, or on a pull request from one, can get a token for faucet")
 
+	for _, ref := range []string{"refs/pull/12/merge", "refs/pull/12/head"} {
+		pull := maps.Clone(github)
+		pull["ref"] = ref
+		err := oauth.ValidateTrustRule(oauth.TrustRule{Issuer: actions, Claims: pull})
+		require.ErrorContains(t, err, "a trust rule for "+actions+" cannot pin ref="+ref+": a workflow on a pull request's ref runs the code of the pull request", ref)
+	}
+
 	unprotected := maps.Clone(gitlab)
 	unprotected["ref_protected"] = "false"
 	err = oauth.ValidateTrustRule(oauth.TrustRule{Issuer: "https://gitlab.com", Claims: unprotected})
