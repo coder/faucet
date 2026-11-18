@@ -269,7 +269,10 @@ func TestEventsListDescribesEveryEventType(t *testing.T) {
 			Properties map[string]any `json:"properties"`
 		}
 		require.NoError(t, json.Unmarshal(e.InputSchema, &input))
-		require.Equal(t, []string{"repo"}, input.Required)
+		require.Empty(t, input.Required, "a call names its target with one of repo, owner and all")
+		for _, target := range []string{"repo", "owner", "all", "repos"} {
+			require.Contains(t, input.Properties, target, e.Name)
+		}
 		if slices.Contains(noPRNames, e.Name) {
 			require.NotContains(t, input.Properties, "pr", "GitHub names no pull request in %s, so a pr filter could never match", e.Name)
 		} else {

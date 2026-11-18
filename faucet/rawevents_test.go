@@ -95,8 +95,8 @@ func TestEventsListOffersTheRawNamesAfterTheTypedOnes(t *testing.T) {
 					AdditionalProperties *bool                      `json:"additionalProperties"`
 				}
 				require.NoError(t, json.Unmarshal(e.InputSchema, &input))
-				require.Equal(t, []string{"repo"}, input.Required, e.Name)
-				require.ElementsMatch(t, []string{"repo", "actions", "fields"}, slices.Collect(maps.Keys(input.Properties)), e.Name)
+				require.Empty(t, input.Required, e.Name)
+				require.ElementsMatch(t, []string{"repo", "owner", "all", "repos", "actions", "fields"}, slices.Collect(maps.Keys(input.Properties)), e.Name)
 				require.NotNil(t, input.AdditionalProperties, e.Name)
 				require.False(t, *input.AdditionalProperties, e.Name)
 			}

@@ -73,7 +73,7 @@ func (s *Service) pollRaw(ctx context.Context, entry *rawEntry, p *eventsPollPar
 	if err != nil {
 		return nil, err
 	}
-	logger := s.logger.With(slog.F("repo", req.args.Repo), slog.F("event", entry.name))
+	logger := s.logger.With(req.args.logField(), slog.F("event", entry.name))
 	principal, err := s.principal(ctx, logger, "poll", ScopeEventsRead)
 	if err != nil {
 		return nil, accessError(err)
@@ -100,6 +100,7 @@ func (s *Service) pollRaw(ctx context.Context, entry *rawEntry, p *eventsPollPar
 		Actions:   req.args.Actions,
 		Fields:    req.args.Fields,
 		Target:    RepoTarget(repoID),
+		RepoNames: req.args.Repos,
 		ExpiresAt: now.Add(rawLeaseTTL),
 	}
 	if _, err := rand.Read(lease.ID[:]); err != nil {

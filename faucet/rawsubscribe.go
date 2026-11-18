@@ -93,7 +93,7 @@ func (s *Service) subscribeRaw(ctx context.Context, wh *webhookState, entry *raw
 	if err != nil {
 		return nil, err
 	}
-	logger := s.logger.With(slog.F("repo", req.args.Repo), slog.F("event", entry.name))
+	logger := s.logger.With(req.args.logField(), slog.F("event", entry.name))
 
 	principal, err := s.subscriber(ctx, logger, "subscribe")
 	if err != nil {
@@ -189,7 +189,7 @@ func (s *Service) unsubscribeRaw(ctx context.Context, wh *webhookState, entry *r
 	if err != nil {
 		return nil, err
 	}
-	logger := s.logger.With(slog.F("repo", args.Repo), slog.F("event", entry.name))
+	logger := s.logger.With(args.logField(), slog.F("event", entry.name))
 
 	principal, err := s.subscriber(ctx, logger, "unsubscribe")
 	if err != nil {

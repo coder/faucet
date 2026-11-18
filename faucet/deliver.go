@@ -333,13 +333,14 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 		return r.endUndecodable(ctx, now, target, logger)
 	}
 	page, err := s.store.PollEvents(ctx, PollQuery{
-		Target:  target.Target,
-		Types:   target.EventTypes,
-		HeadSHA: strings.ToLower(args.SHA),
-		PR:      args.PR,
-		Fields:  args.fieldFilters(func(string) []string { return target.EventTypes }),
-		After:   target.ScannedThrough,
-		Limit:   MaxPendingDeliveries - target.Pending,
+		Target:    target.Target,
+		Types:     target.EventTypes,
+		HeadSHA:   strings.ToLower(args.SHA),
+		PR:        args.PR,
+		Fields:    args.fieldFilters(func(string) []string { return target.EventTypes }),
+		RepoNames: args.repoNames(),
+		After:     target.ScannedThrough,
+		Limit:     MaxPendingDeliveries - target.Pending,
 	})
 	if err != nil {
 		return xerrors.Errorf("read events for a subscription: %w", err)

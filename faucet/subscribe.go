@@ -214,7 +214,7 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 	if err != nil {
 		return nil, err
 	}
-	logger := s.logger.With(slog.F("repo", req.arguments.Repo), slog.F("event", req.entry.name))
+	logger := s.logger.With(req.arguments.logField(), slog.F("event", req.entry.name))
 
 	principal, err := s.subscriber(ctx, logger, "subscribe")
 	if err != nil {
@@ -310,7 +310,7 @@ func (s *Service) unsubscribeMethod(ctx context.Context, _ *mcp.ServerSession, p
 	if err != nil {
 		return nil, err
 	}
-	logger := s.logger.With(slog.F("repo", args.Repo), slog.F("event", entry.name))
+	logger := s.logger.With(args.logField(), slog.F("event", entry.name))
 
 	principal, err := s.subscriber(ctx, logger, "unsubscribe")
 	if err != nil {
@@ -514,15 +514,17 @@ func parseSubscriptionName(rawName, arguments json.RawMessage, input func(*catal
 // each, so two requests that differ only in key order, whitespace or the order
 // and repeats of a list address the same subscription. Arguments without
 // actions and field filters keep the spelling they had before those existed,
-// and so keep their key.
+// and so keep their key, and so do arguments that name a repository, from
+// before owner and all targets existed. repos is in lower case, which a store
+// that reads it compares.
 func canonicalArguments(args pollArguments) json.RawMessage {
 	return marshalRaw(struct {
-		Repo    string   `json:"repo"`
+		targetArguments
 		SHA     string   `json:"sha,omitempty"`
 		PR      int32    `json:"pr,omitempty"`
 		Actions []string `json:"actions,omitempty"`
 		fieldArguments
-	}{args.Repo, args.SHA, args.PR, sortedSet(args.Actions), args.canonical()})
+	}{args.targetArguments.normalized(), args.SHA, args.PR, sortedSet(args.Actions), args.canonical()})
 }
 
 type deliveryParams struct {

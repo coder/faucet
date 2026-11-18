@@ -16,7 +16,6 @@ import (
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog/v3"
-	"github.com/coder/faucet/faucet/internal/githubapi"
 )
 
 const (
@@ -129,7 +128,7 @@ func (s *Service) listEvents(_ context.Context, _ *mcp.ServerSession, p *eventsL
 
 type pollRequest struct {
 	entry  *catalogEntry
-	repo   string
+	target targetArguments
 	query  PollQuery
 	cursor *int64
 	maxAge time.Duration
@@ -150,13 +149,14 @@ func parsePoll(p *eventsPollParams) (pollRequest, error) {
 	}
 	types := entry.types(args.Actions)
 	req := pollRequest{
-		entry: entry,
-		repo:  args.Repo,
+		entry:  entry,
+		target: args.targetArguments,
 		query: PollQuery{
-			Types:   types,
-			HeadSHA: strings.ToLower(args.SHA),
-			PR:      args.PR,
-			Fields:  args.fieldFilters(func(string) []string { return types }),
+			Types:     types,
+			HeadSHA:   strings.ToLower(args.SHA),
+			PR:        args.PR,
+			Fields:    args.fieldFilters(func(string) []string { return types }),
+			RepoNames: args.repoNames(),
 		},
 		limit: pageLimit,
 	}
@@ -206,7 +206,7 @@ func parsePollArguments(input *jsonschema.Resolved, raw json.RawMessage) (pollAr
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return pollArguments{}, invalidParams("arguments do not match the inputSchema: %v", err)
 	}
-	if _, _, err := githubapi.ParseRepo(args.Repo); err != nil {
+	if err := args.check(); err != nil {
 		return pollArguments{}, invalidParams("%v", err)
 	}
 	return args, nil
@@ -225,9 +225,9 @@ func (s *Service) pollEventsMethod(ctx context.Context, _ *mcp.ServerSession, p 
 	if err != nil {
 		return nil, err
 	}
-	logger := s.logger.With(slog.F("repo", req.repo), slog.F("event", req.entry.name))
+	logger := s.logger.With(req.target.logField(), slog.F("event", req.entry.name))
 
-	repoID, err := s.authorize(ctx, logger, "poll", ScopeEventsRead, req.repo)
+	repoID, err := s.authorize(ctx, logger, "poll", ScopeEventsRead, req.target.Repo)
 	if err != nil {
 		return nil, accessError(err)
 	}

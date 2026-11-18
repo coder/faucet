@@ -1,7 +1,12 @@
 package faucet
 
 import (
+	"strings"
+
 	"golang.org/x/xerrors"
+
+	"cdr.dev/slog/v3"
+	"github.com/coder/faucet/faucet/internal/githubapi"
 )
 
 // TargetKind says what a read covers.
@@ -92,4 +97,80 @@ func (t Target) Covers(repoID, ownerID int64) bool {
 	default:
 		return true
 	}
+}
+
+// targetArguments are the arguments that name what a read covers: exactly
+// one of repo, owner and all. repos narrows an owner or all target to the
+// repositories it names.
+type targetArguments struct {
+	Repo  string   `json:"repo,omitempty" jsonschema:"the repository, written owner/name"`
+	Owner string   `json:"owner,omitempty" jsonschema:"every repository of this owner, a GitHub user or organization login; for service clients only"`
+	All   bool     `json:"all,omitempty" jsonschema:"true for every repository that faucet receives events from; for service clients only"`
+	Repos []string `json:"repos,omitempty" jsonschema:"with owner or all, only the events of these repositories, each written owner/name"`
+}
+
+// check reports whether a names one target in the form of its kind.
+func (a targetArguments) check() error {
+	named := 0
+	for _, set := range []bool{a.Repo != "", a.Owner != "", a.All} {
+		if set {
+			named++
+		}
+	}
+	if named != 1 {
+		return xerrors.New("name one target: repo, owner or all")
+	}
+	switch {
+	case a.Repo != "":
+		if _, _, err := githubapi.ParseRepo(a.Repo); err != nil {
+			return err
+		}
+		if len(a.Repos) > 0 {
+			return xerrors.New("repos narrows an owner or all target, so it goes without repo")
+		}
+	case a.Owner != "":
+		if !githubapi.ValidOwner(a.Owner) {
+			return xerrors.New("owner must be a GitHub login")
+		}
+	}
+	for i, repo := range a.Repos {
+		owner, _, err := githubapi.ParseRepo(repo)
+		if err != nil {
+			return xerrors.Errorf("repos[%d] must be written owner/name", i)
+		}
+		if a.Owner != "" && !strings.EqualFold(owner, a.Owner) {
+			return xerrors.Errorf("repos[%d] %s is not a repository of %s", i, repo, a.Owner)
+		}
+	}
+	return nil
+}
+
+// normalized is a with repos in its one spelling.
+func (a targetArguments) normalized() targetArguments {
+	a.Repos = a.repoNames()
+	return a
+}
+
+// repoNames are the names of repos in lower case, sorted once each, as a
+// store compares them, and nil without repos.
+func (a targetArguments) repoNames() []string {
+	if len(a.Repos) == 0 {
+		return nil
+	}
+	lower := make([]string, len(a.Repos))
+	for i, repo := range a.Repos {
+		lower[i] = strings.ToLower(repo)
+	}
+	return sortedSet(lower)
+}
+
+// logField names the target in a log line.
+func (a targetArguments) logField() slog.Field {
+	switch {
+	case a.Owner != "":
+		return slog.F("owner", a.Owner)
+	case a.All:
+		return slog.F("all", true)
+	}
+	return slog.F("repo", a.Repo)
 }

@@ -11,7 +11,6 @@ import (
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog/v3"
-	"github.com/coder/faucet/faucet/internal/githubapi"
 )
 
 const (
@@ -35,7 +34,7 @@ var (
 )
 
 type waitInput struct {
-	Repo     string   `json:"repo" jsonschema:"the repository, written owner/name"`
+	targetArguments
 	Types    []string `json:"types" jsonschema:"the event names to wait for, at least one: a family such as pr.activity or an exact type such as pr.closed"`
 	Actions  []string `json:"actions,omitempty" jsonschema:"only events of these GitHub actions, such as closed; each narrows the families in types that have it, and a family that has none of them stays whole; each must be an action of one of the families"`
 	SHA      string   `json:"sha,omitempty" jsonschema:"only events for this 40 character head commit SHA"`
@@ -98,7 +97,7 @@ type waitRequest struct {
 }
 
 func (in waitInput) parse() (waitRequest, error) {
-	if _, _, err := githubapi.ParseRepo(in.Repo); err != nil {
+	if err := in.check(); err != nil {
 		return waitRequest{}, err
 	}
 	if len(in.Types) == 0 {
@@ -155,11 +154,12 @@ func (in waitInput) parse() (waitRequest, error) {
 	slices.Sort(types)
 	return waitRequest{
 		query: PollQuery{
-			Types:   slices.Compact(types),
-			HeadSHA: strings.ToLower(in.SHA),
-			PR:      in.PR,
-			Fields:  in.fieldFilters(func(name string) []string { return narrowedTypes(name, entries, entryTypes) }),
-			Limit:   pageLimit,
+			Types:     slices.Compact(types),
+			HeadSHA:   strings.ToLower(in.SHA),
+			PR:        in.PR,
+			Fields:    in.fieldFilters(func(name string) []string { return narrowedTypes(name, entries, entryTypes) }),
+			RepoNames: in.repoNames(),
+			Limit:     pageLimit,
 		},
 		cursor:  in.Cursor,
 		timeout: time.Duration(seconds) * time.Second,
@@ -171,7 +171,7 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err != nil {
 		return nil, waitOutput{}, err
 	}
-	logger := s.logger.With(slog.F("repo", in.Repo))
+	logger := s.logger.With(in.logField())
 
 	p, err := s.principal(ctx, logger, "wait", ScopeEventsRead)
 	if err != nil {

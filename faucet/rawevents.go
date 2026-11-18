@@ -14,8 +14,6 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"golang.org/x/xerrors"
-
-	"github.com/coder/faucet/faucet/internal/githubapi"
 )
 
 const (
@@ -186,28 +184,22 @@ func init() {
 }
 
 func rawArgumentsSchema() json.RawMessage {
-	return marshalRaw(map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"repo": repoArgument,
-			"actions": map[string]any{
-				"type":        "array",
-				"minItems":    1,
-				"items":       map[string]any{"type": "string"},
-				"description": "Only deliveries whose action is one of these. Without it, every action, and events that have none.",
-			},
-			"fields": map[string]any{
-				"type":     "array",
-				"minItems": 1,
-				"maxItems": maxFieldPaths,
-				"items":    map[string]any{"type": "string"},
-				"description": fmt.Sprintf("Only these members of the payload, each a path of 1 to %d names of letters, digits, _ or - joined by dots and at most %d bytes long, such as commits.id, which keeps the id of each commit.",
-					maxFieldPathSegments, maxFieldPathBytes),
-			},
-		},
-		"required":             []string{"repo"},
-		"additionalProperties": false,
-	})
+	properties := targetProperties()
+	properties["actions"] = map[string]any{
+		"type":        "array",
+		"minItems":    1,
+		"items":       map[string]any{"type": "string"},
+		"description": "Only deliveries whose action is one of these. Without it, every action, and events that have none.",
+	}
+	properties["fields"] = map[string]any{
+		"type":     "array",
+		"minItems": 1,
+		"maxItems": maxFieldPaths,
+		"items":    map[string]any{"type": "string"},
+		"description": fmt.Sprintf("Only these members of the payload, each a path of 1 to %d names of letters, digits, _ or - joined by dots and at most %d bytes long, such as commits.id, which keeps the id of each commit.",
+			maxFieldPathSegments, maxFieldPathBytes),
+	}
+	return marshalRaw(map[string]any{"type": "object", "properties": properties, "additionalProperties": false})
 }
 
 // rawEntry returns the entry of a raw event name that the service offers.
@@ -246,7 +238,7 @@ func describeRawEvents(entries []*rawEntry, delivery []string) []eventDescriptor
 }
 
 type rawArguments struct {
-	Repo    string   `json:"repo"`
+	targetArguments
 	Actions []string `json:"actions,omitempty"`
 	Fields  []string `json:"fields,omitempty"`
 }
@@ -265,7 +257,7 @@ func parseRawArguments(entry *rawEntry, raw json.RawMessage) (rawArguments, erro
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return rawArguments{}, invalidParams("arguments do not match the inputSchema: %v", err)
 	}
-	if _, _, err := githubapi.ParseRepo(args.Repo); err != nil {
+	if err := args.check(); err != nil {
 		return rawArguments{}, invalidParams("%v", err)
 	}
 	if i := slices.Index(args.Actions, ""); i >= 0 {
@@ -287,7 +279,7 @@ func validFieldPath(path string) bool {
 }
 
 func (a rawArguments) normalized() rawArguments {
-	return rawArguments{Repo: a.Repo, Actions: sortedSetOrNil(a.Actions), Fields: sortedSetOrNil(a.Fields)}
+	return rawArguments{targetArguments: a.targetArguments.normalized(), Actions: sortedSetOrNil(a.Actions), Fields: sortedSetOrNil(a.Fields)}
 }
 
 // canonical is the one JSON spelling of a, so that two requests that differ
