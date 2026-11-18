@@ -1,6 +1,7 @@
 package faucet_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -34,6 +35,16 @@ func TestEveryCallNamesOneTargetInTheFormOfItsKind(t *testing.T) {
 			rpcErr = h.subscribeError(&rawParams{Name: name, Arguments: raw(tt.arguments), Delivery: deliveryTo(callbackURL, newSecret(t, 32))})
 			require.EqualValues(t, jsonrpc.CodeInvalidParams, rpcErr.Code, "%s %s", tt.name, name)
 			require.Equal(t, tt.want, rpcErr.Message, "%s %s", tt.name, name)
+		}
+	}
+	for _, name := range []string{"ci.run_completed", "github.push"} {
+		for _, arguments := range []json.RawMessage{nil, json.RawMessage("null")} {
+			rpcErr := h.pollError(&rawParams{Name: name, Arguments: arguments})
+			require.EqualValues(t, jsonrpc.CodeInvalidParams, rpcErr.Code, "no arguments %s %s", name, arguments)
+			require.Equal(t, "name one target: repo, owner or all", rpcErr.Message, "no arguments %s %s", name, arguments)
+			rpcErr = h.subscribeError(&rawParams{Name: name, Arguments: arguments, Delivery: deliveryTo(callbackURL, newSecret(t, 32))})
+			require.EqualValues(t, jsonrpc.CodeInvalidParams, rpcErr.Code, "no arguments %s %s", name, arguments)
+			require.Equal(t, "name one target: repo, owner or all", rpcErr.Message, "no arguments %s %s", name, arguments)
 		}
 	}
 	require.Empty(t, h.rows(), "nothing is stored for a call that names no target")

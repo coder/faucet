@@ -193,11 +193,12 @@ func eventByName(name string) (*catalogEntry, error) {
 }
 
 func parsePollArguments(input *jsonschema.Resolved, raw json.RawMessage) (pollArguments, error) {
-	var generic any = map[string]any{}
-	if len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
-		if err := json.Unmarshal(raw, &generic); err != nil {
-			return pollArguments{}, invalidParams("arguments are not valid JSON")
-		}
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		raw = json.RawMessage("{}")
+	}
+	var generic any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return pollArguments{}, invalidParams("arguments are not valid JSON")
 	}
 	if err := input.Validate(generic); err != nil {
 		return pollArguments{}, invalidParams("arguments do not match the inputSchema: %v", err)

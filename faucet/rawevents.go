@@ -247,11 +247,12 @@ type rawArguments struct {
 }
 
 func parseRawArguments(entry *rawEntry, raw json.RawMessage) (rawArguments, error) {
-	var generic any = map[string]any{}
-	if len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
-		if err := json.Unmarshal(raw, &generic); err != nil {
-			return rawArguments{}, invalidParams("arguments are not valid JSON")
-		}
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		raw = json.RawMessage("{}")
+	}
+	var generic any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return rawArguments{}, invalidParams("arguments are not valid JSON")
 	}
 	if err := entry.input.Validate(generic); err != nil {
 		return rawArguments{}, invalidParams("arguments do not match the inputSchema: %v", err)
