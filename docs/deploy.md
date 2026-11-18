@@ -48,7 +48,7 @@ Each `/cron/*` route answers 200 with a JSON object, and the result type in the 
 <!-- BEGIN generated:cron-replies -->
 | Route | Reply fields | Documented on |
 | --- | --- | --- |
-| `GET /cron/purge` | `deleted`, `purged_through`, `expired_subscriptions`, `ended_deliveries`, `raw_events_cleared`, `raw_events_deleted`, `expired_leases`, `raw_failures`, `expired_access_tokens`, `expired_auth_requests`, `ended_sessions`, `unused_connections` | `faucet.PurgeResult`, `oauth.PurgeResult` |
+| `GET /cron/purge` | `deleted`, `purged_through`, `expired_subscriptions`, `ended_deliveries`, `raw_events_cleared`, `raw_events_deleted`, `expired_leases`, `raw_failures`, `expired_access_tokens`, `expired_auth_requests`, `ended_sessions`, `unused_connections`, `unused_access_checks` | `faucet.PurgeResult`, `oauth.PurgeResult` |
 | `GET /cron/deliver` | `enqueued`, `gaps`, `gaps_sent`, `gaps_failed`, `claimed`, `sent`, `delivered`, `retried`, `gave_up`, `superseded`, `previous_secrets_cleared`, `incomplete`, `raw_failures` | `faucet.DeliverResult` |
 | `GET /cron/redeliver` | `busy`, `pages`, `attempts`, `tracked`, `asked`, `recovered`, `gave_up.limit`, `gave_up.expired`, `gaps`, `pending`, `ranges`, `error` | `redelivery.Result` |
 <!-- END generated:cron-replies -->

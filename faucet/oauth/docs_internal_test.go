@@ -21,6 +21,8 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 	minutes := func(d time.Duration) int { return int(d / time.Minute) }
 	days := func(d time.Duration) int { return int(d / (24 * time.Hour)) }
 	require.Equal(t, 24*time.Hour, authRequestRetention, "the docs say \"a day\"")
+	require.Equal(t, 24*time.Hour, accessCheckRetention, "the docs say \"a day\"")
+	require.InDelta(t, 0.5, recheckShare, 0, "the docs say \"half of what is left\"")
 
 	for _, p := range []struct {
 		file, format string
@@ -55,6 +57,23 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/browser-login.md", "`/cron/purge` deletes it a day after its last update", nil},
 		{"docs/security.md", "once the session ended or went unused for %d days", []any{days(sessionIdleLifetime)}},
 		{"docs/security.md", "`/cron/purge` deletes it a day after its last update", nil},
+		{"docs/security.md", "asks GitHub again about the %d repositories that the user used last", []any{recheckLimit}},
+		{"docs/security.md", "to keep calling once its %d-minute access token expires", []any{minutes(accessTokenLifetime)}},
+		{"docs/security.md", "and the start of its wait **see a revocation within %d minutes**", []any{minutes(accessTokenLifetime)}},
+		{"docs/browser-login.md", "asks GitHub again about the %d repositories that the user used last", []any{recheckLimit}},
+		{"docs/browser-login.md", "It spends at most %d seconds on that, and half of what is left", []any{seconds(recheckTimeout)}},
+		{"docs/browser-login.md", "lost access to is denied within %d minutes", []any{minutes(accessTokenLifetime)}},
+		{"docs/browser-login.md", "An access token lasts %d minutes, so an agent that keeps working refreshes", []any{minutes(accessTokenLifetime)}},
+		{"docs/upgrading.md", "asks GitHub again about up to %d repositories, which can make the refresh take up to %d seconds longer", []any{recheckLimit, seconds(recheckTimeout)}},
+		{"docs/browser-login.md", "among those used in the last %d minutes", []any{minutes(accessTokenLifetime)}},
+		{"docs/security.md", "among those used in the last %d minutes", []any{minutes(accessTokenLifetime)}},
+		{"docs/browser-login.md", "or a day after a session last used it, when `/cron/purge` deletes it", nil},
+		{"docs/upgrading.md", "`/cron/purge` deletes a stored check a day after a session last used it", nil},
+		{"docs/upgrading.md", "and a stored denial %d minutes after its check", []any{minutes(accessDenialRetention)}},
+		{"docs/browser-login.md", "A denial for %d minutes after its check, when `/cron/purge` deletes it.", []any{minutes(accessDenialRetention)}},
+		{"docs/browser-login.md", "Faucet keeps a denial only as a marker for %d minutes", []any{minutes(accessDenialRetention)}},
+		{"docs/browser-login.md", "After those %d minutes, every session that could take that pass", []any{minutes(accessDenialRetention)}},
+		{"docs/security.md", "Faucet keeps a denial only as a marker for %d minutes", []any{minutes(accessDenialRetention)}},
 	} {
 		doc, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(p.file)))
 		require.NoError(t, err)

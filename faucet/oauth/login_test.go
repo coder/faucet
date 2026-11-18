@@ -282,6 +282,7 @@ func newLoginHarness(t *testing.T) *loginHarness {
 			Keys:      h.keys,
 			Documents: faucet.NewHTTPClient(faucet.HTTPClientOptions{AllowInsecureLoopback: true, RootCAs: pool}),
 		},
+		Repos: faucet.TokenAuthorizer{BaseURL: h.github.URL, Client: h.github.Client()},
 	})
 	require.NoError(t, err)
 	mux.Handle(oauth.AuthorizePath, server.AuthorizeHandler())

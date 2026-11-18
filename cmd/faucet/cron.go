@@ -96,11 +96,13 @@ func (c cronRoutes) purge(w http.ResponseWriter, r *http.Request) {
 		ExpiredAuthRequests *int64 `json:"expired_auth_requests,omitempty"`
 		EndedSessions       *int64 `json:"ended_sessions,omitempty"`
 		UnusedConnections   *int64 `json:"unused_connections,omitempty"`
+		UnusedAccessChecks  *int64 `json:"unused_access_checks,omitempty"`
 	}{
 		res.Deleted, res.PurgedThrough, res.ExpiredSubscriptions, res.EndedDeliveries,
 		res.Raw.Cleared, res.Raw.Deleted, res.Raw.ExpiredLeases, res.RawFailures,
 		c.loginCount(tokens.ExpiredAccessTokens), c.loginCount(tokens.ExpiredAuthRequests),
 		c.loginCount(tokens.EndedSessions), c.loginCount(tokens.UnusedConnections),
+		c.loginCount(tokens.UnusedAccessChecks),
 	})
 }
 

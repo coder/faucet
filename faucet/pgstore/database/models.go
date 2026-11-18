@@ -10,6 +10,14 @@ import (
 	"time"
 )
 
+type FaucetAccessCheck struct {
+	ConnectionID string
+	Repo         string
+	RepoID       sql.NullInt64
+	CheckedAt    time.Time
+	LastUsedAt   time.Time
+}
+
 type FaucetAccessToken struct {
 	TokenHash   []byte
 	ExpiresAt   time.Time

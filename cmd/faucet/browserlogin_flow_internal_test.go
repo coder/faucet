@@ -121,7 +121,7 @@ func (g *browserGitHub) calls(path string) int {
 }
 
 // browserServer is faucet as run() builds it with the browser login on, over
-// TLS and a scratch database.
+// TLS and a scratch database. configure changes the service's Deps.
 type browserServer struct {
 	*httptest.Server
 	store    *pgstore.Store
@@ -130,7 +130,7 @@ type browserServer struct {
 	logs     *syncBuffer
 }
 
-func newBrowserServer(t *testing.T) *browserServer {
+func newBrowserServer(t *testing.T, configure ...func(*faucet.Deps)) *browserServer {
 	t.Helper()
 	adminURL := os.Getenv(testDatabaseURLEnv)
 	if adminURL == "" {
@@ -168,10 +168,14 @@ func newBrowserServer(t *testing.T) *browserServer {
 	githubAPI := faucet.TokenAuthorizer{BaseURL: github.URL, Client: github.Client()}
 	tokens, login, checks, err := newLogin(publicURL, browser, store, faucet.NewAccessCache(githubAPI, clock), githubAPI, clock, logger)
 	require.NoError(t, err)
-	svc, err := faucet.New(faucet.Deps{
+	deps := faucet.Deps{
 		Store: store, Secret: []byte(testSecret), Logger: logger, Authorizer: checks.authorizer, ServiceGrants: checks.grants,
 		PrincipalFrom: principalFrom, Clock: clock,
-	})
+	}
+	for _, c := range configure {
+		c(&deps)
+	}
+	svc, err := faucet.New(deps)
 	require.NoError(t, err)
 	srv.Config.Handler = newRouter(svc, tokens, login, cronRoutes{}, logger)
 	srv.StartTLS()
@@ -324,6 +328,60 @@ func TestAnAgentLogsInThroughABrowserAndWaitsForAnEvent(t *testing.T) {
 	require.Equal(t, "octocat", c.Login)
 	require.NotContains(t, string(c.AccessToken), "ghu_browser_", "the GitHub token is sealed at rest")
 	require.NotContains(t, string(c.RefreshToken), "ghr_browser_")
+}
+
+// accessToken logs the person in for the endpoint at path, as go-sdk's
+// authorization code handler does, and returns the agent's access token.
+func (s *browserServer) accessToken(ctx context.Context, t *testing.T, path string) string {
+	t.Helper()
+	handler, err := auth.NewAuthorizationCodeHandler(&auth.AuthorizationCodeHandlerConfig{
+		ClientIDMetadataDocumentConfig: &auth.ClientIDMetadataDocumentConfig{URL: s.clientID},
+		RedirectURL:                    browserRedirectURI,
+		Client:                         s.Client(),
+		AuthorizationCodeFetcher:       s.person(t),
+	})
+	require.NoError(t, err)
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "coding-agent", Version: "0"}, nil).Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint: s.URL + path, HTTPClient: s.Client(), OAuthHandler: handler, DisableStandaloneSSE: true,
+	}, nil)
+	require.NoError(t, err, s.logs.String())
+	_ = session.Close()
+	source, err := handler.TokenSource(ctx)
+	require.NoError(t, err)
+	token, err := source.Token()
+	require.NoError(t, err)
+	return token.AccessToken
+}
+
+// A person who logged in through a browser is checked through the
+// Authorizer that run() composes. Once GitHub answered for a repository, the
+// next wait and poll answer from faucet's access checks, and every
+// subscription, which renews, asks GitHub again (R3).
+func TestABrowserUserAsksGitHubOnceForReadsAndAtEveryRenewal(t *testing.T) {
+	t.Parallel()
+	key, err := faucet.NewWebhookKey(bytes.Repeat([]byte{1}, 32))
+	require.NoError(t, err)
+	allow, err := faucet.NewCallbackAllowlist([]string{"https://hooks.example.com"}, false)
+	require.NoError(t, err)
+	srv := newBrowserServer(t, func(d *faucet.Deps) { d.Webhook = &faucet.WebhookDeps{Key: key, Callbacks: allow} })
+	srv.deliver(t, "d-1")
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	agent := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, srv.accessToken(ctx, t, "/github/mcp"))
+	lookups := func() int { return srv.github.calls("/repos/" + browserFixtureRepo) }
+
+	for i := range 2 {
+		res, err := call(ctx, agent, browserFixtureRepo, map[string]any{"cursor": 0, "timeout_s": 1})
+		require.NoError(t, err)
+		require.False(t, res.IsError, toolText(t, res))
+		_, err = callEvents(ctx, agent, "events/poll", pollParams(browserFixtureRepo, nil))
+		require.NoError(t, err)
+		require.Equal(t, 1, lookups(), "round %d: GitHub answered once for the reads", i)
+	}
+	for i := range 2 {
+		require.NoError(t, subscribeTo(ctx, agent, browserFixtureRepo))
+		require.Equal(t, 2+i, lookups(), "subscription %d asked GitHub", i)
+	}
 }
 
 // A token of the browser login is for the endpoint that the person logged in

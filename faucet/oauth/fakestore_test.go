@@ -5,6 +5,7 @@ import (
 	"context"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +24,15 @@ type fakeStore struct {
 	sessions    map[string]oauth.Session
 	refresh     map[oauth.TokenHash]oauth.RefreshToken
 	connections map[string]oauth.Connection
+	// checks are the access checks. Their methods fail once their context
+	// is done, as Postgres does, and with the error that failing holds for
+	// their name.
+	checks  map[accessCheckKey]oauth.AccessCheck
+	failing map[string]error
+	// stalls holds, for a method's name, how many more calls of it go
+	// through before each call waits for its context to end, as a stalled
+	// Postgres does.
+	stalls map[string]int
 	// connectionLocks holds a lock per connection ID, which RefreshConnection
 	// holds while its callback runs and ApproveAuthRequest takes, as the row
 	// lock does in Postgres. A caller takes it before mu, never while it
@@ -39,8 +49,53 @@ func newFakeStore() *fakeStore {
 		sessions:        map[string]oauth.Session{},
 		refresh:         map[oauth.TokenHash]oauth.RefreshToken{},
 		connections:     map[string]oauth.Connection{},
+		checks:          map[accessCheckKey]oauth.AccessCheck{},
+		failing:         map[string]error{},
+		stalls:          map[string]int{},
 		connectionLocks: map[string]*sync.Mutex{},
 	}
+}
+
+// accessCheckKey is what names an access check: a connection has one check
+// per repository.
+type accessCheckKey struct{ connectionID, repo string }
+
+// fail makes each call of the method with this name fail with err, and nil
+// makes the calls work again.
+func (s *fakeStore) fail(method string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failing[method] = err
+}
+
+// stallAfter makes every call of the method with this name after the next
+// n wait until its context ends, and fail with the context's error.
+func (s *fakeStore) stallAfter(method string, n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stalls[method] = n
+}
+
+// callErr is the error that a call of the method with this name fails with:
+// the error of ctx once it is done, or the one that fail set. A call that
+// stallAfter stalls waits for ctx first.
+func (s *fakeStore) callErr(ctx context.Context, method string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	left, stalls := s.stalls[method]
+	if stalls && left > 0 {
+		s.stalls[method] = left - 1
+	}
+	s.mu.Unlock()
+	if stalls && left == 0 {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.failing[method]
 }
 
 func cloneClient(c oauth.Client) oauth.Client {
@@ -381,7 +436,9 @@ func (s *fakeStore) RotateSession(_ context.Context, r oauth.Rotation) (oauth.Se
 		s.refresh[r.Presented] = presented
 	}
 	s.refresh[r.Next] = oauth.RefreshToken{Hash: r.Next, SessionID: session.ID, IssuedAt: r.Now}
-	session.RefreshedAt = r.Now
+	if r.Now.After(session.RefreshedAt) {
+		session.RefreshedAt = r.Now
+	}
 	s.sessions[session.ID] = session
 	s.tokens[r.Access] = oauth.AccessToken{
 		Hash: r.Access, ExpiresAt: r.AccessExpiresAt, Scopes: slices.Clone(r.Scopes),
@@ -469,6 +526,7 @@ func (s *fakeStore) DeleteUnusedConnections(_ context.Context, updatedBefore tim
 			slices.ContainsFunc(slices.Collect(maps.Values(s.requests)), func(r oauth.AuthRequest) bool { return r.ConnectionID == id })
 		if !named && c.UpdatedAt.Before(updatedBefore) {
 			delete(s.connections, id)
+			maps.DeleteFunc(s.checks, func(k accessCheckKey, _ oauth.AccessCheck) bool { return k.connectionID == id })
 			n++
 		}
 	}
@@ -487,6 +545,95 @@ func (s *fakeStore) DeleteExpiredAuthRequests(_ context.Context, now, codesBefor
 		}
 	}
 	return n, nil
+}
+
+func (s *fakeStore) FreshAccessCheck(ctx context.Context, sessionID, repo string, now, usedBefore time.Time) (int64, bool, error) {
+	if err := s.callErr(ctx, "FreshAccessCheck"); err != nil {
+		return 0, false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[sessionID]
+	if !ok || !session.Live() {
+		return 0, false, nil
+	}
+	key := accessCheckKey{session.ConnectionID, repo}
+	c, ok := s.checks[key]
+	if !ok || c.Denied() || c.CheckedAt.Before(session.RefreshedAt) {
+		return 0, false, nil
+	}
+	if c.LastUsedAt.Before(usedBefore) && now.After(c.LastUsedAt) {
+		c.LastUsedAt = now
+	}
+	s.checks[key] = c
+	return c.RepoID, true, nil
+}
+
+func (s *fakeStore) StoreAccessCheck(ctx context.Context, c oauth.AccessCheck) error {
+	if err := s.callErr(ctx, "StoreAccessCheck"); err != nil {
+		return err
+	}
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.connections[c.ConnectionID]; !ok {
+		return oauth.ErrUnknownConnection
+	}
+	key := accessCheckKey{c.ConnectionID, c.Repo}
+	if stored, ok := s.checks[key]; ok && c.Denied() && !stored.Denied() {
+		for k, alias := range s.checks {
+			if k.connectionID == c.ConnectionID && k.repo != c.Repo && alias.RepoID == stored.RepoID && !alias.CheckedAt.After(c.CheckedAt) {
+				alias.RepoID, alias.CheckedAt = 0, c.CheckedAt
+				s.checks[k] = alias
+			}
+		}
+	}
+	if stored, ok := s.checks[key]; ok {
+		if stored.CheckedAt.After(c.CheckedAt) || stored.CheckedAt.Equal(c.CheckedAt) && !c.Denied() {
+			c.RepoID, c.CheckedAt = stored.RepoID, stored.CheckedAt
+		}
+		if stored.LastUsedAt.After(c.LastUsedAt) {
+			c.LastUsedAt = stored.LastUsedAt
+		}
+	}
+	s.checks[key] = c
+	return nil
+}
+
+func (s *fakeStore) RecentAccessChecks(ctx context.Context, connectionID string, usedSince time.Time, limit int) ([]oauth.AccessCheck, error) {
+	if err := s.callErr(ctx, "RecentAccessChecks"); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var checks []oauth.AccessCheck
+	for key, c := range s.checks {
+		if key.connectionID == connectionID && !c.Denied() && !c.LastUsedAt.Before(usedSince) {
+			checks = append(checks, c)
+		}
+	}
+	slices.SortFunc(checks, func(a, b oauth.AccessCheck) int {
+		if c := b.LastUsedAt.Compare(a.LastUsedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Repo, b.Repo)
+	})
+	return checks[:min(len(checks), max(limit, 0))], nil
+}
+
+func (s *fakeStore) DeleteUnusedAccessChecks(ctx context.Context, usedBefore, deniedBefore time.Time) (int64, error) {
+	if err := s.callErr(ctx, "DeleteUnusedAccessChecks"); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.checks)
+	maps.DeleteFunc(s.checks, func(_ accessCheckKey, c oauth.AccessCheck) bool {
+		return c.LastUsedAt.Before(usedBefore) || c.Denied() && c.CheckedAt.Before(deniedBefore)
+	})
+	return int64(n - len(s.checks)), nil
 }
 
 func TestFakeStore(t *testing.T) {

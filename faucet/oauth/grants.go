@@ -257,7 +257,8 @@ func (s *Server) refreshToken(r *http.Request, form url.Values) (tokenResponse, 
 	// The GitHub token is refreshed before the rotation, never after: a
 	// failure after the rotation would leave the client with a used token,
 	// which ends its session when it tries again after the grace.
-	if err := s.freshenGitHubToken(ctx, session); err != nil {
+	github, err := s.freshenGitHubToken(ctx, session)
+	if err != nil {
 		return tokenResponse{}, err
 	}
 	tokens, err := newUserTokens()
@@ -278,27 +279,32 @@ func (s *Server) refreshToken(r *http.Request, form url.Values) (tokenResponse, 
 		return tokenResponse{}, xerrors.Errorf("rotate the session: %w", err)
 	}
 	s.logger.Debug(ctx, "session refreshed", slog.F("session_id", rotated.ID), slog.F("client_id", rotated.ClientID), slog.F("connection_id", rotated.ConnectionID), slog.F("reused", token.Used()))
+	// The rotation made the older access checks stale for the session, so
+	// the refresh checks the most recently used again. Nothing after the
+	// rotation may fail the grant, and the re-check fails nothing.
+	s.access.recheck(ctx, rotated, now, github)
 	return tokens.response(scopes), nil
 }
 
 // freshenGitHubToken refreshes the GitHub token of the session's user when it
-// expires within githubRefreshMargin. GitHub refusing the refresh token
-// ended the user's sessions, and refuses the grant. A token that does not
-// open is an error. Any other failure is logged, and the grant goes on with
-// the stored token, which the access check refreshes when it must.
-func (s *Server) freshenGitHubToken(ctx context.Context, session Session) error {
-	tokens := newConnections(s.store, s.clock, s.logger, s.login)
-	_, err := tokens.accessToken(ctx, session.ConnectionID, tokens.expiresWithin(githubRefreshMargin))
+// expires within githubRefreshMargin, and returns the token. GitHub refusing
+// the refresh token ended the user's sessions, and refuses the grant. A
+// token that does not open is an error. Any other failure is logged, and the
+// grant goes on with the stored token, which the access check refreshes when
+// it must. The token returned is then the zero value.
+func (s *Server) freshenGitHubToken(ctx context.Context, session Session) (githubToken, error) {
+	tokens := s.access.tokens
+	token, err := tokens.accessToken(ctx, session.ConnectionID, tokens.expiresWithin(githubRefreshMargin))
 	switch {
 	case err == nil:
-		return nil
+		return token, nil
 	case xerrors.Is(err, faucet.ErrInvalidToken):
-		return badRequest("invalid_grant", "GitHub ended the login of this user: log in again")
+		return githubToken{}, badRequest("invalid_grant", "GitHub ended the login of this user: log in again")
 	case xerrors.Is(err, ErrUnreadableToken):
-		return err
+		return githubToken{}, err
 	}
 	s.logger.Warn(ctx, "could not refresh the GitHub token of a session, the grant goes on", slog.F("session_id", session.ID), slog.F("connection_id", session.ConnectionID), slog.Error(err))
-	return nil
+	return githubToken{}, nil
 }
 
 // wellFormedRefreshToken reports whether token has the form of a refresh

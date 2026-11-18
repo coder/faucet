@@ -80,6 +80,13 @@ const (
 	// endpoint. It must outlast the longest wait the tool allows, which is 50
 	// seconds.
 	mcpWriteTimeout = 75 * time.Second
+	// serverWriteTimeout is the server's write deadline, from the end of the
+	// request's headers.
+	serverWriteTimeout = 30 * time.Second
+	// tokenTimeout keeps a request to the token endpoint inside the server's
+	// write deadline, so that a slow GitHub or store fails a refresh before
+	// its rotation, rather than rotating after the client got no answer.
+	tokenTimeout = 25 * time.Second
 )
 
 type config struct {
@@ -310,8 +317,10 @@ type access struct {
 // goes to GitHub, and GitHub answers for every repository. With one, faucet's
 // own tokens verify too, and a service is checked by its grants. With a
 // browser login, a user who logged in through it is checked by GitHub with
-// the GitHub token that faucet keeps for them: repos asks GitHub, and
-// remembers nothing.
+// the GitHub token that faucet keeps for them: repos asks GitHub at every
+// call, never through the cache github, and the repositories that it let
+// the user read stand until the user's session refreshes, which asks repos
+// about them again.
 func newLogin(publicURL *url.URL, browser *oauth.BrowserLogin, store loginStore, github *faucet.AccessCache, repos oauth.RepoChecker, clock quartz.Clock, logger slog.Logger) (bearers, *oauth.Server, access, error) {
 	if publicURL == nil {
 		tokens, err := newBearers(github, nil, "")
@@ -339,7 +348,7 @@ func newLogin(publicURL *url.URL, browser *oauth.BrowserLogin, store loginStore,
 		resources[i] = tokens.resource(path)
 	}
 	login, err := oauth.NewServer(oauth.ServerDeps{
-		Store: store, Clock: clock, Logger: logger, Issuer: publicURL.String(), Resources: resources, Login: browser,
+		Store: store, Clock: clock, Logger: logger, Issuer: publicURL.String(), Resources: resources, Login: browser, Repos: repos,
 	})
 	if err != nil {
 		return bearers{}, nil, access{}, xerrors.Errorf("create the login server: %w", err)
@@ -509,13 +518,22 @@ func newRouter(svc *faucet.Service, tokens bearers, login *oauth.Server, cron cr
 		r.Handle("/.well-known/oauth-authorization-server", login.MetadataHandler())
 		r.Handle("/oauth/authorize", login.AuthorizeHandler())
 		r.Handle("/oauth/github/callback", login.GitHubCallbackHandler())
-		r.Handle("/oauth/token", login.TokenHandler())
+		r.Handle("/oauth/token", within(tokenTimeout, login.TokenHandler()))
 		r.Handle("/oauth/revoke", login.RevokeHandler())
 	}
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok\n")
 	})
 	return r
+}
+
+// within runs next with a request context that ends after d.
+func within(d time.Duration, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), d)
+		defer cancel()
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // protectedResource serves the metadata (RFC 9728) of the MCP endpoint at
@@ -538,7 +556,7 @@ func serve(ctx context.Context, logger slog.Logger, port string, handler http.Ha
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		WriteTimeout:      serverWriteTimeout,
 		IdleTimeout:       2 * time.Minute,
 	}
 	errCh := make(chan error, 1)

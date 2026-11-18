@@ -46,7 +46,7 @@ func TestTheMetadataOfABrowserLoginNamesItsGrantsAndClientDocuments(t *testing.T
 	t.Parallel()
 	server, err := oauth.NewServer(oauth.ServerDeps{
 		Store: newFakeStore(), Clock: quartz.NewMock(t), Logger: slog.Make(), Issuer: issuer,
-		Resources: []string{resource}, Login: testBrowserLogin(t, "https://github.example.com"),
+		Resources: []string{resource}, Login: testBrowserLogin(t, "https://github.example.com"), Repos: noRepos,
 	})
 	require.NoError(t, err)
 	rec := httptest.NewRecorder()
@@ -94,12 +94,21 @@ func TestNewServerRefusesABrowserLoginThatLacksAPart(t *testing.T) {
 		login := testBrowserLogin(t, "https://github.example.com")
 		mutate(login)
 		_, err := oauth.NewServer(oauth.ServerDeps{
-			Store: newFakeStore(), Clock: quartz.NewMock(t), Logger: slog.Make(), Issuer: issuer, Resources: []string{resource}, Login: login,
+			Store: newFakeStore(), Clock: quartz.NewMock(t), Logger: slog.Make(), Issuer: issuer, Resources: []string{resource}, Login: login, Repos: noRepos,
 		})
 		require.Error(t, err, name)
 		require.NotContains(t, err.Error(), "app-secret", name)
 	}
+	_, err := oauth.NewServer(oauth.ServerDeps{
+		Store: newFakeStore(), Clock: quartz.NewMock(t), Logger: slog.Make(), Issuer: issuer, Resources: []string{resource},
+		Login: testBrowserLogin(t, "https://github.example.com"),
+	})
+	require.Error(t, err, "no repository checker")
 }
+
+// noRepos is the RepoChecker of a server whose test asks GitHub about no
+// repository.
+var noRepos = faucet.TokenAuthorizer{BaseURL: "https://api.github.example.com"}
 
 // A session that ended, or went unused for 180 days, goes with its refresh
 // tokens. A connection that no session and no request names goes too, with

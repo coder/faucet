@@ -40,6 +40,7 @@ var loginSubtests = []struct {
 	{"ARefreshTokenIsFoundUntilItsSessionGoes", aRefreshTokenIsFoundUntilItsSessionGoes},
 	{"RotateTradesTheTokenAndStoresTheNextAccessToken", rotateTradesTheTokenAndStoresTheNextAccessToken},
 	{"RotateTradesAUsedTokenAgainWithinItsGrace", rotateTradesAUsedTokenAgainWithinItsGrace},
+	{"RotateAtAnEarlierTimeKeepsTheLaterRefreshedTime", rotateAtAnEarlierTimeKeepsTheLaterRefreshedTime},
 	{"RotateRetiresTheUnusedTokensThatNoClientStillHolds", rotateRetiresTheUnusedTokensThatNoClientStillHolds},
 	{"RotateRefusesATokenUsedBeforeItsGraceAnEndedSessionAndAnUnknownToken", rotateRefusesATokenUsedBeforeItsGraceAnEndedSessionAndAnUnknownToken},
 	{"RotateRefusesAnAccessTokenWithAScopeThatTheSessionLacks", rotateRefusesAnAccessTokenWithAScopeThatTheSessionLacks},
@@ -895,6 +896,27 @@ func rotateTradesAUsedTokenAgainWithinItsGrace(t *testing.T, s oauth.Store) {
 	require.ErrorIs(t, err, oauth.ErrUnknownSession, "a first use at the start of the grace")
 	requireNoTokens(t, s, late.Next, late.Access)
 	requireSessionIs(t, s, want)
+}
+
+// A rotation at a time before the session's refreshed time, as by an
+// instance whose clock lags, trades the token and keeps the later time, so
+// that it makes no older access check fresh again.
+func rotateAtAnEarlierTimeKeepsTheLaterRefreshedTime(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	now := loginNow()
+	session := newSession(t, s, "req-1", connectionAt(1, now), now)
+	first := rotationOf(refreshOf(session.ID), "first", now.Add(time.Hour))
+	_, err := s.RotateSession(ctx, first)
+	require.NoError(t, err)
+
+	lagging := rotationOf(first.Next, "lagging", first.Now.Add(-time.Minute))
+	got, err := s.RotateSession(ctx, lagging)
+	require.NoError(t, err)
+	want := session
+	want.RefreshedAt = first.Now
+	requireSameSession(t, want, got)
+	requireSessionIs(t, s, want)
+	requireRefreshToken(t, s, oauth.RefreshToken{Hash: lagging.Next, SessionID: session.ID, IssuedAt: lagging.Now})
 }
 
 // A rotation retires the unused tokens of its session that the client no

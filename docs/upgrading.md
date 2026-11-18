@@ -2,6 +2,12 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## To stored repository checks (migration `000015_access_checks`)
+
+This came in [#56](https://github.com/coder/faucet/pull/56). Faucet stores the repository checks of browser logins, so a poll or a wait of a browser login asks GitHub only when no check newer than its session's last refresh answers (see [browser-login.md](browser-login.md#how-faucet-checks-a-repository)). Each refresh of a browser login asks GitHub again about up to 50 repositories, which can make the refresh take up to 5 seconds longer. The migration adds `faucet_access_checks`, which stays empty until a browser login checks a repository. `/cron/purge` deletes a stored check a day after a session last used it, and a stored denial 15 minutes after its check, and counts both in `unused_access_checks`, which is 0 while the browser login is off.
+
+A host that embeds faucet: an `oauth.Store` of your own must also implement `oauth.AccessCheckStore` and pass the new `storetest.RunOAuth` subtests, and an `oauth.ServerDeps` with a `Login` now needs `Repos`. The down migration drops every stored check, and faucet then asks GitHub at the next use of each repository.
+
 ## To owner and all targets
 
 This came in [#55](https://github.com/coder/faucet/pull/55). A service can now read every repository of an owner or every repository (see [service-accounts.md](service-accounts.md#grants) and [events.md](events.md#targets)). A caller that names `repo` sees no change, and a subscription made before keeps its key.

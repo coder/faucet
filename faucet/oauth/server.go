@@ -71,6 +71,11 @@ type ServerDeps struct {
 	// Login turns on the browser login. Nil leaves it off: the server then
 	// takes service clients only.
 	Login *BrowserLogin
+	// Repos asks GitHub whether the token of a user who logged in through
+	// the browser can read a repository, when a refresh checks the user's
+	// repositories again. It is required with Login, and asks GitHub at
+	// every call, as RepoChecker says.
+	Repos RepoChecker
 }
 
 // Server is faucet's authorization server: its metadata and its token
@@ -83,8 +88,10 @@ type Server struct {
 	resources []string
 	// grants is the grant table of this server.
 	grants map[string]grant
-	// login is nil when the browser login is off.
-	login *browserLogin
+	// login is nil when the browser login is off, and access is then the
+	// zero value.
+	login  *browserLogin
+	access repoAccess
 }
 
 // NewServer returns the Server for d.
@@ -105,10 +112,14 @@ func NewServer(d ServerDeps) (*Server, error) {
 	}
 	if d.Login != nil {
 		login, err := newBrowserLogin(*d.Login, d.Clock)
-		if err != nil {
+		switch {
+		case err != nil:
 			return nil, xerrors.Errorf("the browser login: %w", err)
+		case d.Repos == nil:
+			return nil, xerrors.New("the browser login needs the repository checker")
 		}
 		s.login = login
+		s.access = repoAccess{tokens: newConnections(d.Store, d.Clock, d.Logger, login), repos: d.Repos}
 		maps.Copy(s.grants, loginGrants)
 	}
 	return s, nil
@@ -195,12 +206,17 @@ type PurgeResult struct {
 	// named, a day after their last update. The GitHub tokens that faucet
 	// kept for their users went with them.
 	UnusedConnections int64
+	// UnusedAccessChecks is how many access checks no session had used for
+	// a day, and how many denials were 15 minutes old.
+	UnusedAccessChecks int64
 }
 
 // Purge deletes the state of the login server that is past its use: every
 // access token that has expired, every authorization request that expired
 // more than a day ago, every session that ended or went unused for 180
-// days, and then every connection that nothing names any more.
+// days, every access check that no session used for a day, every denial 15
+// minutes after its lookup started, and then every connection that nothing
+// names any more.
 func (s *Server) Purge(ctx context.Context) (PurgeResult, error) {
 	now := s.clock.Now()
 	var res PurgeResult
@@ -212,6 +228,9 @@ func (s *Server) Purge(ctx context.Context) (PurgeResult, error) {
 		return PurgeResult{}, err
 	}
 	if res.EndedSessions, err = s.store.DeleteEndedSessions(ctx, now, now.Add(-sessionIdleLifetime)); err != nil {
+		return PurgeResult{}, err
+	}
+	if res.UnusedAccessChecks, err = s.store.DeleteUnusedAccessChecks(ctx, now.Add(-accessCheckRetention), now.Add(-accessDenialRetention)); err != nil {
 		return PurgeResult{}, err
 	}
 	// A login stores its connection a moment before the request that names

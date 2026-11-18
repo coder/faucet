@@ -2,12 +2,14 @@ package oauth
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog/v3"
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/internal/githubapi"
 	"github.com/coder/quartz"
 )
 
@@ -23,6 +25,15 @@ const (
 // staleToken reports whether the stored GitHub access token of a connection
 // will not do, so that the connection needs a new pair.
 type staleToken func(c Connection, access string) bool
+
+// githubToken is a GitHub access token of a user, with the user's login, as
+// a connection holds them.
+type githubToken struct{ login, access string }
+
+// principal is the caller that the token is, for a RepoChecker.
+func (t githubToken) principal() (faucet.Principal, error) {
+	return faucet.NewPrincipal(t.login, t.access)
+}
 
 // connections keeps the GitHub tokens of the users fresh. It holds no state:
 // all of it is in the store, so the token endpoint and the access check each
@@ -46,47 +57,48 @@ func (c connections) expiresWithin(d time.Duration) staleToken {
 }
 
 // accessToken returns the GitHub access token of the connection with this
-// ID. When stale calls the stored token stale, it refreshes the pair at
-// GitHub first, one refresh per connection at a time: a caller that waited
-// for another's refresh asks stale about the pair that it finds, and uses
-// that pair when it will do.
+// ID, with its login. When stale calls the stored token stale, it refreshes
+// the pair at GitHub first, one refresh per connection at a time: a caller
+// that waited for another's refresh asks stale about the pair that it finds,
+// and uses that pair when it will do.
 //
 // GitHub refusing the refresh token ends every session of the connection,
 // and the error wraps faucet.ErrInvalidToken. A token that does not open is
 // an error that wraps ErrUnreadableToken and changes nothing, so a wrong key
 // never ends a session. Any other failure changes nothing either.
-func (c connections) accessToken(ctx context.Context, id string, stale staleToken) (string, error) {
+func (c connections) accessToken(ctx context.Context, id string, stale staleToken) (githubToken, error) {
 	conn, err := c.store.Connection(ctx, id)
 	if err != nil {
-		return "", xerrors.Errorf("read connection %s: %w", id, err)
+		return githubToken{}, xerrors.Errorf("read connection %s: %w", id, err)
 	}
 	access, err := c.keys.accessToken(conn)
 	if err != nil {
-		return "", xerrors.Errorf("open the GitHub token of connection %s: %w", id, err)
+		return githubToken{}, xerrors.Errorf("open the GitHub token of connection %s: %w", id, err)
 	}
 	if !stale(conn, access) {
-		return access, nil
+		return githubToken{login: conn.Login, access: access}, nil
 	}
 	return c.refresh(ctx, id, stale)
 }
 
 // refresh gives the connection a new pair under its lock, unless the pair
 // that it finds there will do.
-func (c connections) refresh(ctx context.Context, id string, stale staleToken) (string, error) {
+func (c connections) refresh(ctx context.Context, id string, stale staleToken) (githubToken, error) {
 	// GitHub's refresh token works once, and GitHub can spend it even when
 	// the caller gives up during the call. The refresh runs to its end and
 	// stores the new pair however the caller's request ends, or the user's
 	// next refresh fails and ends every session.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), githubRefreshTimeout)
 	defer cancel()
-	var access string
+	var token githubToken
 	ended := false
 	_, err := c.store.RefreshConnection(ctx, id, c.clock.Now(), func(current Connection) (ConnectionChange, error) {
-		var err error
-		if access, err = c.keys.accessToken(current); err != nil {
+		access, err := c.keys.accessToken(current)
+		if err != nil {
 			return ConnectionChange{}, err
 		}
 		if !stale(current, access) {
+			token = githubToken{login: current.Login, access: access}
 			return ConnectionChange{Kind: KeepConnection}, nil
 		}
 		next, fresh, err := c.renew(ctx, current)
@@ -97,17 +109,17 @@ func (c connections) refresh(ctx context.Context, id string, stale staleToken) (
 		case err != nil:
 			return ConnectionChange{}, err
 		}
-		access = fresh
+		token = githubToken{login: next.Login, access: fresh}
 		return ConnectionChange{Kind: ReplaceConnection, Connection: next}, nil
 	})
 	switch {
 	case err != nil:
-		return "", xerrors.Errorf("refresh the GitHub token of connection %s: %w", id, err)
+		return githubToken{}, xerrors.Errorf("refresh the GitHub token of connection %s: %w", id, err)
 	case ended:
 		c.logger.Info(ctx, "GitHub refused the refresh token of a connection, its sessions ended", slog.F("connection_id", id))
-		return "", xerrors.Errorf("GitHub refused the refresh token of connection %s, so its sessions ended: %w", id, faucet.ErrInvalidToken)
+		return githubToken{}, xerrors.Errorf("GitHub refused the refresh token of connection %s, so its sessions ended: %w", id, faucet.ErrInvalidToken)
 	}
-	return access, nil
+	return token, nil
 }
 
 // renew trades the refresh token of current for a new pair at GitHub, and
@@ -168,9 +180,13 @@ func UserResolver(store Store) SubjectResolver {
 }
 
 // RepoChecker asks GitHub whether the principal's own token can read a
-// repository. faucet.TokenAuthorizer is one.
+// repository. Every faucet.Authorizer is one, faucet.TokenAuthorizer and
+// *faucet.AccessCache among them. The access check calls only RepoIDFresh,
+// which must ask GitHub at that call: an access check counts from the start
+// of its lookup, and an answer that GitHub gave before that start could
+// count for a session that refreshed after GitHub last answered.
 type RepoChecker interface {
-	RepoID(ctx context.Context, p faucet.Principal, repo string) (int64, error)
+	RepoIDFresh(ctx context.Context, p faucet.Principal, repo string) (int64, error)
 }
 
 // UserAccessDeps are what a UserAccess needs.
@@ -179,16 +195,18 @@ type UserAccessDeps struct {
 	Clock  quartz.Clock
 	Logger slog.Logger
 	Login  BrowserLogin
-	Repos  RepoChecker
+	// Repos asks GitHub whether the user's token can read a repository, at
+	// every call, as RepoChecker says.
+	Repos RepoChecker
 }
 
 // UserAccess is the faucet.Authorizer of users who logged in through a
-// browser. GitHub answers each check with the GitHub token that faucet
-// keeps for the user, so a user reads what their GitHub login can read.
+// browser. GitHub answers with the GitHub token that faucet keeps for the
+// user, so a user reads what their GitHub login can read. A repository that
+// GitHub let the user read since their session's last refresh needs no new
+// answer until the next one, which asks GitHub again.
 type UserAccess struct {
-	tokens connections
-	repos  RepoChecker
-	logger slog.Logger
+	access repoAccess
 }
 
 var _ faucet.Authorizer = UserAccess{}
@@ -207,45 +225,68 @@ func NewUserAccess(d UserAccessDeps) (UserAccess, error) {
 	if err != nil {
 		return UserAccess{}, xerrors.Errorf("the browser login: %w", err)
 	}
-	return UserAccess{tokens: newConnections(d.Store, d.Clock, d.Logger, login), repos: d.Repos, logger: d.Logger}, nil
+	return UserAccess{access: repoAccess{tokens: newConnections(d.Store, d.Clock, d.Logger, login), repos: d.Repos}}, nil
 }
 
-// RepoIDFresh implements faucet.Authorizer. UserAccess remembers nothing, so
-// it is RepoID.
-func (a UserAccess) RepoIDFresh(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
-	return a.RepoID(ctx, p, repo)
-}
-
-// RepoID implements faucet.Authorizer: it asks the RepoChecker with the
+// RepoIDFresh implements faucet.Authorizer: it asks the RepoChecker with the
 // user's GitHub token, refreshed first when it expires within a minute.
 // When GitHub rejects the token, it refreshes the token once and asks once
-// more. A principal that is not an OAuth user is faucet.ErrNoAccess.
-func (a UserAccess) RepoID(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
-	session, ok := p.OAuthSession()
-	if !ok {
-		return 0, xerrors.Errorf("only a user who logged in through a browser is checked with the GitHub token that faucet keeps: %w", faucet.ErrNoAccess)
-	}
-	token, err := a.tokens.accessToken(ctx, session.ConnectionID, a.tokens.expiresWithin(userTokenMargin))
+// more. A pass becomes the connection's check of the repository. A denial
+// takes the check away, and so does a token that GitHub rejects even after
+// the refresh. A principal that is not an OAuth user is faucet.ErrNoAccess, and
+// repo must be owner/name as the caller wrote it, before any change of case.
+func (a UserAccess) RepoIDFresh(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
+	repo, err := userRepo(repo)
 	if err != nil {
 		return 0, err
 	}
-	id, err := a.check(ctx, p.Login, token, repo)
-	if !xerrors.Is(err, faucet.ErrInvalidToken) {
-		return id, err
-	}
-	a.logger.Info(ctx, "GitHub rejected the stored token of a connection, refreshing it", slog.F("session_id", session.SessionID), slog.F("connection_id", session.ConnectionID))
-	rejectedToken := token
-	token, err = a.tokens.accessToken(ctx, session.ConnectionID, func(_ Connection, access string) bool { return access == rejectedToken })
+	session, err := userSession(p)
 	if err != nil {
 		return 0, err
 	}
-	return a.check(ctx, p.Login, token, repo)
+	return a.access.ask(ctx, session, repo)
 }
 
-func (a UserAccess) check(ctx context.Context, login, token, repo string) (int64, error) {
-	p, err := faucet.NewPrincipal(login, token)
+// RepoID implements faucet.Authorizer. A check of repo by the user's
+// connection that started at or after the last refresh of the user's
+// session answers, and counts as a use. Otherwise it asks GitHub, as
+// RepoIDFresh does.
+func (a UserAccess) RepoID(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
+	repo, err := userRepo(repo)
 	if err != nil {
 		return 0, err
 	}
-	return a.repos.RepoID(ctx, p, repo)
+	session, err := userSession(p)
+	if err != nil {
+		return 0, err
+	}
+	now := a.access.tokens.clock.Now()
+	id, ok, err := a.access.tokens.store.FreshAccessCheck(ctx, session.SessionID, repo, now, now.Add(-accessCheckUseStep))
+	switch {
+	case err != nil:
+		return 0, xerrors.Errorf("read the access check of %s: %w", repo, err)
+	case ok:
+		return id, nil
+	}
+	return a.access.ask(ctx, session, repo)
+}
+
+// userRepo returns repo, owner/name as the caller wrote it, in lower case,
+// once it is a repository name as written. Lower case alone can make a name
+// valid, as the Kelvin sign folds to k.
+func userRepo(repo string) (string, error) {
+	if _, _, err := githubapi.ParseRepo(repo); err != nil {
+		return "", err
+	}
+	return strings.ToLower(repo), nil
+}
+
+// userSession returns the session of p. A principal that is not an OAuth
+// user is faucet.ErrNoAccess.
+func userSession(p faucet.Principal) (faucet.OAuthSession, error) {
+	session, ok := p.OAuthSession()
+	if !ok {
+		return faucet.OAuthSession{}, xerrors.Errorf("only a user who logged in through a browser is checked with the GitHub token that faucet keeps: %w", faucet.ErrNoAccess)
+	}
+	return session, nil
 }
