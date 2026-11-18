@@ -26,6 +26,7 @@ func RunOAuth(t *testing.T, newStore func(t *testing.T) oauth.Store) {
 		{"InsertAccessTokenValidatesInput", insertAccessTokenValidatesInput},
 		{"AccessTokenSharesNoSliceWithItsCaller", accessTokenSharesNoSliceWithItsCaller},
 		{"DeleteExpiredAccessTokensLeavesTheLiveOnes", deleteExpiredAccessTokensLeavesTheLiveOnes},
+		{"DeleteAccessTokenDeletesThatTokenOnly", deleteAccessTokenDeletesThatTokenOnly},
 		{"ClientReadsBackAsInserted", clientReadsBackAsInserted},
 		{"ClientOfAnUnknownIDIsUnknown", clientOfAnUnknownIDIsUnknown},
 		{"InsertClientRefusesAnIDThatAnyClientHeld", insertClientRefusesAnIDThatAnyClientHeld},
@@ -39,6 +40,7 @@ func RunOAuth(t *testing.T, newStore func(t *testing.T) oauth.Store) {
 			st.run(t, newStore(t))
 		})
 	}
+	runOAuthLogin(t, newStore)
 }
 
 // accessTokenAt is a valid token that expires at expires. Postgres keeps
@@ -173,6 +175,24 @@ func deleteExpiredAccessTokensLeavesTheLiveOnes(t *testing.T, s oauth.Store) {
 	n, err = s.DeleteExpiredAccessTokens(ctx, now)
 	require.NoError(t, err)
 	require.Zero(t, n)
+}
+
+func deleteAccessTokenDeletesThatTokenOnly(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+	revoked := accessTokenAt("fct_revoked", now.Add(time.Hour))
+	kept := accessTokenAt("fct_kept", now.Add(time.Hour))
+	for _, token := range []oauth.AccessToken{revoked, kept} {
+		require.NoError(t, s.InsertAccessToken(ctx, token))
+	}
+
+	require.NoError(t, s.DeleteAccessToken(ctx, revoked.Hash))
+	_, err := s.AccessToken(ctx, revoked.Hash)
+	require.ErrorIs(t, err, oauth.ErrUnknownToken)
+	got, err := s.AccessToken(ctx, kept.Hash)
+	require.NoError(t, err)
+	requireSameAccessToken(t, kept, got)
+	require.NoError(t, s.DeleteAccessToken(ctx, revoked.Hash), "an unknown hash")
 }
 
 // clientAt is a valid live client created at created, which has no time

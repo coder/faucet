@@ -43,7 +43,13 @@ An agent asks for events by name, of one `repo` (a service also of an `owner` or
 
 The operator can also offer other GitHub events of a repository, such as `push`, `release` and `issues`, raw as `github.<event>`, by listing them in `FAUCET_RAW_EVENTS`. Faucet stores one only while a subscription or a poller wants it (see [raw events](docs/events.md#raw-events)).
 
-Every `/github/mcp` request carries `Authorization: Bearer <GitHub token>`. Faucet reads with the caller's token: it only returns events for repositories that the token can read. The one GitHub token it holds, for redelivery, is optional. See [docs/security.md](docs/security.md). A service agent can log in with a client ID and secret instead, with no GitHub token (see [docs/service-accounts.md](docs/service-accounts.md)).
+A caller of `/github/mcp` proves who it is in one of three ways, and faucet returns events only for repositories that the caller may read (see [docs/security.md](docs/security.md)):
+
+- **A GitHub token** as `Authorization: Bearer <GitHub token>`. Faucet asks GitHub with it and keeps it for that request only.
+- **A browser login.** A coding agent connects with no token, and its user logs in to GitHub through faucet in a browser. Faucet keeps the user's GitHub App token, sealed, and gives the agent only faucet's own tokens (see [docs/browser-login.md](docs/browser-login.md)).
+- **A client ID and secret** that an operator made for a service agent, which holds no GitHub token (see [docs/service-accounts.md](docs/service-accounts.md)).
+
+The one GitHub token that faucet holds for itself, for redelivery, is optional.
 
 Faucet also deletes events after a retention period, and it can ask GitHub to [redeliver webhooks that failed](docs/redelivery.md) while it was down.
 
@@ -64,7 +70,7 @@ The server listens on `PORT` (default 8080) and applies migrations at startup. T
 - **Secret:** the value of `GITHUB_WEBHOOK_SECRET`
 - **Events:** "Let me select individual events", then Pull requests, Pull request reviews, Pull request review comments, Pull request review threads, Issue comments, Workflow runs, Workflow jobs, Check runs, Check suites and Statuses (see [docs/events.md](docs/events.md#the-github-webhook))
 
-Point any MCP client at `https://<your host>/github/mcp` with a GitHub token as the bearer token. `/mcp` serves the same endpoint as an alias for one release (see [docs/upgrading.md](docs/upgrading.md#to-githubmcp)).
+Point any MCP client at `https://<your host>/github/mcp` with a GitHub token as the bearer token, or with no token once the [browser login](docs/browser-login.md) is on. `/mcp` serves the same endpoint as an alias for one release (see [docs/upgrading.md](docs/upgrading.md#to-githubmcp)).
 
 ## Configuration
 
@@ -85,7 +91,11 @@ Point any MCP client at `https://<your host>/github/mcp` with a GitHub token as 
 | `FAUCET_HOOK_ID` | for redelivery | Numeric ID of the GitHub webhook to watch for failed deliveries. |
 | `FAUCET_HOOK_ORG` | for an org hook | The organization that owns the hook. Set this or `FAUCET_HOOK_REPO`, not both. |
 | `FAUCET_HOOK_REPO` | for a repo hook | The repository that owns the hook, as `owner/name`. |
-| `FAUCET_PUBLIC_URL` | for service accounts | Faucet's public URL, such as `https://faucet.example.com`, with no path or trailing slash. Turns on faucet's login server for service clients (see [docs/service-accounts.md](docs/service-accounts.md)). |
+| `FAUCET_PUBLIC_URL` | for service accounts and the browser login | Faucet's public URL, such as `https://faucet.example.com`, with no path or trailing slash. Turns on faucet's login server, which service clients use (see [docs/service-accounts.md](docs/service-accounts.md)) and which the browser login needs. |
+| `FAUCET_GITHUB_APP_CLIENT_ID` | for the browser login | The client ID of faucet's GitHub App. With the secret and the token key it turns on the browser login of coding agents (see [docs/browser-login.md](docs/browser-login.md)), and needs `FAUCET_PUBLIC_URL`. |
+| `FAUCET_GITHUB_APP_CLIENT_SECRET` | for the browser login | A client secret of faucet's GitHub App. |
+| `FAUCET_TOKEN_KEY` | for the browser login | The keys that seal the GitHub tokens of users at rest: one or more `<key_id>:<32 random bytes, base64>`, comma-separated. The first seals, every one opens (see [rotating the key](docs/browser-login.md#rotate-the-token-key)). |
+| `FAUCET_GITHUB_URL` | no | GitHub's web host, which serves the App's login page. Default `https://github.com`. |
 | `FAUCET_RAW_EVENTS` | for raw events | Comma-separated GitHub events, such as `push,release,issues`, that faucet offers raw as `github.<event>` (see [docs/events.md](docs/events.md#raw-events)). Unset offers none. The server refuses to start on an event whose payload GitHub shows only to people with more than read access. |
 | `VERCEL` | set by Vercel | Marks a Vercel deployment. There the server never migrates without `VERCEL_ENV`. |
 | `VERCEL_ENV` | set by Vercel | When set, the server migrates only if it is `production`, and otherwise starts only on a current schema. |
@@ -101,7 +111,7 @@ Faucet sends nothing on its own between requests. A scheduler calls these with `
 | --- | --- | --- |
 | `GET /cron/deliver` | every minute | Sends due webhooks to subscribers and retries failed ones. |
 | `GET /cron/redeliver` | every 10 minutes | Asks GitHub to resend webhooks that faucet failed to store. |
-| `GET /cron/purge` | hourly | Deletes events past retention, expired subscriptions and leases, and the raw payloads that nobody waits for. |
+| `GET /cron/purge` | hourly | Deletes events past retention, expired subscriptions and leases, the raw payloads that nobody waits for, and the login server's expired tokens, login requests and dead sessions. |
 
 [`vercel.json`](vercel.json) sets these schedules for Vercel Cron.
 
@@ -117,7 +127,7 @@ The packages:
 - [`faucet/redelivery`](faucet/redelivery): the failed-webhook sweep, built with `redelivery.New`.
 - [`faucet/pgstore`](faucet/pgstore): the Postgres store, with embedded migrations.
 - [`faucet/storetest`](faucet/storetest): the contract tests that every `Store` must pass.
-- [`faucet/oauth`](faucet/oauth): faucet's login server for service clients: the token endpoint and its metadata, the clients and their grants, and the access tokens that it mints.
+- [`faucet/oauth`](faucet/oauth): faucet's login server, with the token endpoint and its metadata, the clients of services and their grants, the browser login of users, and the tokens that it mints.
 
 [`cmd/faucet`](cmd/faucet) is the reference host and wires all of it together. The host decides who may call `Service.Purge`, `Service.DeliverDue` and `Runner.Run`, and when.
 
@@ -126,9 +136,10 @@ The packages:
 - [docs/events.md](docs/events.md): the event names, their actions and filters, and the GitHub webhook to set up.
 - [docs/webhooks.md](docs/webhooks.md): the contract for a callback receiver (signatures, retries, cursors, control messages, secret rotation).
 - [docs/redelivery.md](docs/redelivery.md): how failed GitHub deliveries are recovered, with the sweep's guarantees, capacity and known limits.
-- [docs/security.md](docs/security.md): the access checks, the callback URL guard and secret handling.
+- [docs/security.md](docs/security.md): the three kinds of caller, the access checks, what protects the browser login, the callback URL guard and secret handling.
 - [docs/deploy.md](docs/deploy.md): deploying and operating faucet, and what each scheduled route answers.
 - [docs/service-accounts.md](docs/service-accounts.md): service agents that log in with client credentials, how an operator makes their clients, and how grants match repositories.
+- [docs/browser-login.md](docs/browser-login.md): the browser login of coding agents, the GitHub App that an operator makes for it, what faucet keeps, and how to rotate `FAUCET_TOKEN_KEY`.
 - [docs/upgrading.md](docs/upgrading.md): what to change on the GitHub hook and during a rolling deploy when you upgrade.
 
 ## Development

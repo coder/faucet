@@ -12,6 +12,15 @@ import (
 	"github.com/lib/pq"
 )
 
+const deleteAccessToken = `-- name: DeleteAccessToken :exec
+DELETE FROM faucet_access_tokens WHERE token_hash = $1
+`
+
+func (q *Queries) DeleteAccessToken(ctx context.Context, tokenHash []byte) error {
+	_, err := q.db.ExecContext(ctx, deleteAccessToken, tokenHash)
+	return err
+}
+
 const deleteExpiredAccessTokens = `-- name: DeleteExpiredAccessTokens :execrows
 DELETE FROM faucet_access_tokens WHERE expires_at <= $1
 `

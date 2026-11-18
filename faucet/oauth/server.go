@@ -50,6 +50,13 @@ var grants = map[string]grant{
 	"client_credentials": {authMethods: []string{"client_secret_basic"}, issue: (*Server).clientCredentials},
 }
 
+// loginGrants are the rows that the browser login adds to the grant table
+// of a server.
+var loginGrants = map[string]grant{
+	"authorization_code": {authMethods: []string{"none"}, responseType: "code", issue: (*Server).authorizationCode},
+	"refresh_token":      {authMethods: []string{"none"}, issue: (*Server).refreshToken},
+}
+
 // ServerDeps are what a Server needs.
 type ServerDeps struct {
 	Store  Store
@@ -61,6 +68,9 @@ type ServerDeps struct {
 	// Resources are the endpoints that this server serves. A client whose
 	// resource is not one of them gets no token.
 	Resources []string
+	// Login turns on the browser login. Nil leaves it off: the server then
+	// takes service clients only.
+	Login *BrowserLogin
 }
 
 // Server is faucet's authorization server: its metadata and its token
@@ -71,6 +81,10 @@ type Server struct {
 	logger    slog.Logger
 	issuer    string
 	resources []string
+	// grants is the grant table of this server.
+	grants map[string]grant
+	// login is nil when the browser login is off.
+	login *browserLogin
 }
 
 // NewServer returns the Server for d.
@@ -85,7 +99,19 @@ func NewServer(d ServerDeps) (*Server, error) {
 	case len(d.Resources) == 0:
 		return nil, xerrors.New("the server needs the endpoints that it serves")
 	}
-	return &Server{store: d.Store, clock: d.Clock, logger: d.Logger, issuer: d.Issuer, resources: slices.Clone(d.Resources)}, nil
+	s := &Server{
+		store: d.Store, clock: d.Clock, logger: d.Logger, issuer: d.Issuer,
+		resources: slices.Clone(d.Resources), grants: maps.Clone(grants),
+	}
+	if d.Login != nil {
+		login, err := newBrowserLogin(*d.Login, d.Clock)
+		if err != nil {
+			return nil, xerrors.Errorf("the browser login: %w", err)
+		}
+		s.login = login
+		maps.Copy(s.grants, loginGrants)
+	}
+	return s, nil
 }
 
 type authServerMetadata struct {
@@ -103,6 +129,17 @@ type authServerMetadata struct {
 	// it: go-sdk refuses metadata that lists no PKCE method, whatever grant
 	// it asks for.
 	CodeChallengeMethodsSupported []string `json:"code_challenge_methods_supported"`
+	// ClientIDMetadataDocumentSupported and
+	// AuthorizationResponseIssParameterSupported are true when a grant uses
+	// the authorization endpoint: that endpoint takes a client by the URL of
+	// its metadata document, and its redirect back names the issuer (RFC
+	// 9207).
+	ClientIDMetadataDocumentSupported          bool `json:"client_id_metadata_document_supported,omitempty"`
+	AuthorizationResponseIssParameterSupported bool `json:"authorization_response_iss_parameter_supported,omitempty"`
+	// RevocationEndpoint (RFC 7009) takes the clients that the token
+	// endpoint takes, authenticated the same ways.
+	RevocationEndpoint                     string   `json:"revocation_endpoint"`
+	RevocationEndpointAuthMethodsSupported []string `json:"revocation_endpoint_auth_methods_supported"`
 }
 
 // metadataOf describes the authorization server at issuer that takes the
@@ -112,6 +149,7 @@ func metadataOf(issuer string, table map[string]grant) authServerMetadata {
 		Issuer:                        issuer,
 		AuthorizationEndpoint:         issuer + AuthorizePath,
 		TokenEndpoint:                 issuer + TokenPath,
+		RevocationEndpoint:            issuer + RevokePath,
 		ResponseTypesSupported:        []string{},
 		GrantTypesSupported:           slices.Sorted(maps.Keys(table)),
 		CodeChallengeMethodsSupported: []string{"S256"},
@@ -127,14 +165,17 @@ func metadataOf(issuer string, table map[string]grant) authServerMetadata {
 	}
 	slices.Sort(m.TokenEndpointAuthMethodsSupported)
 	m.TokenEndpointAuthMethodsSupported = slices.Compact(m.TokenEndpointAuthMethodsSupported)
+	m.RevocationEndpointAuthMethodsSupported = slices.Clone(m.TokenEndpointAuthMethodsSupported)
 	slices.Sort(m.ResponseTypesSupported)
+	m.ClientIDMetadataDocumentSupported = len(m.ResponseTypesSupported) > 0
+	m.AuthorizationResponseIssParameterSupported = len(m.ResponseTypesSupported) > 0
 	return m
 }
 
 // MetadataHandler serves the authorization server's metadata (RFC 8414) at
 // MetadataPath, as a discovery document.
 func (s *Server) MetadataHandler() http.Handler {
-	return document(metadataOf(s.issuer, grants))
+	return document(metadataOf(s.issuer, s.grants))
 }
 
 // PurgeResult is what Server.Purge deleted.
@@ -142,28 +183,59 @@ type PurgeResult struct {
 	// ExpiredAccessTokens is how many access tokens had expired. A token is
 	// worth nothing once it expires, so none is kept.
 	ExpiredAccessTokens int64
+	// ExpiredAuthRequests is how many authorization requests had expired:
+	// at once for one without a code, from which nothing can come, and more
+	// than a day ago for one with a code, so that a code used again within
+	// that day still ends the session it made.
+	ExpiredAuthRequests int64
+	// EndedSessions is how many sessions had ended or gone unused for 180
+	// days. Their refresh tokens went with them.
+	EndedSessions int64
+	// UnusedConnections is how many connections no session and no request
+	// named, a day after their last update. The GitHub tokens that faucet
+	// kept for their users went with them.
+	UnusedConnections int64
 }
 
 // Purge deletes the state of the login server that is past its use: every
-// access token that has expired.
+// access token that has expired, every authorization request that expired
+// more than a day ago, every session that ended or went unused for 180
+// days, and then every connection that nothing names any more.
 func (s *Server) Purge(ctx context.Context) (PurgeResult, error) {
-	n, err := s.store.DeleteExpiredAccessTokens(ctx, s.clock.Now())
-	if err != nil {
+	now := s.clock.Now()
+	var res PurgeResult
+	var err error
+	if res.ExpiredAccessTokens, err = s.store.DeleteExpiredAccessTokens(ctx, now); err != nil {
 		return PurgeResult{}, err
 	}
-	return PurgeResult{ExpiredAccessTokens: n}, nil
+	if res.ExpiredAuthRequests, err = s.store.DeleteExpiredAuthRequests(ctx, now, now.Add(-authRequestRetention)); err != nil {
+		return PurgeResult{}, err
+	}
+	if res.EndedSessions, err = s.store.DeleteEndedSessions(ctx, now, now.Add(-sessionIdleLifetime)); err != nil {
+		return PurgeResult{}, err
+	}
+	// A login stores its connection a moment before the request that names
+	// it, so a connection that a login just stored is a day from going.
+	if res.UnusedConnections, err = s.store.DeleteUnusedConnections(ctx, now.Add(-authRequestRetention)); err != nil {
+		return PurgeResult{}, err
+	}
+	return res, nil
 }
 
-// AuthorizeHandler serves the authorization endpoint at AuthorizePath. No
-// grant of the grant table uses it yet, so it answers every request with
-// unsupported_response_type, and never redirects, because it knows no
-// client's redirect URI.
+// AuthorizeHandler serves the authorization endpoint at AuthorizePath: the
+// consent page of the browser login, and the form that the page posts.
+// Without the browser login no grant uses the endpoint, so it answers every
+// request with unsupported_response_type, and never redirects, because it
+// knows no client's redirect URI.
 func (s *Server) AuthorizeHandler() http.Handler {
+	if s.login != nil {
+		return s.browserAuthorizeHandler()
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		s.logger.Info(r.Context(), "authorization request refused, no grant uses the endpoint")
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "unsupported_response_type", "error_description": "faucet takes no grant through the authorization endpoint yet",
+			"error": "unsupported_response_type", "error_description": "faucet takes no grant through the authorization endpoint: its browser login is off",
 		})
 	})
 }
@@ -193,6 +265,8 @@ type tokenResponse struct {
 	TokenType   string `json:"token_type"`
 	ExpiresIn   int    `json:"expires_in"`
 	Scope       string `json:"scope"`
+	// RefreshToken is set by the grants of a browser login.
+	RefreshToken string `json:"refresh_token,omitempty"`
 }
 
 // TokenHandler serves the token endpoint at TokenPath. It takes POST only,
@@ -207,21 +281,30 @@ func (s *Server) TokenHandler() http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Pragma", "no-cache")
 		resp, err := s.token(w, r)
-		var te *tokenError
-		switch {
-		case xerrors.As(err, &te):
-			s.logger.Info(r.Context(), "token request refused", slog.F("error", te.code), slog.F("reason", te.description))
-			if te.status == http.StatusUnauthorized {
-				w.Header().Set("WWW-Authenticate", `Basic realm="faucet"`)
-			}
-			writeJSON(w, te.status, map[string]string{"error": te.code, "error_description": te.description})
-		case err != nil:
-			s.logger.Warn(r.Context(), "could not issue a token", slog.Error(err))
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error", "error_description": "could not issue a token, try again"})
-		default:
-			writeJSON(w, http.StatusOK, resp)
+		if err != nil {
+			s.writeTokenError(w, r, err, "token request", "issue a token")
+			return
 		}
+		writeJSON(w, http.StatusOK, resp)
 	})
+}
+
+// writeTokenError answers a request to the token endpoint or the
+// revocation endpoint that failed with err: a tokenError as itself (RFC
+// 6749 section 5.2), any other error as server_error. request names the
+// request and work what failed, in the log and in the answer.
+func (s *Server) writeTokenError(w http.ResponseWriter, r *http.Request, err error, request, work string) {
+	var te *tokenError
+	if !xerrors.As(err, &te) {
+		s.logger.Warn(r.Context(), "could not "+work, slog.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error", "error_description": "could not " + work + ", try again"})
+		return
+	}
+	s.logger.Info(r.Context(), request+" refused", slog.F("error", te.code), slog.F("reason", te.description))
+	if te.status == http.StatusUnauthorized {
+		w.Header().Set("WWW-Authenticate", `Basic realm="faucet"`)
+	}
+	writeJSON(w, te.status, map[string]string{"error": te.code, "error_description": te.description})
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
@@ -236,12 +319,12 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) (tokenResponse, e
 		return tokenResponse{}, err
 	}
 	name := form.Get("grant_type")
-	g, ok := grants[name]
+	g, ok := s.grants[name]
 	switch {
 	case name == "":
 		return tokenResponse{}, badRequest("invalid_request", "grant_type is required")
 	case !ok:
-		return tokenResponse{}, badRequest("unsupported_grant_type", "faucet takes the grant types "+strings.Join(slices.Sorted(maps.Keys(grants)), ", "))
+		return tokenResponse{}, badRequest("unsupported_grant_type", "faucet takes the grant types "+strings.Join(slices.Sorted(maps.Keys(s.grants)), ", "))
 	}
 	return g.issue(s, r, form)
 }

@@ -1,5 +1,5 @@
-// Package oauth is faucet's own authorization server. It verifies the access
-// tokens that faucet mints; the endpoints that mint them come later.
+// Package oauth is faucet's own authorization server. It mints access tokens
+// for service clients and for users who log in at GitHub, and verifies them.
 package oauth
 
 import (

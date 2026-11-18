@@ -60,6 +60,15 @@ func (s *Store) AccessToken(ctx context.Context, hash oauth.TokenHash) (_ oauth.
 	}, nil
 }
 
+// DeleteAccessToken implements oauth.Store.
+func (s *Store) DeleteAccessToken(ctx context.Context, hash oauth.TokenHash) (err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	if err := s.q.DeleteAccessToken(ctx, hash[:]); err != nil {
+		return xerrors.Errorf("delete access token: %w", err)
+	}
+	return nil
+}
+
 // DeleteExpiredAccessTokens implements oauth.Store.
 func (s *Store) DeleteExpiredAccessTokens(ctx context.Context, now time.Time) (_ int64, err error) {
 	defer func() { err = endedBy(ctx, err) }()
