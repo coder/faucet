@@ -39,6 +39,13 @@ var (
 // of coder.
 func (s *loginServer) deliverRunOf(t *testing.T, delivery string, repo deliveredRepo) {
 	t.Helper()
+	s.deliverRunOwnedBy(t, delivery, repo, coderID, "coder")
+}
+
+// deliverRunOwnedBy posts the workflow_run fixture as a run of repo, a
+// repository of the account ownerID that the delivery names login.
+func (s *loginServer) deliverRunOwnedBy(t *testing.T, delivery string, repo deliveredRepo, ownerID int64, login string) {
+	t.Helper()
 	body, err := os.ReadFile("../../faucet/testdata/workflow_run_completed.json")
 	require.NoError(t, err)
 	var payload map[string]any
@@ -46,7 +53,7 @@ func (s *loginServer) deliverRunOf(t *testing.T, delivery string, repo delivered
 	_, name, _ := strings.Cut(repo.fullName, "/")
 	payload["repository"] = map[string]any{
 		"id": repo.id, "name": name, "full_name": repo.fullName,
-		"owner": map[string]any{"id": coderID, "login": "coder", "type": "Organization"},
+		"owner": map[string]any{"id": ownerID, "login": login, "type": "Organization"},
 	}
 	payload["workflow_run"].(map[string]any)["html_url"] = "https://github.com/" + repo.fullName + "/actions/runs/1"
 	body, err = json.Marshal(payload)
@@ -326,4 +333,57 @@ func TestAnOrgGrantOfALoginThatItsAccountGaveUpReadsNothing(t *testing.T) {
 	renamedOrg := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, srv.token(t, "new-login", newSecret))
 	waitFor(ctx, t, renamedOrg, map[string]any{"owner": "coder-legacy"})
 	waitFor(ctx, t, renamedOrg, map[string]any{"repo": "coder-legacy/existing"})
+}
+
+// An organization that gave up a login and the one that took it never mix:
+// after the one that took it moves its last repository away, an org grant
+// of the login still names it, or nothing, and never the organization that
+// held the login before, even on a renewal.
+func TestAnOrgGrantNeverSnapsBackToTheAccountThatGaveItsLoginUp(t *testing.T) {
+	t.Parallel()
+	hooks := newCallbacks(t)
+	key, err := faucet.NewWebhookKey(bytes.Repeat([]byte{1}, 32))
+	require.NoError(t, err)
+	allow, err := faucet.NewCallbackAllowlist([]string{hooks.URL}, true)
+	require.NoError(t, err)
+	srv := newLoginServer(t, func(c *loginConfig) {
+		c.webhook = &faucet.WebhookDeps{Key: key, Callbacks: allow, AllowInsecureLoopback: true}
+	})
+	secret := srv.client(t, "taker", "/github/mcp", bothScopes, "org:old-coder")
+	tool := deliveredRepo{id: 44, fullName: "old-coder/tool"}
+	faucetRepo := deliveredRepo{id: 42, fullName: "coder/faucet"}
+	secretRepo := deliveredRepo{id: 49, fullName: "coder/secret"}
+	sandbox := deliveredRepo{id: 50, fullName: "old-coder/sandbox"}
+	srv.deliverRunOwnedBy(t, "tool-1", tool, 7, "old-coder")
+	srv.deliverRunOwnedBy(t, "faucet-1", faucetRepo, 7, "coder")
+	srv.deliverRunOwnedBy(t, "secret-1", secretRepo, 7, "coder")
+	srv.deliverRunOwnedBy(t, "sandbox-1", sandbox, 99, "old-coder")
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	session := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, srv.token(t, "taker", secret))
+	owner := map[string]any{"owner": "old-coder"}
+	subscribeOwner(ctx, t, session, hooks.URL+"/taker", owner)
+	_, cursor := waitFor(ctx, t, session, owner)
+
+	transferred, err := json.Marshal(map[string]any{
+		"action":     "transferred",
+		"repository": map[string]any{"id": sandbox.id, "full_name": "acme/sandbox", "owner": map[string]any{"id": 88, "login": "acme"}},
+		"changes":    map[string]any{"owner": map[string]any{"from": map[string]any{"organization": map[string]any{"id": 99, "login": "old-coder"}}}},
+	})
+	require.NoError(t, err)
+	srv.postAnswered(t, "repository", "transferred-1", transferred, http.StatusAccepted)
+	subscribeOwner(ctx, t, session, hooks.URL+"/taker", owner)
+	got, err := srv.store.OwnerByLogin(ctx, "old-coder")
+	require.NoError(t, err)
+	require.Equal(t, faucet.Owner{ID: 99, Login: "old-coder"}, got, "the login stays with the account that took it")
+
+	srv.deliverRunOwnedBy(t, "faucet-2", faucetRepo, 7, "coder")
+	srv.deliverRunOwnedBy(t, "secret-2", secretRepo, 7, "coder")
+	repos, _ := waitFor(ctx, t, session, map[string]any{"owner": "old-coder", "cursor": cursor})
+	require.Empty(t, repos, "a wait of the login reads no repository of the account that gave it up")
+	_, err = srv.svc.DeliverDue(ctx)
+	require.NoError(t, err)
+	require.Empty(t, hooks.runsOf("/taker"), "the renewed subscription gets no event of that account")
+	require.Contains(t, waitError(ctx, t, session, map[string]any{"repo": "old-coder/tool"}), "faucet has received no webhook delivery from old-coder/tool yet")
 }
