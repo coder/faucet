@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -159,19 +160,25 @@ func loginS256(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
-// loginDocuments serves the client ID metadata documents over TLS.
+// loginDocuments serves the client ID metadata documents over TLS, and
+// counts the requests for each path.
 type loginDocuments struct {
 	*httptest.Server
 	mu   sync.Mutex
 	docs map[string]map[string]any
+	// headers are added to every answer for a path.
+	headers map[string]http.Header
+	fetches map[string]int
 }
 
 func newLoginDocuments(t *testing.T) *loginDocuments {
 	t.Helper()
-	d := &loginDocuments{docs: map[string]map[string]any{}}
+	d := &loginDocuments{docs: map[string]map[string]any{}, headers: map[string]http.Header{}, fetches: map[string]int{}}
 	d.Server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		d.mu.Lock()
 		doc, ok := d.docs[r.URL.Path]
+		maps.Copy(w.Header(), d.headers[r.URL.Path])
+		d.fetches[r.URL.Path]++
 		d.mu.Unlock()
 		if !ok {
 			http.NotFound(w, r)

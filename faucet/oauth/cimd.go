@@ -23,6 +23,12 @@ const (
 	maxRedirectURIs    = 32
 	maxClientNameBytes = 256
 	documentTimeout    = 3 * time.Second
+	// maxCachedDocuments bounds how many client documents faucet keeps.
+	maxCachedDocuments = 64
+	// maxDocumentAge bounds how long faucet keeps a client document,
+	// whatever its headers allow, so that a change to the document shows
+	// within this time.
+	maxDocumentAge = 5 * time.Minute
 )
 
 // errClientDocument is the error of a client ID, or of the client ID
