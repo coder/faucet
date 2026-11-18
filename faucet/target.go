@@ -105,14 +105,26 @@ func (t Target) Covers(repoID, ownerID int64) bool {
 type targetArguments struct {
 	Repo  string   `json:"repo,omitempty" jsonschema:"the repository, written owner/name"`
 	Owner string   `json:"owner,omitempty" jsonschema:"every repository of this owner, a GitHub user or organization login; for service clients only"`
-	All   bool     `json:"all,omitempty" jsonschema:"true for every repository that faucet receives events from; for service clients only"`
+	All   *bool    `json:"all,omitempty" jsonschema:"true for every repository that faucet receives events from; for service clients only"`
 	Repos []string `json:"repos,omitempty" jsonschema:"with owner or all, only the events of these repositories, each written owner/name"`
 }
 
-// check reports whether a names one target in the form of its kind.
+// all reports whether a names every repository.
+func (a targetArguments) all() bool { return a.All != nil && *a.All }
+
+// check reports whether a names one target in the form of its kind. It
+// refuses all that is false and repos that is empty, as the inputSchema of
+// every event name does, so the wait tool, whose schema the SDK builds,
+// refuses them too.
 func (a targetArguments) check() error {
+	switch {
+	case a.All != nil && !*a.All:
+		return xerrors.New("all must be true; leave it out to name repo or owner")
+	case a.Repos != nil && len(a.Repos) == 0:
+		return xerrors.New("repos must name at least one repository; leave it out to read every repository of the target")
+	}
 	named := 0
-	for _, set := range []bool{a.Repo != "", a.Owner != "", a.All} {
+	for _, set := range []bool{a.Repo != "", a.Owner != "", a.all()} {
 		if set {
 			named++
 		}
@@ -169,7 +181,7 @@ func (a targetArguments) describe() string {
 	switch {
 	case a.Owner != "":
 		return "every repository of " + a.Owner
-	case a.All:
+	case a.all():
 		return "every repository"
 	}
 	return a.Repo
@@ -180,7 +192,7 @@ func (a targetArguments) logField() slog.Field {
 	switch {
 	case a.Owner != "":
 		return slog.F("owner", a.Owner)
-	case a.All:
+	case a.all():
 		return slog.F("all", true)
 	}
 	return slog.F("repo", a.Repo)

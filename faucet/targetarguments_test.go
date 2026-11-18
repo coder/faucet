@@ -55,10 +55,24 @@ func TestEveryCallNamesOneTargetInTheFormOfItsKind(t *testing.T) {
 		require.Equal(t, tt.want, w.call(tt.arguments).failure(t), tt.name)
 	}
 
-	for _, name := range []string{"ci.run_completed", "github.push"} {
-		rpcErr := h.pollError(pollParams(name, args("all", false), nil))
-		require.EqualValues(t, jsonrpc.CodeInvalidParams, rpcErr.Code, "all is true or absent")
-		require.Contains(t, rpcErr.Message, "arguments do not match the inputSchema", name)
+	// all is true or absent, and repos names at least one repository: the
+	// wait tool refuses what the inputSchema of an event name refuses.
+	for name, arguments := range map[string]map[string]any{
+		"all false":           args("all", false),
+		"all false and repo":  args("repo", testRepo, "all", false),
+		"all false and owner": args("owner", "octo", "all", false),
+		"repos empty":         args("owner", "octo", "repos", []string{}),
+		"repos empty of all":  args("all", true, "repos", []string{}),
+	} {
+		for _, event := range []string{"ci.run_completed", "github.push"} {
+			rpcErr := h.pollError(pollParams(event, arguments, nil))
+			require.EqualValues(t, jsonrpc.CodeInvalidParams, rpcErr.Code, "%s %s", name, event)
+			require.Contains(t, rpcErr.Message, "arguments do not match the inputSchema", "%s %s", name, event)
+		}
+		arguments["types"] = []string{"ci.run_completed"}
+		failure := w.call(arguments).failure(t)
+		require.NotEmpty(t, failure, name)
+		require.NotContains(t, failure, "events", "%s is refused, not read: %s", name, failure)
 	}
 }
 

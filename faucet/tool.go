@@ -3,11 +3,13 @@ package faucet
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/xerrors"
 
@@ -79,7 +81,8 @@ type waitOutput struct {
 // cursor it starts at the present, or ten minutes back when sha is set.
 func (s *Service) Register(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
-		Name: toolName,
+		Name:        toolName,
+		InputSchema: waitInputSchema(),
 		Description: "Wait for GitHub events on a repository, such as a CI run finishing or a pull request review, " +
 			"and return them as soon as they arrive. Name the repository with repo; a service client may name owner or all instead, and narrow them with repos. " +
 			"Returns no events and a cursor when timeout_s runs out; " +
@@ -97,6 +100,19 @@ type waitRequest struct {
 	query   PollQuery
 	cursor  *int64
 	timeout time.Duration
+}
+
+// waitInputSchema is the schema that the SDK infers from waitInput, with all
+// held to true and repos to one repository at least, as the inputSchema of
+// every event name holds them.
+func waitInputSchema() *jsonschema.Schema {
+	schema, err := jsonschema.For[waitInput](nil)
+	if err != nil {
+		panic(fmt.Sprintf("infer the input schema of %s: %v", toolName, err))
+	}
+	schema.Properties["all"].Const = jsonschema.Ptr[any](true)
+	schema.Properties["repos"].MinItems = jsonschema.Ptr(1)
+	return schema
 }
 
 func (in waitInput) parse() (waitRequest, error) {
