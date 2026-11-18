@@ -68,23 +68,21 @@ var rawEvents = []rawEvent{
 	{"repository", "Changes to a repository itself, for example one that was renamed, archived, transferred or made public."},
 	{"repository_dispatch", "Custom events that a client sent to the repository dispatch endpoint of the REST API, with the event type it chose as the action."},
 	{"repository_import", "Imports of a repository into GitHub that succeeded, were canceled or failed."},
-	{"repository_ruleset", "Rulesets of a repository that were created, edited or deleted."},
 	{"star", "Stars that were added to or removed from a repository."},
 	{"sub_issues", "Sub-issues that were added to or removed from a parent issue."},
-	{"team_add", "Teams that were given access to a repository."},
 	{"watch", "Accounts that started to watch a repository."},
 	{"workflow_dispatch", "GitHub Actions workflows that someone started by hand."},
 }
 
 // refusedRawEvents are the GitHub events whose payload GitHub shows only to
 // people with more than read access to a repository: security alerts and
-// advisories, deploy keys, collaborators, and protection and security
-// settings. Faucet checks only that a caller can read the repository, so no
+// advisories, deploy keys, collaborators, the teams with access, rulesets with
+// the actors that may bypass them, and protection and security settings. Faucet checks only that a caller can read the repository, so no
 // service offers them, whatever its host lists. Sorted.
 var refusedRawEvents = []string{
 	"branch_protection_configuration", "branch_protection_rule", "code_scanning_alert", "dependabot_alert",
-	"deploy_key", "member", "repository_advisory", "repository_vulnerability_alert", "secret_scanning_alert",
-	"secret_scanning_alert_location", "secret_scanning_scan", "security_and_analysis",
+	"deploy_key", "member", "repository_advisory", "repository_ruleset", "repository_vulnerability_alert",
+	"secret_scanning_alert", "secret_scanning_alert_location", "secret_scanning_scan", "security_and_analysis", "team_add",
 }
 
 // RawEventNames returns the GitHub events, such as "push", that a service can

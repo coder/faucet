@@ -14,8 +14,8 @@ import (
 // people who can do more than read a repository.
 var refusedRawEvents = []string{
 	"branch_protection_configuration", "branch_protection_rule", "code_scanning_alert", "dependabot_alert",
-	"deploy_key", "member", "repository_advisory", "repository_vulnerability_alert", "secret_scanning_alert",
-	"secret_scanning_alert_location", "secret_scanning_scan", "security_and_analysis",
+	"deploy_key", "member", "repository_advisory", "repository_ruleset", "repository_vulnerability_alert",
+	"secret_scanning_alert", "secret_scanning_alert_location", "secret_scanning_scan", "security_and_analysis", "team_add",
 }
 
 func offering(events ...string) func(*faucet.Deps) {
