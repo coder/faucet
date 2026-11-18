@@ -194,3 +194,26 @@ func TestAFullBatchOfStalledSubscriptionsDoesNotHideTheRest(t *testing.T) {
 		require.Equal(t, 1, res.Delivered, "the subscription behind the full batch is read and sent")
 	})
 }
+
+// A purge that a subscription is behind can span several windows of its read.
+// The run must count the gap once and send one gap envelope, as when the read
+// was one statement.
+func TestAGapThatSpansSeveralWindowsIsCountedAndSentOnce(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t)
+	ep := d.endpoint("/hook")
+	d.subscribeEndpoint(ep)
+	d.advance(time.Second)
+	d.store.appendRunEvents(120_000)
+	d.advance(5 * time.Minute)
+	d.newRunEvent()
+	_, err := d.store.Purge(d.ctx, d.clock.Now().Add(-time.Minute))
+	require.NoError(t, err)
+
+	res := d.deliverDue()
+	require.Equal(t, 1, res.Gaps, "one subscription missed purged events")
+	require.Equal(t, 1, res.Delivered, "and gets the event after them")
+	require.Zero(t, d.deliverDue().Gaps)
+	require.Len(t, d.rcv.envelopesOf("/hook", "gap"), 1)
+}
