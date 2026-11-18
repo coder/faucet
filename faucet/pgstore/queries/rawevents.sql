@@ -1,31 +1,58 @@
 -- name: RawInterests :many
+-- Each kind of target has a branch of its own, so each reads its own index:
+-- faucet_subscriptions_raw and faucet_raw_leases_match for a repository, and
+-- the partial indexes of owner and all targets. A delivery with no repository
+-- has repo_id 0 and repo_name '', so it reaches no repo target and passes no
+-- list of repository names.
+WITH subs AS (
+  SELECT s.* FROM faucet_subscriptions s
+  WHERE s.target_kind = 'repo' AND s.repo_id = sqlc.arg(repo_id)::bigint AND sqlc.arg(repo_id)::bigint > 0
+    AND s.event_type = 'github.' || sqlc.arg(event)::text
+  UNION ALL
+  SELECT s.* FROM faucet_subscriptions s
+  WHERE s.target_kind = 'owner' AND s.owner_id = sqlc.arg(owner_id)::bigint AND sqlc.arg(owner_id)::bigint > 0
+    AND s.event_type = 'github.' || sqlc.arg(event)::text
+  UNION ALL
+  SELECT s.* FROM faucet_subscriptions s
+  WHERE s.target_kind = 'all' AND s.event_type = 'github.' || sqlc.arg(event)::text
+), leases AS (
+  SELECT l.* FROM faucet_raw_leases l
+  WHERE l.target_kind = 'repo' AND l.repo_id = sqlc.arg(repo_id)::bigint AND sqlc.arg(repo_id)::bigint > 0
+    AND l.event = sqlc.arg(event)::text
+  UNION ALL
+  SELECT l.* FROM faucet_raw_leases l
+  WHERE l.target_kind = 'owner' AND l.owner_id = sqlc.arg(owner_id)::bigint AND sqlc.arg(owner_id)::bigint > 0
+    AND l.event = sqlc.arg(event)::text
+  UNION ALL
+  SELECT l.* FROM faucet_raw_leases l
+  WHERE l.target_kind = 'all' AND l.event = sqlc.arg(event)::text
+)
 SELECT
   false AS is_lease, s.key_hash AS id, s.created_at AS incarnation,
   (CASE WHEN s.arguments ? 'fields' THEN ARRAY(SELECT jsonb_array_elements_text(s.arguments -> 'fields')) END)::text[] AS fields,
   (SELECT COUNT(*) FROM faucet_raw_deliveries d WHERE d.key_hash = s.key_hash AND d.incarnation = s.created_at)::int AS pending
-FROM faucet_subscriptions s
-WHERE s.repo_id = sqlc.arg(repo_id)
-  AND s.event_type = 'github.' || sqlc.arg(event)::text
-  AND s.expires_at > sqlc.arg(now)
+FROM subs s
+WHERE s.expires_at > sqlc.arg(now)
   AND (NOT (s.arguments ? 'actions') OR (s.arguments -> 'actions') ? sqlc.arg(action)::text)
+  AND (NOT (s.arguments ? 'repos') OR (s.arguments -> 'repos') ? lower(sqlc.arg(repo_name)::text))
 UNION ALL
 SELECT
   true, l.id, l.created_at, l.fields,
   (SELECT COUNT(*) FROM faucet_raw_unread u WHERE u.lease_id = l.id AND NOT u.lost)::int
-FROM faucet_raw_leases l
-WHERE l.repo_id = sqlc.arg(repo_id)
-  AND l.event = sqlc.arg(event)::text
-  AND l.expires_at > sqlc.arg(now)
+FROM leases l
+WHERE l.expires_at > sqlc.arg(now)
   AND (cardinality(l.actions) = 0 OR sqlc.arg(action)::text = ANY(l.actions))
+  AND (cardinality(l.repos) = 0 OR lower(sqlc.arg(repo_name)::text) = ANY(l.repos))
 ORDER BY is_lease, id;
 
 -- name: InsertRawEvent :one
-INSERT INTO faucet_raw_events (delivery_id, event, action, repo_id, body, fields, received_at)
+INSERT INTO faucet_raw_events (delivery_id, event, action, repo_id, owner_id, body, fields, received_at)
 VALUES (
   sqlc.arg(delivery_id),
   sqlc.arg(event),
   sqlc.arg(action),
   sqlc.arg(repo_id),
+  sqlc.arg(owner_id),
   CASE WHEN sqlc.arg(has_body)::boolean THEN sqlc.arg(body)::bytea END,
   sqlc.narg(fields)::text[],
   clock_timestamp()
@@ -75,16 +102,43 @@ ORDER BY l.id
 FOR UPDATE;
 
 -- name: LockRawTarget :exec
-SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg(event)::text || '/' || sqlc.arg(repo_id)::bigint::text, 2));
+-- A repository target keeps the key it had before owner and all targets.
+SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg(event)::text || '/' || CASE sqlc.arg(target_kind)::text
+  WHEN 'repo' THEN sqlc.arg(repo_id)::bigint::text
+  WHEN 'owner' THEN 'owner/' || sqlc.arg(owner_id)::bigint::text
+  ELSE sqlc.arg(target_kind)::text
+END, 2));
 
 -- name: CountRawInterests :one
+-- A branch per kind of target, which only the target's own kind passes, so
+-- each reads its own index as RawInterests does.
 WITH subs AS (
   SELECT s.principal FROM faucet_subscriptions s
-  WHERE s.repo_id = sqlc.arg(repo_id) AND s.event_type = 'github.' || sqlc.arg(event)::text
+  WHERE sqlc.arg(target_kind)::text = 'repo' AND s.target_kind = 'repo' AND s.repo_id = sqlc.arg(repo_id)::bigint
+    AND s.event_type = 'github.' || sqlc.arg(event)::text
+    AND s.expires_at > sqlc.arg(now) AND s.key_hash IS DISTINCT FROM sqlc.narg(except_key)::bytea
+  UNION ALL
+  SELECT s.principal FROM faucet_subscriptions s
+  WHERE sqlc.arg(target_kind)::text = 'owner' AND s.target_kind = 'owner' AND s.owner_id = sqlc.arg(owner_id)::bigint
+    AND s.event_type = 'github.' || sqlc.arg(event)::text
+    AND s.expires_at > sqlc.arg(now) AND s.key_hash IS DISTINCT FROM sqlc.narg(except_key)::bytea
+  UNION ALL
+  SELECT s.principal FROM faucet_subscriptions s
+  WHERE sqlc.arg(target_kind)::text = 'all' AND s.target_kind = 'all'
+    AND s.event_type = 'github.' || sqlc.arg(event)::text
     AND s.expires_at > sqlc.arg(now) AND s.key_hash IS DISTINCT FROM sqlc.narg(except_key)::bytea
 ), leases AS (
   SELECT l.principal FROM faucet_raw_leases l
-  WHERE l.repo_id = sqlc.arg(repo_id) AND l.event = sqlc.arg(event)::text AND l.expires_at > sqlc.arg(now)
+  WHERE sqlc.arg(target_kind)::text = 'repo' AND l.target_kind = 'repo' AND l.repo_id = sqlc.arg(repo_id)::bigint
+    AND l.event = sqlc.arg(event)::text AND l.expires_at > sqlc.arg(now)
+  UNION ALL
+  SELECT l.principal FROM faucet_raw_leases l
+  WHERE sqlc.arg(target_kind)::text = 'owner' AND l.target_kind = 'owner' AND l.owner_id = sqlc.arg(owner_id)::bigint
+    AND l.event = sqlc.arg(event)::text AND l.expires_at > sqlc.arg(now)
+  UNION ALL
+  SELECT l.principal FROM faucet_raw_leases l
+  WHERE sqlc.arg(target_kind)::text = 'all' AND l.target_kind = 'all'
+    AND l.event = sqlc.arg(event)::text AND l.expires_at > sqlc.arg(now)
 )
 SELECT
   ((SELECT COUNT(*) FROM subs) + (SELECT COUNT(*) FROM leases))::bigint AS interests,
@@ -99,7 +153,8 @@ SELECT
 DELETE FROM faucet_raw_leases l
 WHERE l.id IN (
   SELECT o.id FROM faucet_raw_leases o
-  WHERE o.principal = sqlc.arg(principal) AND o.repo_id = sqlc.arg(repo_id) AND o.event = sqlc.arg(event)
+  WHERE o.principal = sqlc.arg(principal) AND o.event = sqlc.arg(event)
+    AND o.target_kind = sqlc.arg(target_kind) AND o.repo_id = sqlc.arg(repo_id) AND o.owner_id = sqlc.arg(owner_id)
     AND o.expires_at > sqlc.arg(now)
   ORDER BY o.polled_at, o.id
   LIMIT 1
@@ -138,7 +193,7 @@ WHERE (lease_id, raw_event_id) IN (
 );
 
 -- name: InsertRawLease :one
-INSERT INTO faucet_raw_leases (id, key_hash, principal, event, actions, fields, repo_id, acked_through, created_at, polled_at, expires_at)
+INSERT INTO faucet_raw_leases (id, key_hash, principal, event, actions, fields, target_kind, repo_id, owner_id, repos, acked_through, created_at, polled_at, expires_at)
 VALUES (
   sqlc.arg(id),
   sqlc.arg(key_hash),
@@ -146,7 +201,10 @@ VALUES (
   sqlc.arg(event),
   sqlc.arg(actions)::text[],
   sqlc.narg(fields)::text[],
+  sqlc.arg(target_kind),
   sqlc.arg(repo_id),
+  sqlc.arg(owner_id),
+  sqlc.arg(repos)::text[],
   (SELECT COALESCE(MAX(e.id), 0) FROM faucet_raw_events e),
   sqlc.arg(now),
   sqlc.arg(now),
@@ -157,7 +215,9 @@ RETURNING acked_through;
 -- name: TouchRawLease :one
 WITH found AS (
   SELECT l.id, l.acked_through FROM faucet_raw_leases l
-  WHERE l.id = sqlc.arg(id) AND l.key_hash = sqlc.arg(key_hash) AND l.repo_id = sqlc.arg(repo_id) AND l.expires_at > sqlc.arg(now)
+  WHERE l.id = sqlc.arg(id) AND l.key_hash = sqlc.arg(key_hash)
+    AND l.target_kind = sqlc.arg(target_kind) AND l.repo_id = sqlc.arg(repo_id) AND l.owner_id = sqlc.arg(owner_id)
+    AND l.expires_at > sqlc.arg(now)
   FOR UPDATE
 )
 UPDATE faucet_raw_leases l
@@ -198,7 +258,7 @@ WITH head AS (
 )
 SELECT
   summary.head, summary.skipped, summary.last_open, summary.more,
-  e.id, e.delivery_id, e.event, e.action, e.repo_id, e.body, e.fields, e.received_at
+  e.id, e.delivery_id, e.event, e.action, e.repo_id, e.owner_id, e.body, e.fields, e.received_at
 FROM summary
 LEFT JOIN ranked r ON r.open AND r.served
 LEFT JOIN faucet_raw_events e ON e.id = r.raw_event_id
@@ -229,9 +289,9 @@ WITH due AS (
 )
 SELECT
   c.key_hash, c.incarnation, c.raw_event_id, c.attempts, c.enqueued_at,
-  s.event_type, s.arguments, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.repo_id,
+  s.event_type, s.arguments, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.target_kind, s.repo_id, s.owner_id,
   (SELECT COALESCE(MIN(p.raw_event_id), c.raw_event_id) - 1 FROM faucet_raw_deliveries p WHERE p.key_hash = c.key_hash AND p.incarnation = c.incarnation)::bigint AS watermark,
-  e.id AS stored_event_id, e.delivery_id, e.event, e.action, e.repo_id AS event_repo_id, e.body, e.fields, e.received_at
+  e.id AS stored_event_id, e.delivery_id, e.event, e.action, e.repo_id AS event_repo_id, e.owner_id AS event_owner_id, e.body, e.fields, e.received_at
 FROM claimed c
 JOIN faucet_subscriptions s ON s.key_hash = c.key_hash AND s.created_at = c.incarnation
 LEFT JOIN faucet_raw_events e ON e.id = c.raw_event_id AND e.body IS NOT NULL;
@@ -375,13 +435,13 @@ SELECT COUNT(*)::bigint FROM deleted;
 
 -- name: RawWants :many
 SELECT
-  s.repo_id,
+  s.target_kind, s.repo_id, s.owner_id,
   substring(s.event_type from 8)::text AS event,
   ARRAY(SELECT a FROM jsonb_array_elements_text(COALESCE(s.arguments -> 'actions', '[]'::jsonb)) AS a ORDER BY a COLLATE "C")::text[] AS actions
 FROM faucet_subscriptions s
 WHERE s.event_type LIKE 'github.%' AND s.expires_at > sqlc.arg(now)
 UNION
-SELECT l.repo_id, l.event, ARRAY(SELECT a FROM unnest(l.actions) AS a ORDER BY a COLLATE "C")::text[]
+SELECT l.target_kind, l.repo_id, l.owner_id, l.event, ARRAY(SELECT a FROM unnest(l.actions) AS a ORDER BY a COLLATE "C")::text[]
 FROM faucet_raw_leases l
 WHERE l.expires_at > sqlc.arg(now)
-ORDER BY 1, 2, 3;
+ORDER BY 1, 2, 3, 4, 5;

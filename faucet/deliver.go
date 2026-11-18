@@ -333,13 +333,14 @@ func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target Scan
 		return r.endUndecodable(ctx, now, target, logger)
 	}
 	page, err := s.store.PollEvents(ctx, PollQuery{
-		RepoID:  target.RepoID,
-		Types:   target.EventTypes,
-		HeadSHA: strings.ToLower(args.SHA),
-		PR:      args.PR,
-		Fields:  args.fieldFilters(func(string) []string { return target.EventTypes }),
-		After:   target.ScannedThrough,
-		Limit:   MaxPendingDeliveries - target.Pending,
+		Target:    target.Target,
+		Types:     target.EventTypes,
+		HeadSHA:   strings.ToLower(args.SHA),
+		PR:        args.PR,
+		Fields:    args.fieldFilters(func(string) []string { return target.EventTypes }),
+		RepoNames: args.repoNames(),
+		After:     target.ScannedThrough,
+		Limit:     MaxPendingDeliveries - target.Pending,
 	})
 	if err != nil {
 		return xerrors.Errorf("read events for a subscription: %w", err)
@@ -643,8 +644,8 @@ func (r *deliveryRun) typedOutbound(claim DeliveryClaim) outbound {
 			switch ev := claim.Event; {
 			case ev == nil:
 				return GiveUpEventPurged
-			case ev.RepoID != claim.RepoID:
-				s.logger.Error(ctx, "event belongs to another repository than the subscription's",
+			case !claim.Target.Covers(ev.RepoID, ev.OwnerID):
+				s.logger.Error(ctx, "event belongs to a repository that the subscription's target does not cover",
 					slog.F("subscription", claim.Ref.Key.ID()), slog.F("event_id", ev.ID))
 				return GiveUpRepoMismatch
 			}
@@ -751,7 +752,7 @@ func (r *deliveryRun) decide(ctx context.Context, o outbound) attemptOutcome {
 }
 
 func buildBody(claim DeliveryClaim, ev Event) ([]byte, attemptOutcome, bool) {
-	occ, err := occurrenceOf(claim.EventType, ev)
+	occ, err := occurrenceOf(claim.EventType, ev, claim.Target)
 	if err != nil {
 		return nil, giveUp(GiveUpEventMalformed), false
 	}

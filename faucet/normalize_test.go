@@ -329,6 +329,19 @@ func TestNormalize(t *testing.T) {
 			require.Equal(t, tt.wantSHA, ev.HeadSHA)
 			require.JSONEq(t, tt.wantData, string(ev.Data))
 			require.NoError(t, ev.Validate())
+
+			var named struct {
+				Repository struct {
+					FullName string `json:"full_name"`
+					Owner    struct {
+						ID int64 `json:"id"`
+					} `json:"owner"`
+				} `json:"repository"`
+			}
+			require.NoError(t, json.Unmarshal(fixture(t, tt.fixture), &named))
+			require.Positive(t, named.Repository.Owner.ID)
+			require.Equal(t, named.Repository.Owner.ID, ev.OwnerID, "the account that owns the repository")
+			require.Equal(t, named.Repository.FullName, ev.RepoName, "the full name as the delivery wrote it")
 		})
 	}
 }

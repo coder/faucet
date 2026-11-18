@@ -74,3 +74,17 @@ func TestALoginHoldsAtMostTenInterestsOfOneRawEvent(t *testing.T) {
 	h.as("mallory")
 	h.subscribe(rawSubscribeTo("github.issues", repoArgs(), callbackURL+"/10", secret))
 }
+
+// The refusal at a limit names the target that the limit is of.
+func TestARawLimitOfAnOwnerTargetNamesTheOwner(t *testing.T) {
+	t.Parallel()
+
+	h := newRawPollHarness(t, asCaller(newServicePrincipal(t), orgGrants()))
+	secret := newSecret(t, 32)
+	for n := range 10 {
+		h.subscribe(rawSubscribeTo("github.issues", args("owner", "coder"), fmt.Sprintf("%s/%d", callbackURL, n), secret))
+	}
+	rpcErr := h.subscribeError(rawSubscribeTo("github.issues", args("owner", "coder"), callbackURL+"/10", secret))
+	require.EqualValues(t, codeResourceExhausted, rpcErr.Code)
+	require.Contains(t, rpcErr.Message, "this login has 10 live subscriptions of github.issues of every repository of coder")
+}

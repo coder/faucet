@@ -266,6 +266,7 @@ func TestNewRequiresCollaborators(t *testing.T) {
 		"authorizer":     func(d *faucet.Deps) { d.Authorizer = nil },
 		"principal from": func(d *faucet.Deps) { d.PrincipalFrom = nil },
 		"clock":          func(d *faucet.Deps) { d.Clock = nil },
+		"redelivered":    func(d *faucet.Deps) { d.RecordRepositories = true },
 	} {
 		deps := testDeps(&fakeStore{})
 		mutate(&deps)
@@ -292,10 +293,14 @@ func TestWaitToolIsListed(t *testing.T) {
 	schema, err := json.Marshal(tool.InputSchema)
 	require.NoError(t, err)
 	var parsed struct {
-		Required []string `json:"required"`
+		Required   []string       `json:"required"`
+		Properties map[string]any `json:"properties"`
 	}
 	require.NoError(t, json.Unmarshal(schema, &parsed))
-	require.ElementsMatch(t, []string{"repo", "types"}, parsed.Required)
+	require.ElementsMatch(t, []string{"types"}, parsed.Required, "the call names its target with one of repo, owner and all")
+	for _, target := range []string{"repo", "owner", "all", "repos"} {
+		require.Contains(t, parsed.Properties, target)
+	}
 }
 
 func TestWaitReturnsEventsForAnAllowedRepo(t *testing.T) {

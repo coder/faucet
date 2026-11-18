@@ -93,7 +93,7 @@ func (s *Service) subscribeRaw(ctx context.Context, wh *webhookState, entry *raw
 	if err != nil {
 		return nil, err
 	}
-	logger := s.logger.With(slog.F("repo", req.args.Repo), slog.F("event", entry.name))
+	logger := s.logger.With(req.args.logField(), slog.F("event", entry.name))
 
 	principal, err := s.subscriber(ctx, logger, "subscribe")
 	if err != nil {
@@ -101,7 +101,7 @@ func (s *Service) subscribeRaw(ctx context.Context, wh *webhookState, entry *raw
 	}
 	canonical := req.args.canonical()
 	key := NewSubscriptionKeyHash(principal.Login, req.callbackURL, entry.name, canonical)
-	repoID, err := s.authorizeFreshRepo(ctx, logger, principal, "subscribe", req.args.Repo)
+	target, err := s.authorizeFreshTarget(ctx, logger, principal, "subscribe", req.args.targetArguments)
 	if err != nil {
 		if xerrors.Is(err, ErrNoAccess) {
 			s.endRevokedSubscription(ctx, logger, wh, principal, key)
@@ -134,7 +134,7 @@ func (s *Service) subscribeRaw(ctx context.Context, wh *webhookState, entry *raw
 		EventType:     entry.name,
 		EventTypes:    []string{entry.name},
 		Arguments:     canonical,
-		RepoID:        repoID,
+		Target:        target,
 		SecretEnc:     sealSecret(wh.aead, wh.nonceKey, req.secret, key[:]),
 		Cursor:        math.MaxInt64,
 		ExpiresAt:     expiresAt,
@@ -147,12 +147,12 @@ func (s *Service) subscribeRaw(ctx context.Context, wh *webhookState, entry *raw
 			map[string]any{"limit": "subscriptions", "max": maxLiveSubscriptions})
 	case xerrors.Is(err, ErrRawInterestLimit):
 		logger.Info(ctx, "subscribe refused, raw interest limit reached", slog.F("login", principal.Login))
-		return nil, rawInterestLimitError(entry, req.args.Repo)
+		return nil, rawInterestLimitError(entry, req.args.targetArguments)
 	case xerrors.Is(err, ErrRawShareLimit):
 		logger.Info(ctx, "subscribe refused, raw subscription limit of the login reached", slog.F("login", principal.Login))
 		return nil, rpcError(codeResourceExhausted,
 			fmt.Sprintf("raw subscription limit reached: this login has %d live subscriptions of %s of %s, the most that one login may hold",
-				maxRawInterestsPerLogin, entry.name, req.args.Repo),
+				maxRawInterestsPerLogin, entry.name, req.args.describe()),
 			map[string]any{"limit": "raw_subscriptions", "max": maxRawInterestsPerLogin})
 	case err != nil:
 		return nil, subscriptionStoreError(ctx, logger, err)
@@ -189,7 +189,7 @@ func (s *Service) unsubscribeRaw(ctx context.Context, wh *webhookState, entry *r
 	if err != nil {
 		return nil, err
 	}
-	logger := s.logger.With(slog.F("repo", args.Repo), slog.F("event", entry.name))
+	logger := s.logger.With(args.logField(), slog.F("event", entry.name))
 
 	principal, err := s.subscriber(ctx, logger, "unsubscribe")
 	if err != nil {

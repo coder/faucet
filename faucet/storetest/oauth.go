@@ -304,7 +304,7 @@ func insertClientValidatesInput(t *testing.T, s oauth.Store) {
 		"no resource":        func(c *oauth.Client) { c.Resource = "" },
 		"no scope":           func(c *oauth.Client) { c.Scopes = nil },
 		"an unknown scope":   func(c *oauth.Client) { c.Scopes = []faucet.Scope{"events:everything"} },
-		"a bad grant":        func(c *oauth.Client) { c.Grants = []string{"org:coder"} },
+		"a bad grant":        func(c *oauth.Client) { c.Grants = []string{"org:coder/faucet"} },
 		"no creation time":   func(c *oauth.Client) { c.CreatedAt = time.Time{} },
 	} {
 		c := clientAt("ci-watcher", time.Now())

@@ -24,7 +24,7 @@ Faucet is a Go library first, with a thin HTTP server on top, so [coder/coder](h
 - **Poll.** `events/list` and `events/poll` from the draft MCP Events extension (SEP-3415).
 - **Subscribe.** `events/subscribe` registers a callback URL. Faucet sends each matching event to it as a signed [Standard Webhooks](https://www.standardwebhooks.com) request. See [docs/webhooks.md](docs/webhooks.md).
 
-An agent asks for events of one `repo` by name, optionally narrowed by `sha`, `pr`, GitHub's `actions` and field filters such as `head_branch` or `conclusion`. A name is a family or one of its exact types (see [docs/events.md](docs/events.md)):
+An agent asks for events by name, of one `repo` (a service also of an `owner` or of `all` repositories), optionally narrowed by `sha`, `pr`, GitHub's `actions` and field filters such as `head_branch` or `conclusion`. A name is a family or one of its exact types (see [docs/events.md](docs/events.md)):
 
 <!-- BEGIN generated:events -->
 | Family | GitHub event | Exact types |
@@ -127,7 +127,7 @@ The packages:
 - [`faucet/redelivery`](faucet/redelivery): the failed-webhook sweep, built with `redelivery.New`.
 - [`faucet/pgstore`](faucet/pgstore): the Postgres store, with embedded migrations.
 - [`faucet/storetest`](faucet/storetest): the contract tests that every `Store` must pass.
-- [`faucet/oauth`](faucet/oauth): faucet's login server, with the token endpoint and its metadata, the clients of services and their repo grants, the browser login of users, and the tokens that it mints.
+- [`faucet/oauth`](faucet/oauth): faucet's login server, with the token endpoint and its metadata, the clients of services and their grants, the browser login of users, and the tokens that it mints.
 
 [`cmd/faucet`](cmd/faucet) is the reference host and wires all of it together. The host decides who may call `Service.Purge`, `Service.DeliverDue` and `Runner.Run`, and when.
 

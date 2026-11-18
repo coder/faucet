@@ -34,7 +34,7 @@ func (s *Store) IngestRaw(ctx context.Context, d faucet.RawDelivery, now time.Ti
 	if plan == nil {
 		return faucet.RawIngest{}, xerrors.New("plan is required")
 	}
-	rows, err := s.q.RawInterests(ctx, database.RawInterestsParams{RepoID: d.RepoID, Event: d.Event, Now: now, Action: d.Action})
+	rows, err := s.q.RawInterests(ctx, database.RawInterestsParams{RepoID: d.RepoID, OwnerID: d.OwnerID, RepoName: d.RepoName, Event: d.Event, Now: now, Action: d.Action})
 	if err != nil {
 		return faucet.RawIngest{}, xerrors.Errorf("read interests: %w", err)
 	}
@@ -70,6 +70,7 @@ func (s *Store) IngestRaw(ctx context.Context, d faucet.RawDelivery, now time.Ti
 		Event:      d.Event,
 		Action:     d.Action,
 		RepoID:     d.RepoID,
+		OwnerID:    d.OwnerID,
 		HasBody:    p.Body != nil,
 		Body:       p.Body,
 		Fields:     p.Fields,
@@ -157,7 +158,7 @@ func (s *Store) UpsertRawSubscription(ctx context.Context, sub faucet.Subscripti
 		return faucet.Subscription{}, xerrors.Errorf("%q is not a raw event name", sub.EventType)
 	}
 	return s.upsertSubscriptionChecked(ctx, sub, now, limits.Live, func(q *database.Queries) error {
-		count, err := countRawTarget(ctx, q, sub.Principal, event, sub.RepoID, now, sub.KeyHash[:])
+		count, err := countRawTarget(ctx, q, sub.Principal, event, sub.Target, now, sub.KeyHash[:])
 		switch {
 		case err != nil:
 			return err
@@ -170,15 +171,19 @@ func (s *Store) UpsertRawSubscription(ctx context.Context, sub faucet.Subscripti
 	})
 }
 
-// countRawTarget counts the live interests of an event of a repository, but
-// the subscription of except. The lock that it takes first holds until the
-// commit, so no other new interest of the event and repository is stored
+// countRawTarget counts the live interests of an event of a target, but the
+// subscription of except. The lock that it takes first holds until the
+// commit, so no other new interest of the event and target is stored
 // meanwhile.
-func countRawTarget(ctx context.Context, q *database.Queries, principal, event string, repoID int64, now time.Time, except []byte) (database.CountRawInterestsRow, error) {
-	if err := q.LockRawTarget(ctx, database.LockRawTargetParams{Event: event, RepoID: repoID}); err != nil {
+func countRawTarget(ctx context.Context, q *database.Queries, principal, event string, target faucet.Target, now time.Time, except []byte) (database.CountRawInterestsRow, error) {
+	kind := string(target.Kind())
+	if err := q.LockRawTarget(ctx, database.LockRawTargetParams{Event: event, TargetKind: kind, RepoID: target.RepoID(), OwnerID: target.OwnerID()}); err != nil {
 		return database.CountRawInterestsRow{}, xerrors.Errorf("lock raw interests: %w", err)
 	}
-	count, err := q.CountRawInterests(ctx, database.CountRawInterestsParams{RepoID: repoID, Event: event, Now: now, ExceptKey: except, Principal: principal})
+	count, err := q.CountRawInterests(ctx, database.CountRawInterestsParams{
+		TargetKind: kind, RepoID: target.RepoID(), OwnerID: target.OwnerID(),
+		Event: event, Now: now, ExceptKey: except, Principal: principal,
+	})
 	if err != nil {
 		return database.CountRawInterestsRow{}, xerrors.Errorf("count raw interests: %w", err)
 	}
@@ -216,13 +221,14 @@ func (s *Store) OpenRawLease(ctx context.Context, lease faucet.RawLease, now tim
 	if err != nil {
 		return 0, xerrors.Errorf("end raw leases: %w", err)
 	}
-	count, err := countRawTarget(ctx, q, lease.Principal, lease.Event, lease.RepoID, now, nil)
+	count, err := countRawTarget(ctx, q, lease.Principal, lease.Event, lease.Target, now, nil)
 	if err != nil {
 		return 0, err
 	}
 	if count.OwnLeases >= int64(limits.PerPrincipalTarget) {
 		oldest, err := q.EndOldestRawLeaseOfTarget(ctx, database.EndOldestRawLeaseOfTargetParams{
-			Principal: lease.Principal, RepoID: lease.RepoID, Event: lease.Event, Now: now,
+			Principal: lease.Principal, Event: lease.Event, Now: now,
+			TargetKind: string(lease.Target.Kind()), RepoID: lease.Target.RepoID(), OwnerID: lease.Target.OwnerID(),
 		})
 		if err != nil {
 			return 0, xerrors.Errorf("end the oldest raw lease of the event: %w", err)
@@ -239,15 +245,18 @@ func (s *Store) OpenRawLease(ctx context.Context, lease faucet.RawLease, now tim
 		}
 	}
 	head, err := q.InsertRawLease(ctx, database.InsertRawLeaseParams{
-		ID:        lease.ID[:],
-		KeyHash:   lease.Key[:],
-		Principal: lease.Principal,
-		Event:     lease.Event,
-		Actions:   nonNil(lease.Actions),
-		Fields:    lease.Fields,
-		RepoID:    lease.RepoID,
-		Now:       now,
-		ExpiresAt: lease.ExpiresAt,
+		ID:         lease.ID[:],
+		KeyHash:    lease.Key[:],
+		Principal:  lease.Principal,
+		Event:      lease.Event,
+		Actions:    nonNil(lease.Actions),
+		Fields:     lease.Fields,
+		TargetKind: string(lease.Target.Kind()),
+		RepoID:     lease.Target.RepoID(),
+		OwnerID:    lease.Target.OwnerID(),
+		Repos:      nonNil(lease.RepoNames),
+		Now:        now,
+		ExpiresAt:  lease.ExpiresAt,
 	})
 	if err != nil {
 		return 0, xerrors.Errorf("insert raw lease: %w", err)
@@ -276,7 +285,8 @@ func (s *Store) ReadRawLease(ctx context.Context, r faucet.RawRead) (_ faucet.Ra
 	q := s.q.WithTx(tx)
 
 	acked, err := q.TouchRawLease(ctx, database.TouchRawLeaseParams{
-		After: r.After, Now: r.Now, ExpiresAt: r.ExpiresAt, ID: r.Lease[:], KeyHash: r.Key[:], RepoID: r.RepoID,
+		After: r.After, Now: r.Now, ExpiresAt: r.ExpiresAt, ID: r.Lease[:], KeyHash: r.Key[:],
+		TargetKind: string(r.Target.Kind()), RepoID: r.Target.RepoID(), OwnerID: r.Target.OwnerID(),
 	})
 	if xerrors.Is(err, sql.ErrNoRows) {
 		return faucet.RawPage{}, false, nil
@@ -307,6 +317,7 @@ func (s *Store) ReadRawLease(ctx context.Context, r faucet.RawRead) (_ faucet.Ra
 				Event:      row.Event.String,
 				Action:     row.Action.String,
 				RepoID:     row.RepoID.Int64,
+				OwnerID:    row.OwnerID.Int64,
 				Body:       row.Body,
 				Fields:     row.Fields,
 				ReceivedAt: row.ReceivedAt.Time,
@@ -345,6 +356,10 @@ func (s *Store) ClaimRawDelivery(ctx context.Context, now time.Time, lease time.
 	if err != nil {
 		return faucet.RawDeliveryClaim{}, false, err
 	}
+	target, err := toTarget(row.TargetKind, row.RepoID, row.OwnerID)
+	if err != nil {
+		return faucet.RawDeliveryClaim{}, false, err
+	}
 	claim := faucet.RawDeliveryClaim{
 		Ref:                 faucet.DeliveryRef{Key: key, EventID: row.RawEventID, Attempt: row.Attempts, Incarnation: row.Incarnation},
 		EnqueuedAt:          row.EnqueuedAt,
@@ -354,7 +369,7 @@ func (s *Store) ClaimRawDelivery(ctx context.Context, now time.Time, lease time.
 		SecretEnc:           row.SecretEnc,
 		PreviousSecretEnc:   row.PreviousSecretEnc,
 		PreviousSecretUntil: row.PreviousSecretUntil.Time,
-		RepoID:              row.RepoID,
+		Target:              target,
 		Watermark:           row.Watermark,
 	}
 	if row.StoredEventID.Valid {
@@ -364,6 +379,7 @@ func (s *Store) ClaimRawDelivery(ctx context.Context, now time.Time, lease time.
 			Event:      row.Event.String,
 			Action:     row.Action.String,
 			RepoID:     row.EventRepoID.Int64,
+			OwnerID:    row.EventOwnerID.Int64,
 			Body:       row.Body,
 			Fields:     row.Fields,
 			ReceivedAt: row.ReceivedAt.Time,
@@ -566,7 +582,11 @@ func (s *Store) RawWants(ctx context.Context, now time.Time) (_ []faucet.RawWant
 	}
 	wants := make([]faucet.RawWant, len(rows))
 	for i, row := range rows {
-		wants[i] = faucet.RawWant{RepoID: row.RepoID, Event: row.Event}
+		target, err := toTarget(row.TargetKind, row.RepoID, row.OwnerID)
+		if err != nil {
+			return nil, err
+		}
+		wants[i] = faucet.RawWant{Target: target, Event: row.Event}
 		if len(row.Actions) > 0 {
 			wants[i].Actions = row.Actions
 		}

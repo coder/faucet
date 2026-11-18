@@ -16,6 +16,8 @@ import (
 const (
 	maxClientIDBytes = 64
 	repoGrantPrefix  = "repo:"
+	orgGrantPrefix   = "org:"
+	allGrant         = "all"
 )
 
 // Client is a service client as a store keeps it. An operator makes it with
@@ -30,7 +32,9 @@ type Client struct {
 	// Resource is the one endpoint that the client's tokens are for, such as
 	// https://faucet.example.com/github/mcp.
 	Resource string
-	// Grants name what the client may read, each "repo:<owner>/<name>".
+	// Grants name what the client may read: "repo:<owner>/<name>" one
+	// repository, "org:<owner>" every repository of a user or organization,
+	// and "all" every repository.
 	Grants []string
 	// Scopes are the most that a token of the client can hold.
 	Scopes    []faucet.Scope
@@ -65,7 +69,7 @@ func (c Client) Validate() error {
 		}
 	}
 	for _, g := range c.Grants {
-		if _, err := parseRepoGrant(g); err != nil {
+		if _, err := parseGrant(g); err != nil {
 			return err
 		}
 	}
@@ -110,17 +114,40 @@ func ValidateClientID(id string) error {
 	return nil
 }
 
-// parseRepoGrant returns the repository, written owner/name, that a grant
-// names.
-func parseRepoGrant(grant string) (string, error) {
-	repo, ok := strings.CutPrefix(grant, repoGrantPrefix)
-	if !ok {
-		return "", xerrors.Errorf("grant %q is not repo:<owner>/<name>", grant)
+// clientGrant is what one grant names: a repository, written owner/name, every
+// repository of an owner, by login, or every repository.
+type clientGrant struct {
+	repo  string
+	owner string
+	all   bool
+}
+
+// parseGrant reads a grant in one of its three forms.
+func parseGrant(g string) (clientGrant, error) {
+	if g == allGrant {
+		return clientGrant{all: true}, nil
 	}
-	if _, _, err := githubapi.ParseRepo(repo); err != nil {
-		return "", xerrors.Errorf("grant %q is not repo:<owner>/<name>", grant)
+	if owner, ok := strings.CutPrefix(g, orgGrantPrefix); ok && githubapi.ValidOwner(owner) {
+		return clientGrant{owner: owner}, nil
 	}
-	return repo, nil
+	if repo, ok := strings.CutPrefix(g, repoGrantPrefix); ok {
+		if _, _, err := githubapi.ParseRepo(repo); err == nil {
+			return clientGrant{repo: repo}, nil
+		}
+	}
+	return clientGrant{}, xerrors.Errorf("grant %q is not repo:<owner>/<name>, org:<owner> or all", g)
+}
+
+// parseGrants reads the grants that a client holds. A store keeps only grants
+// that parse, so one that does not names nothing.
+func parseGrants(grants []string) []clientGrant {
+	parsed := make([]clientGrant, 0, len(grants))
+	for _, g := range grants {
+		if p, err := parseGrant(g); err == nil {
+			parsed = append(parsed, p)
+		}
+	}
+	return parsed
 }
 
 // newSecret returns prefix and 32 random bytes in base64url without padding.

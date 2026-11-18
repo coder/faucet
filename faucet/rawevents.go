@@ -14,8 +14,6 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"golang.org/x/xerrors"
-
-	"github.com/coder/faucet/faucet/internal/githubapi"
 )
 
 const (
@@ -32,10 +30,13 @@ type rawEvent struct {
 	description string
 }
 
-// rawEvents are the GitHub webhook events whose payload names a repository,
-// that no typed family stores in full, and that a host may offer raw, sorted
-// by event. issue_comment is here because pr.comments stores only the
-// comments on pull requests.
+// rawEvents are the GitHub webhook events that no typed family stores in
+// full and that a host may offer raw, sorted by event. issue_comment is here
+// because pr.comments stores only the comments on pull requests. Each payload
+// names a repository, or for some events of an organization, such as
+// project, project_card, project_column, package and registry_package, only
+// the organization: such a delivery reaches an owner or all interest and no
+// repository's.
 var rawEvents = []rawEvent{
 	{"commit_comment", "Comments that were posted on a commit."},
 	{"create", "Git branches and tags that were created."},
@@ -186,28 +187,22 @@ func init() {
 }
 
 func rawArgumentsSchema() json.RawMessage {
-	return marshalRaw(map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"repo": repoArgument,
-			"actions": map[string]any{
-				"type":        "array",
-				"minItems":    1,
-				"items":       map[string]any{"type": "string"},
-				"description": "Only deliveries whose action is one of these. Without it, every action, and events that have none.",
-			},
-			"fields": map[string]any{
-				"type":     "array",
-				"minItems": 1,
-				"maxItems": maxFieldPaths,
-				"items":    map[string]any{"type": "string"},
-				"description": fmt.Sprintf("Only these members of the payload, each a path of 1 to %d names of letters, digits, _ or - joined by dots and at most %d bytes long, such as commits.id, which keeps the id of each commit.",
-					maxFieldPathSegments, maxFieldPathBytes),
-			},
-		},
-		"required":             []string{"repo"},
-		"additionalProperties": false,
-	})
+	properties := targetProperties()
+	properties["actions"] = map[string]any{
+		"type":        "array",
+		"minItems":    1,
+		"items":       map[string]any{"type": "string"},
+		"description": "Only deliveries whose action is one of these. Without it, every action, and events that have none.",
+	}
+	properties["fields"] = map[string]any{
+		"type":     "array",
+		"minItems": 1,
+		"maxItems": maxFieldPaths,
+		"items":    map[string]any{"type": "string"},
+		"description": fmt.Sprintf("Only these members of the payload, each a path of 1 to %d names of letters, digits, _ or - joined by dots and at most %d bytes long, such as commits.id, which keeps the id of each commit.",
+			maxFieldPathSegments, maxFieldPathBytes),
+	}
+	return marshalRaw(map[string]any{"type": "object", "properties": properties, "additionalProperties": false})
 }
 
 // rawEntry returns the entry of a raw event name that the service offers.
@@ -246,17 +241,18 @@ func describeRawEvents(entries []*rawEntry, delivery []string) []eventDescriptor
 }
 
 type rawArguments struct {
-	Repo    string   `json:"repo"`
+	targetArguments
 	Actions []string `json:"actions,omitempty"`
 	Fields  []string `json:"fields,omitempty"`
 }
 
 func parseRawArguments(entry *rawEntry, raw json.RawMessage) (rawArguments, error) {
-	var generic any = map[string]any{}
-	if len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
-		if err := json.Unmarshal(raw, &generic); err != nil {
-			return rawArguments{}, invalidParams("arguments are not valid JSON")
-		}
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		raw = json.RawMessage("{}")
+	}
+	var generic any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return rawArguments{}, invalidParams("arguments are not valid JSON")
 	}
 	if err := entry.input.Validate(generic); err != nil {
 		return rawArguments{}, invalidParams("arguments do not match the inputSchema: %v", err)
@@ -265,7 +261,7 @@ func parseRawArguments(entry *rawEntry, raw json.RawMessage) (rawArguments, erro
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return rawArguments{}, invalidParams("arguments do not match the inputSchema: %v", err)
 	}
-	if _, _, err := githubapi.ParseRepo(args.Repo); err != nil {
+	if err := args.check(); err != nil {
 		return rawArguments{}, invalidParams("%v", err)
 	}
 	if i := slices.Index(args.Actions, ""); i >= 0 {
@@ -287,7 +283,7 @@ func validFieldPath(path string) bool {
 }
 
 func (a rawArguments) normalized() rawArguments {
-	return rawArguments{Repo: a.Repo, Actions: sortedSetOrNil(a.Actions), Fields: sortedSetOrNil(a.Fields)}
+	return rawArguments{targetArguments: a.targetArguments.normalized(), Actions: sortedSetOrNil(a.Actions), Fields: sortedSetOrNil(a.Fields)}
 }
 
 // canonical is the one JSON spelling of a, so that two requests that differ
@@ -393,17 +389,45 @@ func (v *rawValue) array() ([]*rawValue, bool) {
 	return v.elements, v.elements != nil
 }
 
-func (d rawDocument) envelope() (repoID int64, action string, ok bool) {
+// envelope reads where a delivery comes from and its action into a delivery
+// of event. A delivery that names a repository comes from it and its owner.
+// One that names none, such as a project of an organization, comes from the
+// organization it names. ok is false for a delivery that names neither, and
+// for one whose repository has no ID. A full name that a store cannot hold
+// is no name, which no filter of names matches.
+func (d rawDocument) envelope(deliveryID, event string) (delivery RawDelivery, ok bool) {
 	members, _ := d.root.object()
+	member := func(name string) json.RawMessage {
+		if v := members[name]; v != nil {
+			return v.raw
+		}
+		return nil
+	}
+	delivery = RawDelivery{DeliveryID: deliveryID, Event: event}
+	if json.Unmarshal(member("action"), &delivery.Action) != nil {
+		delivery.Action = ""
+	}
+	if isAbsent(member("repository")) {
+		var organization map[string]json.RawMessage
+		if json.Unmarshal(member("organization"), &organization) != nil ||
+			json.Unmarshal(organization["id"], &delivery.OwnerID) != nil || delivery.OwnerID <= 0 {
+			return RawDelivery{}, false
+		}
+		return delivery, true
+	}
 	var repository map[string]json.RawMessage
-	if r, found := members["repository"]; !found || json.Unmarshal(r.raw, &repository) != nil ||
-		json.Unmarshal(repository["id"], &repoID) != nil || repoID <= 0 {
-		return 0, "", false
+	if json.Unmarshal(member("repository"), &repository) != nil ||
+		json.Unmarshal(repository["id"], &delivery.RepoID) != nil || delivery.RepoID <= 0 {
+		return RawDelivery{}, false
 	}
-	if a, found := members["action"]; !found || json.Unmarshal(a.raw, &action) != nil {
-		action = ""
+	var owner map[string]json.RawMessage
+	if json.Unmarshal(repository["owner"], &owner) != nil || json.Unmarshal(owner["id"], &delivery.OwnerID) != nil || delivery.OwnerID < 0 {
+		delivery.OwnerID = 0
 	}
-	return repoID, action, true
+	if json.Unmarshal(repository["full_name"], &delivery.RepoName) != nil || strings.ContainsRune(delivery.RepoName, 0) {
+		delivery.RepoName = ""
+	}
+	return delivery, true
 }
 
 // project copies each selected value as the payload's own bytes, because a

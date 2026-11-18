@@ -103,14 +103,14 @@ func (h *ingestHarness) openLease(w ingestInterest) *ingestLease {
 		Event:     w.event,
 		Actions:   w.actions,
 		Fields:    w.fields,
-		RepoID:    w.repoID,
+		Target:    faucet.RepoTarget(w.repoID),
 		ExpiresAt: h.clock.Now().Add(time.Hour),
 	}
 	binary.BigEndian.PutUint64(lease.ID[8:], h.leases.Add(1))
 	head, err := h.store.OpenRawLease(h.ctx, lease, h.clock.Now(), faucet.RawLimits{Live: 100, PerTarget: 1000, PerPrincipalTarget: 1000})
 	require.NoError(h.t, err)
 	return &ingestLease{h: h, after: head, read: faucet.RawRead{
-		Lease: lease.ID, Key: lease.Key, RepoID: lease.RepoID, Limit: 2000, MaxBytes: 64 << 20,
+		Lease: lease.ID, Key: lease.Key, Target: lease.Target, Limit: 2000, MaxBytes: 64 << 20,
 	}}
 }
 
@@ -138,7 +138,7 @@ func (h *ingestHarness) subscribe(w ingestInterest) faucet.Subscription {
 		EventType:   name,
 		EventTypes:  []string{name},
 		Arguments:   w.arguments(),
-		RepoID:      w.repoID,
+		Target:      faucet.RepoTarget(w.repoID),
 		SecretEnc:   []byte("sealed"),
 		Cursor:      math.MaxInt64,
 		ExpiresAt:   h.clock.Now().Add(time.Hour),
@@ -353,7 +353,7 @@ func TestRawIngestTypedStaysTyped(t *testing.T) {
 func TestRawIngestRecordsTheRepository(t *testing.T) {
 	t.Parallel()
 
-	recording := func(d *faucet.Deps) { d.RecordRepositories = true }
+	recording := func(d *faucet.Deps) { d.RecordRepositories, d.Redelivered = true, noRedeliveries }
 	named := func(fullName string) map[string]any {
 		return map[string]any{"repository": map[string]any{"id": repoID, "full_name": fullName, "owner": map[string]any{"id": 9, "login": "octo"}}}
 	}

@@ -291,9 +291,9 @@ func rawWantsListsWhatLiveRawInterestsWantOnce(t *testing.T, s RawStore) {
 	require.NoError(t, err)
 
 	require.ElementsMatch(t, []faucet.RawWant{
-		{RepoID: rawRepo, Event: rawEvent, Actions: []string{"closed", "opened"}},
-		{RepoID: rawRepo, Event: rawEvent},
-		{RepoID: rawRepo + 1, Event: "issues", Actions: []string{"labeled"}},
+		{Target: faucet.RepoTarget(rawRepo), Event: rawEvent, Actions: []string{"closed", "opened"}},
+		{Target: faucet.RepoTarget(rawRepo), Event: rawEvent},
+		{Target: faucet.RepoTarget(rawRepo + 1), Event: "issues", Actions: []string{"labeled"}},
 	}, r.purgeWantsAt(at), "one entry per want of a live raw interest, with its actions in rising order, and none for a typed subscription")
 	require.Len(t, r.purgeWantsAt(r.now), 5, "the subscription and the lease that expire at the later time are live before it")
 }
@@ -336,9 +336,11 @@ func ingestRawRefusesAnInvalidDelivery(t *testing.T, s RawStore) {
 	r := newRawRig(t, s)
 	r.subscribe(1, rawSpec{})
 	for name, d := range map[string]faucet.RawDelivery{
-		"an empty delivery ID": {Event: rawEvent, RepoID: rawRepo},
-		"an empty event":       {DeliveryID: "raw-delivery-bad", RepoID: rawRepo},
-		"repository 0":         {DeliveryID: "raw-delivery-bad", Event: rawEvent},
+		"an empty delivery ID":       {Event: rawEvent, RepoID: rawRepo},
+		"an empty event":             {DeliveryID: "raw-delivery-bad", RepoID: rawRepo},
+		"no repository and no owner": {DeliveryID: "raw-delivery-bad", Event: rawEvent},
+		"a negative repository":      {DeliveryID: "raw-delivery-bad", Event: rawEvent, RepoID: -1, OwnerID: rawOwner},
+		"a negative owner":           {DeliveryID: "raw-delivery-bad", Event: rawEvent, RepoID: rawRepo, OwnerID: -1},
 	} {
 		_, err := s.IngestRaw(r.ctx, d, r.now, func([]faucet.RawInterest) faucet.RawPlan {
 			t.Errorf("the store planned a delivery with %s", name)
@@ -357,7 +359,8 @@ func openRawLeaseRefusesAnInvalidLease(t *testing.T, s RawStore) {
 		"a zero ID":               func(l *faucet.RawLease) { l.ID = faucet.RawLeaseID{} },
 		"an empty principal":      func(l *faucet.RawLease) { l.Principal = "" },
 		"an empty event":          func(l *faucet.RawLease) { l.Event = "" },
-		"repository 0":            func(l *faucet.RawLease) { l.RepoID = 0 },
+		"repository 0":            func(l *faucet.RawLease) { l.Target = faucet.RepoTarget(0) },
+		"a zero target":           func(l *faucet.RawLease) { l.Target = faucet.Target{} },
 		"an expiry not after now": func(l *faucet.RawLease) { l.ExpiresAt = r.now },
 	}
 	for name, spoil := range bad {

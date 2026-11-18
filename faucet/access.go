@@ -248,6 +248,25 @@ type Authorizer interface {
 	RepoIDFresh(ctx context.Context, p Principal, repo string) (int64, error)
 }
 
+// ServiceGrants decides which owners a service may read every repository of,
+// and whether it may read every repository, from the grants that an operator
+// gave it. A host that has services passes one in Deps. Each method gets a
+// service, and returns ErrNoAccess, or an error that wraps it and says why,
+// when the grants do not cover the read: the caller gets that error's text.
+type ServiceGrants interface {
+	// OwnerID returns the account ID of owner, a GitHub login, when p's
+	// grants cover every repository of it. It may answer from the grants
+	// that p holds.
+	OwnerID(ctx context.Context, p Principal, owner string) (int64, error)
+	// OwnerIDFresh is OwnerID with the grants that the service holds now. A
+	// service that is gone or disabled is ErrInvalidToken.
+	OwnerIDFresh(ctx context.Context, p Principal, owner string) (int64, error)
+	// CoversAll returns nil when p's grants cover every repository.
+	CoversAll(ctx context.Context, p Principal) error
+	// CoversAllFresh is CoversAll with the grants that the service holds now.
+	CoversAllFresh(ctx context.Context, p Principal) error
+}
+
 // TokenAuthorizer asks the GitHub API whether the principal's own token can
 // read a repository. It sends the token only to BaseURL.
 type TokenAuthorizer struct {

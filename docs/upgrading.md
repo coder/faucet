@@ -2,6 +2,24 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## To owner and all targets
+
+This came in [#55](https://github.com/coder/faucet/pull/55). A service can now read every repository of an owner or every repository (see [service-accounts.md](service-accounts.md#grants) and [events.md](events.md#targets)). A caller that names `repo` sees no change, and a subscription made before keeps its key.
+
+- **Grant a service an owner or all repositories** with `faucet clients create -grant org:<login>` or `-grant all`. A client made before keeps its `repo:` grants.
+- **Grant again a repository whose owner was renamed before the upgrade.** Faucet now finds a repository by the login that its owner's latest delivery carried. A `repo:<old login>/<name>` grant of an owner renamed before the upgrade works until that owner's next delivery and then finds nothing. Make a client with `repo:<current login>/<name>` instead.
+- **Migration `000014_owner_targets`** adds the owner and the name of the repository to each event, the kind of target to subscriptions and raw leases, the table `faucet_owners` of each account's latest login (filled from `faucet_repos`), and indexes for each kind of target. It rewrites no row, but it builds `faucet_events_owner` over the events table, which blocks event writes while it runs. An event stored before it records no owner, so an `owner` target never reads it, while an `all` target does. Its down file deletes every owner and all subscription and lease, and the raw events of deliveries that named no repository.
+- **Issue no `org:` or `all` grant until every instance runs this build.** Only a service with one of them can make an owner or all subscription or lease, and an instance of the build before cannot serve one:
+  - Its delivery run fails at such a subscription when it sits below the purge mark, and queues no event for the subscriptions after it.
+  - Its purge moves such a subscription past the events it lost, so the subscriber gets no gap.
+  - It gives up a queued event of such a subscription, typed or raw, as `repo_mismatch`.
+  - It stores no raw event that only an owner or all interest wants.
+  - It refuses the renewal, poll or wait of an owner or all target as invalid arguments, so a subscription whose renewals reach only such instances expires.
+- **Redelivery asks again for more.** An owner or all interest wants every failed delivery of its raw event, whatever the repository, because GitHub's list of deliveries names no owner.
+- **A host that embeds faucet** turns owner and all targets on for services with `Deps.ServiceGrants`, which `oauth.ServiceAccess` implements. Without it faucet refuses them. `Subscription`, `PollQuery`, `ScanTarget`, `DeliveryClaim` and the raw lease, read, claim and want types hold a `Target` in place of `RepoID`.
+- **A host that embeds faucet and sets `Deps.RecordRepositories`** must now also set `Deps.Redelivered`, or `New` refuses: pass `pgstore.Store.Redelivered`, or a func that answers false when the host runs no redelivery. A delivery that it reports moves no login. There is no default, because a func that always answered false would let the host's own redeliveries give renamed accounts their old logins back, and one that always answered true would keep every login as first seen.
+- **A `Store` or `RawStore` of your own** must pass the new `storetest` subtests. `Store` gains `RecordOwner`, `AddOwner`, `OwnerByID` and `OwnerByLogin`; `RecordRepository` and `RenameRepository` no longer record the owner's login, which the webhook records first; and `RenameRepository` also matches `from` under the login that the row's owner holds now.
+
 ## To the browser login (migration `000013_browser_login`)
 
 This came in [#54](https://github.com/coder/faucet/pull/54). Nothing that a client sees changes until you set `FAUCET_GITHUB_APP_CLIENT_ID`, `FAUCET_GITHUB_APP_CLIENT_SECRET` and `FAUCET_TOKEN_KEY` next to `FAUCET_PUBLIC_URL` (see [browser-login.md](browser-login.md)). With only some of them set, the server refuses to start and names the missing ones. Then:

@@ -101,7 +101,7 @@ func claimRawDeliveryReturnsTheSubscriptionAndTheStoredEvent(t *testing.T, s Raw
 	require.Equal(t, []byte("sealed-2"), claim.SecretEnc, "the claim carries the secret as of the claim")
 	require.Equal(t, []byte("sealed-1"), claim.PreviousSecretEnc, "and the secret that the delivery is also signed with")
 	require.True(t, r.now.Add(5*time.Minute).Equal(claim.PreviousSecretUntil), "got %s", claim.PreviousSecretUntil)
-	require.Equal(t, rawRepo, claim.RepoID)
+	require.Equal(t, faucet.RepoTarget(rawRepo), claim.Target)
 
 	require.NotNil(t, claim.Event, "the event and its body are stored")
 	require.Equal(t, id, claim.Event.ID)

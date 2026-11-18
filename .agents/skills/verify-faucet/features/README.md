@@ -30,6 +30,7 @@ One file per user-facing behavior of the faucet server at PR 8b, from the point 
 | [Secret rotation](rotation.md) | `POST /github/mcp`, `events/subscribe` with a new secret, then `GET /cron/deliver` and the signed `POST` to the callback URL | `tests/rotation.e2e.ts` | tested |
 | [Webhook delivery](delivery.md) | `GET /cron/deliver`, then the signed `POST` to the callback URL | `tests/delivery.e2e.ts`, `tests/delivery-retry.e2e.ts`, `tests/cron-auth.e2e.ts` | tested |
 | [Service accounts](service-accounts.md) | `faucet clients`, `POST /oauth/token`, `/.well-known/oauth-*`, then `POST /github/mcp` and `POST /mcp` with a faucet token | `tests/service-accounts.e2e.ts` | tested |
+| [Owner targets](owner-targets.md) | `faucet clients create -grant org:<login>`, then `events/subscribe`, `events/poll` and the wait tool on `POST /github/mcp` with `owner` or `all`, then `GET /cron/deliver` | `tests/owner-targets.e2e.ts` | tested |
 | [Browser login](browser-login.md) | `GET` and `POST /oauth/authorize`, the stub's GitHub, `GET /oauth/github/callback`, `POST /oauth/token` with a code or a refresh token, then `POST /github/mcp` with a person's faucet token | `tests/browser-login.e2e.ts` | tested |
 | [Redelivery](redeliver.md) | `GET /cron/redeliver`, the deliveries stub, the redelivery tables and the app log | `tests/redeliver.e2e.ts`, `tests/cron-auth.e2e.ts`, `tests/startup.e2e.ts` | tested |
 

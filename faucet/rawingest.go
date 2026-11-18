@@ -17,8 +17,7 @@ func (s *Service) serveRawWebhook(w http.ResponseWriter, r *http.Request, logger
 	}
 	var d RawDelivery
 	if ok {
-		d = RawDelivery{DeliveryID: deliveryID, Event: entry.event}
-		d.RepoID, d.Action, ok = doc.envelope()
+		d, ok = doc.envelope(deliveryID, entry.event)
 	}
 	if !ok {
 		logger.Debug(r.Context(), "webhook ignored")

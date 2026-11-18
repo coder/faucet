@@ -44,8 +44,14 @@ func TestNewClientRefusesAClientThatCannotWork(t *testing.T) {
 		"no grant": func() (oauth.Client, string, error) {
 			return oauth.NewClient("ci", resource, bothScopes, nil, time.Now())
 		},
-		"an org grant": func() (oauth.Client, string, error) {
-			return oauth.NewClient("ci", resource, bothScopes, []string{"org:coder"}, time.Now())
+		"an org grant of a repository": func() (oauth.Client, string, error) {
+			return oauth.NewClient("ci", resource, bothScopes, []string{"org:coder/faucet"}, time.Now())
+		},
+		"an org grant of no login": func() (oauth.Client, string, error) {
+			return oauth.NewClient("ci", resource, bothScopes, []string{"org:"}, time.Now())
+		},
+		"all of a repository": func() (oauth.Client, string, error) {
+			return oauth.NewClient("ci", resource, bothScopes, []string{"all:coder/faucet"}, time.Now())
 		},
 		"a bare repo": func() (oauth.Client, string, error) {
 			return oauth.NewClient("ci", resource, bothScopes, []string{"coder/faucet"}, time.Now())
@@ -77,4 +83,7 @@ func TestNewClientRefusesAClientThatCannotWork(t *testing.T) {
 	}
 	_, _, err := oauth.NewClient(strings.Repeat("a", 64), resource, bothScopes, grants, time.Now())
 	require.NoError(t, err, "64 bytes is the longest ID")
+	c, _, err := oauth.NewClient("ci", resource, bothScopes, []string{"repo:coder/faucet", "org:coder", "all"}, time.Now())
+	require.NoError(t, err, "a grant names a repository, an owner or every repository")
+	require.Equal(t, []string{"repo:coder/faucet", "org:coder", "all"}, c.Grants)
 }

@@ -38,7 +38,7 @@ func storeRawEvent(t *testing.T, store *fakeStore, now time.Time, n uint64) int6
 	ctx := context.Background()
 	lease := faucet.RawLease{
 		Key: faucet.NewSubscriptionKeyHash("someone", "", "github.fork", []byte(`{"repo":"other/repo"}`)), Principal: "someone",
-		Event: "fork", RepoID: otherRepoID, ExpiresAt: now.Add(time.Hour),
+		Event: "fork", Target: faucet.RepoTarget(otherRepoID), ExpiresAt: now.Add(time.Hour),
 	}
 	binary.BigEndian.PutUint64(lease.ID[8:], n)
 	_, err := store.OpenRawLease(ctx, lease, now, faucet.RawLimits{Live: 100, PerTarget: 1000, PerPrincipalTarget: 1000})
@@ -90,7 +90,7 @@ func TestSubscribeToARawNameStoresASubscriptionThatTheEventLogNeverReads(t *test
 	require.Equal(t, []string{"github.issues"}, row.EventTypes)
 	require.Equal(t, `{"repo":"octo/repo","actions":["closed","opened"],"fields":["action","issue.title"]}`, string(row.Arguments),
 		"the arguments are stored in their one spelling")
-	require.EqualValues(t, repoID, row.RepoID)
+	require.Equal(t, faucet.RepoTarget(repoID), row.Target)
 	require.Equal(t, got.ID, row.KeyHash.ID())
 	require.EqualValues(t, math.MaxInt64, row.Cursor, "the delivery queue of the event log never reaches this position")
 	require.Equal(t, 1, h.verifier.callCount())

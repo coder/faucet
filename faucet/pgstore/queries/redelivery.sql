@@ -138,3 +138,6 @@ WITH purged AS (
   RETURNING 1
 )
 SELECT ((SELECT COUNT(*) FROM purged) + (SELECT COUNT(*) FROM purged_gaps))::bigint AS deleted;
+
+-- name: IsRedelivery :one
+SELECT EXISTS (SELECT 1 FROM faucet_redeliveries WHERE guid = @guid::text)::boolean AS redelivered;

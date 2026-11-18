@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -216,7 +217,7 @@ func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {
 	require.EqualValues(t, 400, hostVersion)
 	var faucetVersion int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM `+pq.QuoteIdentifier(pgstore.MigrationsTable)).Scan(&faucetVersion))
-	require.EqualValues(t, 13, faucetVersion)
+	require.EqualValues(t, 14, faucetVersion)
 }
 
 // The raw events migration adds tables of its own and one index. A down
@@ -228,12 +229,17 @@ func TestTheRawEventsMigrationGoesDownAndUpAroundTheEventLog(t *testing.T) {
 	db := newDatabase(t, testDatabaseURL(t))
 	store := pgstore.New(db)
 	ctx := context.Background()
+	// The owner targets migration adds columns to the raw tables, so it goes
+	// down before them and up after them.
 	migrate := func(direction string) {
 		t.Helper()
-		statements, err := os.ReadFile("migrations/000012_raw_events." + direction + ".sql")
-		require.NoError(t, err)
-		_, err = db.ExecContext(ctx, string(statements))
-		require.NoError(t, err)
+		files := []string{"000014_owner_targets", "000012_raw_events"}
+		if direction == "up" {
+			slices.Reverse(files)
+		}
+		for _, file := range files {
+			runMigrationFile(t, db, file+"."+direction+".sql")
+		}
 	}
 	exists := func(relation string) (found bool) {
 		t.Helper()
@@ -249,7 +255,7 @@ func TestTheRawEventsMigrationGoesDownAndUpAroundTheEventLog(t *testing.T) {
 	subscription := faucet.Subscription{
 		KeyHash:   faucet.NewSubscriptionKeyHash("octocat", callbackURL, "github.push", arguments),
 		Principal: "octocat", CallbackURL: callbackURL, EventType: "github.push", EventTypes: []string{"github.push"},
-		Arguments: arguments, RepoID: 42, SecretEnc: []byte("sealed"), Cursor: math.MaxInt64, ExpiresAt: now.Add(time.Hour),
+		Arguments: arguments, Target: faucet.RepoTarget(42), SecretEnc: []byte("sealed"), Cursor: math.MaxInt64, ExpiresAt: now.Add(time.Hour),
 	}
 	push := faucet.RawDelivery{DeliveryID: "push-1", Event: "push", RepoID: 42}
 	serve := func(interests []faucet.RawInterest) faucet.RawPlan {
@@ -270,20 +276,24 @@ func TestTheRawEventsMigrationGoesDownAndUpAroundTheEventLog(t *testing.T) {
 	for _, relation := range relations {
 		require.False(t, exists(relation), "%s is gone", relation)
 	}
-	_, inserted, err := store.InsertEvent(ctx, faucet.Event{Source: "github", DeliveryID: "run-1", Type: "ci.run_completed", RepoID: 42, Data: json.RawMessage(`{}`)})
-	require.NoError(t, err)
-	require.True(t, inserted, "the event log stores as before")
-	targets, err := store.ScanTargets(ctx, now, 100, 100)
-	require.NoError(t, err)
-	require.Empty(t, targets, "the raw subscription is a row that the event log never scans")
-	renewed, err := store.UpsertSubscription(ctx, subscription, now.Add(time.Minute), 100)
-	require.NoError(t, err)
-	require.True(t, row.CreatedAt.Equal(renewed.CreatedAt), "and its subscriber can still renew it")
+	// This build reads the columns of later migrations, so the build before
+	// the raw events is played by its own statements.
+	_, err = db.ExecContext(ctx, `INSERT INTO faucet_events (source, delivery_id, type, repo_id, data) VALUES ('github', 'run-1', 'ci.run_completed', 42, '{}')`)
+	require.NoError(t, err, "the event log stores as before")
+	var scanned int64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT scanned_through FROM faucet_subscriptions WHERE key_hash = $1`, row.KeyHash[:]).Scan(&scanned))
+	require.EqualValues(t, math.MaxInt64, scanned, "the raw subscription is a row that the event log never scans")
 
 	migrate("up")
 	for _, relation := range relations {
 		require.True(t, exists(relation), "%s is back", relation)
 	}
+	targets, err := store.ScanTargets(ctx, now, 100, 100)
+	require.NoError(t, err)
+	require.Empty(t, targets, "the raw subscription is still no scan target")
+	renewed, err := store.UpsertSubscription(ctx, subscription, now.Add(time.Minute), 100)
+	require.NoError(t, err)
+	require.True(t, row.CreatedAt.Equal(renewed.CreatedAt), "and its subscriber can still renew it")
 	head, err := store.RawHead(ctx)
 	require.NoError(t, err)
 	require.Zero(t, head, "raw events start empty")
@@ -294,6 +304,89 @@ func TestTheRawEventsMigrationGoesDownAndUpAroundTheEventLog(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, row.KeyHash, claim.Ref.Key)
+}
+
+func runMigrationFile(t *testing.T, db *sql.DB, name string) {
+	t.Helper()
+	statements, err := os.ReadFile("migrations/" + name)
+	require.NoError(t, err)
+	_, err = db.ExecContext(context.Background(), string(statements))
+	require.NoError(t, err)
+}
+
+// A down of the owner targets migration deletes the subscriptions, leases and
+// raw events that a build from before it cannot hold, keeps the rows of one
+// repository, and an up reads those as repo targets.
+func TestTheOwnerTargetsMigrationGoesDownToRepositoryRowsAndUpAgain(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	subscription := func(callbackURL string, target faucet.Target) faucet.Subscription {
+		arguments := json.RawMessage(`{"repo":"octo/repo"}`)
+		return faucet.Subscription{
+			KeyHash:   faucet.NewSubscriptionKeyHash("octocat", callbackURL, "ci.run_completed", arguments),
+			Principal: "octocat", CallbackURL: callbackURL, EventType: "ci.run_completed", EventTypes: []string{"ci.run_completed"},
+			Arguments: arguments, Target: target, SecretEnc: []byte("sealed"), ExpiresAt: now.Add(time.Hour),
+		}
+	}
+	repo := subscription("https://hooks.example.test/repo", faucet.RepoTarget(42))
+	for _, sub := range []faucet.Subscription{repo, subscription("https://hooks.example.test/owner", faucet.OwnerTarget(7)), subscription("https://hooks.example.test/all", faucet.AllTarget())} {
+		_, err := store.UpsertSubscription(ctx, sub, now, 100)
+		require.NoError(t, err)
+	}
+	for _, lease := range []struct {
+		kind            string
+		repoID, ownerID int64
+	}{{"repo", 42, 0}, {"owner", 0, 7}, {"all", 0, 0}} {
+		_, err := db.ExecContext(ctx, `INSERT INTO faucet_raw_leases (id, key_hash, principal, event, target_kind, repo_id, owner_id, acked_through, created_at, polled_at, expires_at)
+			VALUES (decode(md5($1 || random()::text), 'hex'), sha256(random()::text::bytea), 'octocat', 'push', $1, $2, $3, 0, $4, $4, $5)`, lease.kind, lease.repoID, lease.ownerID, now, now.Add(time.Hour))
+		require.NoError(t, err)
+	}
+	for _, raw := range []struct {
+		deliveryID      string
+		repoID, ownerID int64
+	}{{"push-1", 42, 7}, {"project-1", 0, 7}} {
+		_, err := db.ExecContext(ctx, `INSERT INTO faucet_raw_events (delivery_id, event, action, repo_id, owner_id, received_at) VALUES ($1, 'push', '', $2, $3, $4)`,
+			raw.deliveryID, raw.repoID, raw.ownerID, now)
+		require.NoError(t, err)
+	}
+	ev, _, err := store.InsertEvent(ctx, faucet.Event{Source: "github", DeliveryID: "run-1", Type: "ci.run_completed", RepoID: 42, OwnerID: 7, RepoName: "octo/repo", Data: json.RawMessage(`{}`)})
+	require.NoError(t, err)
+	count := func(query string) (n int) {
+		t.Helper()
+		require.NoError(t, db.QueryRowContext(ctx, query).Scan(&n))
+		return n
+	}
+
+	runMigrationFile(t, db, "000014_owner_targets.down.sql")
+	require.Equal(t, 1, count(`SELECT COUNT(*) FROM faucet_subscriptions WHERE repo_id = 42`), "the repository's subscription stays")
+	require.Equal(t, 1, count(`SELECT COUNT(*) FROM faucet_subscriptions`), "the owner and all subscriptions are gone")
+	require.Equal(t, 1, count(`SELECT COUNT(*) FROM faucet_raw_leases`), "so are the owner and all leases")
+	require.Equal(t, 1, count(`SELECT COUNT(*) FROM faucet_raw_events WHERE delivery_id = 'push-1'`))
+	require.Equal(t, 1, count(`SELECT COUNT(*) FROM faucet_raw_events`), "a raw event of no repository is gone")
+	require.Equal(t, 1, count(`SELECT COUNT(*) FROM faucet_events`), "the event log keeps its rows")
+	_, err = db.ExecContext(ctx, `UPDATE faucet_subscriptions SET repo_id = 0`)
+	require.Error(t, err, "a subscription needs a repository again")
+
+	runMigrationFile(t, db, "000014_owner_targets.up.sql")
+	targets, err := store.ScanTargets(ctx, now, 100, 100)
+	require.NoError(t, err)
+	require.Len(t, targets, 1)
+	require.Equal(t, repo.KeyHash, targets[0].KeyHash)
+	require.Equal(t, faucet.RepoTarget(42), targets[0].Target, "a row from before the up is a repo target")
+	page, err := store.PollEvents(ctx, faucet.PollQuery{Target: faucet.AllTarget(), Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, page.Events, 1)
+	require.Equal(t, ev.ID, page.Events[0].ID)
+	require.Zero(t, page.Events[0].OwnerID, "an event stored before the up has no owner")
+	require.Empty(t, page.Events[0].RepoName)
+	for _, bad := range []struct{ repoID, ownerID int64 }{{0, 0}, {-1, 7}, {42, -1}} {
+		_, err := db.ExecContext(ctx, `INSERT INTO faucet_raw_events (delivery_id, event, action, repo_id, owner_id, received_at) VALUES ('bad', 'push', '', $1, $2, $3)`,
+			bad.repoID, bad.ownerID, now)
+		require.Error(t, err, "a raw event after the up names a repository or an owner, and no negative ID: %+v", bad)
+	}
 }
 
 func TestTheClearMigrationMovesTheOldTopToTheClearAndBack(t *testing.T) {

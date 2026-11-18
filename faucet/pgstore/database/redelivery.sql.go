@@ -183,6 +183,17 @@ func (q *Queries) InsertRedeliveryRange(ctx context.Context, arg InsertRedeliver
 	return id, err
 }
 
+const isRedelivery = `-- name: IsRedelivery :one
+SELECT EXISTS (SELECT 1 FROM faucet_redeliveries WHERE guid = $1::text)::boolean AS redelivered
+`
+
+func (q *Queries) IsRedelivery(ctx context.Context, guid string) (bool, error) {
+	row := q.db.QueryRowContext(ctx, isRedelivery, guid)
+	var redelivered bool
+	err := row.Scan(&redelivered)
+	return redelivered, err
+}
+
 const listOpenRedeliveryRanges = `-- name: ListOpenRedeliveryRanges :many
 SELECT id, newer_at, older_at, cursor
 FROM faucet_redelivery_ranges

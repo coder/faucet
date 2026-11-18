@@ -2,16 +2,18 @@ package faucet
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog/v3"
-	"github.com/coder/faucet/faucet/internal/githubapi"
 )
 
 const (
@@ -35,7 +37,7 @@ var (
 )
 
 type waitInput struct {
-	Repo     string   `json:"repo" jsonschema:"the repository, written owner/name"`
+	targetArguments
 	Types    []string `json:"types" jsonschema:"the event names to wait for, at least one: a family such as pr.activity or an exact type such as pr.closed"`
 	Actions  []string `json:"actions,omitempty" jsonschema:"only events of these GitHub actions, such as closed; each narrows the families in types that have it, and a family that has none of them stays whole; each must be an action of one of the families"`
 	SHA      string   `json:"sha,omitempty" jsonschema:"only events for this 40 character head commit SHA"`
@@ -70,18 +72,21 @@ type waitOutput struct {
 // ServerCapabilities so that clients learn the server speaks Events.
 //
 // The tool returns the events of one repository that match its filters, as
-// soon as there are any, or none when timeout_s runs out. Either way it
-// returns a cursor, and passing that cursor to the next call resumes exactly
-// where this one stopped, as long as repo and the filters stay the same: the
-// cursor is the newest event of any repository, so an event at or below it that
-// matches only a new filter is never returned. Without a cursor it starts at
-// the present, or ten minutes back when sha is set.
+// soon as there are any, or none when timeout_s runs out. A service client
+// may name every repository of an owner, or every repository, instead. Either
+// way it returns a cursor, and passing that cursor to the next call resumes
+// exactly where this one stopped, as long as the target and the filters stay
+// the same: the cursor is the newest event of any repository, so an event at
+// or below it that matches only a new filter is never returned. Without a
+// cursor it starts at the present, or ten minutes back when sha is set.
 func (s *Service) Register(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
-		Name: toolName,
+		Name:        toolName,
+		InputSchema: waitInputSchema(),
 		Description: "Wait for GitHub events on a repository, such as a CI run finishing or a pull request review, " +
-			"and return them as soon as they arrive. Returns no events and a cursor when timeout_s runs out; " +
-			"call again with that cursor and the same repo and filters to keep waiting. When truncated is true, a retention purge deleted events after " +
+			"and return them as soon as they arrive. Name the repository with repo; a service client may name owner or all instead, and narrow them with repos. " +
+			"Returns no events and a cursor when timeout_s runs out; " +
+			"call again with that cursor and the same target and filters to keep waiting. When truncated is true, a retention purge deleted events after " +
 			"the cursor you passed, so some may be missing. Event names: " + strings.Join(catalogNames(), ", ") + ". " +
 			"A family such as pr.activity covers every action of one GitHub event. Each event's type is its exact type, such as pr.closed. " +
 			"actions and the field filters narrow only the families in types that offer them, and leave the other names whole; " +
@@ -97,8 +102,21 @@ type waitRequest struct {
 	timeout time.Duration
 }
 
+// waitInputSchema is the schema that the SDK infers from waitInput, with all
+// held to true and repos to one repository at least, as the inputSchema of
+// every event name holds them.
+func waitInputSchema() *jsonschema.Schema {
+	schema, err := jsonschema.For[waitInput](nil)
+	if err != nil {
+		panic(fmt.Sprintf("infer the input schema of %s: %v", toolName, err))
+	}
+	schema.Properties["all"].Const = jsonschema.Ptr[any](true)
+	schema.Properties["repos"].MinItems = jsonschema.Ptr(1)
+	return schema
+}
+
 func (in waitInput) parse() (waitRequest, error) {
-	if _, _, err := githubapi.ParseRepo(in.Repo); err != nil {
+	if err := in.check(); err != nil {
 		return waitRequest{}, err
 	}
 	if len(in.Types) == 0 {
@@ -155,11 +173,12 @@ func (in waitInput) parse() (waitRequest, error) {
 	slices.Sort(types)
 	return waitRequest{
 		query: PollQuery{
-			Types:   slices.Compact(types),
-			HeadSHA: strings.ToLower(in.SHA),
-			PR:      in.PR,
-			Fields:  in.fieldFilters(func(name string) []string { return narrowedTypes(name, entries, entryTypes) }),
-			Limit:   pageLimit,
+			Types:     slices.Compact(types),
+			HeadSHA:   strings.ToLower(in.SHA),
+			PR:        in.PR,
+			Fields:    in.fieldFilters(func(name string) []string { return narrowedTypes(name, entries, entryTypes) }),
+			RepoNames: in.repoNames(),
+			Limit:     pageLimit,
 		},
 		cursor:  in.Cursor,
 		timeout: time.Duration(seconds) * time.Second,
@@ -171,17 +190,16 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err != nil {
 		return nil, waitOutput{}, err
 	}
-	logger := s.logger.With(slog.F("repo", in.Repo))
+	logger := s.logger.With(in.logField())
 
 	p, err := s.principal(ctx, logger, "wait", ScopeEventsRead)
 	if err != nil {
 		return nil, waitOutput{}, err
 	}
-	repoID, err := s.authorizeRepo(ctx, logger, p, "wait", in.Repo)
+	req.query.Target, err = s.authorizeTarget(ctx, logger, p, "wait", in.targetArguments)
 	if err != nil {
 		return nil, waitOutput{}, err
 	}
-	req.query.RepoID = repoID
 
 	release, ok := s.waits.acquire(p.Login)
 	if !ok {
@@ -201,17 +219,19 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 
 	out := waitOutput{Events: make([]waitEvent, len(page.Events)), Cursor: page.Next, Truncated: truncated}
 	for i, ev := range page.Events {
-		out.Events[i] = toWaitEvent(ev)
+		if out.Events[i], err = toWaitEvent(ev, req.query.Target); err != nil {
+			return nil, waitOutput{}, storeError(ctx, logger, err)
+		}
 	}
 	return nil, out, nil
 }
 
-func (s *Service) authorize(ctx context.Context, logger slog.Logger, op string, scope Scope, repo string) (int64, error) {
+func (s *Service) authorize(ctx context.Context, logger slog.Logger, op string, scope Scope, a targetArguments) (Target, error) {
 	p, err := s.principal(ctx, logger, op, scope)
 	if err != nil {
-		return 0, err
+		return Target{}, err
 	}
-	return s.authorizeRepo(ctx, logger, p, op, repo)
+	return s.authorizeTarget(ctx, logger, p, op, a)
 }
 
 // principal returns the caller of this request when it holds scope, the
@@ -232,36 +252,81 @@ func (s *Service) principal(ctx context.Context, logger slog.Logger, op string, 
 	return p, nil
 }
 
-func (s *Service) authorizeRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo string) (int64, error) {
-	return checkRepo(ctx, logger, p, op, repo, s.authorizer.RepoID)
+var (
+	errServiceTargets = xerrors.Errorf("owner and all targets are for service clients; name one repository with repo: %w", ErrNoAccess)
+	errNoGrants       = xerrors.Errorf("this server reads no owner or all target: %w", ErrNoAccess)
+)
+
+// authorizeTarget returns the target that a names when p may read it. A
+// repository is the Authorizer's to answer, and an owner or every repository
+// is the ServiceGrants', for a service only. It may answer from what they
+// remember.
+func (s *Service) authorizeTarget(ctx context.Context, logger slog.Logger, p Principal, op string, a targetArguments) (Target, error) {
+	return s.checkTarget(ctx, logger, p, op, a, s.authorizer.RepoID, ServiceGrants.OwnerID, ServiceGrants.CoversAll)
 }
 
-// authorizeFreshRepo is authorizeRepo that ignores what the Authorizer
-// remembers.
-func (s *Service) authorizeFreshRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo string) (int64, error) {
-	return checkRepo(ctx, logger, p, op, repo, s.authorizer.RepoIDFresh)
+// authorizeFreshTarget is authorizeTarget that asks the source of the answer
+// again, as every subscribe does, so a renewal checks access again.
+func (s *Service) authorizeFreshTarget(ctx context.Context, logger slog.Logger, p Principal, op string, a targetArguments) (Target, error) {
+	return s.checkTarget(ctx, logger, p, op, a, s.authorizer.RepoIDFresh, ServiceGrants.OwnerIDFresh, ServiceGrants.CoversAllFresh)
 }
 
-func checkRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo string, lookup func(context.Context, Principal, string) (int64, error)) (int64, error) {
+func (s *Service) checkTarget(ctx context.Context, logger slog.Logger, p Principal, op string, a targetArguments,
+	repoID func(context.Context, Principal, string) (int64, error),
+	ownerID func(ServiceGrants, context.Context, Principal, string) (int64, error),
+	coversAll func(ServiceGrants, context.Context, Principal) error,
+) (Target, error) {
 	logger = logger.With(slog.F("login", p.Login))
-	repoID, err := lookup(ctx, p, repo)
+	if a.Repo != "" {
+		id, err := repoID(ctx, p, a.Repo)
+		if err != nil {
+			return Target{}, denied(ctx, logger, op, err)
+		}
+		if id <= 0 {
+			logger.Error(ctx, "authorizer returned a repository without an ID")
+			return Target{}, errVerify
+		}
+		return RepoTarget(id), nil
+	}
+	if _, ok := p.ServiceClient(); !ok {
+		return Target{}, denied(ctx, logger, op, errServiceTargets)
+	}
+	if s.grants == nil {
+		return Target{}, denied(ctx, logger, op, errNoGrants)
+	}
+	if a.Owner != "" {
+		id, err := ownerID(s.grants, ctx, p, a.Owner)
+		if err != nil {
+			return Target{}, denied(ctx, logger, op, err)
+		}
+		if id <= 0 {
+			logger.Error(ctx, "service grants returned an owner without an ID")
+			return Target{}, errVerify
+		}
+		return OwnerTarget(id), nil
+	}
+	if err := coversAll(s.grants, ctx, p); err != nil {
+		return Target{}, denied(ctx, logger, op, err)
+	}
+	return AllTarget(), nil
+}
+
+// denied logs why an access check failed and returns the error that the
+// caller gets.
+func denied(ctx context.Context, logger slog.Logger, op string, err error) error {
 	switch {
 	// A denial logs its reason as one line of text: slog.Error would add the
 	// error's stack frames to every routine denial.
 	case xerrors.Is(err, ErrNoAccess):
 		logger.Info(ctx, op+" denied", slog.F("reason", err.Error()))
-		return 0, err
+		return err
 	case xerrors.Is(err, ErrInvalidToken):
 		logger.Info(ctx, op+" denied, token rejected")
-		return 0, ErrInvalidToken
-	case err != nil:
+		return ErrInvalidToken
+	default:
 		logger.Warn(ctx, "could not verify repository access", slog.Error(err))
-		return 0, errVerify
-	case repoID <= 0:
-		logger.Error(ctx, "authorizer returned a repository without an ID")
-		return 0, errVerify
+		return errVerify
 	}
-	return repoID, nil
 }
 
 // startCursor picks where a wait begins. A given cursor wins. With a sha the
@@ -343,10 +408,22 @@ func storeError(ctx context.Context, logger slog.Logger, err error) error {
 	return errStore
 }
 
-func toWaitEvent(ev Event) waitEvent {
+// toWaitEvent returns ev as the wait tool returns it. Read through target, an
+// owner or all target, its data names the repository, as withRepository
+// does.
+func toWaitEvent(ev Event, target Target) (waitEvent, error) {
 	prs := ev.PRs
 	if prs == nil {
 		prs = []int32{}
+	}
+	data := ev.Data
+	if target.Kind() != TargetRepo {
+		var members map[string]json.RawMessage
+		if err := json.Unmarshal(ev.Data, &members); err != nil || members == nil {
+			return waitEvent{}, xerrors.Errorf("data of event %d is not a JSON object", ev.ID)
+		}
+		withRepository(members, ev, target)
+		data = marshalRaw(members)
 	}
 	return waitEvent{
 		ID:         ev.ID,
@@ -354,7 +431,7 @@ func toWaitEvent(ev Event) waitEvent {
 		RepoID:     ev.RepoID,
 		PRs:        prs,
 		HeadSHA:    ev.HeadSHA,
-		Data:       ev.Data,
+		Data:       data,
 		ReceivedAt: ev.ReceivedAt,
-	}
+	}, nil
 }
