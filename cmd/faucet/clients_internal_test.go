@@ -452,6 +452,10 @@ func TestTheClientsCommandRefusesATrustRuleThatCannotWork(t *testing.T) {
 	require.NoError(t, os.WriteFile(private, []byte(`{"keys":[{"kty":"oct","kid":"k","k":"c2VjcmV0"}]}`), 0o600))
 	pasted, err := os.ReadFile(clusterJWKS)
 	require.NoError(t, err)
+	tooLong := filepath.Join(dir, "too-long.json")
+	require.NoError(t, os.WriteFile(tooLong, []byte(`{"keys":[],"x":"`+strings.Repeat("a", 32<<10)+`"}`), 0o600))
+	withBOM := filepath.Join(dir, "bom.json")
+	require.NoError(t, os.WriteFile(withBOM, append([]byte("\xef\xbb\xbf"), pasted...), 0o600))
 	nulEscape := filepath.Join(dir, "nul.json")
 	require.NoError(t, os.WriteFile(nulEscape, []byte(strings.Replace(string(pasted), `{"use":"sig",`, `{"note":"\u0000","use":"sig",`, 1)), 0o600))
 	keysTwice := filepath.Join(dir, "keys-twice.json")
@@ -479,6 +483,8 @@ func TestTheClientsCommandRefusesATrustRuleThatCannotWork(t *testing.T) {
 		"a key set of no file":  {cluster("-jwks-file", filepath.Join(dir, "missing.json")), "-jwks-file: "},
 		"an empty key set":      {cluster("-jwks-file", empty), "-jwks-file " + empty + " is empty"},
 		"a key set of no path":  {cluster("-jwks-file", ""), `invalid value "" for flag -jwks-file: it names no file`},
+		"a key set over 32 KiB": {cluster("-jwks-file", tooLong), "-jwks-file " + tooLong + " is over 32768 bytes, the most that a key set can hold"},
+		"a byte order mark":     {cluster("-jwks-file", withBOM), "-jwks-file " + withBOM + " starts with a UTF-8 byte order mark, which JSON does not allow: save it without one"},
 		"a private key":         {cluster("-jwks-file", private), "a trust rule's JWKS must hold no private key"},
 		"keys twice":            {cluster("-jwks-file", keysTwice), "a trust rule's JWKS must name its keys array once"},
 		"a NUL escape":          {cluster("-jwks-file", nulEscape), "a trust rule's JWKS must be valid UTF-8, with no \\u0000"},

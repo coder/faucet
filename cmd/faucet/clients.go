@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -361,12 +362,9 @@ func trustClient(ctx context.Context, args []string, store oauth.Store, now time
 	}
 	rule := oauth.TrustRule{Issuer: *issuer, Claims: claims}
 	if jwksFile != "" {
-		jwks, err := os.ReadFile(jwksFile)
-		switch {
-		case err != nil:
-			return xerrors.Errorf("-jwks-file: %w", err)
-		case len(jwks) == 0:
-			return xerrors.Errorf("-jwks-file %s is empty", jwksFile)
+		jwks, err := readKeySetFile(jwksFile)
+		if err != nil {
+			return err
 		}
 		rule.JWKS = jwks
 	}
@@ -387,6 +385,28 @@ func trustClient(ctx context.Context, args []string, store oauth.Store, now time
 	}
 	_, err = fmt.Fprintf(stdout, "rule_id: %d\n", ruleID)
 	return err
+}
+
+// readKeySetFile reads the key set that -jwks-file names. It reads no more
+// than a key set can hold, so a pipe that does not end gets an answer too.
+func readKeySetFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, xerrors.Errorf("-jwks-file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	jwks, err := io.ReadAll(io.LimitReader(f, oauth.MaxKeyDocumentBytes+1))
+	switch {
+	case err != nil:
+		return nil, xerrors.Errorf("-jwks-file: %w", err)
+	case len(jwks) == 0:
+		return nil, xerrors.Errorf("-jwks-file %s is empty", path)
+	case len(jwks) > oauth.MaxKeyDocumentBytes:
+		return nil, xerrors.Errorf("-jwks-file %s is over %d bytes, the most that a key set can hold", path, oauth.MaxKeyDocumentBytes)
+	case bytes.HasPrefix(jwks, []byte("\xef\xbb\xbf")):
+		return nil, xerrors.Errorf("-jwks-file %s starts with a UTF-8 byte order mark, which JSON does not allow: save it without one", path)
+	}
+	return jwks, nil
 }
 
 func listTrustRules(ctx context.Context, args []string, store oauth.Store, stdout, stderr io.Writer) error {

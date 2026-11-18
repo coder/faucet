@@ -16,12 +16,13 @@ import (
 	"golang.org/x/xerrors"
 )
 
+// MaxKeyDocumentBytes bounds a key set, pasted or fetched, and a discovery
+// document.
+const MaxKeyDocumentBytes = 32 << 10
+
 const (
-	// maxKeyDocumentBytes bounds a key set, pasted or fetched, and a
-	// discovery document.
-	maxKeyDocumentBytes = 32 << 10
-	maxTrustRuleClaims  = 16
-	maxClaimBytes       = 256
+	maxTrustRuleClaims = 16
+	maxClaimBytes      = 256
 )
 
 // TrustRule lets the tokens that an outside issuer signs for a workload, such
@@ -274,8 +275,8 @@ var secretKeyMembers = []string{"d", "p", "q", "dp", "dq", "qi", "oth", "k", "pr
 // keeps. It returns the entries of keys too, each as it read it. Its errors
 // complete the sentence "the key set ...".
 func parseKeySet(body []byte) (jose.JSONWebKeySet, []json.RawMessage, error) {
-	if len(body) > maxKeyDocumentBytes {
-		return jose.JSONWebKeySet{}, nil, xerrors.Errorf("must be at most %d bytes", maxKeyDocumentBytes)
+	if len(body) > MaxKeyDocumentBytes {
+		return jose.JSONWebKeySet{}, nil, xerrors.Errorf("must be at most %d bytes", MaxKeyDocumentBytes)
 	}
 	entries, err := keySetEntries(body)
 	if err != nil {
