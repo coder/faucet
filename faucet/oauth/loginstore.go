@@ -80,8 +80,9 @@ type LoginStore interface {
 	// In the same step it stores the session's next access token, with the
 	// hash r.Access, the scopes r.Scopes and the session's resource, and
 	// returns the session as it is after. When no live session has that
-	// current refresh token, it returns ErrUnknownSession and changes
-	// nothing. It fails when r is not valid.
+	// current refresh token, or the session lacks a scope of r.Scopes, it
+	// returns ErrUnknownSession and changes nothing. It fails when r is not
+	// valid.
 	RotateSession(ctx context.Context, r Rotation) (Session, error)
 	// EndSession ends the live session with this ID at now. A session that
 	// ended already keeps its time, and an unknown ID is no error.
@@ -102,8 +103,8 @@ type LoginStore interface {
 	// connection. refresh must not call the store.
 	RefreshConnection(ctx context.Context, id string, now time.Time, refresh func(current Connection) (ConnectionChange, error)) (Connection, error)
 
-	// PurgeAuthRequests deletes the requests that expired before the time,
+	// DeleteExpiredAuthRequests deletes the requests that expired before the time,
 	// whatever their state, and returns how many. A session outlives the
 	// request that made it.
-	PurgeAuthRequests(ctx context.Context, before time.Time) (int64, error)
+	DeleteExpiredAuthRequests(ctx context.Context, before time.Time) (int64, error)
 }

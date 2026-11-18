@@ -14,13 +14,14 @@ LIMIT 1;
 
 -- name: RotateSession :one
 -- RotateSession swaps the refresh token of the live session that holds the
--- presented one, and issues the next access token, in one statement.
+-- presented one, and issues the next access token, in one statement. The
+-- token holds no scope that the session lacks.
 WITH rotated AS (
   UPDATE faucet_user_sessions
   SET previous_refresh_hash = refresh_hash,
     refresh_hash = @next_hash::bytea,
     refreshed_at = @now::timestamptz
-  WHERE refresh_hash = @presented_hash::bytea AND ended_at IS NULL
+  WHERE refresh_hash = @presented_hash::bytea AND ended_at IS NULL AND @scopes::text[] <@ scopes
   RETURNING id, client_id, client_name, connection_id, resource, scopes, refresh_hash, previous_refresh_hash, refreshed_at, ended_at
 ), new_token AS (
   INSERT INTO faucet_access_tokens (token_hash, expires_at, scopes, resource, subject_kind, subject)

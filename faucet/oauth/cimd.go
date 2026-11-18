@@ -145,7 +145,10 @@ func parseClientDocument(clientID string, body []byte) (clientDocument, error) {
 		ClientName   string   `json:"client_name"`
 		RedirectURIs []string `json:"redirect_uris"`
 		AuthMethod   *string  `json:"token_endpoint_auth_method"`
-		AuthMethods  []string `json:"token_endpoint_auth_methods_supported"`
+		// Secret and SecretExpiresAt must be absent: a document is public, so
+		// it can hold no shared secret.
+		Secret          json.RawMessage `json:"client_secret"`
+		SecretExpiresAt json.RawMessage `json:"client_secret_expires_at"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		var typeErr *json.UnmarshalTypeError
@@ -159,12 +162,12 @@ func parseClientDocument(clientID string, body []byte) (clientDocument, error) {
 		return clientDocument{}, xerrors.New("the document's client_id must equal its URL, byte for byte")
 	case len(raw.RedirectURIs) == 0 || len(raw.RedirectURIs) > maxRedirectURIs:
 		return clientDocument{}, xerrors.Errorf("the document must list 1 to %d redirect_uris", maxRedirectURIs)
-	case len(raw.ClientName) > maxClientNameBytes || strings.IndexFunc(raw.ClientName, unicode.IsControl) >= 0:
-		return clientDocument{}, xerrors.Errorf("the document's client_name must be at most %d bytes with no control character", maxClientNameBytes)
-	// A client that names its methods in the newer member is confidential
-	// unless it lists none.
-	case raw.AuthMethod != nil && *raw.AuthMethod != "none", raw.AuthMethods != nil && !slices.Contains(raw.AuthMethods, "none"):
-		return clientDocument{}, xerrors.New("the document's token endpoint auth method must be none: faucet takes public clients only")
+	case len(raw.ClientName) > maxClientNameBytes || strings.IndexFunc(raw.ClientName, unprintable) >= 0:
+		return clientDocument{}, xerrors.Errorf("the document's client_name must be at most %d bytes with no control or format character", maxClientNameBytes)
+	case raw.AuthMethod != nil && *raw.AuthMethod != "none":
+		return clientDocument{}, xerrors.New("the document's token_endpoint_auth_method must be none: faucet takes public clients only")
+	case raw.Secret != nil || raw.SecretExpiresAt != nil:
+		return clientDocument{}, xerrors.New("the document must hold no client_secret: anyone can read it")
 	}
 	for i, uri := range raw.RedirectURIs {
 		if _, err := parseRedirectURI(uri); err != nil {
@@ -172,6 +175,13 @@ func parseClientDocument(clientID string, body []byte) (clientDocument, error) {
 		}
 	}
 	return clientDocument{ClientID: raw.ClientID, ClientName: raw.ClientName, RedirectURIs: raw.RedirectURIs}, nil
+}
+
+// unprintable reports whether r is a control character or a format
+// character, such as a bidirectional override, which can make the consent
+// page show a name that the document does not hold.
+func unprintable(r rune) bool {
+	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r)
 }
 
 // parseRedirectURI accepts an absolute URI of at most 2048 bytes with no

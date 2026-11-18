@@ -355,6 +355,17 @@ func (s *fakeStore) Session(_ context.Context, id string) (oauth.Session, error)
 	return cloneSession(session), nil
 }
 
+// holdsAll reports whether the session holds every scope of the rotation's
+// access token.
+func holdsAll(session oauth.Session, r oauth.Rotation) bool {
+	for _, scope := range r.Scopes {
+		if !slices.Contains(session.Scopes, scope) {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *fakeStore) RotateSession(_ context.Context, r oauth.Rotation) (oauth.Session, error) {
 	if err := r.Validate(); err != nil {
 		return oauth.Session{}, err
@@ -364,7 +375,7 @@ func (s *fakeStore) RotateSession(_ context.Context, r oauth.Rotation) (oauth.Se
 	var session oauth.Session
 	found := false
 	for _, o := range s.sessions {
-		if o.RefreshHash == r.Presented && o.Live() {
+		if o.RefreshHash == r.Presented && o.Live() && holdsAll(o, r) {
 			session, found = o, true
 		}
 	}
@@ -434,7 +445,7 @@ func (s *fakeStore) RefreshConnection(ctx context.Context, id string, now time.T
 	return cloneConnection(s.connections[id]), nil
 }
 
-func (s *fakeStore) PurgeAuthRequests(_ context.Context, before time.Time) (int64, error) {
+func (s *fakeStore) DeleteExpiredAuthRequests(_ context.Context, before time.Time) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var n int64

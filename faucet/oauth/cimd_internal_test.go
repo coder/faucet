@@ -465,6 +465,8 @@ func TestTheClientNameIsShortAndHoldsNoControlCharacter(t *testing.T) {
 		{name: "a NUL", members: map[string]any{"client_name": "VS Code\x00"}},
 		{name: "DEL", members: map[string]any{"client_name": "VS Code\x7f"}},
 		{name: "a C1 control", members: map[string]any{"client_name": "VS Code\u0085"}},
+		{name: "a right-to-left override", members: map[string]any{"client_name": "VS Code \u202eedoC duolC"}},
+		{name: "a zero-width joiner", members: map[string]any{"client_name": "VS\u200dCode"}},
 	}
 	taken := []documentCase{
 		{name: "256 bytes", members: map[string]any{"client_name": strings.Repeat("a", 256)}},
@@ -489,13 +491,12 @@ func TestAClientThatAuthenticatesAtTheTokenEndpointIsRefused(t *testing.T) {
 		{name: "client_secret_basic", members: map[string]any{"token_endpoint_auth_method": "client_secret_basic"}},
 		{name: "private_key_jwt", members: map[string]any{"token_endpoint_auth_method": "private_key_jwt"}},
 		{name: "an empty method", members: map[string]any{"token_endpoint_auth_method": ""}},
-		{name: "only private_key_jwt supported", members: map[string]any{"token_endpoint_auth_methods_supported": []string{"private_key_jwt"}}},
-		{name: "no method supported", members: map[string]any{"token_endpoint_auth_methods_supported": []string{}}},
+		{name: "a client secret", members: map[string]any{"client_secret": "s3cret"}},
+		{name: "an expiry of a client secret", members: map[string]any{"client_secret_expires_at": 0}},
 	}
 	taken := []documentCase{
 		{name: "none", members: map[string]any{"token_endpoint_auth_method": "none"}},
 		{name: "no method", members: nil},
-		{name: "none among others", members: map[string]any{"token_endpoint_auth_methods_supported": []string{"private_key_jwt", "none"}}},
 	}
 	s := serveCases(t, append(refused, taken...))
 	for i, c := range refused {

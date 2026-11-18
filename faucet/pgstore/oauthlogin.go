@@ -303,9 +303,9 @@ func (s *Store) RefreshConnection(ctx context.Context, id string, now time.Time,
 	return connectionOf(row), nil
 }
 
-// PurgeAuthRequests implements oauth.LoginStore. No session refers to its
+// DeleteExpiredAuthRequests implements oauth.LoginStore. No session refers to its
 // request, so the sessions stay.
-func (s *Store) PurgeAuthRequests(ctx context.Context, before time.Time) (_ int64, err error) {
+func (s *Store) DeleteExpiredAuthRequests(ctx context.Context, before time.Time) (_ int64, err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	n, err := s.q.DeleteAuthRequestsExpiredBefore(ctx, before)
 	if err != nil {

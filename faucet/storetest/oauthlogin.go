@@ -41,6 +41,7 @@ var loginSubtests = []struct {
 	{"SessionIsFoundByItsCurrentAndByItsPreviousRefreshToken", sessionIsFoundByItsCurrentAndByItsPreviousRefreshToken},
 	{"RotateReplacesTheRefreshTokenAndStoresTheNextAccessToken", rotateReplacesTheRefreshTokenAndStoresTheNextAccessToken},
 	{"RotateRefusesARotatedOutTokenAnEndedSessionAndAnUnknownToken", rotateRefusesARotatedOutTokenAnEndedSessionAndAnUnknownToken},
+	{"RotateRefusesAnAccessTokenWithAScopeThatTheSessionLacks", rotateRefusesAnAccessTokenWithAScopeThatTheSessionLacks},
 	{"OnlyOneOfManyRotationsAtOnceWins", onlyOneOfManyRotationsAtOnceWins},
 	{"EndSessionKeepsTheFirstTime", endSessionKeepsTheFirstTime},
 	// Connections.
@@ -654,7 +655,7 @@ func purgeDeletesTheRequestsThatExpiredBeforeTheTimeAndKeepsTheirSessions(t *tes
 	fresh := consentedRequest(t, s, "req-fresh", now)
 	before := boundary.ExpiresAt
 
-	n, err := s.PurgeAuthRequests(ctx, before)
+	n, err := s.DeleteExpiredAuthRequests(ctx, before)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, n)
 	requireNoRequestByGitHubState(t, s, oldPending.GitHubStateHash)
@@ -666,7 +667,7 @@ func purgeDeletesTheRequestsThatExpiredBeforeTheTimeAndKeepsTheirSessions(t *tes
 	_, err = s.RotateSession(ctx, rotationOf(session.RefreshHash, "after the purge", now))
 	require.NoError(t, err, "the session of a purged request lives on")
 
-	n, err = s.PurgeAuthRequests(ctx, before)
+	n, err = s.DeleteExpiredAuthRequests(ctx, before)
 	require.NoError(t, err)
 	require.Zero(t, n)
 }
@@ -875,6 +876,34 @@ func rotateRefusesARotatedOutTokenAnEndedSessionAndAnUnknownToken(t *testing.T, 
 		requireSessionIs(t, s, rotated)
 		requireSessionIs(t, s, ended)
 	}
+}
+
+// A refresh can narrow the scopes of the next access token and never widen
+// them past what the user approved.
+func rotateRefusesAnAccessTokenWithAScopeThatTheSessionLacks(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	now := loginNow()
+	c := connectionAt(1, now)
+	r := authRequestAt("req-1", now)
+	r.Scopes = []faucet.Scope{faucet.ScopeEventsRead}
+	require.NoError(t, s.InsertAuthRequest(ctx, r))
+	require.NoError(t, s.ConsentAuthRequest(ctx, r.ID, r.BrowserHash, githubStateOf(r.ID), now))
+	r.GitHubStateHash = githubStateOf(r.ID)
+	approve(t, s, r, c, now)
+	session, err := s.RedeemAuthRequest(ctx, redemptionOf(r.ID, r.ID, now))
+	require.NoError(t, err)
+	require.Equal(t, []faucet.Scope{faucet.ScopeEventsRead}, session.Scopes)
+
+	wider := rotationOf(session.RefreshHash, "wider", now.Add(time.Minute))
+	wider.Scopes = []faucet.Scope{faucet.ScopeEventsRead, faucet.ScopeEventsSubscribe}
+	_, err = s.RotateSession(ctx, wider)
+	require.ErrorIs(t, err, oauth.ErrUnknownSession)
+	requireNoTokens(t, s, wider.Next, wider.Access, "a wider rotation")
+	requireSessionIs(t, s, session)
+
+	same := rotationOf(session.RefreshHash, "same", now.Add(time.Minute))
+	_, err = s.RotateSession(ctx, same)
+	require.NoError(t, err)
 }
 
 func onlyOneOfManyRotationsAtOnceWins(t *testing.T, s oauth.Store) {

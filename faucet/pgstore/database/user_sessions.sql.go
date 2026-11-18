@@ -109,11 +109,11 @@ WITH rotated AS (
   SET previous_refresh_hash = refresh_hash,
     refresh_hash = $1::bytea,
     refreshed_at = $2::timestamptz
-  WHERE refresh_hash = $3::bytea AND ended_at IS NULL
+  WHERE refresh_hash = $3::bytea AND ended_at IS NULL AND $4::text[] <@ scopes
   RETURNING id, client_id, client_name, connection_id, resource, scopes, refresh_hash, previous_refresh_hash, refreshed_at, ended_at
 ), new_token AS (
   INSERT INTO faucet_access_tokens (token_hash, expires_at, scopes, resource, subject_kind, subject)
-  SELECT $4::bytea, $5::timestamptz, $6::text[], r.resource, 'user', r.id
+  SELECT $5::bytea, $6::timestamptz, $4::text[], r.resource, 'user', r.id
   FROM rotated r
 )
 SELECT id, client_id, client_name, connection_id, resource, scopes, refresh_hash, previous_refresh_hash, refreshed_at, ended_at
@@ -124,9 +124,9 @@ type RotateSessionParams struct {
 	NextHash        []byte
 	Now             time.Time
 	PresentedHash   []byte
+	Scopes          []string
 	AccessHash      []byte
 	AccessExpiresAt time.Time
-	Scopes          []string
 }
 
 type RotateSessionRow struct {
@@ -143,15 +143,16 @@ type RotateSessionRow struct {
 }
 
 // RotateSession swaps the refresh token of the live session that holds the
-// presented one, and issues the next access token, in one statement.
+// presented one, and issues the next access token, in one statement. The
+// token holds no scope that the session lacks.
 func (q *Queries) RotateSession(ctx context.Context, arg RotateSessionParams) (RotateSessionRow, error) {
 	row := q.db.QueryRowContext(ctx, rotateSession,
 		arg.NextHash,
 		arg.Now,
 		arg.PresentedHash,
+		pq.Array(arg.Scopes),
 		arg.AccessHash,
 		arg.AccessExpiresAt,
-		pq.Array(arg.Scopes),
 	)
 	var i RotateSessionRow
 	err := row.Scan(
