@@ -57,7 +57,7 @@ func TestTheMetadataOfABrowserLoginNamesItsGrantsAndClientDocuments(t *testing.T
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &m))
 
 	require.Equal(t, issuer+oauth.AuthorizePath, m["authorization_endpoint"])
-	require.Equal(t, []any{"authorization_code", "client_credentials", "refresh_token"}, m["grant_types_supported"])
+	require.Equal(t, []any{"authorization_code", "client_credentials", "refresh_token", "urn:ietf:params:oauth:grant-type:token-exchange"}, m["grant_types_supported"])
 	require.Equal(t, []any{"code"}, m["response_types_supported"])
 	require.Equal(t, []any{"client_secret_basic", "none"}, m["token_endpoint_auth_methods_supported"])
 	require.Equal(t, issuer+"/oauth/revoke", m["revocation_endpoint"])
@@ -78,7 +78,7 @@ func TestWithoutABrowserLoginTheMetadataNamesNoClientDocuments(t *testing.T) {
 	var m map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &m))
 
-	require.Equal(t, []any{"client_credentials"}, m["grant_types_supported"])
+	require.Equal(t, []any{"client_credentials", "urn:ietf:params:oauth:grant-type:token-exchange"}, m["grant_types_supported"])
 	require.NotContains(t, m, "client_id_metadata_document_supported")
 	require.NotContains(t, m, "authorization_response_iss_parameter_supported")
 }

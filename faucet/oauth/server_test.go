@@ -31,6 +31,7 @@ type tokenHarness struct {
 	store  *fakeStore
 	clock  *quartz.Mock
 	srv    *httptest.Server
+	server *oauth.Server
 	secret string
 }
 
@@ -52,7 +53,7 @@ func newTokenHarness(t *testing.T) *tokenHarness {
 	mux.Handle(oauth.AuthorizePath, server.AuthorizeHandler())
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return &tokenHarness{t: t, store: store, clock: clock, srv: srv, secret: secret}
+	return &tokenHarness{t: t, store: store, clock: clock, srv: srv, server: server, secret: secret}
 }
 
 type tokenReply struct {
@@ -120,12 +121,12 @@ func TestTheMetadataNamesTheGrantTable(t *testing.T) {
 		"token_endpoint":                             issuer + "/oauth/token",
 		"scopes_supported":                           []any{"events:read", "events:subscribe"},
 		"response_types_supported":                   []any{},
-		"grant_types_supported":                      []any{"client_credentials"},
-		"token_endpoint_auth_methods_supported":      []any{"client_secret_basic"},
+		"grant_types_supported":                      []any{"client_credentials", "urn:ietf:params:oauth:grant-type:token-exchange"},
+		"token_endpoint_auth_methods_supported":      []any{"client_secret_basic", "none"},
 		"code_challenge_methods_supported":           []any{"S256"},
 		"revocation_endpoint":                        issuer + "/oauth/revoke",
 		"revocation_endpoint_auth_methods_supported": []any{"client_secret_basic"},
-	}, got)
+	}, got, "a workload sends no secret, so the revocation endpoint takes none of its clients")
 }
 
 // go-sdk's client reads the metadata with these checks before it asks for a

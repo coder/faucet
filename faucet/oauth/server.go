@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,6 +41,9 @@ type grant struct {
 	// authMethods are the ways a client authenticates for the grant, as
 	// token_endpoint_auth_methods_supported names them.
 	authMethods []string
+	// revokes is set for a grant whose clients the revocation endpoint takes,
+	// authenticated as authMethods says.
+	revokes bool
 	// responseType is what the grant asks the authorization endpoint for,
 	// empty for a grant that does not use that endpoint.
 	responseType string
@@ -47,14 +51,17 @@ type grant struct {
 }
 
 var grants = map[string]grant{
-	"client_credentials": {authMethods: []string{"client_secret_basic"}, issue: (*Server).clientCredentials},
+	"client_credentials": {authMethods: []string{"client_secret_basic"}, revokes: true, issue: (*Server).clientCredentials},
+	// A workload has no secret, so the revocation endpoint cannot tell it
+	// from anyone who names its client ID.
+	tokenExchangeGrant: {authMethods: []string{"none"}, issue: (*Server).tokenExchange},
 }
 
 // loginGrants are the rows that the browser login adds to the grant table
 // of a server.
 var loginGrants = map[string]grant{
-	"authorization_code": {authMethods: []string{"none"}, responseType: "code", issue: (*Server).authorizationCode},
-	"refresh_token":      {authMethods: []string{"none"}, issue: (*Server).refreshToken},
+	"authorization_code": {authMethods: []string{"none"}, revokes: true, responseType: "code", issue: (*Server).authorizationCode},
+	"refresh_token":      {authMethods: []string{"none"}, revokes: true, issue: (*Server).refreshToken},
 }
 
 // ServerDeps are what a Server needs.
@@ -76,6 +83,11 @@ type ServerDeps struct {
 	// repositories again. It is required with Login, and asks GitHub at
 	// every call, as RepoChecker says.
 	Repos RepoChecker
+	// WorkloadKeys sets up the client that fetches the keys of the issuers
+	// that trust rules name. An issuer's discovery document chooses the URL
+	// of its keys, so faucet builds that client itself with
+	// faucet.NewHTTPClient, and the zero value is the one for production.
+	WorkloadKeys faucet.HTTPClientOptions
 }
 
 // Server is faucet's authorization server: its metadata and its token
@@ -87,7 +99,8 @@ type Server struct {
 	issuer    string
 	resources []string
 	// grants is the grant table of this server.
-	grants map[string]grant
+	grants    map[string]grant
+	workloads *workloadChecker
 	// login is nil when the browser login is off, and access is then the
 	// zero value.
 	login  *browserLogin
@@ -109,6 +122,10 @@ func NewServer(d ServerDeps) (*Server, error) {
 	s := &Server{
 		store: d.Store, clock: d.Clock, logger: d.Logger, issuer: d.Issuer,
 		resources: slices.Clone(d.Resources), grants: maps.Clone(grants),
+		workloads: newWorkloadChecker(faucet.NewHTTPClient(d.WorkloadKeys), d.Clock),
+	}
+	if d.WorkloadKeys.AllowInsecureLoopback {
+		d.Logger.Warn(context.Background(), "the client that fetches the keys of workload issuers reaches loopback over http, which is for tests only")
 	}
 	if d.Login != nil {
 		login, err := newBrowserLogin(*d.Login, d.Clock)
@@ -173,13 +190,17 @@ func metadataOf(issuer string, table map[string]grant) authServerMetadata {
 	}
 	for _, g := range table {
 		m.TokenEndpointAuthMethodsSupported = append(m.TokenEndpointAuthMethodsSupported, g.authMethods...)
+		if g.revokes {
+			m.RevocationEndpointAuthMethodsSupported = append(m.RevocationEndpointAuthMethodsSupported, g.authMethods...)
+		}
 		if g.responseType != "" {
 			m.ResponseTypesSupported = append(m.ResponseTypesSupported, g.responseType)
 		}
 	}
 	slices.Sort(m.TokenEndpointAuthMethodsSupported)
 	m.TokenEndpointAuthMethodsSupported = slices.Compact(m.TokenEndpointAuthMethodsSupported)
-	m.RevocationEndpointAuthMethodsSupported = slices.Clone(m.TokenEndpointAuthMethodsSupported)
+	slices.Sort(m.RevocationEndpointAuthMethodsSupported)
+	m.RevocationEndpointAuthMethodsSupported = slices.Compact(m.RevocationEndpointAuthMethodsSupported)
 	slices.Sort(m.ResponseTypesSupported)
 	m.ClientIDMetadataDocumentSupported = len(m.ResponseTypesSupported) > 0
 	m.AuthorizationResponseIssParameterSupported = len(m.ResponseTypesSupported) > 0
@@ -269,6 +290,8 @@ type tokenError struct {
 	status      int
 	code        string
 	description string
+	// retryAfter, when set, tells the client when to ask again.
+	retryAfter time.Duration
 }
 
 func (e *tokenError) Error() string { return e.code + ": " + e.description }
@@ -289,6 +312,8 @@ type tokenResponse struct {
 	Scope       string `json:"scope"`
 	// RefreshToken is set by the grants of a browser login.
 	RefreshToken string `json:"refresh_token,omitempty"`
+	// IssuedTokenType is set by the token exchange (RFC 8693 section 2.2.1).
+	IssuedTokenType string `json:"issued_token_type,omitempty"`
 }
 
 // TokenHandler serves the token endpoint at TokenPath. It takes POST only,
@@ -325,6 +350,9 @@ func (s *Server) writeTokenError(w http.ResponseWriter, r *http.Request, err err
 	s.logger.Info(r.Context(), request+" refused", slog.F("error", te.code), slog.F("reason", te.description))
 	if te.status == http.StatusUnauthorized {
 		w.Header().Set("WWW-Authenticate", `Basic realm="faucet"`)
+	}
+	if te.retryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(te.retryAfter/time.Second)))
 	}
 	writeJSON(w, te.status, map[string]string{"error": te.code, "error_description": te.description})
 }
@@ -382,28 +410,57 @@ func (s *Server) clientCredentials(r *http.Request, form url.Values) (tokenRespo
 	if err != nil {
 		return tokenResponse{}, err
 	}
-	if !slices.Contains(s.resources, c.Resource) {
-		s.logger.Warn(ctx, "a client is for an endpoint that this server does not serve", slog.F("client_id", c.ID), slog.F("resource", c.Resource))
-		return tokenResponse{}, &tokenError{
-			status: http.StatusUnauthorized, code: "invalid_client",
-			description: "the client is for " + c.Resource + ", which this server does not serve; an operator must make a client for this server",
-		}
+	if err := s.servedClient(ctx, c); err != nil {
+		return tokenResponse{}, err
 	}
 	scopes, err := grantedScopes(form, c.Scopes)
 	if err != nil {
 		return tokenResponse{}, err
 	}
+	if err := checkResources(form, c); err != nil {
+		return tokenResponse{}, err
+	}
+	resp, err := s.mintServiceToken(ctx, c, scopes, s.clock.Now(), accessTokenLifetime)
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	s.logger.Debug(ctx, "token issued", slog.F("client_id", c.ID), slog.F("scope", resp.Scope))
+	return resp, nil
+}
+
+// servedClient refuses a client whose resource this server does not serve.
+func (s *Server) servedClient(ctx context.Context, c Client) error {
+	if slices.Contains(s.resources, c.Resource) {
+		return nil
+	}
+	s.logger.Warn(ctx, "a client is for an endpoint that this server does not serve", slog.F("client_id", c.ID), slog.F("resource", c.Resource))
+	return &tokenError{
+		status: http.StatusUnauthorized, code: "invalid_client",
+		description: "the client is for " + c.Resource + ", which this server does not serve; an operator must make a client for this server",
+	}
+}
+
+// checkResources refuses a request that names another resource than the
+// client's (RFC 8707).
+func checkResources(form url.Values, c Client) error {
 	for _, resource := range form["resource"] {
 		if resource != c.Resource {
-			return tokenResponse{}, badRequest("invalid_target", "the tokens of this client are for "+c.Resource)
+			return badRequest("invalid_target", "the tokens of this client are for "+c.Resource)
 		}
 	}
+	return nil
+}
+
+// mintServiceToken stores a new access token of the service client c, made
+// at now, that lasts lifetime, and returns the answer that names it.
+// lifetime is a second or more.
+func (s *Server) mintServiceToken(ctx context.Context, c Client, scopes []faucet.Scope, now time.Time, lifetime time.Duration) (tokenResponse, error) {
 	token, err := newSecret(accessTokenPrefix)
 	if err != nil {
 		return tokenResponse{}, err
 	}
 	if err := s.store.InsertAccessToken(ctx, AccessToken{
-		Hash: HashToken(token), ExpiresAt: s.clock.Now().Add(accessTokenLifetime), Scopes: scopes,
+		Hash: HashToken(token), ExpiresAt: now.Add(lifetime), Scopes: scopes,
 		Resource: c.Resource, SubjectKind: SubjectService, Subject: c.ID,
 	}); err != nil {
 		return tokenResponse{}, xerrors.Errorf("store the access token: %w", err)
@@ -412,9 +469,8 @@ func (s *Server) clientCredentials(r *http.Request, form url.Values) (tokenRespo
 	for i, scope := range scopes {
 		names[i] = string(scope)
 	}
-	s.logger.Debug(ctx, "token issued", slog.F("client_id", c.ID), slog.F("scope", names))
 	return tokenResponse{
-		AccessToken: token, TokenType: "Bearer", ExpiresIn: int(accessTokenLifetime / time.Second), Scope: strings.Join(names, " "),
+		AccessToken: token, TokenType: "Bearer", ExpiresIn: int(lifetime / time.Second), Scope: strings.Join(names, " "),
 	}, nil
 }
 

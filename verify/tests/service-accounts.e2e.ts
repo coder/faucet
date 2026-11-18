@@ -137,8 +137,9 @@ describe('service accounts', () => {
         authorization_endpoint: `${started.baseUrl}/oauth/authorize`,
         token_endpoint: `${started.baseUrl}/oauth/token`,
         response_types_supported: [],
-        grant_types_supported: ['client_credentials'],
-        token_endpoint_auth_methods_supported: ['client_secret_basic'],
+        grant_types_supported: ['client_credentials', 'urn:ietf:params:oauth:grant-type:token-exchange'],
+        token_endpoint_auth_methods_supported: ['client_secret_basic', 'none'],
+        revocation_endpoint_auth_methods_supported: ['client_secret_basic'],
       });
 
       const old = await started.clients(['create', '-resource', `${started.baseUrl}/mcp`, '-grant', 'repo:verify/r1', 'old-agent']);

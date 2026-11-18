@@ -381,6 +381,7 @@ func newLogin(publicURL *url.URL, browser *oauth.BrowserLogin, store loginStore,
 	}
 	login, err := oauth.NewServer(oauth.ServerDeps{
 		Store: store, Clock: clock, Logger: logger, Issuer: publicURL.String(), Resources: resources, Login: browser, Repos: repos,
+		WorkloadKeys: faucet.HTTPClientOptions{AllowInsecureLoopback: allowInsecureLoopback},
 	})
 	if err != nil {
 		return bearers{}, nil, access{}, xerrors.Errorf("create the login server: %w", err)

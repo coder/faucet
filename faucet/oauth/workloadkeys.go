@@ -36,7 +36,8 @@ const (
 )
 
 // errIssuerKeys is the error of an issuer whose keys faucet could not fetch.
-// An error that wraps it holds the cause, which is for the log only.
+// An error that wraps it names the issuer and holds the cause, which are for
+// the log only.
 var errIssuerKeys = xerrors.New("faucet could not fetch the keys of the subject token's issuer")
 
 // keySource fetches the keys of issuers through their OpenID discovery
@@ -129,7 +130,7 @@ func (s *keySource) keySet(ctx context.Context, issuer, kid string) (jose.JSONWe
 	// for it, so a caller that leaves does not end it.
 	keys, err := s.fetch(context.WithoutCancel(ctx), issuer)
 	if err != nil {
-		err = fmt.Errorf("%w: %w", errIssuerKeys, err)
+		err = fmt.Errorf("%w %s: %w", errIssuerKeys, issuer, err)
 	}
 	s.mu.Lock()
 	delete(s.flights, issuer)
