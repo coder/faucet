@@ -226,13 +226,21 @@ func (r repoAccess) recheck(ctx context.Context, session Session, now time.Time,
 	wg.Wait()
 	taken := 0
 	if !rejectedAt.IsZero() {
+		// The denials run to their end however the request ends, as a
+		// record does, but share one time limit, so a stalled store holds
+		// the grant's answer back by recordTimeout once.
+		deny, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+		defer cancel()
 		for i, c := range checks {
 			if recorded[i] {
 				continue
 			}
 			c.RepoID, c.CheckedAt = 0, rejectedAt
-			if err := r.record(ctx, c, faucet.ErrInvalidToken); err != nil {
+			if err := r.tokens.store.StoreAccessCheck(deny, c); err != nil {
 				logger.Warn(ctx, "could not store the denial of a repository after GitHub rejected the token", slog.F("repo", c.Repo), slog.Error(err))
+				if deny.Err() != nil {
+					break
+				}
 				continue
 			}
 			taken++

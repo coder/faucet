@@ -29,6 +29,10 @@ type fakeStore struct {
 	// their name.
 	checks  map[accessCheckKey]oauth.AccessCheck
 	failing map[string]error
+	// stalls holds, for a method's name, how many more calls of it go
+	// through before each call waits for its context to end, as a stalled
+	// Postgres does.
+	stalls map[string]int
 	// connectionLocks holds a lock per connection ID, which RefreshConnection
 	// holds while its callback runs and ApproveAuthRequest takes, as the row
 	// lock does in Postgres. A caller takes it before mu, never while it
@@ -47,6 +51,7 @@ func newFakeStore() *fakeStore {
 		connections:     map[string]oauth.Connection{},
 		checks:          map[accessCheckKey]oauth.AccessCheck{},
 		failing:         map[string]error{},
+		stalls:          map[string]int{},
 		connectionLocks: map[string]*sync.Mutex{},
 	}
 }
@@ -63,11 +68,30 @@ func (s *fakeStore) fail(method string, err error) {
 	s.failing[method] = err
 }
 
+// stallAfter makes every call of the method with this name after the next
+// n wait until its context ends, and fail with the context's error.
+func (s *fakeStore) stallAfter(method string, n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stalls[method] = n
+}
+
 // callErr is the error that a call of the method with this name fails with:
-// the error of ctx once it is done, or the one that fail set.
+// the error of ctx once it is done, or the one that fail set. A call that
+// stallAfter stalls waits for ctx first.
 func (s *fakeStore) callErr(ctx context.Context, method string) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	s.mu.Lock()
+	left, stalls := s.stalls[method]
+	if stalls && left > 0 {
+		s.stalls[method] = left - 1
+	}
+	s.mu.Unlock()
+	if stalls && left == 0 {
+		<-ctx.Done()
+		return ctx.Err()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

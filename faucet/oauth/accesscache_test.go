@@ -666,6 +666,28 @@ func TestACheckThatStartedBeforeARefreshDoesNotCountAfterIt(t *testing.T) {
 	require.Equal(t, []string{"o/x"}, got.asked, "the lookup started before the refresh, so its answer is stale after it")
 }
 
+// When GitHub rejects the token during the re-check, the denials of the
+// checks that it did not get to share one time limit, so a stalled store
+// holds the grant's answer back by that limit once, not once per check.
+func TestTheDenialsAfterARejectedTokenShareOneTimeLimit(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	h := newGrantHarness(t, store)
+	s := h.redeem(h.approve("login-1", 1))
+	h.storeChecks(1, numberedRepos(12))
+	stored, _, err := oauth.GrantOpen(h.login.Keys, usertokensConnection(t, h, 1))
+	require.NoError(t, err)
+	h.github.rejectAccess(stored)
+	h.clock.Advance(time.Minute)
+	// The lookups that started record their own answers; every write after
+	// those stalls.
+	store.stallAfter("StoreAccessCheck", 4)
+
+	began := time.Now()
+	h.refresh(s)
+	require.Less(t, time.Since(began), 15*time.Second, "the denials of the checks left wait for the store once")
+}
+
 // The user revokes the App, which kills both of their GitHub tokens, and
 // the refresh of one session meets the dead token as it checks again the
 // repository of another session. The refresh asks GitHub for no new token
