@@ -1,0 +1,1 @@
+{"issuer":"https://k8s.wi-test.invalid","jwks_uri":"https://172.17.0.2:6443/openid/v1/jwks","response_types_supported":["id_token"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]}

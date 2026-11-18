@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -578,6 +579,54 @@ func TestAFailedFetchIsKeptForAMinute(t *testing.T) {
 	clock.Advance(keyFetchInterval)
 	require.NoError(t, check())
 	require.Equal(t, 2, s.hitsOf(testVercelDiscovery))
+}
+
+// testdata/k8s-* hold a token that a k3s v1.33.5 cluster minted for the
+// service account apps/digest-bot with faucet's audience, and the cluster's
+// discovery document and key set. The cluster's key no longer exists.
+const (
+	realKubernetesIssuer = "https://k8s.wi-test.invalid"
+	realKubernetesIAT    = 1795005407
+	realKubernetesEXP    = 1795009007
+)
+
+// The cluster is private: its discovery document names a jwks_uri that
+// faucet's guarded client refuses, so the rule holds the cluster's keys.
+func TestARealKubernetesTokenMatchesARuleWithTheClustersKeys(t *testing.T) {
+	t.Parallel()
+	var doc struct {
+		Issuer  string `json:"issuer"`
+		JWKSURI string `json:"jwks_uri"`
+	}
+	require.NoError(t, json.Unmarshal(must(os.ReadFile("testdata/k8s-discovery.json")), &doc))
+	require.Equal(t, realKubernetesIssuer, doc.Issuer)
+	_, err := newKeySource(faucet.NewHTTPClient(faucet.HTTPClientOptions{}), quartz.NewMock(t)).get(context.Background(), doc.JWKSURI)
+	require.ErrorIs(t, err, faucet.ErrDestinationRefused, doc.JWKSURI)
+
+	token := strings.TrimSpace(string(must(os.ReadFile("testdata/k8s-token.jwt"))))
+	rule := TrustRule{
+		Issuer: realKubernetesIssuer, Claims: map[string]string{"sub": "system:serviceaccount:apps:digest-bot"},
+		JWKS: must(os.ReadFile("testdata/k8s-jwks.json")),
+	}
+	clock := quartz.NewMock(t)
+	clock.Set(time.Unix(realKubernetesIAT, 0).Add(30 * time.Minute))
+	c := newWorkloadChecker(&http.Client{}, clock)
+	now := clock.Now()
+
+	m, err := checkAt(t, c, now, token, rule)
+	require.NoError(t, err)
+	require.Equal(t, rule, m.Rule)
+	require.Equal(t, int64(realKubernetesEXP), m.Expires.Unix())
+	require.Equal(t, accessTokenLifetime, m.lifetime(now))
+
+	otherAccount := rule
+	otherAccount.Claims = map[string]string{"sub": "system:serviceaccount:apps:other-bot"}
+	_, err = checkAt(t, c, now, token, otherAccount)
+	requireTokenRefused(t, err, "it matches no trust rule of the client")
+	_, err = c.check(context.Background(), []TrustRule{rule}, token, "https://vault.example.com", now)
+	requireTokenRefused(t, err, "its aud must be https://vault.example.com alone")
+	_, err = checkAt(t, c, time.Unix(realKubernetesEXP, 0), token, rule)
+	requireTokenRefused(t, err, "it has expired")
 }
 
 // A token with a made-up kid makes faucet fetch again once a minute, and a
