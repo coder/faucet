@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"net/http"
-	"sync"
+	"net/url"
 	"testing"
 	"time"
 
@@ -30,29 +30,6 @@ var usertokensStores = map[string]func(t *testing.T) oauth.Store{
 // out at its start expire within the refresh grant's ten minutes.
 const usertokensSoon = 8*time.Hour - 5*time.Minute
 
-// usertokensRefreshAll presents the refresh token of each session at once.
-func usertokensRefreshAll(t *testing.T, h *grantHarness, sessions []grantSession) []tokenReply {
-	t.Helper()
-	start := make(chan struct{})
-	replies := make([]tokenReply, len(sessions))
-	errs := make([]error, len(sessions))
-	var wg sync.WaitGroup
-	for i, s := range sessions {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start
-			replies[i], errs[i] = h.send("", grantRefreshForm(s.refresh))
-		}()
-	}
-	close(start)
-	wg.Wait()
-	for _, err := range errs {
-		require.NoError(t, err)
-	}
-	return replies
-}
-
 // Several agents of one user refresh at once while the user's GitHub token
 // is about to expire. GitHub's refresh tokens work once, so a second refresh
 // with the old one is refused, which ends every session of the user. With
@@ -70,7 +47,11 @@ func TestSessionsOfOneUserThatRefreshAtOnceRefreshTheGitHubTokenOnce(t *testing.
 			}
 			h.clock.Advance(usertokensSoon)
 
-			replies := usertokensRefreshAll(t, h, sessions)
+			var forms []url.Values
+			for _, s := range sessions {
+				forms = append(forms, grantRefreshForm(s.refresh))
+			}
+			replies := h.raceAll(forms...)
 			refreshes, _ := h.github.counts()
 			require.Equal(t, 1, refreshes, "GitHub saw one refresh")
 			for i, s := range sessions {

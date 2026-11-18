@@ -377,3 +377,74 @@ func grantRequireRefused(t *testing.T, reply tokenReply, status int, code, name 
 	require.Equal(t, code, reply.body["error"], "%s: %s", name, reply.rawBody)
 	require.NotEmpty(t, reply.body["error_description"], name)
 }
+
+// grantBarrierStore can hold reads of a code or a refresh token back until
+// a number of them have arrived, so that requests which race all read the
+// row before any of them changes it.
+type grantBarrierStore struct {
+	oauth.Store
+	mu      sync.Mutex
+	waiting int
+	release chan struct{}
+}
+
+func newGrantBarrierStore() *grantBarrierStore {
+	return &grantBarrierStore{Store: newFakeStore()}
+}
+
+// hold makes the next n reads wait until all n have arrived.
+func (s *grantBarrierStore) hold(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.waiting, s.release = n, make(chan struct{})
+}
+
+func (s *grantBarrierStore) arrive() {
+	s.mu.Lock()
+	if s.waiting == 0 {
+		s.mu.Unlock()
+		return
+	}
+	s.waiting--
+	release := s.release
+	if s.waiting == 0 {
+		close(release)
+	}
+	s.mu.Unlock()
+	<-release
+}
+
+func (s *grantBarrierStore) AuthRequestByCode(ctx context.Context, code oauth.TokenHash) (oauth.AuthRequest, error) {
+	r, err := s.Store.AuthRequestByCode(ctx, code)
+	s.arrive()
+	return r, err
+}
+
+func (s *grantBarrierStore) SessionByRefreshToken(ctx context.Context, refresh oauth.TokenHash) (oauth.Session, bool, error) {
+	session, current, err := s.Store.SessionByRefreshToken(ctx, refresh)
+	s.arrive()
+	return session, current, err
+}
+
+// raceAll sends each form at once.
+func (h *grantHarness) raceAll(forms ...url.Values) []tokenReply {
+	h.t.Helper()
+	start := make(chan struct{})
+	replies := make([]tokenReply, len(forms))
+	errs := make([]error, len(forms))
+	var wg sync.WaitGroup
+	for i, form := range forms {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			replies[i], errs[i] = h.send("", form)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	for _, err := range errs {
+		require.NoError(h.t, err)
+	}
+	return replies
+}

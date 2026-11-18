@@ -3,10 +3,8 @@ package oauth_test
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"net/http"
 	"net/url"
-	"sync"
 	"testing"
 	"time"
 
@@ -134,29 +132,17 @@ func TestACodeUsedAgainEndsItsSession(t *testing.T) {
 	grantRequireRefused(t, h.post("", grantRefreshForm(s.refresh)), http.StatusBadRequest, "invalid_grant", "the session's refresh token")
 }
 
-// Of two redemptions of one code at once, one gets the tokens and the other
-// ends the session that they make: the code was used twice.
+// Of two redemptions of one code that both read it before either redeems,
+// one gets the tokens, and the other ends the session that they make: the
+// code was used twice.
 func TestTwoRedemptionsOfOneCodeAtOnceEndTheSession(t *testing.T) {
 	t.Parallel()
-	h := newGrantHarness(t, newFakeStore())
+	store := newGrantBarrierStore()
+	h := newGrantHarness(t, store)
 	l := h.approve("login-1", 1)
-	start := make(chan struct{})
-	replies := make([]tokenReply, 2)
-	errs := make([]error, 2)
-	var wg sync.WaitGroup
-	for i := range replies {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start
-			replies[i], errs[i] = h.send("", grantCodeForm(l))
-		}()
-	}
-	close(start)
-	wg.Wait()
-	require.NoError(t, errors.Join(errs...))
-	statuses := []int{replies[0].status, replies[1].status}
-	require.ElementsMatch(t, []int{http.StatusOK, http.StatusBadRequest}, statuses)
+	store.hold(2)
+	replies := h.raceAll(grantCodeForm(l), grantCodeForm(l))
+	require.ElementsMatch(t, []int{http.StatusOK, http.StatusBadRequest}, []int{replies[0].status, replies[1].status})
 	require.False(t, h.session(l.id).Live())
 }
 
