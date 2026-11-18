@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -92,20 +93,60 @@ func TestTheHeadersOfAClientDocumentSetHowLongFaucetKeepsIt(t *testing.T) {
 	}
 }
 
-// An error answer, and a document that fails a check, are fetched again
-// whatever their headers say.
-func TestARefusedClientDocumentIsFetchedAgain(t *testing.T) {
+// A client ID whose fetch failed, by an error answer or a document that
+// fails a check, is fetched once a minute at most, whatever its headers
+// say, so a bad client ID costs one fetch however often it comes. Each
+// request in between gets the same page.
+func TestAClientIDWhoseFetchFailedIsFetchedOnceAMinute(t *testing.T) {
 	t.Parallel()
 	h := newLoginHarness(t)
 	refused := h.newClient("refused", map[string]any{"redirect_uris": []string{}})
 	missing := loginClient{id: h.docs.URL + "/missing.json", redirectURI: h.agents.URL + "/cb/missing", path: "/cb/missing"}
 	for _, c := range []loginClient{refused, missing} {
-		h.docs.serveWith(c, http.Header{"Cache-Control": {"max-age=60"}})
-		for range 2 {
+		h.docs.serveWith(c, http.Header{"Cache-Control": {"max-age=600"}})
+	}
+	for _, c := range []loginClient{refused, missing} {
+		var pages []string
+		for range 3 {
 			a := h.newBrowser(t).authorize(h.request(c))
 			require.Equal(t, http.StatusBadRequest, a.status, c.id)
+			pages = append(pages, a.body)
 		}
-		require.Equal(t, 2, h.docs.fetchCount(c), c.id)
+		require.Equal(t, 1, h.docs.fetchCount(c), c.id)
+		require.Equal(t, pages[0], pages[2], "%s: the same page each time", c.id)
+	}
+	h.clock.Advance(time.Minute)
+	for _, c := range []loginClient{refused, missing} {
+		h.newBrowser(t).authorize(h.request(c))
+		require.Equal(t, 2, h.docs.fetchCount(c), "%s is fetched again after a minute", c.id)
+	}
+}
+
+// Logins of one client that start at once, before faucet holds its
+// document, share one fetch of it.
+func TestLoginsOfOneClientThatStartAtOnceShareOneFetch(t *testing.T) {
+	t.Parallel()
+	h := newLoginHarness(t)
+	c := h.newClient("agent", nil)
+	hold := make(chan struct{})
+	h.docs.mu.Lock()
+	h.docs.hold = hold
+	h.docs.mu.Unlock()
+
+	const logins = 8
+	var wg sync.WaitGroup
+	statuses := make([]int, logins)
+	for i := range logins {
+		b := h.newBrowser(t)
+		wg.Go(func() { statuses[i] = b.authorize(h.request(c)).status })
+	}
+	require.Eventually(t, func() bool { return h.docs.fetchCount(c) > 0 }, 10*time.Second, time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
+	close(hold)
+	wg.Wait()
+	require.Equal(t, 1, h.docs.fetchCount(c))
+	for i, status := range statuses {
+		require.Equal(t, http.StatusOK, status, "login %d", i)
 	}
 }
 

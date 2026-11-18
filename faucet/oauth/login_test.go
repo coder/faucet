@@ -169,6 +169,8 @@ type loginDocuments struct {
 	// headers are added to every answer for a path.
 	headers map[string]http.Header
 	fetches map[string]int
+	// hold, when set, keeps each answer back until it is closed.
+	hold chan struct{}
 }
 
 func newLoginDocuments(t *testing.T) *loginDocuments {
@@ -179,7 +181,11 @@ func newLoginDocuments(t *testing.T) *loginDocuments {
 		doc, ok := d.docs[r.URL.Path]
 		maps.Copy(w.Header(), d.headers[r.URL.Path])
 		d.fetches[r.URL.Path]++
+		hold := d.hold
 		d.mu.Unlock()
+		if hold != nil {
+			<-hold
+		}
 		if !ok {
 			http.NotFound(w, r)
 			return
