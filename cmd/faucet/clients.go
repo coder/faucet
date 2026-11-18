@@ -282,7 +282,6 @@ func listClients(ctx context.Context, store oauth.Store, stdout io.Writer) error
 	return w.Flush()
 }
 
-// claimFlags are the claims that a trust rule pins, by name.
 type claimFlags map[string]string
 
 func (c claimFlags) String() string { return strings.Join(sortedClaims(c), ",") }
@@ -310,7 +309,7 @@ func sortedClaims(claims map[string]string) []string {
 
 // trustClient adds a trust rule to a live client. Adding a rule that the
 // client holds prints that rule's ID again.
-func trustClient(ctx context.Context, id string, args []string, store clientStore, now time.Time, stdout, stderr io.Writer) error {
+func trustClient(ctx context.Context, id string, args []string, store oauth.Store, now time.Time, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("faucet clients trust", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	issuer := flags.String("issuer", "", "the issuer of the workload's tokens, as their iss names it, such as https://oidc.vercel.com/<team>")
@@ -361,9 +360,11 @@ func listTrustRules(ctx context.Context, id string, store oauth.Store, stdout io
 	if err := oauth.ValidateClientID(id); err != nil {
 		return err
 	}
-	if _, err := store.Client(ctx, id); xerrors.Is(err, oauth.ErrUnknownClient) {
+	_, err := store.Client(ctx, id)
+	switch {
+	case xerrors.Is(err, oauth.ErrUnknownClient):
 		return xerrors.Errorf("there is no client %q", id)
-	} else if err != nil {
+	case err != nil:
 		return err
 	}
 	rules, err := store.TrustRules(ctx, id)
@@ -391,10 +392,10 @@ func untrustClient(ctx context.Context, id, rawRuleID string, store oauth.Store,
 		return xerrors.Errorf("a rule ID is a whole number above 0, as faucet clients trusts %s lists", id)
 	}
 	err = store.RemoveTrustRule(ctx, id, ruleID)
-	if xerrors.Is(err, oauth.ErrUnknownTrustRule) {
+	switch {
+	case xerrors.Is(err, oauth.ErrUnknownTrustRule):
 		return xerrors.Errorf("client %q has no trust rule %d", id, ruleID)
-	}
-	if err != nil {
+	case err != nil:
 		return err
 	}
 	_, err = fmt.Fprintf(stdout, "Trust rule %d of %s is removed. A token that a workload got with it works until it expires.\n", ruleID, id)

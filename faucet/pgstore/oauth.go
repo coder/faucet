@@ -154,9 +154,7 @@ func (s *Store) DisableClient(ctx context.Context, id string, now time.Time) (_ 
 	return clientOf(row)
 }
 
-// AddTrustRule implements oauth.Store. The query hashes the rule's values as
-// jsonb, so the same JSON values, written in any order or spacing, are the
-// same rule.
+// AddTrustRule implements oauth.Store.
 func (s *Store) AddTrustRule(ctx context.Context, clientID string, r oauth.TrustRule, now time.Time) (_ int64, err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	claims, err := json.Marshal(r.Claims)

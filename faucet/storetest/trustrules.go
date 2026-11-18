@@ -38,8 +38,6 @@ func runTrustRules(t *testing.T, newStore func(t *testing.T) oauth.Store) {
 	}
 }
 
-// vercelRule trusts the production deployments of one project of the
-// codercom team on Vercel, whose keys come from discovery.
 func vercelRule() oauth.TrustRule {
 	return oauth.TrustRule{
 		Issuer: "https://oidc.vercel.com/codercom",
@@ -47,8 +45,6 @@ func vercelRule() oauth.TrustRule {
 	}
 }
 
-// clusterRule trusts one service account of a cluster whose keys an operator
-// pasted.
 func clusterRule() oauth.TrustRule {
 	return oauth.TrustRule{
 		Issuer: "https://k8s.wi-test.invalid",
@@ -68,7 +64,6 @@ func requireSameTrustRule(t *testing.T, want oauth.TrustRule, got oauth.TrustRul
 	require.JSONEq(t, string(want.JWKS), string(got.JWKS))
 }
 
-// addClients adds a live client for each ID.
 func addClients(t *testing.T, s oauth.Store, ids ...string) {
 	t.Helper()
 	for _, id := range ids {
@@ -106,9 +101,6 @@ func trustRulesReadBackAsAddedInTheirOrder(t *testing.T, s oauth.Store) {
 	require.Empty(t, rules)
 }
 
-// An operator who runs the same trust command twice gets the rule of the
-// first. The same JSON values make the same rule, whatever their order or
-// spacing, and a rule that differs in any value is another.
 func addingARuleThatTheClientHoldsReturnsItsID(t *testing.T, s oauth.Store) {
 	ctx := context.Background()
 	addClients(t, s, "digest-bot")
@@ -149,8 +141,9 @@ func addingARuleThatTheClientHoldsReturnsItsID(t *testing.T, s oauth.Store) {
 	}
 }
 
-// A pasted key set can hold many keys, and their bytes do not compress, which
-// no index entry of the values themselves could hold.
+// A btree entry holds at most 2704 bytes, and random key bytes do not
+// compress, so a unique index on the values themselves would refuse this
+// rule.
 func aRuleWithAKeySetOf30KBIsAddedOnce(t *testing.T, s oauth.Store) {
 	ctx := context.Background()
 	addClients(t, s, "digest-bot")
@@ -191,9 +184,6 @@ func addTrustRuleOfAnUnknownClientIsUnknown(t *testing.T, s oauth.Store) {
 	require.Empty(t, rules, "nothing is stored")
 }
 
-// An operator removes a rule by its client and its ID, so a mistyped client
-// removes nothing of another's. A removed ID is never given again, so a
-// second untrust of it cannot remove a later rule.
 func removeTrustRuleRemovesThatRuleOfThatClientOnly(t *testing.T, s oauth.Store) {
 	ctx := context.Background()
 	addClients(t, s, "digest-bot", "ci-watcher")

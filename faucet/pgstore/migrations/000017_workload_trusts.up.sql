@@ -1,6 +1,5 @@
 -- A client that faucet clients create -no-secret made has no secret_hash, so
--- the client credentials grant refuses it, and only its trust rules let a
--- workload act as it.
+-- the client credentials grant refuses it.
 ALTER TABLE faucet_service_clients ALTER COLUMN secret_hash DROP NOT NULL;
 
 -- faucet_workload_trusts holds the trust rules of the service clients. A

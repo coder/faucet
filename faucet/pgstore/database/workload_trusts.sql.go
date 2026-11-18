@@ -33,9 +33,9 @@ type AddTrustRuleParams struct {
 	ClientID  string
 }
 
-// A rule that the client holds already conflicts on rule_hash, and the update,
-// which changes nothing, returns its ID. A client that does not exist gives
-// no row.
+// ON CONFLICT DO NOTHING would return no row, so an update that changes
+// nothing returns the ID of the rule that the client holds already. A client
+// that does not exist gives no row.
 func (q *Queries) AddTrustRule(ctx context.Context, arg AddTrustRuleParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, addTrustRule,
 		arg.Issuer,

@@ -331,9 +331,6 @@ func TestDisablingAnImpossibleClientIDIsRefused(t *testing.T) {
 	}
 }
 
-// The rules that the trust tests take: a Vercel project of the codercom team
-// in production, whose keys come from discovery, and a service account of a
-// private cluster, whose keys the operator pastes.
 const (
 	codercomIssuer = "https://oidc.vercel.com/codercom"
 	codercomTeam   = "team_tGkWfhEGGelkkqUUm9nXq17r"
@@ -354,8 +351,6 @@ func trustVercel(id string, claims ...string) []string {
 
 var vercelPins = []string{"owner_id=" + codercomTeam, "project_id=" + digestProject, "environment=production"}
 
-// A client for workloads has no secret, and gets trust rules that the
-// commands add, list and remove.
 func TestTheClientsCommandMakesAClientForWorkloadsAndManagesItsTrustRules(t *testing.T) {
 	t.Parallel()
 	getenv, store := newClientsDatabase(t)
@@ -473,8 +468,6 @@ func TestTheClientsCommandRefusesATrustRuleThatCannotWork(t *testing.T) {
 	}
 }
 
-// untrust and trusts name a client, so an operator who names the wrong one
-// removes nothing of another's.
 func TestTheClientsCommandRemovesATrustRuleOfThatClientOnly(t *testing.T) {
 	t.Parallel()
 	getenv, store := newClientsDatabase(t)

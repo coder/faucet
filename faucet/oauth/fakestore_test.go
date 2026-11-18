@@ -40,8 +40,6 @@ type fakeStore struct {
 	// lock does in Postgres. A caller takes it before mu, never while it
 	// holds mu.
 	connectionLocks map[string]*sync.Mutex
-	// trustRules are the trust rules of every client, in the order they
-	// were added, and lastTrustRuleID is the ID of the last one.
 	trustRules      []fakeTrustRule
 	lastTrustRuleID int64
 	err             error

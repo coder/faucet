@@ -102,7 +102,6 @@ func TestNewClientRefusesAClientThatCannotWork(t *testing.T) {
 	require.Equal(t, []string{"repo:coder/faucet", "org:coder#7", "all"}, c.Grants)
 }
 
-// A client with no secret holds what any other does, and needs as much.
 func TestNewSecretlessClientMakesAClientWithNoSecret(t *testing.T) {
 	t.Parallel()
 	const resource = "https://faucet.example.com/github/mcp"

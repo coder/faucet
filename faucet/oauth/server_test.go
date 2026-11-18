@@ -268,8 +268,6 @@ func TestClientCredentialsRefusesAClientThatDoesNotAuthenticate(t *testing.T) {
 	require.Zero(t, h.store.tokenCount())
 }
 
-// A client with no secret logs in only as a workload, so the client
-// credentials grant refuses it whatever secret comes, the empty one included.
 func TestClientCredentialsRefusesAClientWithNoSecret(t *testing.T) {
 	t.Parallel()
 	h := newTokenHarness(t)

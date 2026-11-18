@@ -1,7 +1,7 @@
 -- name: AddTrustRule :one
--- A rule that the client holds already conflicts on rule_hash, and the update,
--- which changes nothing, returns its ID. A client that does not exist gives
--- no row.
+-- ON CONFLICT DO NOTHING would return no row, so an update that changes
+-- nothing returns the ID of the rule that the client holds already. A client
+-- that does not exist gives no row.
 INSERT INTO faucet_workload_trusts (client_id, issuer, claims, jwks, rule_hash, created_at)
 SELECT
   c.client_id,

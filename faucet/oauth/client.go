@@ -27,8 +27,8 @@ const (
 
 // Client is a service client as a store keeps it. An operator makes it with
 // NewClient, and the service logs in with its ID and secret under the client
-// credentials grant, or with NewSecretlessClient, and a workload logs in as it
-// under one of the client's trust rules.
+// credentials grant. NewSecretlessClient makes a client for workloads, which
+// has no secret.
 type Client struct {
 	// ID is lower-case letters, digits and inner hyphens. The service's
 	// login is "svc:" and the ID.
