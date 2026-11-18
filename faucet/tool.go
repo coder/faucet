@@ -246,8 +246,10 @@ func checkRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo st
 	logger = logger.With(slog.F("login", p.Login))
 	repoID, err := lookup(ctx, p, repo)
 	switch {
+	// A denial logs its reason as one line of text: slog.Error would add the
+	// error's stack frames to every routine denial.
 	case xerrors.Is(err, ErrNoAccess):
-		logger.Info(ctx, op+" denied", slog.Error(err))
+		logger.Info(ctx, op+" denied", slog.F("reason", err.Error()))
 		return 0, err
 	case xerrors.Is(err, ErrInvalidToken):
 		logger.Info(ctx, op+" denied, token rejected")

@@ -9,7 +9,7 @@ A service agent, such as one that analyzes GitHub events, logs in to faucet with
 - `/.well-known/oauth-authorization-server` names `/oauth/authorize`, which answers 400 `unsupported_response_type` until a grant uses it (the TypeScript MCP SDK needs the field), and `POST /oauth/token`, which takes `client_credentials` with HTTP Basic client authentication. A token request without `resource` gets the client's endpoint, and the token holds the scopes asked for that the client holds. The token lasts 15 minutes and works only on the client's endpoint. A client for another server's endpoint gets `invalid_client`.
 - A service may wait on a repository that a grant names, matched by name, once a signed delivery named it: with `FAUCET_PUBLIC_URL` set, every signed delivery records the repository it names, stored or ignored, under the name it was first seen with until a `repository` renamed or transferred delivery from that name changes it, so a redelivered older rename changes nothing. Before that the wait tool says faucet has received no delivery from it yet. A repository no grant names is refused with that reason.
 - A disabled client gets no new token, and its token fails on its next request.
-- `/cron/purge` deletes expired access tokens and counts them in `expired_access_tokens`.
+- `/cron/purge` deletes expired access tokens and counts them in `expired_access_tokens`, a field that a faucet without `FAUCET_PUBLIC_URL` leaves out.
 - Without `FAUCET_PUBLIC_URL`, none of these routes exist (404), no delivery writes a repository row, and the 401 is the bare `Bearer` of [MCP paths](mcp-paths.md).
 
 ## How to get to it (user POV)

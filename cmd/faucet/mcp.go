@@ -187,7 +187,8 @@ func requireBearer(b bearers, path, challenge string, logger slog.Logger, next h
 			p, err := b.verifyFaucetToken(r.Context(), token, resource)
 			switch {
 			case xerrors.Is(err, faucet.ErrInvalidToken):
-				logger.Debug(r.Context(), "faucet token rejected", slog.Error(err))
+				// One line of text: slog.Error would add the error's stack frames.
+				logger.Debug(r.Context(), "faucet token rejected", slog.F("reason", err.Error()))
 				unauthorized(w, challenge)
 			case err != nil:
 				logger.Warn(r.Context(), "could not check the faucet token", slog.Error(err))
