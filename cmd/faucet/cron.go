@@ -86,8 +86,19 @@ func (c cronRoutes) purge(w http.ResponseWriter, r *http.Request) {
 		PurgedThrough        int64 `json:"purged_through"`
 		ExpiredSubscriptions int64 `json:"expired_subscriptions"`
 		EndedDeliveries      int64 `json:"ended_deliveries"`
-		ExpiredAccessTokens  int64 `json:"expired_access_tokens"`
-	}{res.Deleted, res.PurgedThrough, res.ExpiredSubscriptions, res.EndedDeliveries, tokens.ExpiredAccessTokens})
+		// ExpiredAccessTokens is left out without the login server, which
+		// keeps no access token.
+		ExpiredAccessTokens *int64 `json:"expired_access_tokens,omitempty"`
+	}{res.Deleted, res.PurgedThrough, res.ExpiredSubscriptions, res.EndedDeliveries, present(c.login != nil, tokens.ExpiredAccessTokens)})
+}
+
+// present returns a pointer to v when on, and nil otherwise, which omitempty
+// leaves out of a reply.
+func present[T any](on bool, v T) *T {
+	if !on {
+		return nil
+	}
+	return &v
 }
 
 func (c cronRoutes) deliver(w http.ResponseWriter, r *http.Request) {
