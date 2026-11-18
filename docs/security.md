@@ -48,6 +48,8 @@ These checks keep another site, another browser and another client from finishin
 - **Redirect URIs match exactly.** A request's redirect URI must equal one of the document's byte for byte, and a loopback `http` one may differ in its port only (RFC 8252). The token request must name the same redirect URI. Schemes that a browser runs, such as `javascript`, are refused.
 - **The pages load nothing and run one script,** the wait of Continue, which their Content-Security-Policy allows by its hash. No other site can frame them.
 
+Anyone who serves a valid document can open `/oauth/authorize`, so faucet bounds what that costs. It keeps up to 64 documents, each for as long as its cache headers let a shared cache keep it and 5 minutes at most, and fetches no client ID on its own host. It holds at most 100 logins in progress for the clients of one host and 1000 in all, and a login past a limit gets a 429 page. A client ID with a new path, or a document sent with `no-store`, still costs one fetch per request, and a sender with many hosts can fill the total limit, which blocks every login for as long as it keeps sending.
+
 ## Callback URLs
 
 In webhook mode faucet makes outbound requests to URLs that clients choose, so it guards them against SSRF:
