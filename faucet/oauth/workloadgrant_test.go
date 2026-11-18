@@ -115,6 +115,44 @@ func TestAWorkloadTokenLastsAtLeastASecond(t *testing.T) {
 	}, reply.body)
 }
 
+type roundTrip func(*http.Request) (*http.Response, error)
+
+func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// A fetch of the keys takes time, so faucet reads its clock again before it
+// mints: the token's lifetime starts then, and a subject token that expires
+// during the fetch gets no token.
+func TestAWorkloadTokenLastsFromItsMint(t *testing.T) {
+	t.Parallel()
+	for left, want := range map[time.Duration]int{10 * time.Second: 7, 3 * time.Second: 0} {
+		h := newTokenHarness(t)
+		keys, _ := oauth.ServeVercel(t)
+		oauth.WorkloadKeysThrough(h.server, &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+			h.clock.Advance(1500 * time.Millisecond)
+			return keys.Transport.RoundTrip(r)
+		})})
+		h.addWorkloadClient("digest-bot", resource, oauth.VercelRule())
+		start := h.clock.Now()
+		claims := oauth.VercelFunctionClaims(start)
+		claims["exp"] = start.Add(left).Unix()
+
+		reply := h.post("", exchange(oauth.SignAsVercel(t, claims)))
+		require.Equal(t, start.Add(3*time.Second), h.clock.Now(), "the discovery document and the key set took 3 seconds")
+		if want == 0 {
+			require.Equal(t, http.StatusBadRequest, reply.status, reply.rawBody)
+			require.Equal(t, map[string]any{
+				"error": "invalid_request", "error_description": "the subject token is refused: it has expired, or expires in less than a second",
+			}, reply.body, "%s left at the check", left)
+			continue
+		}
+		require.Equal(t, http.StatusOK, reply.status, reply.rawBody)
+		require.Equal(t, float64(want), reply.body["expires_in"], "%s left at the check", left)
+		stored, err := h.store.AccessToken(context.Background(), oauth.HashToken(reply.body["access_token"].(string)))
+		require.NoError(t, err)
+		require.Equal(t, start.Add(left), stored.ExpiresAt)
+	}
+}
+
 var waitForKeys = map[string]any{
 	"error": "temporarily_unavailable", "error_description": "faucet cannot get the key of the subject token from its issuer yet: try again after Retry-After seconds",
 }

@@ -81,7 +81,11 @@ func (s *Server) exchange(ctx context.Context, form url.Values) (tokenResponse, 
 		return tokenResponse{}, badRequest("invalid_target", "the tokens of this client are for "+c.Resource)
 	}
 	now := s.clock.Now()
-	resp, err := s.mintServiceToken(ctx, c, scopes, now, match.lifetime(now))
+	lifetime := match.lifetime(now)
+	if lifetime < minWorkloadTokenLifetime {
+		return tokenResponse{}, refuseSigned("it has expired, or expires in less than a second")
+	}
+	resp, err := s.mintServiceToken(ctx, c, scopes, now, lifetime)
 	if err != nil {
 		return tokenResponse{}, err
 	}

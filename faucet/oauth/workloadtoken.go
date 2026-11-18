@@ -62,7 +62,7 @@ type workloadMatch struct {
 }
 
 // lifetime is how long a faucet token for m lasts when faucet mints it at
-// now, at least minWorkloadTokenLifetime when now is the time of the check.
+// now.
 func (m workloadMatch) lifetime(now time.Time) time.Duration {
 	return min(accessTokenLifetime, m.Expires.Sub(now))
 }
