@@ -100,6 +100,14 @@ type webhookBody struct {
 // whose origin is at the limit when a worker looks is passed over. A gap that no
 // worker took before the call ended stays recorded, and the next call sends it.
 //
+// With a RawStore the call also sends the raw deliveries that webhook
+// deliveries queued, with the same attempts, schedule and reasons, and the gap
+// envelope of a raw subscription that held the most unsent deliveries when
+// events arrived. Both kinds share the workers, the limit per callback origin
+// and the limit of a call. Each worker asks for the other kind first after
+// each delivery it takes, so neither kind waits behind a long queue of the
+// other.
+//
 // By default at most 2 of the 8 workers of a call send to one callback origin
 // at a time, for deliveries and gaps alike, so one endpoint that stalls cannot
 // hold up the others. WebhookDeps.MaxWorkersPerOrigin changes the number.

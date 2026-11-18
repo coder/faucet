@@ -370,3 +370,109 @@ func TestDeliverDueDoesNotSendARawGapASecondTimeWhenTheEndpointRefusesIt(t *test
 	require.Zero(t, res.GapsFailed+res.GapsSent, "a gap gets one attempt")
 	require.Len(t, d.rcv.envelopesOf("/hook", "gap"), 1)
 }
+
+func TestDeliverDueSendsTypedAndRawDeliveriesInOneRun(t *testing.T) {
+	t.Parallel()
+
+	d := newRawDeliverHarness(t)
+	d.subscribeEndpoint(d.endpoint("/typed"))
+	d.subscribeRaw("github.push", d.endpoint("/raw"))
+	d.advance(time.Second)
+	d.newRunEvent()
+	d.pushRaw(nil)
+
+	res := d.deliverDue()
+	require.Equal(t, 1, res.Enqueued, "the run queues the typed delivery, and the raw one was queued before")
+	require.Equal(t, 2, res.Claimed)
+	require.Equal(t, 2, res.Delivered)
+	typed, raw := d.rcv.requests("/typed"), d.rcv.requests("/raw")
+	require.Len(t, typed, 1)
+	require.Len(t, raw, 1)
+	require.Equal(t, "ci.run_completed", typed[0].body(t).Name)
+	require.Regexp(t, `^v1\.\d+$`, typed[0].body(t).Cursor)
+	require.Equal(t, "github.push", raw[0].body(t).Name)
+	require.Regexp(t, `^r1\.\d+$`, raw[0].body(t).Cursor)
+}
+
+func TestDeliverDueStarvesNeitherKindWhenMoreIsDueThanARunTakes(t *testing.T) {
+	t.Parallel()
+
+	d := newRawDeliverHarness(t, func(deps *faucet.Deps) { deps.Webhook.MaxWorkersPerOrigin = -1 })
+	for i := range 2 {
+		d.subscribeEndpoint(d.endpoint(fmt.Sprintf("/typed/%d", i)))
+		d.subscribeRaw("github.push", d.endpoint(fmt.Sprintf("/raw/%d", i)))
+	}
+	d.advance(time.Second)
+	for range 100 {
+		d.newRunEvent()
+		d.pushRaw(nil)
+	}
+	count := func(kind string) int {
+		return len(d.rcv.requests("/"+kind+"/0")) + len(d.rcv.requests("/"+kind+"/1"))
+	}
+
+	first := d.deliverDue()
+	require.Equal(t, 200, first.Delivered, "400 deliveries are due, and a run takes 200")
+	require.True(t, first.Incomplete)
+	require.GreaterOrEqual(t, count("typed"), 80, "the typed deliveries get about half of the run")
+	require.GreaterOrEqual(t, count("raw"), 80, "the raw deliveries get about half of the run")
+
+	second := d.deliverDue()
+	require.Equal(t, 200, second.Delivered)
+	require.Equal(t, 200, count("typed"))
+	require.Equal(t, 200, count("raw"))
+}
+
+func TestDeliverDueHoldsTheLimitPerOriginAcrossTypedAndRawDeliveries(t *testing.T) {
+	t.Parallel()
+
+	d := newRawDeliverHarness(t)
+	d.subscribeEndpoint(d.endpoint("/typed"))
+	d.subscribeRaw("github.push", d.endpoint("/raw"))
+	stalled := stall(t, d.rcv, "/typed", "/raw")
+	d.advance(time.Second)
+	for range 8 {
+		d.newRunEvent()
+		d.pushRaw(nil)
+	}
+
+	wait := d.runDeliverDue()
+	stalled.requireHeldAtMost(t, 2)
+	stalled.release()
+	res := wait()
+	d.record(res)
+	require.Equal(t, 16, res.Delivered)
+}
+
+func TestDeliverDueEndsTheRawDeliveriesOfASubscriptionThatIsGone(t *testing.T) {
+	t.Parallel()
+
+	for name, end := range map[string]func(d *deliverHarness, ep hookEndpoint){
+		"it expired": func(d *deliverHarness, _ hookEndpoint) { d.advance(11 * time.Minute) },
+		"its subscriber unsubscribed": func(d *deliverHarness, ep hookEndpoint) {
+			require.NoError(d.t, d.unsubscribeRaw("github.push", ep.args, d.rcv.url(ep.path)))
+		},
+		"it was made again": func(d *deliverHarness, ep hookEndpoint) {
+			require.NoError(d.t, d.unsubscribeRaw("github.push", ep.args, d.rcv.url(ep.path)))
+			d.advance(time.Second)
+			d.subscribeRaw("github.push", ep)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d := newRawDeliverHarness(t)
+			ep := d.endpoint("/hook")
+			d.subscribeRaw("github.push", ep)
+			d.advance(time.Second)
+			d.pushRaw(nil)
+			d.pushRaw(nil)
+
+			end(d, ep)
+			res := d.deliverDue()
+			require.Equal(t, map[faucet.GiveUpReason]int{faucet.GiveUpSubscriptionExpired: 2}, res.GaveUp,
+				"the deliveries end with the subscription that held them, counted")
+			require.Zero(t, res.Claimed)
+			require.Zero(t, d.rcv.total(), "an event from before a subscription existed is never sent to it")
+		})
+	}
+}

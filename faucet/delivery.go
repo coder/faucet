@@ -256,7 +256,10 @@ const (
 // DeliverResult counts what one DeliverDue run did. Every delivery that ended
 // in the run is in Delivered or in one entry of GaveUp.
 type DeliverResult struct {
-	// Enqueued is the deliveries queued for events that the run read.
+	// Enqueued is the deliveries queued for events that the run read. A raw
+	// delivery is queued when its webhook delivery arrives, not by a run, so
+	// it is never in Enqueued. It is in the other counts when a run sends or
+	// ends it.
 	Enqueued int
 	// Gaps is the subscriptions that missed events because a purge deleted
 	// them before the run read them, and for which the run queued a gap
