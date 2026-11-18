@@ -160,7 +160,8 @@ func (a ServiceAccess) liveGrants(ctx context.Context, p faucet.Principal) ([]cl
 // that the latest delivery named by that login, and it must be the owner
 // that the delivery of the repository named.
 func (a ServiceAccess) repoGranted(ctx context.Context, grants []clientGrant, repo string) (int64, error) {
-	if _, _, err := githubapi.ParseRepo(repo); err != nil {
+	repoOwner, _, err := githubapi.ParseRepo(repo)
+	if err != nil {
 		return 0, err
 	}
 	named := slices.ContainsFunc(grants, func(g clientGrant) bool { return g.all || strings.EqualFold(g.repo, repo) })
@@ -171,6 +172,12 @@ func (a ServiceAccess) repoGranted(ctx context.Context, grants []clientGrant, re
 	}
 	r, err := a.repos.RepositoryByName(ctx, repo)
 	switch {
+	case xerrors.Is(err, faucet.ErrUnknownRepository) && !named &&
+		!slices.ContainsFunc(orgs, func(g clientGrant) bool { return strings.EqualFold(g.owner, repoOwner) }):
+		// Only a grant that names the repository or its owner learns that
+		// faucet has not seen it, so a service cannot probe which repositories
+		// of other owners faucet hears from.
+		return 0, notGranted
 	case xerrors.Is(err, faucet.ErrUnknownRepository):
 		return 0, xerrors.Errorf("faucet has received no webhook delivery from %s yet, so it cannot tell which repository the grant names; it can once GitHub sends one: %w", repo, faucet.ErrNoAccess)
 	case err != nil:

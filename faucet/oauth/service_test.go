@@ -123,10 +123,12 @@ func TestAnOrgGrantCoversTheRepositoriesOfTheOwnersAccount(t *testing.T) {
 			require.NoError(t, err, repo)
 			require.Equal(t, want, id, repo)
 		}
-		_, err := check(ctx, p, "octo/repo")
-		require.ErrorIs(t, err, faucet.ErrNoAccess)
-		require.ErrorContains(t, err, "no grant of this service names octo/repo")
-		_, err = check(ctx, p, "coder/new")
+		for _, repo := range []string{"octo/repo", "octo/unseen"} {
+			_, err := check(ctx, p, repo)
+			require.ErrorIs(t, err, faucet.ErrNoAccess, repo)
+			require.ErrorContains(t, err, "no grant of this service names "+repo, "the answer does not tell which repositories of other owners faucet has seen")
+		}
+		_, err := check(ctx, p, "coder/new")
 		require.ErrorContains(t, err, "faucet has received no webhook delivery from coder/new yet")
 	}
 	for _, check := range []func(context.Context, faucet.Principal, string) (int64, error){access.OwnerID, access.OwnerIDFresh} {
