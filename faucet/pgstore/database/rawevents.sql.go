@@ -222,13 +222,31 @@ func (q *Queries) ClearRawBodies(ctx context.Context, clearBefore sql.NullTime) 
 const countRawInterests = `-- name: CountRawInterests :one
 WITH subs AS (
   SELECT s.principal FROM faucet_subscriptions s
-  WHERE s.target_kind = $2 AND s.repo_id = $3 AND s.owner_id = $4
-    AND s.event_type = 'github.' || $5::text
-    AND s.expires_at > $6 AND s.key_hash IS DISTINCT FROM $7::bytea
+  WHERE $2::text = 'repo' AND s.target_kind = 'repo' AND s.repo_id = $3::bigint
+    AND s.event_type = 'github.' || $4::text
+    AND s.expires_at > $5 AND s.key_hash IS DISTINCT FROM $6::bytea
+  UNION ALL
+  SELECT s.principal FROM faucet_subscriptions s
+  WHERE $2::text = 'owner' AND s.target_kind = 'owner' AND s.owner_id = $7::bigint
+    AND s.event_type = 'github.' || $4::text
+    AND s.expires_at > $5 AND s.key_hash IS DISTINCT FROM $6::bytea
+  UNION ALL
+  SELECT s.principal FROM faucet_subscriptions s
+  WHERE $2::text = 'all' AND s.target_kind = 'all'
+    AND s.event_type = 'github.' || $4::text
+    AND s.expires_at > $5 AND s.key_hash IS DISTINCT FROM $6::bytea
 ), leases AS (
   SELECT l.principal FROM faucet_raw_leases l
-  WHERE l.target_kind = $2 AND l.repo_id = $3 AND l.owner_id = $4
-    AND l.event = $5::text AND l.expires_at > $6
+  WHERE $2::text = 'repo' AND l.target_kind = 'repo' AND l.repo_id = $3::bigint
+    AND l.event = $4::text AND l.expires_at > $5
+  UNION ALL
+  SELECT l.principal FROM faucet_raw_leases l
+  WHERE $2::text = 'owner' AND l.target_kind = 'owner' AND l.owner_id = $7::bigint
+    AND l.event = $4::text AND l.expires_at > $5
+  UNION ALL
+  SELECT l.principal FROM faucet_raw_leases l
+  WHERE $2::text = 'all' AND l.target_kind = 'all'
+    AND l.event = $4::text AND l.expires_at > $5
 )
 SELECT
   ((SELECT COUNT(*) FROM subs) + (SELECT COUNT(*) FROM leases))::bigint AS interests,
@@ -240,10 +258,10 @@ type CountRawInterestsParams struct {
 	Principal  string
 	TargetKind string
 	RepoID     int64
-	OwnerID    int64
 	Event      string
 	Now        time.Time
 	ExceptKey  []byte
+	OwnerID    int64
 }
 
 type CountRawInterestsRow struct {
@@ -252,15 +270,17 @@ type CountRawInterestsRow struct {
 	OwnLeases        int64
 }
 
+// A branch per kind of target, which only the target's own kind passes, so
+// each reads its own index as RawInterests does.
 func (q *Queries) CountRawInterests(ctx context.Context, arg CountRawInterestsParams) (CountRawInterestsRow, error) {
 	row := q.db.QueryRowContext(ctx, countRawInterests,
 		arg.Principal,
 		arg.TargetKind,
 		arg.RepoID,
-		arg.OwnerID,
 		arg.Event,
 		arg.Now,
 		arg.ExceptKey,
+		arg.OwnerID,
 	)
 	var i CountRawInterestsRow
 	err := row.Scan(&i.Interests, &i.OwnSubscriptions, &i.OwnLeases)
@@ -804,32 +824,43 @@ func (q *Queries) RawHead(ctx context.Context) (int64, error) {
 }
 
 const rawInterests = `-- name: RawInterests :many
+WITH subs AS (
+  SELECT s.key_hash, s.principal, s.callback_url, s.event_type, s.arguments, s.repo_id, s.secret_enc, s.cursor, s.created_at, s.updated_at, s.expires_at, s.scanned_through, s.last_delivery_at, s.last_error, s.failed_since, s.previous_secret_enc, s.previous_secret_until, s.gap_through, s.gap_lease_until, s.event_types, s.target_kind, s.owner_id FROM faucet_subscriptions s
+  WHERE s.target_kind = 'repo' AND s.repo_id = $1::bigint AND $1::bigint > 0
+    AND s.event_type = 'github.' || $2::text
+  UNION ALL
+  SELECT s.key_hash, s.principal, s.callback_url, s.event_type, s.arguments, s.repo_id, s.secret_enc, s.cursor, s.created_at, s.updated_at, s.expires_at, s.scanned_through, s.last_delivery_at, s.last_error, s.failed_since, s.previous_secret_enc, s.previous_secret_until, s.gap_through, s.gap_lease_until, s.event_types, s.target_kind, s.owner_id FROM faucet_subscriptions s
+  WHERE s.target_kind = 'owner' AND s.owner_id = $3::bigint AND $3::bigint > 0
+    AND s.event_type = 'github.' || $2::text
+  UNION ALL
+  SELECT s.key_hash, s.principal, s.callback_url, s.event_type, s.arguments, s.repo_id, s.secret_enc, s.cursor, s.created_at, s.updated_at, s.expires_at, s.scanned_through, s.last_delivery_at, s.last_error, s.failed_since, s.previous_secret_enc, s.previous_secret_until, s.gap_through, s.gap_lease_until, s.event_types, s.target_kind, s.owner_id FROM faucet_subscriptions s
+  WHERE s.target_kind = 'all' AND s.event_type = 'github.' || $2::text
+), leases AS (
+  SELECT l.id, l.key_hash, l.principal, l.event, l.actions, l.fields, l.repo_id, l.acked_through, l.created_at, l.polled_at, l.expires_at, l.target_kind, l.owner_id, l.repos FROM faucet_raw_leases l
+  WHERE l.target_kind = 'repo' AND l.repo_id = $1::bigint AND $1::bigint > 0
+    AND l.event = $2::text
+  UNION ALL
+  SELECT l.id, l.key_hash, l.principal, l.event, l.actions, l.fields, l.repo_id, l.acked_through, l.created_at, l.polled_at, l.expires_at, l.target_kind, l.owner_id, l.repos FROM faucet_raw_leases l
+  WHERE l.target_kind = 'owner' AND l.owner_id = $3::bigint AND $3::bigint > 0
+    AND l.event = $2::text
+  UNION ALL
+  SELECT l.id, l.key_hash, l.principal, l.event, l.actions, l.fields, l.repo_id, l.acked_through, l.created_at, l.polled_at, l.expires_at, l.target_kind, l.owner_id, l.repos FROM faucet_raw_leases l
+  WHERE l.target_kind = 'all' AND l.event = $2::text
+)
 SELECT
   false AS is_lease, s.key_hash AS id, s.created_at AS incarnation,
   (CASE WHEN s.arguments ? 'fields' THEN ARRAY(SELECT jsonb_array_elements_text(s.arguments -> 'fields')) END)::text[] AS fields,
   (SELECT COUNT(*) FROM faucet_raw_deliveries d WHERE d.key_hash = s.key_hash AND d.incarnation = s.created_at)::int AS pending
-FROM faucet_subscriptions s
-WHERE (
-    (s.target_kind = 'repo' AND s.repo_id = $1::bigint AND $1::bigint > 0)
-    OR (s.target_kind = 'owner' AND s.owner_id = $2::bigint AND $2::bigint > 0)
-    OR s.target_kind = 'all'
-  )
-  AND s.event_type = 'github.' || $3::text
-  AND s.expires_at > $4
+FROM subs s
+WHERE s.expires_at > $4
   AND (NOT (s.arguments ? 'actions') OR (s.arguments -> 'actions') ? $5::text)
   AND (NOT (s.arguments ? 'repos') OR (s.arguments -> 'repos') ? lower($6::text))
 UNION ALL
 SELECT
   true, l.id, l.created_at, l.fields,
   (SELECT COUNT(*) FROM faucet_raw_unread u WHERE u.lease_id = l.id AND NOT u.lost)::int
-FROM faucet_raw_leases l
-WHERE (
-    (l.target_kind = 'repo' AND l.repo_id = $1::bigint AND $1::bigint > 0)
-    OR (l.target_kind = 'owner' AND l.owner_id = $2::bigint AND $2::bigint > 0)
-    OR l.target_kind = 'all'
-  )
-  AND l.event = $3::text
-  AND l.expires_at > $4
+FROM leases l
+WHERE l.expires_at > $4
   AND (cardinality(l.actions) = 0 OR $5::text = ANY(l.actions))
   AND (cardinality(l.repos) = 0 OR lower($6::text) = ANY(l.repos))
 ORDER BY is_lease, id
@@ -837,8 +868,8 @@ ORDER BY is_lease, id
 
 type RawInterestsParams struct {
 	RepoID   int64
-	OwnerID  int64
 	Event    string
+	OwnerID  int64
 	Now      time.Time
 	Action   string
 	RepoName string
@@ -852,13 +883,16 @@ type RawInterestsRow struct {
 	Pending     int32
 }
 
-// A delivery with no repository has repo_id 0 and repo_name ”, so it reaches
-// no repo target and passes no list of repository names.
+// Each kind of target has a branch of its own, so each reads its own index:
+// faucet_subscriptions_raw and faucet_raw_leases_match for a repository, and
+// the partial indexes of owner and all targets. A delivery with no repository
+// has repo_id 0 and repo_name ”, so it reaches no repo target and passes no
+// list of repository names.
 func (q *Queries) RawInterests(ctx context.Context, arg RawInterestsParams) ([]RawInterestsRow, error) {
 	rows, err := q.db.QueryContext(ctx, rawInterests,
 		arg.RepoID,
-		arg.OwnerID,
 		arg.Event,
+		arg.OwnerID,
 		arg.Now,
 		arg.Action,
 		arg.RepoName,

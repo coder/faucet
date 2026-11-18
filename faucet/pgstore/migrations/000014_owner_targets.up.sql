@@ -44,6 +44,14 @@ ALTER TABLE faucet_raw_leases
     OR (target_kind = 'all' AND repo_id = 0 AND owner_id = 0)
   );
 
+-- A raw delivery finds the interests of each kind of target through an index
+-- of its own: faucet_subscriptions_raw and faucet_raw_leases_match for a
+-- repository, and these for an owner and for all.
+CREATE INDEX faucet_subscriptions_raw_owner ON faucet_subscriptions (owner_id, event_type) WHERE target_kind = 'owner';
+CREATE INDEX faucet_subscriptions_raw_all ON faucet_subscriptions (event_type) WHERE target_kind = 'all';
+CREATE INDEX faucet_raw_leases_match_owner ON faucet_raw_leases (owner_id, event) WHERE target_kind = 'owner';
+CREATE INDEX faucet_raw_leases_match_all ON faucet_raw_leases (event) WHERE target_kind = 'all';
+
 -- faucet_owners holds the login that each account had in the latest signed
 -- delivery that named it. GitHub sends no event for each repository of an
 -- account that it renames, so the rows of faucet_repos keep the login that

@@ -1,3 +1,7 @@
+DROP INDEX faucet_subscriptions_raw_owner;
+DROP INDEX faucet_subscriptions_raw_all;
+DROP INDEX faucet_raw_leases_match_owner;
+DROP INDEX faucet_raw_leases_match_all;
 DROP INDEX faucet_repos_owner;
 DROP TABLE faucet_owners;
 
