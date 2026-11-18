@@ -180,10 +180,11 @@ func loadConfig(getenv func(string) string) (config, error) {
 // loadPublicURL reads faucet's public URL: FAUCET_PUBLIC_URL, or on Vercel
 // production, where it is unset, https and the project's production host.
 // Vercel sets that host in previews too, and a preview must not take the
-// issuer of production, so no other environment derives it.
+// issuer of production, so only a process with VERCEL set and VERCEL_ENV
+// production derives it.
 func loadPublicURL(getenv func(string) string, cfg *config) error {
 	name, raw := envPublicURL, getenv(envPublicURL)
-	if host := getenv(envVercelProductionURL); raw == "" && host != "" && cfg.deployment.env == "production" {
+	if host := getenv(envVercelProductionURL); raw == "" && host != "" && cfg.deployment.onVercel && cfg.deployment.env == "production" {
 		name, raw, cfg.publicURLDerived = envVercelProductionURL, "https://"+host, true
 	}
 	if raw == "" {

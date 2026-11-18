@@ -8,8 +8,8 @@ import (
 
 // On Vercel production, faucet's public URL defaults to the production URL
 // that Vercel gives. A preview or a development deployment never takes it,
-// because Vercel sets the variable there too, and an explicit
-// FAUCET_PUBLIC_URL always wins.
+// because Vercel sets the variable there too, nor a process without VERCEL,
+// and an explicit FAUCET_PUBLIC_URL always wins.
 func TestOnVercelProductionThePublicURLDefaultsToTheProductionURL(t *testing.T) {
 	t.Parallel()
 	const production = "faucet.example.com"
@@ -22,6 +22,7 @@ func TestOnVercelProductionThePublicURLDefaultsToTheProductionURL(t *testing.T) 
 		"preview":           {env: map[string]string{envVercel: "1", envVercelEnv: "preview", envVercelProductionURL: production}},
 		"development":       {env: map[string]string{envVercel: "1", envVercelEnv: "development", envVercelProductionURL: production}},
 		"no VERCEL_ENV":     {env: map[string]string{envVercel: "1", envVercelProductionURL: production}},
+		"no VERCEL":         {env: map[string]string{envVercelEnv: "production", envVercelProductionURL: production}},
 		"no production URL": {env: map[string]string{envVercel: "1", envVercelEnv: "production"}},
 		"an explicit FAUCET_PUBLIC_URL": {
 			env:  map[string]string{envVercel: "1", envVercelEnv: "production", envVercelProductionURL: production, envPublicURL: "https://events.example.com"},
