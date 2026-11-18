@@ -231,3 +231,52 @@ func TestAnOrgGrantCoversTheRepositoriesOfItsOwner(t *testing.T) {
 	require.True(t, res.IsError)
 	require.Contains(t, toolText(t, res), "faucet has received no webhook delivery from coder/new-repo yet")
 }
+
+// A service polls a raw event of an organization over the server as run()
+// builds it: a ruleset of the organization names no repository and reaches
+// the owner's lease and the lease of every repository, beside a ruleset of
+// one of its repositories.
+func TestAServicePollsTheRawEventsOfAnOrganization(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	srv := newLoginServer(t)
+	secret := srv.client(t, "org-watcher", "/github/mcp", []faucet.Scope{faucet.ScopeEventsRead}, "org:coder", "all")
+	srv.deliverRunOf(t, "existing-1", coderExisting)
+	session := srv.connectServiceEvents(ctx, t, "org-watcher", secret)
+
+	poll := func(arguments map[string]any, cursor *string) rawPollPage {
+		t.Helper()
+		fields, err := callEvents(ctx, session, "events/poll", &eventsParams{Name: "github.repository_ruleset", Arguments: arguments, Cursor: cursor})
+		require.NoError(t, err)
+		var page rawPollPage
+		require.NoError(t, json.Unmarshal(fields["events"], &page.Events))
+		require.NoError(t, json.Unmarshal(fields["cursor"], &page.Cursor))
+		return page
+	}
+	ids := func(page rawPollPage) []string {
+		var out []string
+		for _, ev := range page.Events {
+			out = append(out, ev.EventID)
+		}
+		return out
+	}
+	owner, all := map[string]any{"owner": "coder"}, map[string]any{"all": true}
+	ownerOpened, allOpened := poll(owner, nil), poll(all, nil)
+
+	ruleset := map[string]any{"id": 1, "name": "main"}
+	body, err := json.Marshal(map[string]any{"action": "created", "repository_ruleset": ruleset, "organization": map[string]any{"id": coderID, "login": "coder"}})
+	require.NoError(t, err)
+	srv.post(t, "repository_ruleset", "of-the-org", body)
+	body, err = json.Marshal(map[string]any{"action": "created", "repository_ruleset": ruleset, "repository": map[string]any{
+		"id": coderNewRepo.id, "full_name": coderNewRepo.fullName, "owner": map[string]any{"id": coderID, "login": "coder"},
+	}})
+	require.NoError(t, err)
+	srv.post(t, "repository_ruleset", "of-new-repo", body)
+	body, err = json.Marshal(map[string]any{"action": "created", "repository_ruleset": ruleset, "organization": map[string]any{"id": 9, "login": "octo"}})
+	require.NoError(t, err)
+	srv.post(t, "repository_ruleset", "of-another-org", body)
+
+	require.Equal(t, []string{"of-the-org", "of-new-repo"}, ids(poll(owner, &ownerOpened.Cursor)))
+	require.Equal(t, []string{"of-the-org", "of-new-repo", "of-another-org"}, ids(poll(all, &allOpened.Cursor)))
+}

@@ -1,10 +1,72 @@
 package faucet_test
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+// ownedRepo is a repository and the account that owns it.
+type ownedRepo struct {
+	id, ownerID int64
+	fullName    string
+}
+
+var (
+	coderA = ownedRepo{id: 101, ownerID: ownerID, fullName: "coder/a"}
+	coderB = ownedRepo{id: 102, ownerID: ownerID, fullName: "coder/b"}
+	octoC  = ownedRepo{id: 103, ownerID: 9, fullName: "octo/c"}
+)
+
+func (r ownedRepo) repository() map[string]any {
+	owner, _, _ := strings.Cut(r.fullName, "/")
+	return map[string]any{"id": r.id, "full_name": r.fullName, "owner": map[string]any{"id": r.ownerID, "login": owner}}
+}
+
+// runURL is the html_url of the run that runOf posts for r.
+func (r ownedRepo) runURL() string { return "https://github.com/" + r.fullName + "/actions/runs/1" }
+
+// runOf is the workflow_run fixture as a completed run of r.
+func runOf(t *testing.T, r ownedRepo) []byte {
+	t.Helper()
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(fixture(t, "workflow_run_completed"), &payload))
+	payload["repository"] = r.repository()
+	payload["workflow_run"].(map[string]any)["html_url"] = r.runURL()
+	return raw(payload)
+}
+
+// post sends a signed delivery to the webhook handler, which must store it.
+func (h *webhookHarness) post(event, delivery string, body []byte) {
+	h.t.Helper()
+	rec := httptest.NewRecorder()
+	h.svc.WebhookHandler().ServeHTTP(rec, newRequest(http.MethodPost, body, event, delivery))
+	require.Equal(h.t, "stored", strings.TrimSpace(rec.Body.String()), delivery)
+}
+
+// runsAt returns the html_url of each event delivered at path, sorted.
+func (d *deliverHarness) runsAt(path string) []string {
+	d.t.Helper()
+	var runs []string
+	for _, g := range d.rcv.requests(path) {
+		if url, ok := g.body(d.t).Data["html_url"].(string); ok {
+			runs = append(runs, url)
+		}
+	}
+	slices.Sort(runs)
+	return runs
+}
+
+// orgGrants cover the owners coder and octo, and every repository.
+func orgGrants() *fakeGrants {
+	return &fakeGrants{owners: map[string]int64{"coder": ownerID, "octo": octoC.ownerID}, all: true}
+}
 
 // GitHub sends some events of an organization, such as a ruleset of the
 // organization, with no repository. Such a delivery comes from the
@@ -13,7 +75,7 @@ import (
 func TestADeliveryOfAnOrganizationReachesItsOwnerAndEveryRepository(t *testing.T) {
 	t.Parallel()
 
-	h := newRawPollHarness(t, asCaller(newServicePrincipal(t), &fakeGrants{owners: map[string]int64{"coder": ownerID}, all: true}))
+	h := newRawPollHarness(t, asCaller(newServicePrincipal(t), orgGrants()))
 	leases := map[string]map[string]any{
 		"repo":        repoArgs(),
 		"owner":       args("owner", "coder"),
@@ -51,7 +113,7 @@ func TestADeliveryOfAnOrganizationReachesItsOwnerAndEveryRepository(t *testing.T
 func TestAnOwnerOrAllInterestWantsEveryFailedDeliveryOfItsEvent(t *testing.T) {
 	t.Parallel()
 
-	h := newRawPollHarness(t, asCaller(newServicePrincipal(t), &fakeGrants{owners: map[string]int64{"coder": ownerID}, all: true}))
+	h := newRawPollHarness(t, asCaller(newServicePrincipal(t), orgGrants()))
 	h.pollRaw("github.star", repoArgs(), "")
 	h.pollRaw("github.push", args("owner", "coder"), "")
 	h.pollRaw("github.issues", args("all", true, "actions", []string{"opened"}), "")
@@ -78,4 +140,98 @@ func TestAnOwnerOrAllInterestWantsEveryFailedDeliveryOfItsEvent(t *testing.T) {
 	} {
 		require.Equal(t, tc.want, wants(tc.event, tc.action, tc.repoID), tc.name)
 	}
+}
+
+// One subscription of a service gets the events of every repository of an
+// owner, or of every repository, as GitHub sends them.
+func TestASubscriptionToAnOwnerGetsTheEventsOfEachOfItsRepositories(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t, asCaller(newServicePrincipal(t), orgGrants()))
+	for path, arguments := range map[string]map[string]any{
+		"/owner":    args("owner", "coder"),
+		"/all":      args("all", true),
+		"/narrowed": args("owner", "coder", "repos", []string{"Coder/B"}),
+	} {
+		d.subscribe(subscribeTo(arguments, d.rcv.url(path), newSecret(t, 32)))
+	}
+	d.advance(time.Second)
+	for i, r := range []ownedRepo{coderA, coderB, octoC} {
+		d.post("workflow_run", "run-"+string(rune('a'+i)), runOf(t, r))
+	}
+
+	res := d.deliverDue()
+	require.Equal(t, 6, res.Delivered)
+	require.Empty(t, res.GaveUp)
+	require.Equal(t, []string{coderA.runURL(), coderB.runURL()}, d.runsAt("/owner"))
+	require.Equal(t, []string{coderA.runURL(), coderB.runURL(), octoC.runURL()}, d.runsAt("/all"))
+	require.Equal(t, []string{coderB.runURL()}, d.runsAt("/narrowed"))
+}
+
+// A purge that deletes an event that an owner subscription had not read
+// leaves it a gap, and the next run sends the gap envelope. A subscription
+// of another owner lost nothing and gets none.
+func TestAPurgeLeavesAGapForAnOwnerSubscriptionThatLostAnEvent(t *testing.T) {
+	t.Parallel()
+
+	d := newDeliverHarness(t, asCaller(newServicePrincipal(t), orgGrants()))
+	d.subscribe(subscribeTo(args("owner", "coder"), d.rcv.url("/coder"), newSecret(t, 32)))
+	d.subscribe(subscribeTo(args("owner", "octo"), d.rcv.url("/octo"), newSecret(t, 32)))
+	d.advance(time.Second)
+	d.post("workflow_run", "lost", runOf(t, coderB))
+	d.advance(5 * time.Minute)
+
+	purged, err := d.svc.Purge(d.ctx, d.clock.Now().Add(-time.Minute))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, purged.Deleted)
+
+	res := d.deliverDue()
+	require.Equal(t, 1, res.GapsSent)
+	require.Len(t, d.rcv.envelopesOf("/coder", "gap"), 1, "the subscription that lost the event of coder/b")
+	require.Empty(t, d.rcv.requests("/octo"))
+}
+
+// A raw subscription of an owner gets the deliveries of each repository of
+// the owner, and one of every repository gets them all.
+func TestARawSubscriptionToAnOwnerGetsTheDeliveriesOfEachOfItsRepositories(t *testing.T) {
+	t.Parallel()
+
+	d := newRawDeliverHarness(t, asCaller(newServicePrincipal(t), orgGrants()))
+	d.subscribeRaw("github.push", hookEndpoint{path: "/owner", secret: newSecret(t, 32), args: args("owner", "coder")})
+	d.subscribeRaw("github.push", hookEndpoint{path: "/all", secret: newSecret(t, 32), args: args("all", true)})
+	for _, r := range []ownedRepo{coderA, coderB, octoC} {
+		d.deliverRaw("push", raw(map[string]any{"ref": "refs/heads/main", "repository": r.repository()}))
+	}
+
+	res := d.deliverDue()
+	require.Equal(t, 5, res.Delivered)
+	require.Empty(t, res.GaveUp)
+	pushedTo := func(path string) []string {
+		var names []string
+		for _, g := range d.rcv.requests(path) {
+			names = append(names, g.body(t).Data["repository"].(map[string]any)["full_name"].(string))
+		}
+		slices.Sort(names)
+		return names
+	}
+	require.Equal(t, []string{"coder/a", "coder/b"}, pushedTo("/owner"))
+	require.Equal(t, []string{"coder/a", "coder/b", "octo/c"}, pushedTo("/all"))
+}
+
+// A poll lease of an owner reads the deliveries of each of its repositories,
+// in the order they arrived.
+func TestAPollLeaseOfAnOwnerReadsEachOfItsRepositories(t *testing.T) {
+	t.Parallel()
+
+	h := newRawPollHarness(t, asCaller(newServicePrincipal(t), orgGrants()))
+	opened := h.pollRaw("github.push", args("owner", "coder"), "")
+	push := func(r ownedRepo) string {
+		return h.deliver("push", "push-"+r.fullName, raw(map[string]any{"ref": "refs/heads/main", "repository": r.repository()}))
+	}
+	require.Equal(t, "stored", push(coderA))
+	require.Equal(t, "ignored", push(octoC), "no interest wants the pushes of another owner")
+	require.Equal(t, "stored", push(coderB))
+	page := h.pollRaw("github.push", args("owner", "coder"), opened.Cursor)
+	require.Equal(t, []string{"push-coder/a", "push-coder/b"}, page.eventIDs())
+	require.False(t, page.Truncated)
 }
