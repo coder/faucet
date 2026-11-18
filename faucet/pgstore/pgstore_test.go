@@ -382,6 +382,11 @@ func TestTheOwnerTargetsMigrationGoesDownToRepositoryRowsAndUpAgain(t *testing.T
 	require.Equal(t, ev.ID, page.Events[0].ID)
 	require.Zero(t, page.Events[0].OwnerID, "an event stored before the up has no owner")
 	require.Empty(t, page.Events[0].RepoName)
+	for _, bad := range []struct{ repoID, ownerID int64 }{{0, 0}, {-1, 7}, {42, -1}} {
+		_, err := db.ExecContext(ctx, `INSERT INTO faucet_raw_events (delivery_id, event, action, repo_id, owner_id, received_at) VALUES ('bad', 'push', '', $1, $2, $3)`,
+			bad.repoID, bad.ownerID, now)
+		require.Error(t, err, "a raw event after the up names a repository or an owner, and no negative ID: %+v", bad)
+	}
 }
 
 func TestTheClearMigrationMovesTheOldTopToTheClearAndBack(t *testing.T) {

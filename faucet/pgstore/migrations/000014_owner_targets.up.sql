@@ -24,12 +24,17 @@ ALTER TABLE faucet_subscriptions
   );
 
 -- A raw event of an organization's delivery names no repository: its repo_id
--- is 0 and its owner_id is the organization's.
+-- is 0 and its owner_id is the organization's. A row stored before this
+-- migration names a repository and gets owner_id 0, so it passes every check.
+-- The checks are NOT VALID, as on faucet_events, so adding them reads no row
+-- while the lock of the migration blocks writes. They hold for every row
+-- written after it.
 ALTER TABLE faucet_raw_events
-  ADD COLUMN owner_id bigint NOT NULL DEFAULT 0 CHECK (owner_id >= 0),
+  ADD COLUMN owner_id bigint NOT NULL DEFAULT 0,
   DROP CONSTRAINT faucet_raw_events_repo_id_check,
-  ADD CONSTRAINT faucet_raw_events_repo_id_check CHECK (repo_id >= 0),
-  ADD CONSTRAINT faucet_raw_events_named_check CHECK (repo_id > 0 OR owner_id > 0);
+  ADD CONSTRAINT faucet_raw_events_owner_id_check CHECK (owner_id >= 0) NOT VALID,
+  ADD CONSTRAINT faucet_raw_events_repo_id_check CHECK (repo_id >= 0) NOT VALID,
+  ADD CONSTRAINT faucet_raw_events_named_check CHECK (repo_id > 0 OR owner_id > 0) NOT VALID;
 
 -- A lease has the target of a subscription, and repos limits it to the
 -- repositories of these lower-case full names when it is not empty.
