@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -28,6 +29,8 @@ const workloadClockLeeway = time.Minute
 // never expires.
 const minWorkloadTokenLifetime = time.Second
 
+const maxSubjectTokenLifetime = 24 * time.Hour
+
 // workloadAlgorithms are the signatures that faucet takes from an outside
 // issuer. Every other alg, none and the HMAC ones included, fails the parse.
 var workloadAlgorithms = []jose.SignatureAlgorithm{jose.RS256, jose.ES256}
@@ -53,8 +56,6 @@ type workloadMatch struct {
 	Expires time.Time
 }
 
-// lifetime is how long a faucet token for m lasts when faucet mints it at
-// now, at least minWorkloadTokenLifetime when now is the time of the check.
 func (m workloadMatch) lifetime(now time.Time) time.Duration {
 	return min(accessTokenLifetime, m.Expires.Sub(now))
 }
@@ -124,6 +125,11 @@ func (c *workloadChecker) match(ctx context.Context, rule trustRule, jws *jose.J
 	if json.Unmarshal(payload, &registered) != nil || json.Unmarshal(payload, &claims) != nil {
 		return time.Time{}, refuseSigned("its claims must be a JSON object, with the registered claims of RFC 7519 in their types")
 	}
+	_, delegated := claims["act"]
+	issued := registered.IssuedAt
+	if registered.NotBefore != nil && (issued == nil || registered.NotBefore.Time().Before(issued.Time())) {
+		issued = registered.NotBefore
+	}
 	switch {
 	case registered.Issuer != rule.Issuer:
 		return time.Time{}, refuseSigned("its iss must be the rule's issuer")
@@ -137,6 +143,12 @@ func (c *workloadChecker) match(ctx context.Context, rule trustRule, jws *jose.J
 		return time.Time{}, refuseSigned("its nbf is in the future")
 	case registered.IssuedAt != nil && registered.IssuedAt.Time().After(now.Add(workloadClockLeeway)):
 		return time.Time{}, refuseSigned("its iat is in the future")
+	case delegated:
+		return time.Time{}, refuseSigned("it carries an act claim, the delegation of RFC 8693, and faucet takes only a workload's own token")
+	case issued == nil:
+		return time.Time{}, refuseSigned("it must have an iat or an nbf")
+	case registered.Expiry.Time().Sub(issued.Time()) > maxSubjectTokenLifetime:
+		return time.Time{}, refuseSigned(fmt.Sprintf("it must expire at most %d hours after its iat and its nbf", int(maxSubjectTokenLifetime/time.Hour)))
 	}
 	for name, want := range rule.Claims {
 		if got, ok := claims[name].(string); !ok || got != want {

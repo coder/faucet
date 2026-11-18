@@ -309,11 +309,11 @@ describe('browser login', () => {
 
     expect(main.status).toBe(404);
     expect(publicOnly.callback).toBe(404);
-    expect(publicOnly.metadata.grant_types_supported).toEqual(['client_credentials']);
+    expect(publicOnly.metadata.grant_types_supported).toEqual(['client_credentials', 'urn:ietf:params:oauth:grant-type:token-exchange']);
     expect(publicOnly.metadata).not.toHaveProperty('client_id_metadata_document_supported');
     expect(withLogin).toMatchObject({
       response_types_supported: ['code'],
-      grant_types_supported: ['authorization_code', 'client_credentials', 'refresh_token'],
+      grant_types_supported: ['authorization_code', 'client_credentials', 'refresh_token', 'urn:ietf:params:oauth:grant-type:token-exchange'],
       code_challenge_methods_supported: ['S256'],
       client_id_metadata_document_supported: true,
       authorization_response_iss_parameter_supported: true,

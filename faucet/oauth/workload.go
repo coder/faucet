@@ -52,7 +52,6 @@ type trustRule struct {
 // and why.
 type requiredPin struct {
 	claim, value, why string
-	refuse            func(value string) error
 }
 
 // issuerProfile is what faucet requires of a rule for the issuers of one
@@ -76,20 +75,8 @@ var issuerProfiles = map[string]issuerProfile{
 			{claim: "environment", value: "production", why: "a preview deployment runs any branch, and a development token sits on a laptop for 12 hours"},
 		},
 	},
-	"token.actions.githubusercontent.com": {
-		pins: []requiredPin{
-			{claim: "repository_owner_id", why: "the workflows of every GitHub account get their tokens from this issuer, an owner can choose the parts of sub, and the name of a renamed or deleted account can pass to another, so only the owner ID tells the accounts apart"},
-			{claim: "repository_id", why: "every repository of the owner can get a token for faucet, and the name of a renamed or deleted repository can pass to another, so only the repository ID names one"},
-			{claim: "ref", why: "a workflow on any branch of the repository, or on a pull request from one, can get a token for faucet, so the rule names the ref whose code may act as the client, such as refs/heads/main", refuse: refusePullRequestRef},
-		},
-	},
-	"gitlab.com": {
-		pins: []requiredPin{
-			{claim: "namespace_id", why: "the jobs of every group and user of gitlab.com get their tokens from this issuer, a project can choose the parts of sub, and the path of a renamed namespace can pass to another, so only the namespace ID tells the namespaces apart"},
-			{claim: "project_id", why: "every project of the namespace can get a token for faucet, and only the project ID names one project of gitlab.com"},
-			{claim: "ref_protected", value: "true", why: "a developer of the project can run a job on any branch that is not protected, and the project chooses who may push to a protected one"},
-		},
-	},
+	"token.actions.githubusercontent.com": {issuer: notYet("token.actions.githubusercontent.com", githubActionsPins)},
+	"gitlab.com":                          {issuer: notYet("gitlab.com", "no test has logged in with one, and a rule would have to pin namespace_id, project_id and ref_protected=true")},
 }
 
 // unpinnableClaims are the claims that no rule may pin, and why.
@@ -106,11 +93,12 @@ var otherIssuers = issuerProfile{
 	pins: []requiredPin{{claim: "sub", why: "every workload of the issuer can get a token for faucet, and sub names one of them"}},
 }
 
-func refusePullRequestRef(ref string) error {
-	if strings.HasPrefix(ref, "refs/pull/") {
-		return xerrors.New("a workflow on a pull request's ref runs the code of the pull request, which its author chose and no one need have reviewed: pin the ref of a branch or a tag, such as refs/heads/main")
+const githubActionsPins = "no test has logged in with one, and a rule would have to pin repository_owner_id, repository_id, ref, event_name and job_workflow_ref, as ref alone also matches a pull_request_target or workflow_run run that a fork's pull request starts"
+
+func notYet(host, why string) func(string) error {
+	return func(string) error {
+		return xerrors.Errorf("faucet does not take tokens of %s yet; %s", host, why)
 	}
-	return nil
 }
 
 const vercelTeamIssuerPrefix = "https://oidc.vercel.com/"
@@ -128,8 +116,14 @@ func vercelTeamIssuer(issuer string) error {
 }
 
 func profileOf(u *url.URL) issuerProfile {
-	if p, ok := issuerProfiles[strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")]; ok {
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if p, ok := issuerProfiles[host]; ok {
 		return p
+	}
+	// GitHub Enterprise Cloud with data residency issues tokens as
+	// https://token.actions.<subdomain>.ghe.com.
+	if sub, ok := strings.CutPrefix(host, "token.actions."); ok && strings.HasSuffix(sub, ".ghe.com") && sub != ".ghe.com" {
+		return issuerProfile{issuer: notYet(host, githubActionsPins)}
 	}
 	return otherIssuers
 }
@@ -193,10 +187,6 @@ func parseTrustRule(r TrustRule) (trustRule, error) {
 			return trustRule{}, xerrors.Errorf("a trust rule for %s must pin %s: %s", r.Issuer, pin.claim, pin.why)
 		case pin.value != "" && got != pin.value:
 			return trustRule{}, xerrors.Errorf("a trust rule for %s must pin %s=%s: %s", r.Issuer, pin.claim, pin.value, pin.why)
-		case pin.refuse != nil:
-			if err := pin.refuse(got); err != nil {
-				return trustRule{}, xerrors.Errorf("a trust rule for %s cannot pin %s=%s: %w", r.Issuer, pin.claim, got, err)
-			}
 		}
 	}
 	rule := trustRule{TrustRule: r}

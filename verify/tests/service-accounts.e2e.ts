@@ -1,5 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { ClientCredentialsProvider } from '@modelcontextprotocol/sdk/client/auth-extensions.js';
+import { ClientCredentialsProvider, StaticPrivateKeyJwtProvider } from '@modelcontextprotocol/sdk/client/auth-extensions.js';
+import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { accessToken, createClient, deliverRun } from './services';
 import { describe, expect, newDeliveryId, newRepoId, test } from './support';
@@ -12,6 +13,23 @@ interface WaitResult {
 
 function waited(stdout: string): WaitResult {
   return JSON.parse(stdout) as WaitResult;
+}
+
+// The SDK has no provider for the RFC 8693 token exchange grant, so this is its provider for a static client assertion with the
+// assertion swapped for the subject token.
+function tokenExchangeProvider(clientId: string, expectedIssuer: string, subjectToken: () => Promise<string>): OAuthClientProvider {
+  return Object.assign(new StaticPrivateKeyJwtProvider({ clientId, expectedIssuer, jwtBearerAssertion: '' }), {
+    addClientAuthentication: (_headers: Headers, params: URLSearchParams): void => params.set('client_id', clientId),
+    prepareTokenRequest: async (scope?: string): Promise<URLSearchParams> => {
+      const params = new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+        subject_token: await subjectToken(),
+        subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+      });
+      if (scope !== undefined) params.set('scope', scope);
+      return params;
+    },
+  });
 }
 
 interface RawPoll {
@@ -72,6 +90,82 @@ describe('service accounts', () => {
         await client.close();
       }
     }, { publicUrl: true });
+  });
+
+  test('a workload logs in through the TypeScript SDK with its platform token, waits for an event and lists events', async ({ faucet, issuer }) => {
+    await faucet.withFaucet({}, async (started, output) => {
+      const repoId = newRepoId();
+      const repo = `verify/r${repoId}`;
+      const made = await started.clients(['create', '-no-secret', '-resource', `${started.baseUrl}/github/mcp`, '-grant', `repo:${repo}`, 'pod-agent']);
+      expect(made.code, made.stderr).toBe(0);
+      expect(made.stdout, 'no secret to keep').toBe('client_id: pod-agent\n');
+      const sub = 'system:serviceaccount:apps:pod-agent';
+      const trusted = await started.clients(['trust', 'pod-agent', '-issuer', issuer.url, '-claim', `sub=${sub}`]);
+      expect(trusted.code, trusted.stderr).toBe(0);
+      const ruleId = /^rule_id: (?<id>\d+)\n$/.exec(trusted.stdout)?.groups?.id;
+      expect(ruleId, trusted.stdout).toBeDefined();
+      await deliverRun(started, repoId);
+
+      const subjects: string[] = [];
+      const provider = tokenExchangeProvider('pod-agent', started.baseUrl, async () => {
+        const subject = issuer.sign({ sub, aud: [started.baseUrl] });
+        subjects.push(subject);
+        return subject;
+      });
+      const transport = new StreamableHTTPClientTransport(new URL(`${started.baseUrl}/github/mcp`), { authProvider: provider });
+      const client = new Client({ name: 'ts-workload', version: '0' });
+      await client.connect(transport);
+      let token: string;
+      try {
+        const result = (await client.callTool({
+          name: 'wait_for_github_events',
+          arguments: { repo, types: ['ci.run_completed'], cursor: 0, timeout_s: 1 },
+        })) as WaitResult;
+        expect(result.isError, JSON.stringify(result)).not.toBe(true);
+        expect(result.structuredContent?.events).toEqual([expect.objectContaining({ type: 'ci.run_completed', repo_id: repoId })]);
+        token = (await provider.tokens())?.access_token as string;
+        expect(token).toMatch(/^fct_[A-Za-z0-9_-]{43}$/);
+      } finally {
+        await client.close();
+      }
+      expect(subjects, 'the SDK asked for one subject token for its one login').toHaveLength(1);
+      expect(issuer.hits('/.well-known/openid-configuration'), 'faucet read the keys from the discovery document').toBe(1);
+      expect(issuer.hits('/openid/v1/jwks')).toBe(1);
+
+      const list = await started.mcp<{ events: { name: string }[] }>('events/list', {}, { token });
+      expect(list.error, list.body).toBeNull();
+      expect(list.result?.events.map((e) => e.name)).toContain('ci.run_completed');
+
+      const untrusted = await started.clients(['untrust', 'pod-agent', ruleId as string]);
+      expect(untrusted.code, untrusted.stderr).toBe(0);
+      const fresh = issuer.sign({ sub, aud: [started.baseUrl] });
+      subjects.push(fresh);
+      const exchange = (clientId: string) =>
+        started.request('/oauth/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+            client_id: clientId,
+            subject_token: fresh,
+            subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+          }).toString(),
+        });
+      const refused = await exchange('pod-agent');
+      expect(refused.status, refused.body).toBe(400);
+      expect(refused.headers.get('www-authenticate'), 'the client sends no Authorization header').toBeNull();
+      expect(JSON.parse(refused.body), 'the answer tells the caller nothing about the client').toEqual({
+        error: 'invalid_client',
+        error_description: "the client takes no such subject token: check client_id and the token, and faucet's log for the reason",
+      });
+      const unknown = await exchange('no-such-agent');
+      expect([unknown.status, unknown.body], 'an unknown client gets the same answer').toEqual([refused.status, refused.body]);
+      expect(output()).toContain('the client trusts no workload issuer: add one with faucet clients trust');
+      expect(output()).toContain('no client has this ID');
+
+      for (const secret of [...subjects, token]) expect(output()).not.toContain(secret);
+      expect(started.leaksSecret(output())).toBe(false);
+    }, { publicUrl: true, e2eBuild: true });
   });
 
   // A service that reads only raw events can start. The push that nobody wants is not stored, and it still names the
@@ -137,8 +231,9 @@ describe('service accounts', () => {
         authorization_endpoint: `${started.baseUrl}/oauth/authorize`,
         token_endpoint: `${started.baseUrl}/oauth/token`,
         response_types_supported: [],
-        grant_types_supported: ['client_credentials'],
-        token_endpoint_auth_methods_supported: ['client_secret_basic'],
+        grant_types_supported: ['client_credentials', 'urn:ietf:params:oauth:grant-type:token-exchange'],
+        token_endpoint_auth_methods_supported: ['client_secret_basic', 'none'],
+        revocation_endpoint_auth_methods_supported: ['client_secret_basic'],
       });
 
       const old = await started.clients(['create', '-resource', `${started.baseUrl}/mcp`, '-grant', 'repo:verify/r1', 'old-agent']);

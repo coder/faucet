@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { createDecipheriv, createHmac, randomBytes, randomInt, randomUUID } from 'node:crypto';
+import { createDecipheriv, createHmac, generateKeyPairSync, randomBytes, randomInt, randomUUID, sign, type KeyObject } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
@@ -346,10 +346,11 @@ export class Faucet {
 
   // withFaucet starts one more faucet on its own database, runs fn against it and stops it. The new faucet has a random
   // CRON_SECRET, webhook mode off and the raw events of RAW_EVENTS. env adds the rest, and FAUCET_RAW_EVENTS: '' offers none. fn gets the faucet and a function that returns its
-  // output so far. opts.e2eBuild runs the binary that was built with -tags faucet_e2e, whose callback client reaches loopback
-  // over http. opts.publicUrl sets FAUCET_PUBLIC_URL to the new faucet's own URL, which turns on its login server.
-  // opts.browserLogin also turns on its browser login, with the stub as GitHub and its GitHub App, and a random token key. It
-  // runs the e2e build, whose document client fetches from loopback, and trusts the certificate of Documents.
+  // output so far. opts.e2eBuild runs the binary that was built with -tags faucet_e2e, whose callback client, document client
+  // and client for the keys of workload issuers reach loopback, over http too, and which trusts the certificate that Documents
+  // and Issuer serve. opts.publicUrl sets FAUCET_PUBLIC_URL to the new faucet's own URL, which turns on its login server.
+  // opts.browserLogin also turns on its browser login, with the stub as GitHub and its GitHub App, and a random token key, and
+  // runs the e2e build.
   async withFaucet<T>(
     env: Record<string, string>,
     fn: (started: Faucet, output: () => string) => Promise<T>,
@@ -361,7 +362,8 @@ export class Faucet {
     const cronSecret = randomBytes(32).toString('hex');
     const { dbHost, dbPort, cron, githubApp, tls } = this.#state;
     const login = opts.browserLogin === true;
-    const binary = opts.e2eBuild === true || login ? this.#state.e2eBinary : this.#state.binary;
+    const e2eBuild = opts.e2eBuild === true || login;
+    const binary = e2eBuild ? this.#state.e2eBinary : this.#state.binary;
     const tokenKey = login ? `e2e:${randomBytes(32).toString('base64')}` : null;
     const databaseUrl = `postgres://postgres@/${database}?${new URLSearchParams({ host: dbHost, port: String(dbPort), sslmode: 'disable' })}`;
 
@@ -375,14 +377,14 @@ export class Faucet {
         CRON_SECRET: cronSecret,
         FAUCET_RAW_EVENTS: RAW_EVENTS,
         ...(opts.publicUrl === true || login ? { FAUCET_PUBLIC_URL: `http://127.0.0.1:${port}` } : {}),
+        // Go reads its roots from SSL_CERT_FILE in place of the system's.
+        ...(e2eBuild ? { SSL_CERT_FILE: tls.cert } : {}),
         ...(tokenKey !== null
           ? {
               FAUCET_GITHUB_APP_CLIENT_ID: githubApp.clientId,
               FAUCET_GITHUB_APP_CLIENT_SECRET: githubApp.clientSecret,
               FAUCET_TOKEN_KEY: tokenKey,
               FAUCET_GITHUB_URL: cron.stubUrl,
-              // Go reads its roots from SSL_CERT_FILE in place of the system's.
-              SSL_CERT_FILE: tls.cert,
             }
           : {}),
         ...env,
@@ -899,6 +901,64 @@ export class Documents {
   }
 }
 
+// Issuer is the OpenID Connect issuer of a workload's platform, such as a Kubernetes cluster, on 127.0.0.1. It serves its
+// discovery document and its key set over https with the certificate that app.mjs wrote, which the faucets of the e2e build
+// trust, counts the requests for each path, and signs tokens with its RS256 key, as the platform does.
+export class Issuer {
+  static readonly kid = 'verify-issuer';
+  readonly #server: Server;
+  readonly #key: KeyObject;
+  readonly #hits: Map<string, number>;
+
+  private constructor(server: Server, key: KeyObject, hits: Map<string, number>) {
+    this.#server = server;
+    this.#key = key;
+    this.#hits = hits;
+  }
+
+  static async start(appUrl: string): Promise<Issuer> {
+    const { tls } = readState(appUrl);
+    const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const jwk = { ...publicKey.export({ format: 'jwk' }), kid: Issuer.kid, use: 'sig', alg: 'RS256' };
+    const hits = new Map<string, number>();
+    const server = createHttpsServer({ cert: readFileSync(tls.cert), key: readFileSync(tls.key) }, (req, res) => {
+      const path = req.url ?? '';
+      const url = `https://127.0.0.1:${portOf(server)}`;
+      hits.set(path, (hits.get(path) ?? 0) + 1);
+      const documents: Record<string, object> = {
+        '/.well-known/openid-configuration': { issuer: url, jwks_uri: `${url}/openid/v1/jwks`, id_token_signing_alg_values_supported: ['RS256'] },
+        '/openid/v1/jwks': { keys: [jwk] },
+      };
+      const document = documents[path];
+      if (document === undefined) return void res.writeHead(404).end();
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(document));
+    });
+    await listen(server, '127.0.0.1');
+    return new Issuer(server, privateKey, hits);
+  }
+
+  // url is the issuer, which its tokens name as iss.
+  get url(): string {
+    return `https://127.0.0.1:${portOf(this.#server)}`;
+  }
+
+  hits(path: string): number {
+    return this.#hits.get(path) ?? 0;
+  }
+
+  // sign returns a JWT of the issuer with claims, issued now and valid for lifetimeS seconds.
+  sign(claims: Record<string, unknown>, lifetimeS = 600): string {
+    const now = Math.floor(Date.now() / 1000);
+    const part = (v: object): string => Buffer.from(JSON.stringify(v)).toString('base64url');
+    const input = `${part({ alg: 'RS256', typ: 'JWT', kid: Issuer.kid })}.${part({ iss: this.url, iat: now, nbf: now, exp: now + lifetimeS, ...claims })}`;
+    return `${input}.${sign('sha256', Buffer.from(input), this.#key).toString('base64url')}`;
+  }
+
+  async close(): Promise<void> {
+    await close(this.#server);
+  }
+}
+
 // Site is a web server on 127.0.0.1 that a test serves pages from, such as a redirect URI or a page of another site, and that
 // records the path and query of every request. A browser reaches it as http://127.0.0.1:<port>, and as another site than
 // faucet's as http://localhost:<port>.
@@ -1008,7 +1068,15 @@ export class HookStub {
   }
 }
 
-export const test = base.extend<{ faucet: Faucet; cron: Faucet; receiver: Receiver; hooks: HookStub; documents: Documents; site: Site }>({
+export const test = base.extend<{
+  faucet: Faucet;
+  cron: Faucet;
+  receiver: Receiver;
+  hooks: HookStub;
+  documents: Documents;
+  issuer: Issuer;
+  site: Site;
+}>({
   faucet: async ({ app }, use) => {
     await use(Faucet.main(app.baseUrl));
   },
@@ -1027,6 +1095,14 @@ export const test = base.extend<{ faucet: Faucet; cron: Faucet; receiver: Receiv
       await use(documents);
     } finally {
       await documents.close();
+    }
+  },
+  issuer: async ({ app }, use) => {
+    const issuer = await Issuer.start(app.baseUrl);
+    try {
+      await use(issuer);
+    } finally {
+      await issuer.close();
     }
   },
   site: async ({}, use) => {

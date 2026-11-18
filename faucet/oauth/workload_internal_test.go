@@ -410,7 +410,13 @@ func TestTheTokenMustBeValidNow(t *testing.T) {
 		"nbf past the leeway":             {map[string]any{"nbf": at(workloadClockLeeway + time.Second)}, "its nbf is in the future"},
 		"iat past the leeway":             {map[string]any{"iat": at(workloadClockLeeway + time.Second)}, "its iat is in the future"},
 		"nbf and iat within the leeway":   {map[string]any{"nbf": at(workloadClockLeeway), "iat": at(workloadClockLeeway)}, ""},
-		"no nbf or iat":                   {map[string]any{"nbf": nil, "iat": nil}, ""},
+		"no nbf or iat":                   {map[string]any{"nbf": nil, "iat": nil}, "it must have an iat or an nbf"},
+		"an iat alone":                    {map[string]any{"nbf": nil}, ""},
+		"an nbf alone":                    {map[string]any{"iat": nil}, ""},
+		"a life of 24 hours":              {map[string]any{"iat": at(-time.Hour), "nbf": at(-time.Hour), "exp": at(23 * time.Hour)}, ""},
+		"a life past 24 hours":            {map[string]any{"iat": at(-time.Hour), "nbf": at(-time.Hour), "exp": at(23*time.Hour + time.Second)}, "it must expire at most 24 hours after its iat and its nbf"},
+		"a life past 24 hours from nbf":   {map[string]any{"iat": at(0), "nbf": at(-time.Hour), "exp": at(23*time.Hour + time.Second)}, "it must expire at most 24 hours after its iat and its nbf"},
+		"a life past 24 hours from iat":   {map[string]any{"iat": at(-time.Hour), "nbf": nil, "exp": at(23*time.Hour + time.Second)}, "it must expire at most 24 hours after its iat and its nbf"},
 		"expiring in a second":            {map[string]any{"exp": at(time.Second)}, ""},
 		"a fractional exp past the start": {map[string]any{"exp": float64(at(time.Second)) + 0.5}, ""},
 	} {
@@ -430,6 +436,24 @@ func TestTheTokenMustBeValidNow(t *testing.T) {
 		}
 		requireTokenRefused(t, err, tc.want, name)
 	}
+}
+
+func TestATokenWithAnActClaimIsRefused(t *testing.T) {
+	t.Parallel()
+	clock := quartz.NewMock(t)
+	now := clock.Now()
+	rule := testKubernetesRule(t, publicJWK(testRSAKey(), testKID))
+	c := newWorkloadChecker(&http.Client{}, clock)
+	for _, act := range []any{map[string]any{"sub": "system:serviceaccount:apps:other-bot"}, nil, "x"} {
+		claims := kubernetesClaims(now)
+		claims["act"] = act
+		_, err := checkAt(t, c, now, signToken(t, jose.RS256, testRSAKey(), testKID, claims), rule)
+		requireTokenRefused(t, err, "it carries an act claim, the delegation of RFC 8693", act)
+	}
+	claims := kubernetesClaims(now)
+	claims["may_act"] = map[string]any{"sub": "system:serviceaccount:apps:other-bot"}
+	_, err := checkAt(t, c, now, signToken(t, jose.RS256, testRSAKey(), testKID, claims), rule)
+	require.NoError(t, err, "may_act names who may act for the workload, and acts for no one")
 }
 
 func TestTheFaucetTokenEndsNoLaterThanTheSubjectToken(t *testing.T) {
@@ -515,18 +539,19 @@ func TestAnUnknownKidCostsOneFetchAMinute(t *testing.T) {
 	require.NoError(t, err)
 
 	s.serveVercelKeys(t, publicJWK(testRSAKey(), testKID), publicJWK(otherRSAKey(), "rotated"))
+	clock.Advance(20 * time.Second)
 	for i := range 20 {
 		token := signToken(t, jose.RS256, testRSAKey(), fmt.Sprintf("made-up-%d", i), vercelClaims(now))
-		_, err := checkAt(t, c, now, token, testVercelRule())
-		requireTokenRefused(t, err, "its kid and alg name no key of its issuer")
+		_, err := checkAt(t, c, clock.Now(), token, testVercelRule())
+		requireTokenRefused(t, err, "its kid and alg name no key of its issuer", "a made-up kid within a minute of the fetch")
 	}
 	rotated := signToken(t, jose.RS256, otherRSAKey(), "rotated", vercelClaims(now))
-	_, err = checkAt(t, c, now, rotated, testVercelRule())
-	requireTokenRefused(t, err, "its kid and alg name no key of its issuer")
+	_, err = checkAt(t, c, clock.Now(), rotated, testVercelRule())
+	requireTokenRefused(t, err, "its kid and alg name no key of its issuer", "a key added within a minute of the fetch")
 	require.Equal(t, 1, s.hitsOf(testVercelDiscovery))
 	require.Equal(t, 1, s.hitsOf(testVercelKeys))
 
-	clock.Advance(keyFetchInterval)
+	clock.Advance(keyFetchInterval - 20*time.Second)
 	now = clock.Now()
 	_, err = checkAt(t, c, now, signToken(t, jose.RS256, otherRSAKey(), "rotated", vercelClaims(now)), testVercelRule())
 	require.NoError(t, err, "the added key works a minute after the last fetch")
@@ -864,11 +889,13 @@ func TestADiscoveryDocumentCannotSendFaucetToAPrivateAddress(t *testing.T) {
 	s := newKeySource(client, quartz.NewMock(t))
 	for _, uri := range []string{
 		"https://10.0.0.1/keys", "https://169.254.169.254/keys", "https://[fd00::1]/keys", "https://keys.example.com/keys", "http://keys.example.com/keys",
+		"https://10.0.0.1/keys?token=hunter2",
 	} {
 		jwksURI.Store(uri)
 		_, err := s.fetch(context.Background(), srv.URL)
 		require.ErrorContains(t, err, "the key set: ", uri)
 		require.ErrorIs(t, err, faucet.ErrDestinationRefused, uri)
+		require.NotContains(t, err.Error(), "/keys", "the error, which the grant logs, quotes no URL: %s", uri)
 	}
 	_, err := s.fetch(context.Background(), srv.URL+"/moved")
 	require.ErrorContains(t, err, "the discovery document: it must be served with status 200 and no redirect, not 302")

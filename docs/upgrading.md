@@ -2,6 +2,16 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## To workload logins (migration `000017_workload_trusts`)
+
+This came in [#63](https://github.com/coder/faucet/pull/63) and, with the token exchange, [#65](https://github.com/coder/faucet/pull/65). A Vercel function or a Kubernetes pod can now log in as a service client with the token that its platform signs for it (see [service-accounts.md](service-accounts.md#log-in-with-a-workload-identity)). Nothing changes until an operator runs `faucet clients trust`.
+
+- **`faucet clients trust`** refuses the issuers of GitHub Actions (github.com and GHE.com) and gitlab.com, which the build of #63 took. A rule for them that it stored matches no token: remove it with `faucet clients untrust`.
+- **The migration** lets a client have no secret and adds `faucet_workload_trusts`, which holds the trust rules. The down file deletes every trust rule, of every client, and gives each client without a secret an all-zero secret hash, which no known secret hashes to, so the build before gives it no token. The up file turns that hash back into no secret, but the rules are gone: add them again with `faucet clients trust`.
+- **The metadata** lists `urn:ietf:params:oauth:grant-type:token-exchange` in `grant_types_supported` and `none` in `token_endpoint_auth_methods_supported`, also with the browser login off. A service client logs in with its secret as before, and the revocation endpoint takes the same methods as before.
+- **A rolling deploy:** until every instance runs this build, an instance of the build before answers a token exchange `unsupported_grant_type`.
+- **A host that embeds faucet:** an `oauth.Store` of your own must also implement `AddTrustRule`, `TrustRules` and `RemoveTrustRule` and pass the new `storetest.RunOAuth` subtests, and `oauth.Client.SecretHash` is now a pointer, nil for a client with no secret. `oauth.ServerDeps.WorkloadKeys` sets up the client that fetches the keys of issuers, which faucet builds with `faucet.NewHTTPClient`. Leave it at its zero value in production: `AllowInsecureLoopback` is for tests, and `oauth.NewServer` logs a warning when it is set.
+
 ## To a public URL from Vercel
 
 This came in [#60](https://github.com/coder/faucet/pull/60). On Vercel production with `FAUCET_PUBLIC_URL` unset, faucet now takes `https://` and `VERCEL_PROJECT_PRODUCTION_URL` as its public URL, so the routes of its login server exist there from this deploy on: the metadata documents, `/oauth/token`, `/oauth/authorize` and `/oauth/revoke`, and a 401 from `/github/mcp` names the metadata. A preview or development deployment, and every host outside Vercel, sees no change. Set `FAUCET_PUBLIC_URL` to pin the URL, because a shorter custom domain added later changes it (see [deploy.md](deploy.md#the-public-url)).
@@ -48,7 +58,7 @@ This came in [#55](https://github.com/coder/faucet/pull/55). A service can now r
 This came in [#54](https://github.com/coder/faucet/pull/54). Nothing that a client sees changes until you set `FAUCET_GITHUB_APP_CLIENT_ID`, `FAUCET_GITHUB_APP_CLIENT_SECRET` and `FAUCET_TOKEN_KEY` next to `FAUCET_PUBLIC_URL` (see [browser-login.md](browser-login.md)). With only some of them set, the server refuses to start and names the missing ones. Then:
 
 - `/oauth/authorize` shows the consent page and takes its form, the new route `/oauth/github/callback` takes GitHub's answer, `/oauth/token` also takes the `authorization_code` and `refresh_token` grants, and the new route `/oauth/revoke` revokes a client's own tokens (RFC 7009), service clients' included. The authorization server metadata lists the new grants and the revocation endpoint, and says that faucet takes client ID metadata documents.
-- Faucet keeps the GitHub App tokens of the users who log in, sealed under `FAUCET_TOKEN_KEY` (see [security.md](security.md#three-kinds-of-caller)).
+- Faucet keeps the GitHub App tokens of the users who log in, sealed under `FAUCET_TOKEN_KEY` (see [security.md](security.md#four-kinds-of-caller)).
 
 Whether or not you set them:
 

@@ -43,11 +43,12 @@ An agent asks for events by name, of one `repo` (a service also of an `owner` or
 
 The operator can also offer other GitHub events of a repository, such as `push`, `release` and `issues`, raw as `github.<event>`, by listing them in `FAUCET_RAW_EVENTS`. Faucet stores one only while a subscription or a poller wants it (see [raw events](docs/events.md#raw-events)).
 
-A caller of `/github/mcp` proves who it is in one of three ways, and faucet returns events only for repositories that the caller may read (see [docs/security.md](docs/security.md)):
+A caller of `/github/mcp` proves who it is in one of four ways, and faucet returns events only for repositories that the caller may read (see [docs/security.md](docs/security.md)):
 
 - **A GitHub token** as `Authorization: Bearer <GitHub token>`. Faucet asks GitHub with it and keeps it for that request only.
 - **A browser login.** A coding agent connects with no token, and its user logs in to GitHub through faucet in a browser. Faucet keeps the user's GitHub App token, sealed, and gives the agent only faucet's own tokens (see [docs/browser-login.md](docs/browser-login.md)).
 - **A client ID and secret** that an operator made for a service agent, which holds no GitHub token (see [docs/service-accounts.md](docs/service-accounts.md)).
+- **A workload's own token.** A Vercel function or a Kubernetes pod trades the token that its platform signs for it for a token of a service client, with no stored secret (see [docs/service-accounts.md](docs/service-accounts.md#log-in-with-a-workload-identity)).
 
 The one GitHub token that faucet holds for itself, for redelivery, is optional.
 
@@ -137,9 +138,9 @@ The packages:
 - [docs/events.md](docs/events.md): the event names, their actions and filters, and the GitHub webhook to set up.
 - [docs/webhooks.md](docs/webhooks.md): the contract for a callback receiver (signatures, retries, cursors, control messages, secret rotation).
 - [docs/redelivery.md](docs/redelivery.md): how failed GitHub deliveries are recovered, with the sweep's guarantees, capacity and known limits.
-- [docs/security.md](docs/security.md): the three kinds of caller, the access checks, what protects the browser login, the callback URL guard and secret handling.
+- [docs/security.md](docs/security.md): the four kinds of caller, the access checks, what protects the browser login and workload logins, the callback URL guard and secret handling.
 - [docs/deploy.md](docs/deploy.md): deploying and operating faucet, and what each scheduled route answers.
-- [docs/service-accounts.md](docs/service-accounts.md): service agents that log in with client credentials, how an operator makes their clients, and how grants match repositories.
+- [docs/service-accounts.md](docs/service-accounts.md): service agents that log in with client credentials or with their platform's token, how an operator makes their clients and trust rules, and how grants match repositories.
 - [docs/browser-login.md](docs/browser-login.md): the browser login of coding agents, the GitHub App that an operator makes for it, what faucet keeps, and how to rotate `FAUCET_TOKEN_KEY`.
 - [docs/upgrading.md](docs/upgrading.md): what to change on the GitHub hook and during a rolling deploy when you upgrade.
 

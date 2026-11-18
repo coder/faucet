@@ -3,9 +3,9 @@ package oauth
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -35,9 +35,19 @@ const (
 	discoveryPath    = "/.well-known/openid-configuration"
 )
 
-// errIssuerKeys is the error of an issuer whose keys faucet could not fetch.
-// An error that wraps it holds the cause, which is for the log only.
 var errIssuerKeys = xerrors.New("faucet could not fetch the keys of the subject token's issuer")
+
+type issuerKeysError struct {
+	issuer   string
+	retryAt  time.Time
+	fetchErr error
+}
+
+func (e issuerKeysError) Error() string {
+	return errIssuerKeys.Error() + " " + e.issuer + ": " + e.fetchErr.Error()
+}
+
+func (e issuerKeysError) Unwrap() []error { return []error{errIssuerKeys, e.fetchErr} }
 
 // keySource fetches the keys of issuers through their OpenID discovery
 // documents, and keeps them. Callers that ask at once for an issuer whose
@@ -90,24 +100,18 @@ func newKeySource(client *http.Client, clock quartz.Clock) *keySource {
 	return &keySource{client: client, clock: clock, sets: map[string]fetchedKeySet{}, flights: map[string]*keySetFlight{}}
 }
 
-// keySet returns the keys of issuer, for a token whose header names kid. It
-// fetches them when the keys that it holds, which last keySetLifetime from
-// the fetch that got them, lack kid, unless a fetch of issuer ended less than
-// keyFetchInterval ago: then it returns the keys that it holds, or the error
-// of that fetch. A fetch that fails keeps the keys. It starts no fetch once
-// ctx has ended, and every error but the end of ctx wraps errIssuerKeys.
 func (s *keySource) keySet(ctx context.Context, issuer, kid string) (jose.JSONWebKeySet, error) {
 	s.mu.Lock()
 	now := s.clock.Now()
 	f := s.sets[issuer]
-	keys := f.keysAt(now)
+	keys, retryAt := f.keysAt(now), f.triedAt.Add(keyFetchInterval)
 	switch {
-	case len(keys.Key(kid)) > 0:
+	case len(keys.Key(kid)) > 0, now.Before(retryAt) && f.err == nil:
 		s.mu.Unlock()
 		return keys, nil
-	case now.Before(f.triedAt.Add(keyFetchInterval)):
+	case now.Before(retryAt):
 		s.mu.Unlock()
-		return keys, f.err
+		return jose.JSONWebKeySet{}, issuerKeysError{issuer: issuer, retryAt: retryAt, fetchErr: f.err}
 	case ctx.Err() != nil:
 		s.mu.Unlock()
 		return jose.JSONWebKeySet{}, ctx.Err()
@@ -128,15 +132,14 @@ func (s *keySource) keySet(ctx context.Context, issuer, kid string) (jose.JSONWe
 	// The fetch has a timeout of its own, and every caller at once waits
 	// for it, so a caller that leaves does not end it.
 	keys, err := s.fetch(context.WithoutCancel(ctx), issuer)
-	if err != nil {
-		err = fmt.Errorf("%w: %w", errIssuerKeys, err)
-	}
 	s.mu.Lock()
 	delete(s.flights, issuer)
 	f = s.sets[issuer]
 	f.err, f.triedAt = err, s.clock.Now()
 	if err == nil {
 		f.keys, f.fetchedAt = keys, f.triedAt
+	} else {
+		err = issuerKeysError{issuer: issuer, retryAt: f.triedAt.Add(keyFetchInterval), fetchErr: err}
 	}
 	keep(s.sets, issuer, f, maxCachedKeySets, f.triedAt, fetchedKeySet.keptUntil)
 	s.mu.Unlock()
@@ -185,6 +188,12 @@ func (s *keySource) get(ctx context.Context, rawURL string) ([]byte, error) {
 	req.Header.Set("Accept", "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {
+		// A *url.Error quotes the URL, which the discovery document chose,
+		// and the grant logs this error.
+		var urlErr *url.Error
+		if xerrors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
 		return nil, lateOr(ctx, err)
 	}
 	defer resp.Body.Close()
