@@ -17,6 +17,8 @@ For a pasted token, a service and a workload, faucet holds no GitHub token of th
 
 Every `/github/mcp` request carries its bearer token as `Authorization: Bearer <token>`. A bearer that starts with `fct_`, `fcr_` or `fcs_` is a faucet token. Faucet checks it itself and never sends it to GitHub. Faucet mints access tokens for service clients and for the sessions of browser logins, each valid for 15 minutes on the one endpoint it was issued for, and every other faucet token is 401.
 
+Because no request reaches the MCP server without a bearer token, faucet turns off the go-sdk's DNS-rebinding check, which refuses a loopback listener reached under another `Host`. That check protects a local server that trusts whoever can reach it, and it refused every request on Vercel, whose runtime hands each request to faucet on a loopback address under faucet's public `Host`.
+
 Any other bearer is a GitHub token. Faucet checks it with `GET /user`, then checks that the same token can read the repository with `GET /repos/{owner}/{name}`. The token lives only for that request, and faucet sends it only to `FAUCET_GITHUB_API_URL`. A repository the token can't read gives the same `Forbidden` error as one that doesn't exist.
 
 For a GitHub token, faucet remembers a successful check for 60 seconds per token and repository, to save GitHub rate limit. The cache is keyed by the SHA-256 of the token, never the token itself. Failed checks aren't cached, so a new grant works at once. So **a revocation can take up to 60 seconds to reach** `events/poll` and the start of a wait. A wait that starts in that window can run for up to 50 more seconds. `events/subscribe` always checks fresh.

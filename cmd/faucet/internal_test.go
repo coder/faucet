@@ -338,6 +338,28 @@ func TestMCPRateLimitedUserLookupIsABadGatewayNotAnInvalidToken(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, status, "a plain 403 is a refusal, so the same lookup without a rate limit sign stays a 401")
 }
 
+// TestMCPServesAPublicHostOnALoopbackListener models Vercel, whose runtime
+// hands each request to the function's server on a loopback address with the
+// Host that the client called.
+func TestMCPServesAPublicHostOnALoopbackListener(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+srv.mcpPath, strings.NewReader(body))
+	require.NoError(t, err)
+	req.Host = "faucet.example.com"
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	resp, err := srv.Client().Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	got, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", got)
+	require.Contains(t, string(got), `"serverInfo"`)
+}
+
 func TestMCPToolWaitsForAllowedRepoOverHTTP(t *testing.T) {
 	t.Parallel()
 
