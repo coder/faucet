@@ -48,7 +48,7 @@ Each `/cron/*` route answers 200 with a JSON object, and the result type in the 
 <!-- BEGIN generated:cron-replies -->
 | Route | Reply fields | Documented on |
 | --- | --- | --- |
-| `GET /cron/purge` | `deleted`, `purged_through`, `expired_subscriptions`, `ended_deliveries` | `faucet.PurgeResult` |
+| `GET /cron/purge` | `deleted`, `purged_through`, `expired_subscriptions`, `ended_deliveries`, `expired_access_tokens` | `faucet.PurgeResult`, `oauth.PurgeResult` |
 | `GET /cron/deliver` | `enqueued`, `gaps`, `gaps_sent`, `gaps_failed`, `claimed`, `sent`, `delivered`, `retried`, `gave_up`, `superseded`, `previous_secrets_cleared`, `incomplete` | `faucet.DeliverResult` |
 | `GET /cron/redeliver` | `busy`, `pages`, `attempts`, `tracked`, `asked`, `recovered`, `gave_up.limit`, `gave_up.expired`, `gaps`, `pending`, `ranges`, `error` | `redelivery.Result` |
 <!-- END generated:cron-replies -->

@@ -25,6 +25,7 @@ func RunOAuth(t *testing.T, newStore func(t *testing.T) oauth.Store) {
 		{"InsertAccessTokenRefusesASecondTokenWithTheSameHash", insertAccessTokenRefusesASecondTokenWithTheSameHash},
 		{"InsertAccessTokenValidatesInput", insertAccessTokenValidatesInput},
 		{"AccessTokenSharesNoSliceWithItsCaller", accessTokenSharesNoSliceWithItsCaller},
+		{"DeleteExpiredAccessTokensLeavesTheLiveOnes", deleteExpiredAccessTokensLeavesTheLiveOnes},
 		{"ClientReadsBackAsInserted", clientReadsBackAsInserted},
 		{"ClientOfAnUnknownIDIsUnknown", clientOfAnUnknownIDIsUnknown},
 		{"InsertClientRefusesAnIDThatAnyClientHeld", insertClientRefusesAnIDThatAnyClientHeld},
@@ -147,6 +148,31 @@ func accessTokenSharesNoSliceWithItsCaller(t *testing.T, s oauth.Store) {
 	again, err := s.AccessToken(ctx, want.Hash)
 	require.NoError(t, err)
 	requireSameAccessToken(t, want, again)
+}
+
+func deleteExpiredAccessTokensLeavesTheLiveOnes(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+	expired := accessTokenAt("fct_expired", now.Add(-time.Minute))
+	atNow := accessTokenAt("fct_now", now)
+	live := accessTokenAt("fct_live", now.Add(time.Second))
+	for _, token := range []oauth.AccessToken{expired, atNow, live} {
+		require.NoError(t, s.InsertAccessToken(ctx, token))
+	}
+
+	n, err := s.DeleteExpiredAccessTokens(ctx, now)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, n, "a token that expires at now has expired")
+	for _, gone := range []oauth.AccessToken{expired, atNow} {
+		_, err := s.AccessToken(ctx, gone.Hash)
+		require.ErrorIs(t, err, oauth.ErrUnknownToken)
+	}
+	got, err := s.AccessToken(ctx, live.Hash)
+	require.NoError(t, err)
+	requireSameAccessToken(t, live, got)
+	n, err = s.DeleteExpiredAccessTokens(ctx, now)
+	require.NoError(t, err)
+	require.Zero(t, n)
 }
 
 // clientAt is a valid live client created at created, which has no time

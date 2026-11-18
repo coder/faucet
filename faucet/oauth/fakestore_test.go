@@ -109,6 +109,19 @@ func (s *fakeStore) AccessToken(_ context.Context, hash oauth.TokenHash) (oauth.
 	return t, nil
 }
 
+func (s *fakeStore) DeleteExpiredAccessTokens(_ context.Context, now time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for hash, t := range s.tokens {
+		if !t.ExpiresAt.After(now) {
+			delete(s.tokens, hash)
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (s *fakeStore) tokenCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

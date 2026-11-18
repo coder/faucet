@@ -12,6 +12,7 @@ interface PurgeReply {
   purged_through: number;
   expired_subscriptions: number;
   ended_deliveries: number;
+  expired_access_tokens: number;
 }
 
 interface PollResult {
@@ -57,7 +58,7 @@ async function retentionOracle(faucet: Faucet): Promise<PurgeReply> {
   const ended = Number(await faucet.sql(
     'select count(*) from faucet_deliveries d join faucet_subscriptions s using (key_hash) where s.expires_at <= now()',
   ));
-  return { deleted, purged_through: Math.max(highest, await faucet.purgeMark()), expired_subscriptions: expired, ended_deliveries: ended };
+  return { deleted, purged_through: Math.max(highest, await faucet.purgeMark()), expired_subscriptions: expired, ended_deliveries: ended, expired_access_tokens: 0 };
 }
 
 describe('purge', () => {
@@ -83,7 +84,7 @@ describe('purge', () => {
 
     const second = await purge(cron);
 
-    expect(second).toEqual({ deleted: 0, purged_through: first.purged_through, expired_subscriptions: 0, ended_deliveries: 0 });
+    expect(second).toEqual({ deleted: 0, purged_through: first.purged_through, expired_subscriptions: 0, ended_deliveries: 0, expired_access_tokens: 0 });
   });
 
   test('an events/poll from before the purge says events were lost, one from after does not', async ({ cron }) => {

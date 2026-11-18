@@ -90,6 +90,9 @@ type Store interface {
 	// expired or not, or ErrUnknownToken. A stored token need not pass
 	// Validate: a later build can write a scope that this one does not know.
 	AccessToken(ctx context.Context, hash TokenHash) (AccessToken, error)
+	// DeleteExpiredAccessTokens deletes every access token that expired at or
+	// before now and returns how many it deleted.
+	DeleteExpiredAccessTokens(ctx context.Context, now time.Time) (int64, error)
 
 	// InsertClient stores c. It fails when c is not valid, and returns
 	// ErrClientExists when the store holds a client with the same ID, even a

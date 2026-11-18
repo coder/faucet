@@ -139,6 +139,23 @@ func (s *Server) MetadataHandler() http.Handler {
 	})
 }
 
+// PurgeResult is what Server.Purge deleted.
+type PurgeResult struct {
+	// ExpiredAccessTokens is how many access tokens had expired. A token is
+	// worth nothing once it expires, so none is kept.
+	ExpiredAccessTokens int64
+}
+
+// Purge deletes the state of the login server that is past its use: every
+// access token that has expired.
+func (s *Server) Purge(ctx context.Context) (PurgeResult, error) {
+	n, err := s.store.DeleteExpiredAccessTokens(ctx, s.clock.Now())
+	if err != nil {
+		return PurgeResult{}, err
+	}
+	return PurgeResult{ExpiredAccessTokens: n}, nil
+}
+
 // AuthorizeHandler serves the authorization endpoint at AuthorizePath. No
 // grant of the grant table uses it yet, so it answers every request with
 // unsupported_response_type, and never redirects, because it knows no

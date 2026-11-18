@@ -64,7 +64,8 @@ func newLoginServer(t *testing.T) *loginServer {
 		RecordRepositories: true,
 	})
 	require.NoError(t, err)
-	srv.Config.Handler = newRouter(svc, tokens, login, cronRoutes{}, logger)
+	cron := cronRoutes{secret: []byte(loginCronSecret), svc: svc, retention: 24 * time.Hour, login: login, clock: clock, logger: logger}
+	srv.Config.Handler = newRouter(svc, tokens, login, cron, logger)
 	srv.Start()
 	t.Cleanup(srv.Close)
 	return &loginServer{Server: srv, store: store, github: github, logs: logs}
@@ -130,6 +131,41 @@ func (s *loginServer) get(t *testing.T, path string) (int, http.Header, []byte) 
 }
 
 var bothScopes = []faucet.Scope{faucet.ScopeEventsRead, faucet.ScopeEventsSubscribe}
+
+const loginCronSecret = "cron-secret-0123456789abcdef"
+
+// An access token is worth nothing once it expires, so the purge deletes it.
+func TestThePurgeDeletesExpiredAccessTokens(t *testing.T) {
+	t.Parallel()
+	srv := newLoginServer(t)
+	ctx := context.Background()
+	token := func(name string, expires time.Time) oauth.AccessToken {
+		return oauth.AccessToken{
+			Hash: oauth.HashToken(name), ExpiresAt: expires, Scopes: bothScopes,
+			Resource: srv.URL + "/github/mcp", SubjectKind: oauth.SubjectService, Subject: "ci-watcher",
+		}
+	}
+	expired, live := token("fct_expired", time.Now().Add(-time.Minute)), token("fct_live", time.Now().Add(time.Hour))
+	for _, at := range []oauth.AccessToken{expired, live} {
+		require.NoError(t, srv.store.InsertAccessToken(ctx, at))
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/cron/purge", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+loginCronSecret)
+	resp, err := srv.Client().Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var reply map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&reply))
+	require.EqualValues(t, 1, reply["expired_access_tokens"])
+
+	_, err = srv.store.AccessToken(ctx, expired.Hash)
+	require.ErrorIs(t, err, oauth.ErrUnknownToken)
+	_, err = srv.store.AccessToken(ctx, live.Hash)
+	require.NoError(t, err)
+}
 
 // A service agent logs in with the client credentials that an operator made,
 // and no GitHub token. go-sdk's handler finds faucet's login server from the

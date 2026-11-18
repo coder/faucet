@@ -284,7 +284,8 @@ func run() error {
 		return err
 	}
 	cron := cronRoutes{
-		secret: []byte(cfg.cronSecret), svc: svc, retention: cfg.retention, delivers: cfg.webhook != nil, redeliverer: redeliverer, clock: clock, logger: logger,
+		secret: []byte(cfg.cronSecret), svc: svc, retention: cfg.retention, delivers: cfg.webhook != nil, redeliverer: redeliverer, login: login,
+		clock: clock, logger: logger,
 	}
 	return serve(ctx, logger, cfg.port, newRouter(svc, tokens, login, cron, logger))
 }
@@ -425,29 +426,38 @@ func newRouter(svc *faucet.Service, tokens bearers, login *oauth.Server, cron cr
 	cron.mount(r)
 	r.Method(http.MethodPost, "/webhook/github", svc.WebhookHandler())
 	githubMCP := newMCPHandler(svc)
-	for _, path := range mcpPaths {
+	// A faucet token is valid only on the resource it was issued for, so
+	// each path checks tokens for its own.
+	mcpEndpoint := func(path string) http.Handler {
 		challenge := "Bearer"
 		if login != nil {
 			challenge = tokens.challenge(path)
-			r.Handle(protectedResourcePath(path), auth.ProtectedResourceMetadataHandler(&oauthex.ProtectedResourceMetadata{
-				Resource:             tokens.resource(path),
-				AuthorizationServers: []string{tokens.origin.String()},
-				ScopesSupported:      scopeNames(faucet.AllScopes()),
-			}))
 		}
-		// A faucet token is valid only on the resource it was issued for, so
-		// each path checks tokens for its own.
-		r.Handle(path, longResponse(requireBearer(tokens, path, challenge, logger, githubMCP)))
+		return longResponse(requireBearer(tokens, path, challenge, logger, githubMCP))
 	}
+	r.Handle("/github/mcp", mcpEndpoint("/github/mcp"))
+	r.Handle("/mcp", mcpEndpoint("/mcp"))
 	if login != nil {
-		r.Method(http.MethodGet, oauth.MetadataPath, login.MetadataHandler())
-		r.Handle(oauth.AuthorizePath, login.AuthorizeHandler())
-		r.Method(http.MethodPost, oauth.TokenPath, login.TokenHandler())
+		r.Handle("/.well-known/oauth-protected-resource/github/mcp", protectedResource(tokens, "/github/mcp"))
+		r.Handle("/.well-known/oauth-protected-resource/mcp", protectedResource(tokens, "/mcp"))
+		r.Method(http.MethodGet, "/.well-known/oauth-authorization-server", login.MetadataHandler())
+		r.Handle("/oauth/authorize", login.AuthorizeHandler())
+		r.Method(http.MethodPost, "/oauth/token", login.TokenHandler())
 	}
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok\n")
 	})
 	return r
+}
+
+// protectedResource serves the metadata (RFC 9728) of the MCP endpoint at
+// path, which names faucet's origin as its authorization server.
+func protectedResource(tokens bearers, path string) http.Handler {
+	return auth.ProtectedResourceMetadataHandler(&oauthex.ProtectedResourceMetadata{
+		Resource:             tokens.resource(path),
+		AuthorizationServers: []string{tokens.origin.String()},
+		ScopesSupported:      scopeNames(faucet.AllScopes()),
+	})
 }
 
 func scopeNames(scopes []faucet.Scope) []string {

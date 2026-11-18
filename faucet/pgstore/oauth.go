@@ -60,6 +60,16 @@ func (s *Store) AccessToken(ctx context.Context, hash oauth.TokenHash) (_ oauth.
 	}, nil
 }
 
+// DeleteExpiredAccessTokens implements oauth.Store.
+func (s *Store) DeleteExpiredAccessTokens(ctx context.Context, now time.Time) (_ int64, err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	deleted, err := s.q.DeleteExpiredAccessTokens(ctx, now)
+	if err != nil {
+		return 0, xerrors.Errorf("delete expired access tokens: %w", err)
+	}
+	return deleted, nil
+}
+
 // InsertClient implements oauth.Store. A client with the same ID, live or
 // disabled, makes it oauth.ErrClientExists.
 func (s *Store) InsertClient(ctx context.Context, c oauth.Client) (err error) {
