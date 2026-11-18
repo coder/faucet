@@ -26,9 +26,9 @@ var errWorkloadRefused = &tokenError{
 	description: "the client takes no such subject token: check client_id and the token, and faucet's log for the reason",
 }
 
-type workloadClientError string
+type clientRefusalError string
 
-func (e workloadClientError) Error() string { return string(e) }
+func (e clientRefusalError) Error() string { return string(e) }
 
 func (s *Server) tokenExchange(r *http.Request, form url.Values) (tokenResponse, error) {
 	switch {
@@ -89,13 +89,13 @@ func (s *Server) exchange(ctx context.Context, form url.Values) (tokenResponse, 
 
 func (s *Server) exchangeAnswer(ctx context.Context, clientID string, err error) error {
 	var keys issuerKeysError
-	var refusal workloadClientError
+	var refusal clientRefusalError
 	var token subjectTokenError
 	var answer *tokenError
 	switch {
 	case xerrors.As(err, &keys):
 		log := s.logger.Info
-		if keys.fetch != nil {
+		if keys.fetchErr != nil {
 			log = s.logger.Warn
 		}
 		log(ctx, "a workload's token waits for the keys of its issuer", slog.F("client_id", clientID), slog.Error(err))
@@ -116,25 +116,25 @@ func (s *Server) exchangeAnswer(ctx context.Context, clientID string, err error)
 
 func (s *Server) workloadClient(ctx context.Context, id string) (Client, []TrustRule, error) {
 	if ValidateClientID(id) != nil {
-		return Client{}, nil, workloadClientError("client_id is not a client ID")
+		return Client{}, nil, clientRefusalError("client_id is not a client ID")
 	}
 	c, err := s.store.Client(ctx, id)
 	switch {
 	case xerrors.Is(err, ErrUnknownClient):
-		return Client{}, nil, workloadClientError("no client has this ID")
+		return Client{}, nil, clientRefusalError("no client has this ID")
 	case err != nil:
 		return Client{}, nil, xerrors.Errorf("read the client: %w", err)
 	case !c.Live():
-		return Client{}, nil, workloadClientError("the client is disabled")
+		return Client{}, nil, clientRefusalError("the client is disabled")
 	case !slices.Contains(s.resources, c.Resource):
-		return Client{}, nil, workloadClientError("the client is for " + c.Resource + ", which this server does not serve")
+		return Client{}, nil, clientRefusalError("the client is for " + c.Resource + ", which this server does not serve")
 	}
 	stored, err := s.store.TrustRules(ctx, c.ID)
 	switch {
 	case err != nil:
 		return Client{}, nil, xerrors.Errorf("read the trust rules of the client: %w", err)
 	case len(stored) == 0:
-		return Client{}, nil, workloadClientError("the client trusts no workload issuer: add one with faucet clients trust")
+		return Client{}, nil, clientRefusalError("the client trusts no workload issuer: add one with faucet clients trust")
 	}
 	rules := make([]TrustRule, len(stored))
 	for i, st := range stored {

@@ -38,24 +38,24 @@ const (
 var errIssuerKeys = xerrors.New("faucet holds no key of the subject token's issuer for it yet")
 
 type issuerKeysError struct {
-	issuer  string
-	retryAt time.Time
-	fetch   error
+	issuer   string
+	retryAt  time.Time
+	fetchErr error
 }
 
 func (e issuerKeysError) Error() string {
 	why := "faucet fetched its keys less than a minute ago, and they lack the token's kid"
-	if e.fetch != nil {
-		why = e.fetch.Error()
+	if e.fetchErr != nil {
+		why = e.fetchErr.Error()
 	}
 	return errIssuerKeys.Error() + " " + e.issuer + ": " + why
 }
 
 func (e issuerKeysError) Unwrap() []error {
-	if e.fetch == nil {
+	if e.fetchErr == nil {
 		return []error{errIssuerKeys}
 	}
-	return []error{errIssuerKeys, e.fetch}
+	return []error{errIssuerKeys, e.fetchErr}
 }
 
 // keySource fetches the keys of issuers through their OpenID discovery
@@ -120,7 +120,7 @@ func (s *keySource) keySet(ctx context.Context, issuer, kid string) (jose.JSONWe
 		return keys, nil
 	case now.Before(f.triedAt.Add(keyFetchInterval)):
 		s.mu.Unlock()
-		return jose.JSONWebKeySet{}, issuerKeysError{issuer: issuer, retryAt: f.triedAt.Add(keyFetchInterval), fetch: f.err}
+		return jose.JSONWebKeySet{}, issuerKeysError{issuer: issuer, retryAt: f.triedAt.Add(keyFetchInterval), fetchErr: f.err}
 	case ctx.Err() != nil:
 		s.mu.Unlock()
 		return jose.JSONWebKeySet{}, ctx.Err()
@@ -148,7 +148,7 @@ func (s *keySource) keySet(ctx context.Context, issuer, kid string) (jose.JSONWe
 	if err == nil {
 		f.keys, f.fetchedAt = keys, f.triedAt
 	} else {
-		err = issuerKeysError{issuer: issuer, retryAt: f.triedAt.Add(keyFetchInterval), fetch: err}
+		err = issuerKeysError{issuer: issuer, retryAt: f.triedAt.Add(keyFetchInterval), fetchErr: err}
 	}
 	keep(s.sets, issuer, f, maxCachedKeySets, f.triedAt, fetchedKeySet.keptUntil)
 	s.mu.Unlock()

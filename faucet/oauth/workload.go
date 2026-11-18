@@ -75,8 +75,8 @@ var issuerProfiles = map[string]issuerProfile{
 			{claim: "environment", value: "production", why: "a preview deployment runs any branch, and a development token sits on a laptop for 12 hours"},
 		},
 	},
-	"token.actions.githubusercontent.com": {issuer: notYet("token.actions.githubusercontent.com")},
-	"gitlab.com":                          {issuer: notYet("gitlab.com")},
+	"token.actions.githubusercontent.com": {issuer: notYet("token.actions.githubusercontent.com", "no test has logged in with one, and a rule would have to pin repository_owner_id, repository_id, ref, event_name and job_workflow_ref, as ref alone also matches a pull_request_target or workflow_run run that a fork's pull request starts")},
+	"gitlab.com":                          {issuer: notYet("gitlab.com", "no test has logged in with one, and a rule would have to pin namespace_id, project_id and ref_protected=true")},
 }
 
 // unpinnableClaims are the claims that no rule may pin, and why.
@@ -93,9 +93,9 @@ var otherIssuers = issuerProfile{
 	pins: []requiredPin{{claim: "sub", why: "every workload of the issuer can get a token for faucet, and sub names one of them"}},
 }
 
-func notYet(host string) func(string) error {
+func notYet(host, why string) func(string) error {
 	return func(string) error {
-		return xerrors.Errorf("faucet does not take tokens of %s yet; it takes those of a Vercel team, and of an issuer whose sub names one workload, such as a Kubernetes cluster", host)
+		return xerrors.Errorf("faucet does not take tokens of %s yet; %s", host, why)
 	}
 }
 

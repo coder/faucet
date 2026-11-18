@@ -108,7 +108,7 @@ func TestFaucetRefusesARuleForGitHubActionsOrGitLab(t *testing.T) {
 	} {
 		for _, claims := range []map[string]string{c.pins, {"sub": "repo:octo-org/octo-repo:ref:refs/heads/main"}} {
 			err := oauth.ValidateTrustRule(oauth.TrustRule{Issuer: issuer, Claims: claims})
-			require.ErrorContains(t, err, "faucet does not take tokens of "+c.host+" yet; it takes those of a Vercel team", "%s %v", issuer, claims)
+			require.ErrorContains(t, err, "faucet does not take tokens of "+c.host+" yet; no test has logged in with one, and a rule would have to pin ", "%s %v", issuer, claims)
 		}
 	}
 }

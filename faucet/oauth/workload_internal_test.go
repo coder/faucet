@@ -546,7 +546,7 @@ func TestAnUnknownKidCostsOneFetchAMinute(t *testing.T) {
 		require.ErrorAs(t, err, &keys, msgAndArgs...)
 		require.NotErrorIs(t, err, errSubjectToken, msgAndArgs...)
 		require.Equal(t, retryAt, keys.retryAt, msgAndArgs...)
-		require.NoError(t, keys.fetch, msgAndArgs...)
+		require.NoError(t, keys.fetchErr, msgAndArgs...)
 	}
 	for i := range 20 {
 		token := signToken(t, jose.RS256, testRSAKey(), fmt.Sprintf("made-up-%d", i), vercelClaims(now))
