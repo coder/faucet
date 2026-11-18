@@ -439,7 +439,9 @@ func (r *deliveryRun) enqueueWindow(ctx, readCtx context.Context, now time.Time,
 		return true, nil
 	}
 	e := Enqueue{Key: target.KeyHash, ExpectedScannedThrough: target.ScannedThrough, NewScannedThrough: page.Next}
-	gap := target.ScannedThrough < page.PurgedThrough
+	// Only the window that reaches the purge mark raises the gap, so a purge
+	// that spans several windows is one gap, as it was for one statement.
+	gap := target.ScannedThrough < page.PurgedThrough && page.Next >= page.PurgedThrough
 	if gap {
 		e.GapThrough = page.PurgedThrough
 	}
