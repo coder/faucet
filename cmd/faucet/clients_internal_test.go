@@ -65,8 +65,9 @@ func TestTheClientsCommandMakesListsAndDisablesClients(t *testing.T) {
 	require.Equal(t, []string{"repo:coder/faucet", "repo:coder/coder"}, c.Grants)
 
 	require.NoError(t, store.RecordOwner(ctx, faucet.Owner{ID: 7, Login: "Coder"}))
-	_, _, err = clients(t, getenv, "create", "-resource", "https://faucet.example.com/github/mcp", "-grant", "org:coder", "-grant", "all", "triage")
+	_, notice, err = clients(t, getenv, "create", "-resource", "https://faucet.example.com/github/mcp", "-grant", "org:coder", "-grant", "all", "triage")
 	require.NoError(t, err)
+	require.Contains(t, notice, "The client holds org:Coder#7, all.", "the operator sees which account the org grant names")
 	triage, err := store.Client(ctx, "triage")
 	require.NoError(t, err)
 	require.Equal(t, faucet.AllScopes(), triage.Scopes, "a client holds every scope by default")
@@ -106,22 +107,23 @@ func TestTheClientsCommandRefusesAClientThatCannotWork(t *testing.T) {
 
 	require.NoError(t, store.RecordOwner(context.Background(), faucet.Owner{ID: 7, Login: "coder"}))
 	for name, args := range map[string][]string{
-		"no resource":                {"create", "-grant", "repo:coder/faucet", "ci"},
-		"a resource of no endpoint":  {"create", "-resource", "https://faucet.example.com/api", "-grant", "repo:coder/faucet", "ci"},
-		"a resource with a slash":    {"create", "-resource", "https://faucet.example.com/github/mcp/", "-grant", "repo:coder/faucet", "ci"},
-		"a resource of a bad origin": {"create", "-resource", "http://faucet.example.com/github/mcp", "-grant", "repo:coder/faucet", "ci"},
-		"the old /mcp path":          {"create", "-resource", "https://faucet.example.com/mcp", "-grant", "repo:coder/faucet", "ci"},
-		"no grant":                   {"create", "-resource", resource, "ci"},
-		"an org grant of a repo":     {"create", "-resource", resource, "-grant", "org:coder/faucet", "ci"},
-		"an org grant of an account": {"create", "-resource", resource, "-grant", "org:coder#7", "ci"},
-		"an org grant of no account": {"create", "-resource", resource, "-grant", "org:nobody", "ci"},
-		"an unknown scope":           {"create", "-resource", resource, "-scope", "events:read,events:admin", "-grant", "repo:coder/faucet", "ci"},
-		"no client ID":               {"create", "-resource", resource, "-grant", "repo:coder/faucet"},
-		"a flag after the ID":        {"create", "-resource", resource, "ci", "-grant", "repo:coder/faucet"},
-		"an upper-case ID":           {"create", "-resource", resource, "-grant", "repo:coder/faucet", "CI"},
-		"an unknown command":         {"delete", "ci"},
-		"no command":                 {},
-		"disable with no ID":         {"disable"},
+		"no resource":                     {"create", "-grant", "repo:coder/faucet", "ci"},
+		"a resource of no endpoint":       {"create", "-resource", "https://faucet.example.com/api", "-grant", "repo:coder/faucet", "ci"},
+		"a resource with a slash":         {"create", "-resource", "https://faucet.example.com/github/mcp/", "-grant", "repo:coder/faucet", "ci"},
+		"a resource of a bad origin":      {"create", "-resource", "http://faucet.example.com/github/mcp", "-grant", "repo:coder/faucet", "ci"},
+		"the old /mcp path":               {"create", "-resource", "https://faucet.example.com/mcp", "-grant", "repo:coder/faucet", "ci"},
+		"no grant":                        {"create", "-resource", resource, "ci"},
+		"an org grant of a repo":          {"create", "-resource", resource, "-grant", "org:coder/faucet", "ci"},
+		"an org grant of another account": {"create", "-resource", resource, "-grant", "org:coder#8", "ci"},
+		"an org grant of account 07":      {"create", "-resource", resource, "-grant", "org:coder#07", "ci"},
+		"an org grant of no account":      {"create", "-resource", resource, "-grant", "org:nobody", "ci"},
+		"an unknown scope":                {"create", "-resource", resource, "-scope", "events:read,events:admin", "-grant", "repo:coder/faucet", "ci"},
+		"no client ID":                    {"create", "-resource", resource, "-grant", "repo:coder/faucet"},
+		"a flag after the ID":             {"create", "-resource", resource, "ci", "-grant", "repo:coder/faucet"},
+		"an upper-case ID":                {"create", "-resource", resource, "-grant", "repo:coder/faucet", "CI"},
+		"an unknown command":              {"delete", "ci"},
+		"no command":                      {},
+		"disable with no ID":              {"disable"},
 	} {
 		out, _, err := clients(t, getenv, args...)
 		require.Error(t, err, name)
@@ -130,6 +132,24 @@ func TestTheClientsCommandRefusesAClientThatCannotWork(t *testing.T) {
 	all, err := store.Clients(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, all)
+}
+
+// An operator can name the account of an org grant too, and the command makes
+// the client only when that account holds the login now.
+func TestTheClientsCommandTakesAnOrgGrantWithTheAccountThatHoldsItsLogin(t *testing.T) {
+	t.Parallel()
+	getenv, store := newClientsDatabase(t)
+	ctx := context.Background()
+	require.NoError(t, store.RecordOwner(ctx, faucet.Owner{ID: 7, Login: "coder"}))
+	const resource = "https://faucet.example.com/github/mcp"
+
+	_, _, err := clients(t, getenv, "create", "-resource", resource, "-grant", "org:coder#8", "elsewhere")
+	require.ErrorContains(t, err, "org:coder#8 names account 8, and faucet's latest delivery gives coder to account 7")
+	_, _, err = clients(t, getenv, "create", "-resource", resource, "-grant", "org:Coder#7", "triage")
+	require.NoError(t, err)
+	triage, err := store.Client(ctx, "triage")
+	require.NoError(t, err)
+	require.Equal(t, []string{"org:coder#7"}, triage.Grants)
 }
 
 // An org grant names the account that holds its login when the client is

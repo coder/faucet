@@ -115,8 +115,13 @@ func TestBindGrantsNamesTheAccountThatHoldsTheLoginNow(t *testing.T) {
 	_, err = oauth.BindGrants(ctx, owners, []string{"org:octo"})
 	require.ErrorIs(t, err, faucet.ErrUnknownOwner)
 	require.ErrorContains(t, err, "faucet has received no webhook delivery from octo or a repository of it, so it cannot tell which account org:octo names")
-	for _, grant := range []string{"org:coder#7", "org:coder/faucet", "repo:coder", "everything"} {
+	bound, err = oauth.BindGrants(ctx, owners, []string{"org:CODER#7"})
+	require.NoError(t, err, "an operator can name the account that holds the login")
+	require.Equal(t, []string{"org:Coder#7"}, bound)
+	_, err = oauth.BindGrants(ctx, owners, []string{"org:coder#8"})
+	require.ErrorContains(t, err, "org:coder#8 names account 8, and faucet's latest delivery gives coder to account 7")
+	for _, grant := range []string{"org:coder#07", "org:coder#", "org:#7", "org:coder/faucet", "repo:coder", "everything"} {
 		_, err = oauth.BindGrants(ctx, owners, []string{grant})
-		require.ErrorContains(t, err, "is not repo:<owner>/<name>, org:<login> or all", "%s: an operator names no account ID", grant)
+		require.ErrorContains(t, err, "is not repo:<owner>/<name>, org:<login>, org:<login>#<account ID> or all", grant)
 	}
 }

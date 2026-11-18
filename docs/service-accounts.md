@@ -57,7 +57,7 @@ A client holds one or more grants, which only `faucet clients create` sets:
 | `org:<login>` | every repository of the user or organization that holds `<login>` when the client is made, also one it makes later, under any later login | `owner` of the account by its current login, and `repo` of any of its repositories |
 | `all` | every repository and owner that faucet receives deliveries from | every target, `all: true` included |
 
-`faucet clients create` binds an `org:` grant to the account that holds the login then, and the client keeps it as `org:<login>#<account ID>`, which `faucet clients list` shows. The command refuses a login that no delivery has named, because faucet cannot tell which account it is: make the client once GitHub has sent a delivery from the account or one of its repositories.
+`faucet clients create` binds an `org:` grant to the account that holds the login then, and the client keeps it as `org:<login>#<account ID>`, which the command prints and `faucet clients list` shows. An operator can also write `org:<login>#<account ID>`, which the command takes only when that account holds the login now. The command refuses a login that no delivery has named, because faucet cannot tell which account it is: make the client once GitHub has sent a delivery from the account or one of its repositories.
 
 A grant covers every event that faucet offers of what it names, and that includes the [raw events](events.md#raw-events), whose data is GitHub's whole payload. Names and logins match ignoring case, as GitHub does.
 

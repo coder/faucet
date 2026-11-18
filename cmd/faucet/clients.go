@@ -27,7 +27,9 @@ The commands read DATABASE_URL and FAUCET_PUBLIC_URL, as the server does.
 -resource defaults to FAUCET_PUBLIC_URL and /github/mcp.
 A grant is repo:<owner>/<name> for one repository, org:<login> for every
 repository of the user or organization that holds the login now, under any
-later login too, or all for every repository.`
+later login too, or all for every repository. org:<login>#<account ID> is
+taken only when that account holds the login now. The client keeps each org
+grant with the ID of its account, which create and list show.`
 
 // clientEndpoint is the path of the endpoint that new clients are for. /mcp,
 // its old path, takes no new client, because a later release removes it.
@@ -138,7 +140,7 @@ func createClient(ctx context.Context, args []string, store clientStore, publicU
 	resource := flags.String("resource", defaultResource, "the MCP endpoint that the client's tokens are for, such as https://faucet.example.com/github/mcp")
 	scopeList := flags.String("scope", strings.Join(scopeNames(faucet.AllScopes()), ","), "the scopes that the client's tokens can hold, comma separated")
 	var grants grantFlags
-	flags.Var(&grants, "grant", "what the client may read: repo:<owner>/<name>, org:<login> or all; repeat it for more")
+	flags.Var(&grants, "grant", "what the client may read: repo:<owner>/<name>, org:<login>, org:<login>#<account ID> or all; repeat it for more")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -173,7 +175,7 @@ func createClient(ctx context.Context, args []string, store clientStore, publicU
 	if _, err := fmt.Fprintf(stdout, "client_id: %s\nclient_secret: %s\n", c.ID, secret); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintln(stderr, "Keep the secret now: faucet stores only its hash and cannot show it again.")
+	_, err = fmt.Fprintf(stderr, "The client holds %s. An org grant names the account after its #.\nKeep the secret now: faucet stores only its hash and cannot show it again.\n", strings.Join(c.Grants, ", "))
 	return err
 }
 

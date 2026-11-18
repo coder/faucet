@@ -175,21 +175,25 @@ func parseGrants(grants []string) []clientGrant {
 // them: each "org:<login>" becomes "org:<login>#<account ID>", under the
 // login that owners holds, for the account that holds the login now. So the
 // grant follows that account through a rename, and no later holder of the
-// login gets it. A login that no delivery has named is an error that wraps
-// faucet.ErrUnknownOwner, because faucet cannot tell which account it is.
+// login gets it. An operator who writes "org:<login>#<account ID>" gets it
+// only when that account holds the login now. A login that no delivery has
+// named is an error that wraps faucet.ErrUnknownOwner, because faucet cannot
+// tell which account it is.
 func BindGrants(ctx context.Context, owners Repositories, grants []string) ([]string, error) {
 	bound := make([]string, 0, len(grants))
 	for _, g := range grants {
-		login, ok := strings.CutPrefix(g, orgGrantPrefix)
+		rest, ok := strings.CutPrefix(g, orgGrantPrefix)
 		if !ok {
 			if _, err := parseGrant(g); err != nil {
-				return nil, xerrors.Errorf("grant %q is not repo:<owner>/<name>, org:<login> or all", g)
+				return nil, errOperatorGrant(g)
 			}
 			bound = append(bound, g)
 			continue
 		}
-		if !githubapi.ValidOwner(login) {
-			return nil, xerrors.Errorf("grant %q is not repo:<owner>/<name>, org:<login> or all", g)
+		login, _, hasID := strings.Cut(rest, accountSeparator)
+		named, err := parseGrant(g)
+		if hasID && err != nil || !hasID && !githubapi.ValidOwner(login) {
+			return nil, errOperatorGrant(g)
 		}
 		o, err := owners.OwnerByLogin(ctx, login)
 		switch {
@@ -197,10 +201,16 @@ func BindGrants(ctx context.Context, owners Repositories, grants []string) ([]st
 			return nil, xerrors.Errorf("faucet has received no webhook delivery from %s or a repository of it, so it cannot tell which account %s names; grant it once GitHub has sent one: %w", login, g, err)
 		case err != nil:
 			return nil, xerrors.Errorf("look up the owner of %s: %w", g, err)
+		case hasID && o.ID != named.accountID:
+			return nil, xerrors.Errorf("%s names account %d, and faucet's latest delivery gives %s to account %d", g, named.accountID, login, o.ID)
 		}
 		bound = append(bound, orgGrantPrefix+o.Login+accountSeparator+strconv.FormatInt(o.ID, 10))
 	}
 	return bound, nil
+}
+
+func errOperatorGrant(g string) error {
+	return xerrors.Errorf("grant %q is not repo:<owner>/<name>, org:<login>, org:<login>#<account ID> or all", g)
 }
 
 // newSecret returns prefix and 32 random bytes in base64url without padding.
