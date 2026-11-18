@@ -41,12 +41,12 @@ Keep `FAUCET_WEBHOOK_KEY` stable. Rows sealed under another key can't be read. T
 
 ## Subscribe
 
-`events/subscribe` takes `name` (an [event name](events.md)), `arguments` (`repo`, optionally `sha` and `pr`, and for a family `actions` and the field filters it offers), `delivery` (`url` and `secret`) and optionally `cursor`, `maxAgeMs` and `ttlMs`. The HTTP request must carry an `Mcp-Name` header with the event name (see [the header rule](events.md#the-mcp-name-header)).
+`events/subscribe` takes `name` (an [event name](events.md)), `arguments` (a [target](events.md#targets), which is `repo`, or for a service `owner` or `all` with an optional `repos`, optionally `sha` and `pr`, and for a family `actions` and the field filters it offers), `delivery` (`url` and `secret`) and optionally `cursor`, `maxAgeMs` and `ttlMs`. The HTTP request must carry an `Mcp-Name` header with the event name (see [the header rule](events.md#the-mcp-name-header)).
 
-- The token must be able to read the repository. Faucet checks again on every renewal, because it stores no token.
+- The caller must be able to read the target: a GitHub token the repository, a service a grant that covers it. Faucet checks again on every renewal, because it stores no token.
 - `delivery.secret` is `whsec_` followed by base64 of 24 to 64 random bytes. The client makes it. Faucet never returns or logs it.
 - `delivery.url` must be `https` with a public host, and it must pass the server's callback check.
-- A subscription is the tuple (login, URL, event name, arguments). Arguments that differ only in key order, or in the order or repeats of the values of `actions` or a field filter, are the same, and a family with `actions` and the same family without them are two subscriptions. Subscribing again with the same tuple renews it: same `id`, new expiry, and the secret is replaced (see [Secret rotation](#secret-rotation)).
+- A subscription is the tuple (login, URL, event name, arguments). Arguments that differ only in key order, in the order or repeats of the values of `actions` or a field filter, or in the order, repeats or case of `repos`, are the same, and a family with `actions` and the same family without them are two subscriptions. Subscribing again with the same tuple renews it: same `id`, new expiry, and the secret is replaced (see [Secret rotation](#secret-rotation)).
 - A subscription lives for `ttlMs`, clamped to between 30 seconds and 10 minutes (default 10 minutes). Renew before `refreshBefore`.
 - A login can hold 100 live subscriptions. The next subscribe gets `ResourceExhausted` with `data.limit` `subscriptions`.
 
@@ -107,7 +107,7 @@ A delivery that a run takes and that doesn't succeed ends with one of these reas
 | `attempts_exhausted` | All 5 attempts failed. |
 | `window_expired` | The next attempt would come more than 15 minutes after the event was queued. |
 | `event_purged` | A retention purge deleted the event before the delivery ended, or, for a raw event, a purge dropped its payload. A raw subscription then gets a gap. |
-| `repo_mismatch` | The event's repository is not the one that the subscription is granted now. |
+| `repo_mismatch` | The event is outside the target that the subscription is granted now: another repository, or a repository of another owner. |
 | `secret_unreadable` | The subscriber's sealed secret does not open, as after a change of `FAUCET_WEBHOOK_KEY`. The subscription is deleted too, until its subscriber renews. |
 | `subscription_expired` | The subscription expired before the delivery ended. A raw delivery also ends so when its subscription was unsubscribed, or deleted after a renewal found access revoked. |
 | `arguments_undecodable` | The subscription's stored arguments do not decode, so faucet deleted the subscription with its deliveries. |
@@ -123,8 +123,8 @@ Faucet keeps no subscriber's token, so it only sees revoked access **when the su
 
 Faucet also sends two bodies with a top-level `type` and no `eventId` or `data`. They carry the same headers and signature. Each send gets a fresh `webhook-id` and is attempted once.
 
-- `{"type":"gap","cursor":"v1.<n>"}`: a retention purge deleted events that the subscription hadn't read yet. The check ignores the `sha`, `pr` and field filter arguments, so a filtered subscription can get a gap for an event that its filter would have dropped. Treat it like `truncated: true` and persist the `cursor`. A gap can arrive more than once, so deduplicate gaps by `cursor` and keep the highest. A raw subscription gets a gap, with a cursor `r1.<n>`, for the events that arrived while it held 100 unsent deliveries, for an event whose payload, or the `fields` of it, or the body that carries them, is over 256 KiB, and for an event whose payload a purge dropped before its delivery ended.
-- `{"type":"terminated","error":{"code":-32024,"message":"Forbidden","data":{"reason":"Access revoked"}}}`: a renewal found that the token can no longer read the repository, so the subscription was deleted. Delivery is at most once.
+- `{"type":"gap","cursor":"v1.<n>"}`: a retention purge deleted events that the subscription hadn't read yet. The check ignores the `sha`, `pr`, `repos` and field filter arguments, so a filtered subscription can get a gap for an event that its filter would have dropped. Treat it like `truncated: true` and persist the `cursor`. A gap can arrive more than once, so deduplicate gaps by `cursor` and keep the highest. A raw subscription gets a gap, with a cursor `r1.<n>`, for the events that arrived while it held 100 unsent deliveries, for an event whose payload, or the `fields` of it, or the body that carries them, is over 256 KiB, and for an event whose payload a purge dropped before its delivery ended.
+- `{"type":"terminated","error":{"code":-32024,"message":"Forbidden","data":{"reason":"Access revoked"}}}`: a renewal found that the caller can no longer read the target, so the subscription was deleted. Delivery is at most once.
 
 ## Secret rotation
 
