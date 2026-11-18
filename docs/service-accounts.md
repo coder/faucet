@@ -68,6 +68,12 @@ Until then, faucet refuses the target and says why.
 
 `repos` narrows an `owner` or `all` target to some repositories. It matches the name that each delivery carried, not the name that faucet holds, so after a rename, list the new name.
 
-An account's login is the one in its latest delivery, because GitHub sends no event for each repository of an account that it renames. One login names one account: once a delivery names another account by a login, the account that had it holds no login until its own next delivery. So after an organization is renamed and someone else takes its old login, an `org:` or `repo:` grant of the old login reads none of the renamed organization's repositories. A delivery that GitHub sends again with the old login gives it back until the next one.
+An account's login is the one in its latest delivery, because GitHub sends no event for each repository of an account that it renames. One login names one account: once a delivery names another account by a login, the account that had it holds no login until its own next delivery. So after an organization is renamed and someone else takes its old login, an `org:` or `repo:` grant of the old login reads none of the renamed organization's repositories.
+
+A delivery that GitHub sends again names the accounts as they were when it first came. One that faucet's own [redelivery](redelivery.md) asked for moves no login: it only adds an account that faucet has not seen. One that a hook admin sends again by hand from GitHub gives the old login back to the renamed account, and opens a window that ends at the next delivery of either account. While it lasts:
+
+- a service with an `org:` grant of the old login can read every stored event of the renamed account through an `owner` target, those after the rename included;
+- a renewal of such a service's subscription points it at the renamed account until its next renewal;
+- the events of the account that holds the login now stop reaching that service.
 
 The name part of a repository is the one under which faucet first saw it until a Repositories delivery says that it was renamed or transferred from that name. So neither a replayed delivery nor a redelivered older rename can move a name back. Without that event on the hook, or when faucet missed one rename of several, a renamed repository stays under the name faucet holds: the old `repo:` grant keeps working, and a grant of the new name finds nothing. After a rename, grant the new name. An `org:` grant covers a repository by its owner's ID, so a rename inside the owner changes nothing for it.
