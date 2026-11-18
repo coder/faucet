@@ -90,6 +90,6 @@ An agent logs out by revoking its refresh token at `POST /oauth/revoke` (RFC 700
 
 1. Put a new `<key_id>:<key>` first and keep the old one, such as `k2:<new key>,k1:<old key>`. Make the new key with `openssl rand -base64 32`.
 2. Deploy. A user's row moves to the new key when faucet refreshes the user's GitHub token or the user logs in again. For a user whose agent stays active, a refresh comes within 8 hours.
-3. Drop the old key once `SELECT count(*) FROM faucet_connections WHERE key_id = 'k1'` gives 0. A row whose `refresh_expires_at` has passed is of no use anyway, because its user must log in again whatever the key.
+3. Drop the old key once `SELECT count(*) FROM faucet_connections WHERE key_id = 'k1'` gives 0, and wait at least 10 minutes after the deploy: a consent page that faucet showed before it carries a form sealed under the old key for that long. A row whose `refresh_expires_at` has passed is of no use anyway, because its user must log in again whatever the key.
 
 If faucet runs without a key that rows name, because you dropped it too early or lost `FAUCET_TOKEN_KEY`, faucet cannot read those users' GitHub tokens. Their checks and refreshes fail, and no session ends. Put the key back and they work again. Without the key, each user recovers by logging in again, which seals a new pair under the first key.

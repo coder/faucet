@@ -39,6 +39,7 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/browser-login.md", "an fct_ access token for %d minutes", []any{minutes(accessTokenLifetime)}},
 		{"docs/browser-login.md", "| Its SHA-256. | %d minutes.", []any{minutes(accessTokenLifetime)}},
 		{"docs/browser-login.md", "The page works for %d minutes.", []any{minutes(authRequestLifetime)}},
+		{"docs/browser-login.md", "and wait at least %d minutes after the deploy", []any{minutes(authRequestLifetime)}},
 		{"docs/browser-login.md", "visible and in focus for %d milliseconds", []any{milliseconds(continueDelay)}},
 		{"docs/browser-login.md", "trade the code for faucet's tokens within %d seconds", []any{seconds(codeLifetime)}},
 		{"docs/browser-login.md", "and of the code. | %d minutes to finish in the browser, then %d seconds to redeem the code", []any{minutes(authRequestLifetime), seconds(codeLifetime)}},

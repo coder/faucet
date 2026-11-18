@@ -3,6 +3,8 @@ package oauth
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -18,6 +20,9 @@ import (
 const (
 	tokenKeyBytes    = 32
 	tokenSealVersion = 1
+	// consentFormKeyInfo is the HKDF info of the key that seals consent
+	// forms, so that a form and a GitHub token share no key.
+	consentFormKeyInfo = "faucet consent form key v1"
 )
 
 // ErrUnreadableToken is the error of a sealed token that does not open: its
@@ -40,8 +45,12 @@ type TokenKeys struct {
 }
 
 type tokenKey struct {
-	id   string
+	id string
+	// aead seals the GitHub tokens of connections, under the key itself.
 	aead cipher.AEAD
+	// forms seals consent forms, under a key derived from the key with
+	// HKDF-SHA256.
+	forms cipher.AEAD
 }
 
 // ParseTokenKeys reads the value of FAUCET_TOKEN_KEY: one or more
@@ -83,15 +92,31 @@ func parseTokenKey(position int, entry string) (*tokenKey, error) {
 	if [tokenKeyBytes]byte(b) == [tokenKeyBytes]byte{} {
 		return nil, xerrors.Errorf("token key %q is all zero", id)
 	}
-	block, err := aes.NewCipher(b)
+	aead, err := newTokenAEAD(b)
 	if err != nil {
-		return nil, xerrors.Errorf("create the cipher of token key %q: %w", id, err)
+		return nil, xerrors.Errorf("token key %q: %w", id, err)
+	}
+	formKey, err := hkdf.Key(sha256.New, b, nil, consentFormKeyInfo, tokenKeyBytes)
+	if err != nil {
+		return nil, xerrors.Errorf("derive the consent form key of token key %q: %w", id, err)
+	}
+	forms, err := newTokenAEAD(formKey)
+	if err != nil {
+		return nil, xerrors.Errorf("consent form key of token key %q: %w", id, err)
+	}
+	return &tokenKey{id: id, aead: aead, forms: forms}, nil
+}
+
+func newTokenAEAD(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, xerrors.Errorf("create the cipher: %w", err)
 	}
 	aead, err := cipher.NewGCMWithRandomNonce(block)
 	if err != nil {
-		return nil, xerrors.Errorf("create GCM for token key %q: %w", id, err)
+		return nil, xerrors.Errorf("create GCM: %w", err)
 	}
-	return &tokenKey{id: id, aead: aead}, nil
+	return aead, nil
 }
 
 // empty reports whether k holds no key, as the zero TokenKeys does.
@@ -163,9 +188,9 @@ type pendingLogin struct {
 
 // sealRequest seals the pending request r into the value that its consent
 // form carries: the ID of the first key, a dot, and the sealed request in
-// base64url. Its additional data names r's ID and browser hash, so the
-// value opens only for that request and with the cookie of the browser
-// that got the page.
+// base64url. It is sealed under the key's consent form key, and its
+// additional data names r's ID and browser hash, so the value opens only
+// for that request and with the cookie of the browser that got the page.
 func (k TokenKeys) sealRequest(r AuthRequest) (string, error) {
 	if k.sealing == nil {
 		return "", xerrors.New("no token key to seal with")
@@ -177,7 +202,7 @@ func (k TokenKeys) sealRequest(r AuthRequest) (string, error) {
 	if err != nil {
 		return "", xerrors.Errorf("encode the pending request: %w", err)
 	}
-	sealed := k.sealing.seal(requestAAD(r.ID, r.BrowserHash), string(plain))
+	sealed := k.sealing.forms.Seal([]byte{tokenSealVersion}, nil, plain, requestAAD(r.ID, r.BrowserHash))
 	return k.sealing.id + "." + base64.RawURLEncoding.EncodeToString(sealed), nil
 }
 
@@ -195,7 +220,7 @@ func (k TokenKeys) openRequest(value, id string, browser TokenHash) (AuthRequest
 	case err != nil || len(sealed) == 0 || sealed[0] != tokenSealVersion:
 		return AuthRequest{}, xerrors.Errorf("the pending request has an unknown layout: %w", ErrUnreadableToken)
 	}
-	plain, err := key.aead.Open(nil, nil, sealed[1:], requestAAD(id, browser))
+	plain, err := key.forms.Open(nil, nil, sealed[1:], requestAAD(id, browser))
 	if err != nil {
 		return AuthRequest{}, xerrors.Errorf("the pending request does not open under key %q for this request and browser: %w", keyID, ErrUnreadableToken)
 	}
