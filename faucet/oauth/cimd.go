@@ -30,6 +30,10 @@ const (
 // what the client must change and never quotes the document.
 var errClientDocument = xerrors.New("the client ID metadata document is refused")
 
+// errDocumentUnreachable is the error of a document that faucet could not
+// fetch. An error that wraps it holds the cause, which is for the log only.
+var errDocumentUnreachable = xerrors.New("faucet could not fetch the client's document")
+
 var (
 	// refusedSchemes are the schemes that a redirect URI must not use: a
 	// browser runs them, or they name no place to come back to.
@@ -111,7 +115,7 @@ func fetchFailure(ctx context.Context, timeout time.Duration, err error) error {
 	if xerrors.As(err, &urlErr) {
 		err = urlErr.Err
 	}
-	return xerrors.Errorf("faucet could not fetch the document: %w", err)
+	return fmt.Errorf("%w: %w", errDocumentUnreachable, err)
 }
 
 // checkClientID accepts the URLs that a client ID can be: https with a host

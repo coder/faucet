@@ -110,6 +110,25 @@ func TestAnAuthorizationRequestThatFaucetDoesNotTakeIsAnErrorPageAndNoRedirect(t
 	require.Zero(t, h.github.authorizeCount())
 }
 
+// The cause of a failed fetch can name an address or a resolver of faucet's
+// own network, so only the log gets it.
+func TestTheErrorPageOfADocumentThatCannotBeFetchedKeepsTheCauseToTheLog(t *testing.T) {
+	t.Parallel()
+	h := newLoginHarness(t)
+	c := h.newClient("unreachable", nil)
+	q := h.request(c)
+	q.Set("client_id", "https://127.0.0.1:1/unreachable.json")
+
+	page := h.newBrowser(t).authorize(q)
+	require.Equal(t, http.StatusBadRequest, page.status)
+	require.Empty(t, page.header.Get("Location"))
+	require.Contains(t, page.body, "faucet could not fetch the client&#39;s document")
+	for _, cause := range []string{"connection refused", "dial tcp", "connect:"} {
+		require.NotContains(t, page.body, cause)
+	}
+	require.Contains(t, h.logs.String(), "connection refused")
+}
+
 func TestTheEdgesOfAnAuthorizationRequestAreTaken(t *testing.T) {
 	t.Parallel()
 	h := newLoginHarness(t)

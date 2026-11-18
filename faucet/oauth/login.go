@@ -122,9 +122,7 @@ func (s *Server) refuse(w http.ResponseWriter, r *http.Request, ref *refusal, fi
 // authorizeHandler serves the authorization endpoint of the browser login:
 // GET shows the consent page, and POST is its form. It never redirects to
 // a client, because nothing yet proves that the browser is the user's.
-//
-//nolint:revive // AuthorizeHandler serves this handler when the browser login is on.
-func (s *Server) authorizeHandler() http.Handler {
+func (s *Server) browserAuthorizeHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setLoginHeaders(w)
 		switch r.Method {
@@ -194,7 +192,13 @@ func (s *Server) readAuthorization(ctx context.Context, rawQuery string) (AuthRe
 	}
 	doc, err := s.login.documents.fetch(ctx, clientID)
 	if err != nil {
-		return AuthRequest{}, badAuthorization(err.Error())
+		ref := badAuthorization(err.Error())
+		if xerrors.Is(err, errDocumentUnreachable) {
+			// The cause can name a resolver or an address of faucet's own
+			// network. The log has it.
+			ref.page.Detail = errDocumentUnreachable.Error()
+		}
+		return AuthRequest{}, ref
 	}
 	redirectURI, resource, state := q.Get("redirect_uri"), q.Get("resource"), q.Get("state")
 	var reason string

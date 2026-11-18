@@ -206,7 +206,7 @@ func (s *Server) Purge(ctx context.Context) (PurgeResult, error) {
 // knows no client's redirect URI.
 func (s *Server) AuthorizeHandler() http.Handler {
 	if s.login != nil {
-		return s.authorizeHandler()
+		return s.browserAuthorizeHandler()
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
