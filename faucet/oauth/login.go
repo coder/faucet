@@ -38,11 +38,13 @@ const (
 )
 
 // refusal is a step of a browser login that does not go on: the page that
-// the browser gets, and the reason that the log gets.
+// the browser gets, and what the log gets.
 type refusal struct {
 	status int
 	page   errorPage
 	reason string
+	// err is set when faucet or GitHub failed, rather than the request.
+	err error
 }
 
 // badAuthorization refuses an authorization request that the client got
@@ -64,20 +66,57 @@ func forbiddenConsent(reason string) *refusal {
 	}}
 }
 
-func (s *Server) refuse(w http.ResponseWriter, r *http.Request, ref *refusal, fields ...slog.Field) {
-	fields = append(fields, slog.F("path", r.URL.Path), slog.F("status", ref.status), slog.F("reason", ref.reason))
-	s.logger.Info(r.Context(), "browser login refused", fields...)
-	writePage(w, ref.status, "error", ref.page)
+// unknownLogin refuses a callback of a login that is not waiting for
+// GitHub.
+func unknownLogin(reason string) *refusal {
+	return &refusal{status: http.StatusBadRequest, reason: reason, page: errorPage{
+		Title:   "This login is over",
+		Message: "faucet has no open login for this page: it expired, it finished already, or it did not start here. Go back to your agent and start the login again.",
+	}}
 }
 
-// fail answers a step that faucet could not finish. err holds no secret.
-func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error, fields ...slog.Field) {
-	fields = append(fields, slog.F("path", r.URL.Path), slog.Error(err))
-	s.logger.Error(r.Context(), "browser login failed", fields...)
-	writePage(w, http.StatusInternalServerError, "error", errorPage{
+// wrongBrowser refuses a callback in a browser other than the one that
+// pressed Continue. The login stays open for that browser.
+func wrongBrowser(reason string) *refusal {
+	return &refusal{status: http.StatusForbidden, reason: reason, page: errorPage{
+		Title:   "Login stopped",
+		Message: "This browser is not the one that pressed Continue for this login. Finish the login in that browser, or go back to your agent and start the login again.",
+	}}
+}
+
+// githubFailure answers a callback whose login GitHub did not complete.
+// The login stays open.
+func githubFailure(status int, err error) *refusal {
+	return &refusal{status: status, err: err, page: errorPage{
+		Title:   "GitHub did not finish the login",
+		Message: "faucet could not get your login from GitHub. Go back to your agent and start the login again.",
+	}}
+}
+
+func wrongMethod(method string) *refusal {
+	return &refusal{status: http.StatusMethodNotAllowed, reason: "method " + method, page: errorPage{
+		Title:   "This page takes a link",
+		Message: "faucet's login pages open from a link of your agent. Go back to your agent and start the login again.",
+	}}
+}
+
+func failure(err error) *refusal {
+	return &refusal{status: http.StatusInternalServerError, err: err, page: errorPage{
 		Title:   "Something went wrong",
 		Message: "faucet could not finish this step of the login. Go back to your agent and start the login again.",
-	})
+	}}
+}
+
+// refuse logs ref and sends its page. fields name the login, never a
+// secret of it.
+func (s *Server) refuse(w http.ResponseWriter, r *http.Request, ref *refusal, fields ...slog.Field) {
+	fields = append(fields, slog.F("path", r.URL.Path), slog.F("status", ref.status))
+	if ref.err != nil {
+		s.logger.Error(r.Context(), "browser login failed", append(fields, slog.Error(ref.err))...)
+	} else {
+		s.logger.Info(r.Context(), "browser login refused", append(fields, slog.F("reason", ref.reason))...)
+	}
+	writePage(w, ref.status, "error", ref.page)
 }
 
 // authorizeHandler serves the authorization endpoint of the browser login:
@@ -95,9 +134,7 @@ func (s *Server) authorizeHandler() http.Handler {
 			s.consent(w, r)
 		default:
 			w.Header().Set("Allow", "GET, POST")
-			s.refuse(w, r, &refusal{status: http.StatusMethodNotAllowed, reason: "method " + r.Method, page: errorPage{
-				Title: "This login cannot start", Message: "faucet's login page takes a link from your agent. Go back to your agent and start the login again.",
-			}})
+			s.refuse(w, r, wrongMethod(r.Method))
 		}
 	})
 }
@@ -114,19 +151,19 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := newID()
 	if err != nil {
-		s.fail(w, r, err, host)
+		s.refuse(w, r, failure(err), host)
 		return
 	}
 	browser, err := newSecret("")
 	if err != nil {
-		s.fail(w, r, err, host)
+		s.refuse(w, r, failure(err), host)
 		return
 	}
 	now := s.clock.Now()
 	request.ID, request.State, request.BrowserHash = id, AuthRequestPending, HashToken(browser)
 	request.CreatedAt, request.ExpiresAt = now, now.Add(authRequestLifetime)
 	if err := s.store.InsertAuthRequest(ctx, request); err != nil {
-		s.fail(w, r, xerrors.Errorf("store the authorization request: %w", err), host)
+		s.refuse(w, r, failure(xerrors.Errorf("store the authorization request: %w", err)), host)
 		return
 	}
 	http.SetCookie(w, loginCookie(browserCookieName(id), browser, http.SameSiteStrictMode))
@@ -208,7 +245,7 @@ func (s *Server) consent(w http.ResponseWriter, r *http.Request) {
 	}
 	g, err := newSecret("")
 	if err != nil {
-		s.fail(w, r, err, slog.F("request_id", id))
+		s.refuse(w, r, failure(err), slog.F("request_id", id))
 		return
 	}
 	state := derive(githubStateLabel, g)
@@ -218,7 +255,7 @@ func (s *Server) consent(w http.ResponseWriter, r *http.Request) {
 		s.endConsent(w, r, form, xerrors.New("no pending request of this browser has this ID, or it has expired"))
 		return
 	case err != nil:
-		s.fail(w, r, xerrors.Errorf("record the consent: %w", err), slog.F("request_id", id))
+		s.refuse(w, r, failure(xerrors.Errorf("record the consent: %w", err)), slog.F("request_id", id))
 		return
 	}
 	http.SetCookie(w, loginCookie(githubCookieName(id), g, http.SameSiteLaxMode))
@@ -284,11 +321,151 @@ func (s *Server) checkConsent(r *http.Request, form url.Values) (string, error) 
 }
 
 // GitHubCallbackHandler serves GitHubCallbackPath, where GitHub sends the
-// browser back to after the user logged in there.
+// browser back to after the user logged in there. It goes on only in the
+// browser that pressed Continue, because GitHub's state derives from that
+// browser's cookie. The client then gets a code, or access_denied when the
+// user refused at GitHub; these are the only redirects to a client.
 func (s *Server) GitHubCallbackHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "not built yet", http.StatusNotImplemented)
+	if s.login == nil {
+		return http.NotFoundHandler()
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setLoginHeaders(w)
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			s.refuse(w, r, wrongMethod(r.Method))
+			return
+		}
+		s.callback(w, r)
 	})
+}
+
+func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	state := q.Get("state")
+	request, g, ref := s.callbackLogin(r, state)
+	fields := []slog.Field{slog.F("request_id", request.ID), slog.F("client_host", clientHost(request.ClientID))}
+	if ref != nil {
+		s.refuse(w, r, ref, fields...)
+		return
+	}
+	answer := url.Values{}
+	if q.Has("error") {
+		if err := s.store.ExpireAuthRequest(ctx, request.ID); err != nil {
+			s.refuse(w, r, failure(xerrors.Errorf("end the refused login: %w", err)), fields...)
+			return
+		}
+		s.logger.Info(ctx, "the user refused the login at GitHub", append(fields, slog.F("github_error", githubErrorOf(q.Get("error"))))...)
+		answer.Set("error", "access_denied")
+	} else {
+		code, ref := s.approve(ctx, request, state, q.Get("code"), g)
+		if ref != nil {
+			s.refuse(w, r, ref, fields...)
+			return
+		}
+		s.logger.Info(ctx, "browser login approved", fields...)
+		answer.Set("code", code)
+	}
+	if request.ClientState != "" {
+		answer.Set("state", request.ClientState)
+	}
+	answer.Set("iss", s.issuer)
+	http.SetCookie(w, endedCookie(browserCookieName(request.ID), http.SameSiteStrictMode))
+	http.SetCookie(w, endedCookie(githubCookieName(request.ID), http.SameSiteLaxMode))
+	w.Header().Set("Location", withQuery(request.RedirectURI, answer))
+	w.WriteHeader(http.StatusFound)
+}
+
+// callbackLogin returns the pending login that GitHub's state names, and the
+// value of its GitHub cookie, when this browser is the one that pressed
+// Continue.
+func (s *Server) callbackLogin(r *http.Request, state string) (AuthRequest, string, *refusal) {
+	if state == "" {
+		return AuthRequest{}, "", unknownLogin("GitHub sent no state")
+	}
+	request, err := s.store.AuthRequestByGitHubState(r.Context(), HashToken(state))
+	switch {
+	case xerrors.Is(err, ErrUnknownAuthRequest):
+		return AuthRequest{}, "", unknownLogin("no request holds this state")
+	case err != nil:
+		return AuthRequest{}, "", failure(xerrors.Errorf("read the request of a GitHub state: %w", err))
+	case request.State != AuthRequestPending:
+		return request, "", unknownLogin("the request is " + string(request.State))
+	case !request.ExpiresAt.After(s.clock.Now()):
+		return request, "", unknownLogin("the request expired")
+	}
+	cookie, err := r.Cookie(githubCookieName(request.ID))
+	if err != nil || subtle.ConstantTimeCompare([]byte(derive(githubStateLabel, cookie.Value)), []byte(state)) != 1 {
+		return request, "", wrongBrowser("the browser's GitHub cookie does not belong to the state")
+	}
+	return request, cookie.Value, nil
+}
+
+// approve trades GitHub's code for the user's tokens, keeps them sealed in
+// the user's connection, and moves the request to approved with a new code
+// for the client, which it returns. A failure leaves the request pending.
+func (s *Server) approve(ctx context.Context, request AuthRequest, state, githubCode, g string) (string, *refusal) {
+	if githubCode == "" {
+		return "", githubFailure(http.StatusBadRequest, xerrors.New("GitHub sent the browser back with neither a code nor an error"))
+	}
+	tokens, err := s.login.github.exchange(ctx, githubCode, s.issuer+GitHubCallbackPath, derive(githubPKCELabel, g))
+	switch {
+	case xerrors.Is(err, errTokensDoNotExpire):
+		return "", &refusal{status: http.StatusBadGateway, err: err, page: errorPage{
+			Title:   "faucet cannot keep this login",
+			Message: "faucet's GitHub App gives tokens that never expire, and faucet keeps none of those. Tell the person who runs faucet; a new login works once they change the App.",
+		}}
+	case err != nil:
+		return "", githubFailure(http.StatusBadGateway, xerrors.Errorf("trade GitHub's code: %w", err))
+	}
+	user, err := s.login.github.user(ctx, tokens.access)
+	if err != nil {
+		return "", githubFailure(http.StatusBadGateway, xerrors.Errorf("ask GitHub who logged in: %w", err))
+	}
+	now := s.clock.Now()
+	connection := Connection{
+		ID: ConnectionID(ProviderGitHub, user.id), Provider: ProviderGitHub, UpstreamUserID: user.id, Login: user.login,
+		AccessExpiresAt: now.Add(tokens.accessLifetime), RefreshExpiresAt: now.Add(tokens.refreshLifetime), UpdatedAt: now,
+	}
+	if err := s.login.keys.seal(&connection, tokens.access, tokens.refresh); err != nil {
+		return "", failure(xerrors.Errorf("seal the GitHub tokens: %w", err))
+	}
+	code, err := newSecret("")
+	if err != nil {
+		return "", failure(err)
+	}
+	err = s.store.ApproveAuthRequest(ctx, Approval{
+		RequestID: request.ID, GitHubState: HashToken(state), Connection: connection,
+		Code: HashToken(code), Now: now, ExpiresAt: now.Add(codeLifetime),
+	})
+	switch {
+	case xerrors.Is(err, ErrUnknownAuthRequest):
+		return "", unknownLogin("the request was no longer pending with this state, or expired, at its approval")
+	case err != nil:
+		return "", failure(xerrors.Errorf("approve the request: %w", err))
+	}
+	return code, nil
+}
+
+// githubErrorOf is GitHub's error code for the log, when it looks like one.
+func githubErrorOf(code string) string {
+	if githubErrorCode.MatchString(code) {
+		return code
+	}
+	return "unrecognized"
+}
+
+// withQuery appends params to the query of uri as the client wrote it, so
+// the client finds its own query byte for byte.
+func withQuery(uri string, params url.Values) string {
+	switch {
+	case !strings.Contains(uri, "?"):
+		return uri + "?" + params.Encode()
+	case strings.HasSuffix(uri, "?"), strings.HasSuffix(uri, "&"):
+		return uri + params.Encode()
+	}
+	return uri + "&" + params.Encode()
 }
 
 // wellFormedID reports whether id has the form that newID makes, so it can
@@ -324,6 +501,13 @@ func clientHost(clientID string) string {
 func browserCookieName(id string) string { return browserCookiePrefix + id }
 
 func githubCookieName(id string) string { return browserCookiePrefix + id + githubCookieSuffix }
+
+// endedCookie deletes the cookie of a login named name.
+func endedCookie(name string, sameSite http.SameSite) *http.Cookie {
+	c := loginCookie(name, "", sameSite)
+	c.MaxAge = -1
+	return c
+}
 
 // loginCookie is a cookie of a login, which lasts as long as its request.
 // The __Host- prefix makes a browser take it only from faucet's own origin
