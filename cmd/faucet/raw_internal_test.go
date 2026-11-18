@@ -16,7 +16,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/auth/extauth"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/modelcontextprotocol/go-sdk/oauthex"
 	"github.com/stretchr/testify/require"
 
 	"cdr.dev/slog/v3"
@@ -27,7 +30,7 @@ import (
 	"github.com/coder/quartz"
 )
 
-const rawPush = `{"ref":"refs/heads/main","repository":{"id":42,"full_name":"o/r"}}`
+const rawPush = `{"ref":"refs/heads/main","repository":{"id":42,"full_name":"o/r","owner":{"id":7,"login":"o"}}}`
 
 // rawHooks is a webhook whose delivery list holds one push of repository 42
 // that faucet failed a minute ago.
@@ -116,14 +119,25 @@ func (s *rawServer) do(t *testing.T, req *http.Request) (status int, body string
 // deliver posts a push of repository 42 with GitHub's signature.
 func (s *rawServer) deliver(ctx context.Context, t *testing.T, delivery string) (status int, body string) {
 	t.Helper()
+	return deliverPush(ctx, t, s.Server, delivery)
+}
+
+// deliverPush posts rawPush to srv with GitHub's signature.
+func deliverPush(ctx context.Context, t *testing.T, srv *httptest.Server, delivery string) (status int, body string) {
+	t.Helper()
 	mac := hmac.New(sha256.New, []byte(testSecret))
 	_, _ = mac.Write([]byte(rawPush))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.URL+"/webhook/github", bytes.NewReader([]byte(rawPush)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/webhook/github", bytes.NewReader([]byte(rawPush)))
 	require.NoError(t, err)
 	req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	req.Header.Set("X-GitHub-Event", "push")
 	req.Header.Set("X-GitHub-Delivery", delivery)
-	return s.do(t, req)
+	resp, err := srv.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	b, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, string(b)
 }
 
 func (s *rawServer) rawEvents(ctx context.Context, t *testing.T) (count int) {
@@ -230,4 +244,68 @@ func TestTheServerAsksAgainForAFailedDeliveryOnlyWhileAnInterestWantsIt(t *testi
 	require.Equal(t, 1, res.Tracked, "a poll lease wants the pushes of the repository")
 	require.Equal(t, 1, res.Asked)
 	require.Equal(t, []int64{31}, wanted.hooks.askedFor())
+}
+
+// connectServiceEvents logs in as connectService does, with a client that
+// sends events/poll.
+func (s *loginServer) connectServiceEvents(ctx context.Context, t *testing.T, id, secret string) *mcp.ClientSession {
+	t.Helper()
+	handler, err := extauth.NewClientCredentialsHandler(&extauth.ClientCredentialsHandlerConfig{
+		Credentials: &oauthex.ClientCredentials{ClientID: id, ClientSecretAuth: &oauthex.ClientSecretAuth{ClientSecret: secret}},
+		HTTPClient:  s.Client(),
+	})
+	require.NoError(t, err)
+	client := mcp.NewClient(&mcp.Implementation{Name: "service-agent", Version: "0"}, nil)
+	require.NoError(t, mcp.AddSendingCustomMethod[*eventsParams, *eventsResult](client, "events/poll"))
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint:             s.URL + "/github/mcp",
+		HTTPClient:           &http.Client{Transport: eventNameTransport{next: s.Client().Transport}},
+		OAuthHandler:         handler,
+		DisableStandaloneSSE: true,
+	}, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = session.Close() })
+	return session
+}
+
+// A service is granted a repository by name, and faucet learns the name's ID
+// from the deliveries of the repository. A raw delivery that nobody wants is
+// not stored, and it still names the repository, so a service that reads only
+// raw events can start: its first poll after that delivery opens the lease
+// that makes faucet store the next one.
+func TestAServiceReadsRawEventsOnceAnIgnoredDeliveryNamedTheRepository(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	srv := newLoginServer(t)
+	secret := srv.client(t, "push-watcher", "/github/mcp", []faucet.Scope{faucet.ScopeEventsRead}, "repo:o/r")
+	session := srv.connectServiceEvents(ctx, t, "push-watcher", secret)
+
+	_, err := callEvents(ctx, session, "events/poll", &eventsParams{Name: "github.push", Arguments: map[string]any{"repo": "o/r"}})
+	var denied *jsonrpc.Error
+	require.ErrorAs(t, err, &denied)
+	require.EqualValues(t, -32024, denied.Code)
+	require.Contains(t, denied.Message, "faucet has received no webhook delivery from o/r yet")
+
+	status, body := deliverPush(ctx, t, srv.Server, "nobody-asked")
+	require.Equal(t, http.StatusAccepted, status, body)
+	require.Equal(t, "ignored\n", body)
+
+	opened := pollRawPush(ctx, t, session, nil)
+	require.Empty(t, opened.Events, "the lease starts after the delivery that nobody wanted")
+
+	status, body = deliverPush(ctx, t, srv.Server, "wanted")
+	require.Equal(t, http.StatusOK, status, body)
+	require.Equal(t, "stored\n", body)
+
+	page := pollRawPush(ctx, t, session, &opened.Cursor)
+	require.Len(t, page.Events, 1)
+	require.Equal(t, "wanted", page.Events[0].EventID)
+	require.JSONEq(t, rawPush, string(page.Events[0].Data))
+	require.False(t, page.Truncated)
+
+	paths, _ := srv.github.seen()
+	require.Empty(t, paths, "a service never reaches GitHub")
+	requireNoTokenPiece(t, srv.logs.String(), []string{secret})
 }
