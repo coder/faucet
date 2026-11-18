@@ -164,6 +164,17 @@ func (a targetArguments) repoNames() []string {
 	return sortedSet(lower)
 }
 
+// describe names the target in an error that a caller reads.
+func (a targetArguments) describe() string {
+	switch {
+	case a.Owner != "":
+		return "every repository of " + a.Owner
+	case a.All:
+		return "every repository"
+	}
+	return a.Repo
+}
+
 // logField names the target in a log line.
 func (a targetArguments) logField() slog.Field {
 	switch {

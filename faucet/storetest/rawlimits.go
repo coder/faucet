@@ -20,6 +20,7 @@ var rawLimitSubtests = []rawSubtest{
 	{"UpsertRawSubscriptionRefusesOneMoreOfThePrincipalsShare", upsertRawSubscriptionRefusesOneMoreOfThePrincipalsShare},
 	{"OpenRawLeaseEndsThePrincipalsOldestLeaseOfTheEventAtItsShare", openRawLeaseEndsThePrincipalsOldestLeaseOfTheEventAtItsShare},
 	{"RawInterestsKeepTheLimitOfAnEventUnderConcurrentCalls", rawInterestsKeepTheLimitOfAnEventUnderConcurrentCalls},
+	{"TheLimitsOfAnEventCountTheInterestsOfEachTargetApart", theLimitsOfAnEventCountTheInterestsOfEachTargetApart},
 }
 
 func targetLimits(perTarget, perPrincipal int) faucet.RawLimits {
@@ -147,4 +148,25 @@ func rawInterestsKeepTheLimitOfAnEventUnderConcurrentCalls(t *testing.T, s RawSt
 	require.NoError(t, concurrentRun(fns...))
 	require.Len(t, r.interestsAt(r.newDelivery(), r.now), perTarget, "concurrent calls fill the event to its limit and no further")
 	require.EqualValues(t, callers-perTarget, refused.Load())
+}
+
+// An owner, all or repository target of one event has limits of its own, so
+// the interests of one owner never fill those of another.
+func theLimitsOfAnEventCountTheInterestsOfEachTargetApart(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	limits := targetLimits(1, 1)
+	targets := map[string]faucet.Target{
+		"an owner":       faucet.OwnerTarget(rawOwner),
+		"another owner":  faucet.OwnerTarget(rawOwner + 1),
+		"all":            faucet.AllTarget(),
+		"the repository": faucet.RepoTarget(rawRepo),
+	}
+	for name, target := range targets {
+		_, err := s.OpenRawLease(r.ctx, newRawLease(r.leases.Add(1), rawSpec{principal: "alice", target: target}, r.now.Add(time.Hour)), r.now, limits)
+		require.NoError(t, err, name)
+	}
+	for name, target := range targets {
+		_, err := s.UpsertRawSubscription(r.ctx, newRawSubscription(int(r.leases.Add(1)), rawSpec{principal: "bob", target: target}, r.now.Add(time.Hour)), r.now, limits)
+		require.ErrorIs(t, err, faucet.ErrRawInterestLimit, name)
+	}
 }

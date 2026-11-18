@@ -15,18 +15,18 @@ const (
 	// event plans and writes.
 	maxRawInterestsPerTarget = 100
 	// maxRawInterestsPerLogin is the most live poll leases, and the most live
-	// subscriptions, of one raw event of one repository that one login holds,
+	// subscriptions, of one raw event of one target that one login holds,
 	// so that no login takes all of maxRawInterestsPerTarget. A poll that
 	// opens one more ends the login's lease of it polled longest ago.
 	maxRawInterestsPerLogin = 10
 )
 
 // rawInterestLimitError refuses a new subscription or poll lease of a raw
-// event of a repository that has maxRawInterestsPerTarget of them.
-func rawInterestLimitError(entry *rawEntry, repo string) error {
+// event of a target that has maxRawInterestsPerTarget of them.
+func rawInterestLimitError(entry *rawEntry, target targetArguments) error {
 	return rpcError(codeResourceExhausted,
-		fmt.Sprintf("raw interest limit reached: %s of %s has %d live subscriptions and poll leases, the most that faucet keeps for one event of one repository",
-			entry.name, repo, maxRawInterestsPerTarget),
+		fmt.Sprintf("raw interest limit reached: %s of %s has %d live subscriptions and poll leases, the most that faucet keeps for one event of one target",
+			entry.name, target.describe(), maxRawInterestsPerTarget),
 		map[string]any{"limit": "raw_interests", "max": maxRawInterestsPerTarget})
 }
 

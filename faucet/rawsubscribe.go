@@ -147,7 +147,7 @@ func (s *Service) subscribeRaw(ctx context.Context, wh *webhookState, entry *raw
 			map[string]any{"limit": "subscriptions", "max": maxLiveSubscriptions})
 	case xerrors.Is(err, ErrRawInterestLimit):
 		logger.Info(ctx, "subscribe refused, raw interest limit reached", slog.F("login", principal.Login))
-		return nil, rawInterestLimitError(entry, req.args.Repo)
+		return nil, rawInterestLimitError(entry, req.args.targetArguments)
 	case xerrors.Is(err, ErrRawShareLimit):
 		logger.Info(ctx, "subscribe refused, raw subscription limit of the login reached", slog.F("login", principal.Login))
 		return nil, rpcError(codeResourceExhausted,

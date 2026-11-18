@@ -28,10 +28,10 @@ type RawLimits struct {
 	// Live is the most live leases, or subscriptions, of one principal.
 	Live int
 	// PerTarget is the most live subscriptions and leases of one event of one
-	// repository.
+	// target.
 	PerTarget int
 	// PerPrincipalTarget is the most live leases, and the most live
-	// subscriptions, of one event of one repository that one principal holds,
+	// subscriptions, of one event of one target that one principal holds,
 	// so that no principal takes all of PerTarget.
 	PerPrincipalTarget int
 }

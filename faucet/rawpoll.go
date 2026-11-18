@@ -110,7 +110,7 @@ func (s *Service) pollRaw(ctx context.Context, entry *rawEntry, p *eventsPollPar
 	switch {
 	case xerrors.Is(err, ErrRawInterestLimit):
 		logger.Info(ctx, "poll refused, raw interest limit reached", slog.F("login", principal.Login))
-		return nil, rawInterestLimitError(entry, req.args.Repo)
+		return nil, rawInterestLimitError(entry, req.args.targetArguments)
 	case err != nil:
 		return nil, readError(storeError(ctx, logger, err))
 	}
