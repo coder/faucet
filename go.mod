@@ -6,6 +6,7 @@ require (
 	cdr.dev/slog/v3 v3.2.0
 	github.com/coder/quartz v0.3.0
 	github.com/go-chi/chi/v5 v5.5.0
+	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/golang-migrate/migrate/v4 v4.20.1
 	github.com/google/jsonschema-go v0.4.3
 	github.com/lib/pq v1.10.9
