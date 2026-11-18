@@ -309,3 +309,64 @@ func TestDeliverDueEndsARawSubscriptionWhoseArgumentsDoNotDecode(t *testing.T) {
 	require.Len(t, d.rows(), 1, "the subscription is deleted, and the other stays")
 	require.True(t, d.logsContain("stored arguments do not decode"))
 }
+
+func TestDeliverDueTellsARawSubscriptionWhichEventsItMissedAtItsLimit(t *testing.T) {
+	t.Parallel()
+
+	d := newRawDeliverHarness(t)
+	ep := d.endpoint("/hook")
+	sub := d.subscribeRaw("github.push", ep)
+	d.advance(time.Second)
+	for range 100 {
+		d.pushRaw(nil)
+	}
+	d.pushRaw(nil)
+	missed := d.pushRaw(nil)
+	require.Equal(t, 100, d.rawQueued, "a subscription holds 100 unsent deliveries and no more")
+
+	res := d.deliverDue()
+	require.Equal(t, 1, res.GapsSent)
+	require.Zero(t, res.GapsFailed)
+	require.Equal(t, 100, res.Delivered)
+
+	gaps := d.rcv.envelopesOf("/hook", "gap")
+	require.Len(t, gaps, 1, "one gap for the two events that it missed")
+	members := d.requireEnvelope(gaps[0], "gap", ep.secret, sub.ID)
+	require.Len(t, members, 2, "a gap body has a type and a cursor and nothing else")
+	require.JSONEq(t, fmt.Sprintf(`"r1.%d"`, missed), string(members["cursor"]), "the cursor is the newest event that the subscription missed")
+	line := logLine(t, d.logs.String(), "the gap envelope was sent")
+	require.Contains(t, line, "held the most unsent deliveries")
+	require.Contains(t, line, fmt.Sprintf("missed_through=%d", missed))
+	require.NotContains(t, line, "purged", "no purge is behind this gap")
+
+	next := d.pushRaw(nil)
+	res = d.deliverDue()
+	require.Zero(t, res.GapsSent, "a gap is sent once")
+	require.Equal(t, 1, res.Delivered, "with room again, the next event is delivered")
+	requests := d.rcv.requests("/hook")
+	require.Equal(t, fmt.Sprintf("r1.%d", next-1), requests[len(requests)-1].body(t).Cursor)
+}
+
+func TestDeliverDueDoesNotSendARawGapASecondTimeWhenTheEndpointRefusesIt(t *testing.T) {
+	t.Parallel()
+
+	d := newRawDeliverHarness(t)
+	ep := d.endpoint("/hook")
+	d.subscribeRaw("github.push", ep)
+	d.advance(time.Second)
+	for range 101 {
+		d.pushRaw(nil)
+	}
+	d.rcv.answerEnvelope("/hook", "gap", func() int { return http.StatusInternalServerError })
+
+	res := d.deliverDue()
+	require.Equal(t, 1, res.GapsFailed)
+	require.Zero(t, res.GapsSent)
+	require.Equal(t, 100, res.Delivered, "the deliveries go out whatever became of the gap")
+	require.Contains(t, logLine(t, d.logs.String(), "the gap envelope was not delivered"), "http_5xx")
+
+	d.advance(time.Minute)
+	res = d.deliverDue()
+	require.Zero(t, res.GapsFailed+res.GapsSent, "a gap gets one attempt")
+	require.Len(t, d.rcv.envelopesOf("/hook", "gap"), 1)
+}

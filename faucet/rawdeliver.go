@@ -85,7 +85,7 @@ func rawData(ev RawEvent, fields []string) (json.RawMessage, error) {
 
 func (r *deliveryRun) rawGaps() gapKind {
 	return gapKind{
-		noun: "raw gap", claim: r.svc.raw.ClaimRawGap, finish: r.svc.raw.FinishRawGap, cursor: encodeRawCursor,
+		noun: "raw gap", claim: r.svc.raw.ClaimRawGap, finish: r.svc.raw.FinishRawGap, cursor: encodeRawCursor, through: "missed_through",
 		sent:   "the subscription held the most unsent deliveries when events arrived, the gap envelope was sent",
 		failed: "the subscription held the most unsent deliveries when events arrived, the gap envelope was not delivered",
 	}

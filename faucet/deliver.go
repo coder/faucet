@@ -368,6 +368,9 @@ type gapKind struct {
 	claim  func(ctx context.Context, now time.Time, lease time.Duration, skip []string) (GapClaim, bool, error)
 	finish func(ctx context.Context, ref GapRef) error
 	cursor func(through int64) string
+	// through names the log field of the gap's position: the purge mark of
+	// a typed gap, and the newest event that a raw subscription missed.
+	through string
 	// sent and failed are the log lines of a gap envelope that was delivered
 	// and of one that was not.
 	sent, failed string
@@ -375,7 +378,7 @@ type gapKind struct {
 
 func (r *deliveryRun) typedGaps() gapKind {
 	return gapKind{
-		noun: "gap", claim: r.svc.store.ClaimGap, finish: r.svc.store.FinishGap, cursor: encodeCursor,
+		noun: "gap", claim: r.svc.store.ClaimGap, finish: r.svc.store.FinishGap, cursor: encodeCursor, through: "purged_through",
 		sent:   "a purge deleted events before the subscription read them, the gap envelope was sent",
 		failed: "a purge deleted events before the subscription read them, the gap envelope was not delivered",
 	}
@@ -419,7 +422,7 @@ func (r *deliveryRun) sendGapsOf(ctx context.Context, kind gapKind) error {
 // claim keeps its lease, and a later run sends the gap again.
 func (r *deliveryRun) sendGap(ctx context.Context, kind gapKind, claim GapClaim) error {
 	defer r.gate.leave(CallbackOrigin(claim.CallbackURL))
-	logger := r.svc.logger.With(slog.F("subscription", claim.Ref.Key.ID()), slog.F("purged_through", claim.Ref.Through))
+	logger := r.svc.logger.With(slog.F("subscription", claim.Ref.Key.ID()), slog.F(kind.through, claim.Ref.Through))
 	failure := r.wh.sendEnvelope(ctx, r.svc.clock.Now(), envelopeGap, claim.Ref.Key, claim.CallbackURL, claim.sealedSecrets(),
 		gapEnvelope{Type: envelopeGap, Cursor: kind.cursor(claim.Ref.Through)})
 	if failure != "" && ctx.Err() != nil {
