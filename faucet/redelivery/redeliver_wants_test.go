@@ -107,28 +107,43 @@ func TestALapsedInterestEndsItsPendingDeliveryAsRecoveredOnA2xxAttempt(t *testin
 	require.Equal(t, "pushed", recovered[0]["delivery_id"])
 }
 
-func TestAWantsThatFailsLeavesTheRunToTheTypedDeliveries(t *testing.T) {
+// A run that cannot read the raw interests must not move past a raw delivery
+// that one of them wanted, so it tracks every delivery that the fallback that
+// Wants returned with its error wants, and every delivery without one.
+func TestAWantsThatFailsTracksEveryDeliveryThatFaucetMayWant(t *testing.T) {
 	t.Parallel()
-	interest := &pushInterest{repoID: 42, live: true}
-	env := newWantingEnv(t, interest)
-	env.gh.answer = failing(503, "waiting")
-	env.gh.record("waiting", env.now().Add(-time.Minute), 503)
-	require.Equal(t, 1, env.run().Asked)
-	env.advance(cronEvery)
-	env.failedPush("pushed", 42)
-	env.gh.record("typed", env.now().Add(-time.Minute), 500)
 	outage := errors.New("the interests are out of reach")
-	interest.err = outage
+	for name, tc := range map[string]struct {
+		fallback   func(event, action string, repoID int64) bool
+		starsAsked bool
+	}{
+		"with the fallback that Wants returned": {func(event, _ string, _ int64) bool { return event == "push" }, false},
+		"without one":                           {nil, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := newRedeliveryEnv(t, func(o *envOptions) {
+				o.wants = func(context.Context) (func(string, string, int64) bool, error) { return tc.fallback, outage }
+			})
+			env.failedPush("pushed", 42)
+			env.gh.add(ghAttempt{guid: "starred", at: env.now().Add(-time.Minute), status: http.StatusInternalServerError, event: "star", repoID: 42})
+			env.gh.record("typed", env.now().Add(-time.Minute), 500)
 
-	res, err := env.runner.Run(context.Background())
-	require.NoError(t, err, "a run without the raw interests is no failed run")
-	require.Equal(t, 1, res.Pages, "the run reads the list")
-	require.True(t, env.tracked("typed"))
-	require.False(t, env.tracked("pushed"), "a raw delivery that an interest wanted is not tracked without the interests")
-	require.Equal(t, 2, res.Asked, "the second ask of waiting and the first of typed")
-	lost := env.logged("the raw interests could not be read, this run tracks only typed deliveries")
-	require.Len(t, lost, 1)
-	require.Contains(t, lost[0]["error"], outage.Error())
+			res, err := env.runner.Run(context.Background())
+			require.NoError(t, err, "a run without the raw interests is no failed run")
+			require.True(t, env.tracked("typed"))
+			require.True(t, env.tracked("pushed"), "a raw delivery that an interest may want is asked for")
+			require.Equal(t, tc.starsAsked, env.tracked("starred"))
+			asked := 2
+			if tc.starsAsked {
+				asked = 3
+			}
+			require.Equal(t, asked, res.Asked)
+			lost := env.logged("the raw interests could not be read, this run tracks every delivery that faucet may store raw")
+			require.Len(t, lost, 1)
+			require.Contains(t, lost[0]["error"], outage.Error())
+		})
+	}
 }
 
 // In a synctest bubble the clock moves only when every goroutine waits, so the

@@ -89,5 +89,13 @@ func TestRawWantsReturnsTheStoreError(t *testing.T) {
 
 	wants, err := h.svc.RawWants(h.ctx)
 	require.ErrorIs(t, err, errRawStoreDown)
-	require.Nil(t, wants)
+	require.True(t, wants("push", "", otherRepoID), "without the interests, every event that the service offers raw is wanted")
+	require.True(t, wants("issues", "closed", repoID))
+	require.False(t, wants("pull_request", "opened", repoID), "a typed event is no raw event")
+
+	only := newIngestHarness(t, func(d *faucet.Deps) { d.RawStore, d.RawEvents = rawWantsDown{d.RawStore}, []string{"push"} })
+	wants, err = only.svc.RawWants(only.ctx)
+	require.ErrorIs(t, err, errRawStoreDown)
+	require.True(t, wants("push", "", repoID))
+	require.False(t, wants("issues", "closed", repoID), "an event that the service does not offer is not wanted")
 }

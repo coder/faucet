@@ -148,9 +148,11 @@ type Deps struct {
 	// says, for the interests that are live then, whether faucet would store
 	// a delivery of this GitHub event, action and repository
 	// (HookDelivery.RepositoryID). A call that fails, or that runs past a
-	// tenth of the run's time, leaves the run to the deliveries that faucet
-	// stores: it logs the error and tracks no other delivery. Nil, or a nil
-	// predicate, wants nothing.
+	// tenth of the run's time, must not let the run pass a delivery that an
+	// interest wanted: the run logs the error and tracks every delivery that
+	// the predicate returned with the error wants, or every delivery when
+	// that predicate is nil. MaxAsksPerRun bounds the asks. Nil Deps.Wants,
+	// or a nil predicate without an error, wants nothing.
 	Wants func(ctx context.Context) (wants func(event, action string, repoID int64) bool, err error)
 }
 
@@ -273,8 +275,8 @@ type Result struct {
 // fails stops the asks of the run, and a failed first page stops them as well,
 // because both mean that the token, the hook or GitHub is not working. A
 // first page without a usable Date is a failed first page. An error of
-// Deps.Wants, which the run calls before it reads the first page, only leaves
-// the run to the deliveries that faucet stores.
+// Deps.Wants, which the run calls before it reads the first page, fails
+// nothing: the run tracks what the predicate returned with it wants.
 //
 // When ctx has a deadline, the run keeps to it by construction. It reads the
 // list for half of the time that is left at its start, and a page that is not
@@ -402,15 +404,18 @@ func (r *redeliveryRun) classify(page DeliveryPage, bound readBound, want wanted
 }
 
 // loadWants calls Deps.Wants inside the first tenth of the run, so that a slow
-// call costs only some of the time for reading the list. A raw interest is no
-// reason to fail the typed work, so after an error the run wants nothing more.
+// call costs only some of the time for reading the list. An error fails no
+// typed work, and passes no delivery that an interest may want: the run then
+// wants what the predicate returned with the error wants, or everything.
 func (r *redeliveryRun) loadWants(ctx context.Context) wanted {
 	wantCtx, cancel := until(ctx, r.budget.wantsEnd)
 	defer cancel()
 	want, err := r.runner.wants(wantCtx)
 	if err != nil {
-		r.logger.Error(ctx, "the raw interests could not be read, this run tracks only typed deliveries", slog.Error(err))
-		return nil
+		r.logger.Error(ctx, "the raw interests could not be read, this run tracks every delivery that faucet may store raw", slog.Error(err))
+		if want == nil {
+			return func(string, string, int64) bool { return true }
+		}
 	}
 	return want
 }

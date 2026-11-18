@@ -17,7 +17,9 @@ type rawWantKey struct {
 // says whether one of them wants a delivery of that event, action and
 // repository, for an event that the service offers. It reads the store once,
 // so the func is a snapshot. Without a RawStore or offered events the func
-// always says false.
+// always says false. When the store fails, the func that it returns with the
+// error wants every event that the service offers, of any repository, so that
+// a host that cannot read the interests passes no delivery that one wanted.
 //
 // It is the value that a host gives redelivery.Deps.Wants, so that a delivery
 // which failed is asked for again while an interest wants it.
@@ -27,7 +29,11 @@ func (s *Service) RawWants(ctx context.Context) (func(event, action string, repo
 	}
 	wants, err := s.raw.RawWants(ctx, s.clock.Now())
 	if err != nil {
-		return nil, xerrors.Errorf("read what raw interests want: %w", err)
+		offered := func(event, _ string, _ int64) bool {
+			_, ok := s.rawEntry(rawNamePrefix + event)
+			return ok
+		}
+		return offered, xerrors.Errorf("read what raw interests want: %w", err)
 	}
 	every := map[rawWantKey]bool{}
 	actions := map[rawWantKey][]string{}
