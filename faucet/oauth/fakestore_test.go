@@ -567,7 +567,7 @@ func (s *fakeStore) StoreAccessCheck(ctx context.Context, c oauth.AccessCheck) e
 		}
 	}
 	if stored, ok := s.checks[key]; ok {
-		if stored.CheckedAt.After(c.CheckedAt) {
+		if stored.CheckedAt.After(c.CheckedAt) || stored.CheckedAt.Equal(c.CheckedAt) && !c.Denied() {
 			c.RepoID, c.CheckedAt = stored.RepoID, stored.CheckedAt
 		}
 		if stored.LastUsedAt.After(c.LastUsedAt) {

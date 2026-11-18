@@ -27,6 +27,7 @@ var accessCheckSubtests = []struct {
 	{"AnOlderPassNeverReplacesALaterDenial", anOlderPassNeverReplacesALaterDenial},
 	{"ALaterPassReplacesAnOlderDenial", aLaterPassReplacesAnOlderDenial},
 	{"AnOlderDenialNeverReplacesALaterPass", anOlderDenialNeverReplacesALaterPass},
+	{"ADenialWinsATieWithAPass", aDenialWinsATieWithAPass},
 	{"ADenialIsNeverFreshNorRecent", aDenialIsNeverFreshNorRecent},
 	{"StoreAccessCheckOfAnUnknownConnectionIsUnknown", storeAccessCheckOfAnUnknownConnectionIsUnknown},
 	{"StoreAccessCheckValidatesInput", storeAccessCheckValidatesInput},
@@ -277,6 +278,23 @@ func aLaterPassReplacesAnOlderDenial(t *testing.T, s oauth.Store) {
 
 // A denial whose lookup started before a pass's, and which GitHub answered
 // after it, leaves the pass.
+// A pass and a denial whose lookups started at the same time end as the
+// denial, in either order, as in faucet.AccessCache.
+func aDenialWinsATieWithAPass(t *testing.T, s oauth.Store) {
+	now := loginNow()
+	c := connectionAt(1, now)
+	session := newSession(t, s, "req-1", c, now)
+	at := now.Add(time.Minute)
+
+	storeCheck(t, s, denialOf(c, "o/denied-first", at))
+	storeCheck(t, s, checkOf(c, "o/denied-first", 11, at))
+	requireStale(t, s, session.ID, "o/denied-first", at)
+	storeCheck(t, s, checkOf(c, "o/passed-first", 12, at))
+	storeCheck(t, s, denialOf(c, "o/passed-first", at))
+	requireStale(t, s, session.ID, "o/passed-first", at)
+	requireChecks(t, s, c.ID, nil, "both ended as denials")
+}
+
 func anOlderDenialNeverReplacesALaterPass(t *testing.T, s oauth.Store) {
 	now := loginNow()
 	c := connectionAt(1, now)

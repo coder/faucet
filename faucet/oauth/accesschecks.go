@@ -57,8 +57,9 @@ type AccessCheckStore interface {
 	FreshAccessCheck(ctx context.Context, sessionID, repo string, now, usedBefore time.Time) (int64, bool, error)
 	// StoreAccessCheck stores c, a pass or a denial, in place of the
 	// connection's check of c.Repo. A stored check that started later stays
-	// as it is, pass or denial, and the last use becomes the later of the
-	// two. A denial also turns into denials, as of c's start, the
+	// as it is, pass or denial, and so does one that started at the same
+	// time unless c is a denial, which wins such a tie. The last use becomes
+	// the later of the two. A denial also turns into denials, as of c's start, the
 	// connection's checks of the repository that the stored check of c.Repo
 	// held, under its other names, which a renamed repository has, when
 	// their lookup started at or before c's.

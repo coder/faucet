@@ -22,7 +22,8 @@ SELECT repo_id::bigint FROM fresh;
 -- name: StoreAccessCheck :execrows
 -- StoreAccessCheck stores a check of a repository by a connection, a pass or
 -- a denial, whose repo_id 0 is stored as NULL, in place of the stored one
--- unless that one started later. A conflict always updates the row, so no
+-- unless that one started later, or at the same time when only the stored one
+-- is a denial. A conflict always updates the row, so no
 -- row means no connection. A denial also turns into denials the connection's
 -- checks of the repository that the stored check held under its other names,
 -- a repository renamed since, whose lookup started at or before the
@@ -44,7 +45,12 @@ SELECT c.id, @repo::text, nullif(@repo_id::bigint, 0), @checked_at::timestamptz,
 FROM faucet_connections c
 WHERE c.id = @connection_id
 ON CONFLICT (connection_id, repo) DO UPDATE SET
-  repo_id = CASE WHEN excluded.checked_at >= faucet_access_checks.checked_at THEN excluded.repo_id ELSE faucet_access_checks.repo_id END,
+  repo_id = CASE
+    WHEN excluded.checked_at > faucet_access_checks.checked_at
+      OR (excluded.checked_at = faucet_access_checks.checked_at AND excluded.repo_id IS NULL)
+      THEN excluded.repo_id
+    ELSE faucet_access_checks.repo_id
+  END,
   checked_at = greatest(faucet_access_checks.checked_at, excluded.checked_at),
   last_used_at = greatest(faucet_access_checks.last_used_at, excluded.last_used_at);
 
