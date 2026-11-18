@@ -668,10 +668,11 @@ func TestACheckThatStartedBeforeARefreshDoesNotCountAfterIt(t *testing.T) {
 
 // The user revokes the App, which kills both of their GitHub tokens, and
 // the refresh of one session meets the dead token as it checks again the
-// repository of another session. It refreshes the token, GitHub refuses,
-// which ends every session of the user, and the check of the other session
-// no longer answers.
-func TestARecheckThatMeetsARevokedAppEndsTheSessionsOfTheUser(t *testing.T) {
+// repository of another session. The refresh asks GitHub for no new token
+// and takes the check away. The other session's next check of it asks
+// GitHub, refreshes the token, and GitHub refuses, which ends every session
+// of the user.
+func TestARecheckThatMeetsARevokedAppLeavesTheOtherSessionsNoCheck(t *testing.T) {
 	t.Parallel()
 	for name, newStore := range usertokensStores {
 		t.Run(name, func(t *testing.T) {
@@ -688,11 +689,13 @@ func TestARecheckThatMeetsARevokedAppEndsTheSessionsOfTheUser(t *testing.T) {
 
 			_, asked := h.refreshAsking(a)
 			require.Equal(t, []string{"o/secret"}, asked)
-			require.False(t, h.session("login-b").Live(), "GitHub refused the refresh token, which ends b too")
+			require.Empty(t, h.checkedRepos(1), "the rejected token took the check away")
 			h.clock.Advance(time.Minute)
 			got := h.repoID(access, b, "o/secret")
 			require.ErrorIs(t, got.err, faucet.ErrInvalidToken)
 			require.Equal(t, []string{"o/secret"}, got.asked, "the check of o/secret no longer answers")
+			require.False(t, h.session("login-b").Live(), "GitHub refused the refresh token, which ends b")
+			require.False(t, h.session("login-a").Live(), "and a")
 		})
 	}
 }
@@ -722,34 +725,45 @@ func TestATokenThatGitHubRejectsAfterARefreshLeavesNoCheck(t *testing.T) {
 	}
 }
 
-// When GitHub rejects the stored token of the user, the refresh of a
-// session refreshes it once as it checks the repositories again, asks again
-// with the new token, and goes on with that one.
-func TestARecheckRefreshesAGitHubTokenThatGitHubRejects(t *testing.T) {
+// When GitHub rejects the stored token of the user as a refresh checks the
+// repositories again, the refresh asks GitHub for no new token, because the
+// rotation is stored and a slow GitHub would hold the grant's answer past
+// the server's write deadline. It answers at once, and every check that it
+// was to ask about becomes a denial, so each session's next check asks
+// GitHub, and that check refreshes the token.
+func TestARecheckThatGitHubRejectsTheTokenOfRefreshesNoTokenAndTakesTheChecksAway(t *testing.T) {
 	t.Parallel()
+	const tokenDelay = 5 * time.Second
 	for name, newStore := range usertokensStores {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			h := newGrantHarness(t, newStore(t))
 			s := h.redeem(h.approve("login-1", 1))
+			other := h.principal(h.redeem(h.approve("login-2", 1)))
 			access := h.userAccess()
 			repos := numberedRepos(6)
 			h.storeChecks(1, repos)
 			stored, _, err := oauth.GrantOpen(h.login.Keys, usertokensConnection(t, h, 1))
 			require.NoError(t, err)
 			h.github.rejectAccess(stored)
+			h.github.set(func(g *grantGitHub) { g.onRefresh = func() { time.Sleep(tokenDelay) } })
 			h.clock.Advance(time.Minute)
 
-			s, asked := h.refreshAsking(s)
+			began := time.Now()
+			_, asked := h.refreshAsking(s)
+			took := time.Since(began)
 			refreshes, _ := h.github.counts()
-			require.Equal(t, 1, refreshes, "the re-check refreshed the GitHub token once")
-			require.Less(t, len(asked), 2*len(repos), "the lookups that started after the refresh sent the new token: %v", asked)
-			p := h.principal(s)
-			for _, repo := range repos {
-				got := h.repoID(access, p, repo)
-				require.NoError(t, got.err, repo)
-				require.Empty(t, got.asked, "the re-check checked %s again", repo)
-			}
+			require.Zero(t, refreshes, "the refresh asked GitHub for no new token after the rotation")
+			require.Less(t, took, tokenDelay/2, "the grant did not wait for GitHub's token endpoint")
+			require.NotEmpty(t, asked, "the refresh checked the repositories again")
+			require.Empty(t, h.checkedRepos(1), "every check that the refresh was to ask about is a denial now")
+
+			h.github.set(func(g *grantGitHub) { g.onRefresh = nil })
+			got := h.repoID(access, other, repos[0])
+			require.NoError(t, got.err)
+			require.Equal(t, []string{repos[0], repos[0]}, got.asked, "the other session asks GitHub, which rejects the token, refreshes it and asks again")
+			refreshes, _ = h.github.counts()
+			require.Equal(t, 1, refreshes)
 		})
 	}
 }
