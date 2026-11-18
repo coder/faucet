@@ -163,7 +163,14 @@ func freshFor(header http.Header, now time.Time) time.Duration {
 		}
 		lifetime = expires.Sub(date)
 	}
-	return min(lifetime-deltaSeconds(header.Get("Age")), maxDocumentAge)
+	// An Expires in the first year makes lifetime the smallest Duration.
+	// Past this check both sides are at least zero, so the difference
+	// cannot wrap around.
+	age := deltaSeconds(header.Get("Age"))
+	if lifetime <= age {
+		return 0
+	}
+	return min(lifetime-age, maxDocumentAge)
 }
 
 // deltaSeconds reads a delta-seconds value (RFC 9111 section 1.2.2): one or
