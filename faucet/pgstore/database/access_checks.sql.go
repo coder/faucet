@@ -39,25 +39,39 @@ func (q *Queries) DeleteUnusedAccessChecks(ctx context.Context, usedBefore time.
 }
 
 const freshAccessCheck = `-- name: FreshAccessCheck :one
-UPDATE faucet_access_checks a
-SET last_used_at = greatest(a.last_used_at, $1::timestamptz)
-FROM faucet_user_sessions s
-WHERE s.id = $2 AND a.connection_id = s.connection_id AND a.repo = $3
-  AND a.checked_at >= s.refreshed_at
-RETURNING a.repo_id
+WITH fresh AS (
+  SELECT a.connection_id, a.repo, a.repo_id
+  FROM faucet_access_checks a
+  JOIN faucet_user_sessions s ON s.connection_id = a.connection_id
+  WHERE s.id = $1 AND a.repo = $2 AND a.checked_at >= s.refreshed_at
+), used AS (
+  UPDATE faucet_access_checks a
+  SET last_used_at = greatest(a.last_used_at, $3::timestamptz)
+  FROM fresh f
+  WHERE a.connection_id = f.connection_id AND a.repo = f.repo
+    AND a.last_used_at < $4::timestamptz
+)
+SELECT repo_id FROM fresh
 `
 
 type FreshAccessCheckParams struct {
-	Now       time.Time
-	SessionID string
-	Repo      string
+	SessionID  string
+	Repo       string
+	Now        time.Time
+	UsedBefore time.Time
 }
 
 // FreshAccessCheck takes the check of a repository by the connection of a
-// session when the check started at or after the session's last refresh,
-// and moves its last use forward to now, in one statement.
+// session when the check started at or after the session's last refresh.
+// It moves the check's last use forward to now only when the last use came
+// before used_before, so a use that moves nothing writes no row.
 func (q *Queries) FreshAccessCheck(ctx context.Context, arg FreshAccessCheckParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, freshAccessCheck, arg.Now, arg.SessionID, arg.Repo)
+	row := q.db.QueryRowContext(ctx, freshAccessCheck,
+		arg.SessionID,
+		arg.Repo,
+		arg.Now,
+		arg.UsedBefore,
+	)
 	var repo_id int64
 	err := row.Scan(&repo_id)
 	return repo_id, err

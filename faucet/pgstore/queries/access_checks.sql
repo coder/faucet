@@ -1,13 +1,21 @@
 -- name: FreshAccessCheck :one
 -- FreshAccessCheck takes the check of a repository by the connection of a
--- session when the check started at or after the session's last refresh,
--- and moves its last use forward to now, in one statement.
-UPDATE faucet_access_checks a
-SET last_used_at = greatest(a.last_used_at, @now::timestamptz)
-FROM faucet_user_sessions s
-WHERE s.id = @session_id AND a.connection_id = s.connection_id AND a.repo = @repo
-  AND a.checked_at >= s.refreshed_at
-RETURNING a.repo_id;
+-- session when the check started at or after the session's last refresh.
+-- It moves the check's last use forward to now only when the last use came
+-- before used_before, so a use that moves nothing writes no row.
+WITH fresh AS (
+  SELECT a.connection_id, a.repo, a.repo_id
+  FROM faucet_access_checks a
+  JOIN faucet_user_sessions s ON s.connection_id = a.connection_id
+  WHERE s.id = @session_id AND a.repo = @repo AND a.checked_at >= s.refreshed_at
+), used AS (
+  UPDATE faucet_access_checks a
+  SET last_used_at = greatest(a.last_used_at, @now::timestamptz)
+  FROM fresh f
+  WHERE a.connection_id = f.connection_id AND a.repo = f.repo
+    AND a.last_used_at < @used_before::timestamptz
+)
+SELECT repo_id FROM fresh;
 
 -- name: StoreAccessCheck :execrows
 -- StoreAccessCheck stores a check of a repository by a connection, in place

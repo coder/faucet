@@ -177,6 +177,30 @@ func TestAFreshAccessCheckAnswersWithoutGitHub(t *testing.T) {
 	}
 }
 
+// A use of a fresh check moves its last use only once the last use is a
+// minute old, so that most uses of a busy repository write nothing.
+func TestAUseMovesTheLastUseOfACheckOnlyOnceItIsAMinuteOld(t *testing.T) {
+	t.Parallel()
+	for name, newStore := range usertokensStores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newGrantHarness(t, newStore(t))
+			p := h.principal(h.redeem(h.approve("login-1", 1)))
+			access := h.userAccess()
+			require.NoError(t, h.repoID(access, p, "o/x").err)
+			h.clock.Advance(10 * time.Second)
+			require.NoError(t, h.repoID(access, p, "o/y").err)
+			h.clock.Advance(40 * time.Second)
+
+			require.Empty(t, h.repoID(access, p, "o/x").asked)
+			require.Equal(t, []string{"o/y", "o/x"}, h.checkedRepos(1), "a use 50 seconds after the last leaves it")
+			h.clock.Advance(20 * time.Second)
+			require.Empty(t, h.repoID(access, p, "o/x").asked)
+			require.Equal(t, []string{"o/x", "o/y"}, h.checkedRepos(1), "a use 70 seconds after the last moves it")
+		})
+	}
+}
+
 // Until the next refresh a check stands, so a revoked access passes for at
 // most one access token's life. The refresh asks GitHub about the checks,
 // deletes the one that GitHub denies and keeps the other.

@@ -20,6 +20,7 @@ var accessCheckSubtests = []struct {
 	{"EachSessionOfAConnectionJudgesACheckByItsOwnRefresh", eachSessionOfAConnectionJudgesACheckByItsOwnRefresh},
 	{"ARotationMakesAnOlderCheckStale", aRotationMakesAnOlderCheckStale},
 	{"AFreshCheckMovesItsLastUseForwardOnly", aFreshCheckMovesItsLastUseForwardOnly},
+	{"AFreshCheckMovesItsLastUseOnlyWhenItCameBeforeTheBound", aFreshCheckMovesItsLastUseOnlyWhenItCameBeforeTheBound},
 	{"AMissChangesNothing", aMissChangesNothing},
 	{"AnOlderCheckNeverReplacesALaterOne", anOlderCheckNeverReplacesALaterOne},
 	{"StoreAccessCheckOfAnUnknownConnectionIsUnknown", storeAccessCheckOfAnUnknownConnectionIsUnknown},
@@ -80,7 +81,7 @@ func requireSameChecks(t *testing.T, want, got []oauth.AccessCheck, msgAndArgs .
 // connection's check of repo at now, with the repository ID want.
 func requireFresh(t *testing.T, s oauth.Store, sessionID, repo string, now time.Time, want int64) {
 	t.Helper()
-	id, ok, err := s.FreshAccessCheck(context.Background(), sessionID, repo, now)
+	id, ok, err := s.FreshAccessCheck(context.Background(), sessionID, repo, now, now)
 	require.NoError(t, err)
 	require.True(t, ok, "%s takes the check of %s", sessionID, repo)
 	require.Equal(t, want, id)
@@ -90,7 +91,7 @@ func requireFresh(t *testing.T, s oauth.Store, sessionID, repo string, now time.
 // repo at now.
 func requireStale(t *testing.T, s oauth.Store, sessionID, repo string, now time.Time) {
 	t.Helper()
-	id, ok, err := s.FreshAccessCheck(context.Background(), sessionID, repo, now)
+	id, ok, err := s.FreshAccessCheck(context.Background(), sessionID, repo, now, now)
 	require.NoError(t, err)
 	require.False(t, ok, "%s takes no check of %s", sessionID, repo)
 	require.Zero(t, id)
@@ -151,6 +152,29 @@ func aFreshCheckMovesItsLastUseForwardOnly(t *testing.T, s oauth.Store) {
 	requireFresh(t, s, session.ID, "o/r", now.Add(20*time.Minute), 11)
 	check.LastUsedAt = now.Add(20 * time.Minute)
 	requireChecks(t, s, c.ID, []oauth.AccessCheck{check}, "a later use moves it")
+}
+
+// A use moves the last use of a check only when the last use came before
+// the bound, so that a use soon after another needs no write.
+func aFreshCheckMovesItsLastUseOnlyWhenItCameBeforeTheBound(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	now := loginNow()
+	c := connectionAt(1, now)
+	session := newSession(t, s, "req-1", c, now)
+	check := checkOf(c, "o/r", 11, now)
+	storeCheck(t, s, check)
+
+	id, ok, err := s.FreshAccessCheck(ctx, session.ID, "o/r", now.Add(30*time.Second), now)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.EqualValues(t, 11, id)
+	requireChecks(t, s, c.ID, []oauth.AccessCheck{check}, "a last use at the bound stays")
+	id, ok, err = s.FreshAccessCheck(ctx, session.ID, "o/r", now.Add(time.Minute), now.Add(time.Microsecond))
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.EqualValues(t, 11, id)
+	check.LastUsedAt = now.Add(time.Minute)
+	requireChecks(t, s, c.ID, []oauth.AccessCheck{check}, "a last use before the bound moves to the time of the use")
 }
 
 // A stale check, a repository that the connection has no check of, another

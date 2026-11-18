@@ -251,7 +251,8 @@ func (a UserAccess) RepoID(ctx context.Context, p faucet.Principal, repo string)
 		return 0, err
 	}
 	repo = strings.ToLower(repo)
-	id, ok, err := a.access.tokens.store.FreshAccessCheck(ctx, session.SessionID, repo, a.access.tokens.clock.Now())
+	now := a.access.tokens.clock.Now()
+	id, ok, err := a.access.tokens.store.FreshAccessCheck(ctx, session.SessionID, repo, now, now.Add(-accessCheckUseStep))
 	switch {
 	case err != nil:
 		return 0, xerrors.Errorf("read the access check of %s: %w", repo, err)

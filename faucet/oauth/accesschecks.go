@@ -42,10 +42,11 @@ func (c AccessCheck) Validate() error {
 type AccessCheckStore interface {
 	// FreshAccessCheck looks for the check of repo by the connection of the
 	// session with this ID that started at or after the session's refreshed
-	// time. When it finds one, it sets that check's last use to now, never
-	// earlier than it was, and returns its repository ID and true. Otherwise
-	// it returns 0 and false and changes nothing, as for an unknown session.
-	FreshAccessCheck(ctx context.Context, sessionID, repo string, now time.Time) (int64, bool, error)
+	// time. When it finds one, it returns its repository ID and true, and
+	// when the check's last use came before usedBefore, it sets the last use
+	// to now, never earlier than it was. Otherwise it returns 0 and false
+	// and changes nothing, as for an unknown session.
+	FreshAccessCheck(ctx context.Context, sessionID, repo string, now, usedBefore time.Time) (int64, bool, error)
 	// StoreAccessCheck stores c in place of the connection's check of c.Repo.
 	// A stored check that started later keeps its repository ID and its
 	// time, and the last use becomes the later of the two. It returns

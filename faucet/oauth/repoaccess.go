@@ -28,6 +28,11 @@ const (
 	// accessCheckRetention is how long a check that no session uses stays,
 	// until the purge deletes it.
 	accessCheckRetention = 24 * time.Hour
+	// accessCheckUseStep is how old the last use of a check must be before
+	// a use moves it, so that most uses write nothing. It is far below an
+	// access token's life, so a check in use stays among those that a
+	// refresh checks again.
+	accessCheckUseStep = time.Minute
 	// recordTimeout bounds the store write that keeps an answer of GitHub,
 	// which runs to its end however the caller's request ends.
 	recordTimeout = 5 * time.Second

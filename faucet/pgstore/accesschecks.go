@@ -14,11 +14,11 @@ import (
 var _ oauth.AccessCheckStore = (*Store)(nil)
 
 // FreshAccessCheck implements oauth.AccessCheckStore in one statement, which
-// reads the session's refreshed time and moves the check's last use
-// together.
-func (s *Store) FreshAccessCheck(ctx context.Context, sessionID, repo string, now time.Time) (_ int64, _ bool, err error) {
+// reads the session's refreshed time and the check, and writes the check
+// only when its last use moves.
+func (s *Store) FreshAccessCheck(ctx context.Context, sessionID, repo string, now, usedBefore time.Time) (_ int64, _ bool, err error) {
 	defer func() { err = endedBy(ctx, err) }()
-	id, err := s.q.FreshAccessCheck(ctx, database.FreshAccessCheckParams{Now: now, SessionID: sessionID, Repo: repo})
+	id, err := s.q.FreshAccessCheck(ctx, database.FreshAccessCheckParams{SessionID: sessionID, Repo: repo, Now: now, UsedBefore: usedBefore})
 	switch {
 	case xerrors.Is(err, sql.ErrNoRows):
 		return 0, false, nil

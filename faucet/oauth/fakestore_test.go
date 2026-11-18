@@ -523,7 +523,7 @@ func (s *fakeStore) DeleteExpiredAuthRequests(_ context.Context, now, codesBefor
 	return n, nil
 }
 
-func (s *fakeStore) FreshAccessCheck(ctx context.Context, sessionID, repo string, now time.Time) (int64, bool, error) {
+func (s *fakeStore) FreshAccessCheck(ctx context.Context, sessionID, repo string, now, usedBefore time.Time) (int64, bool, error) {
 	if err := s.callErr(ctx, "FreshAccessCheck"); err != nil {
 		return 0, false, err
 	}
@@ -538,7 +538,7 @@ func (s *fakeStore) FreshAccessCheck(ctx context.Context, sessionID, repo string
 	if !ok || c.CheckedAt.Before(session.RefreshedAt) {
 		return 0, false, nil
 	}
-	if now.After(c.LastUsedAt) {
+	if c.LastUsedAt.Before(usedBefore) && now.After(c.LastUsedAt) {
 		c.LastUsedAt = now
 	}
 	s.checks[key] = c
