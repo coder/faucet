@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -18,11 +19,16 @@ import (
 )
 
 const clientsUsage = `usage:
-  faucet clients create -resource <url> [-scope <scopes>] -grant repo:<owner>/<name> [-grant ...] <client-id>
+  faucet clients create [-resource <url>] [-scope <scopes>] -grant repo:<owner>/<name> [-grant ...] <client-id>
   faucet clients list
   faucet clients disable <client-id>
 
-The commands read DATABASE_URL, as the server does.`
+The commands read DATABASE_URL and FAUCET_PUBLIC_URL, as the server does.
+-resource defaults to FAUCET_PUBLIC_URL and /github/mcp.`
+
+// clientEndpoint is the path of the endpoint that new clients are for. /mcp,
+// its old path, takes no new client, because a later release removes it.
+const clientEndpoint = "/github/mcp"
 
 // runClients runs "faucet clients", the operator's commands for the clients
 // of services.
@@ -34,6 +40,14 @@ func runClients(ctx context.Context, args []string, getenv func(string) string, 
 	if databaseURL == "" {
 		return xerrors.Errorf("missing required environment variable %s", envDatabaseURL)
 	}
+	var publicURL *url.URL
+	if raw := getenv(envPublicURL); raw != "" {
+		u, err := parseOrigin(raw)
+		if err != nil {
+			return xerrors.Errorf("%s: %w", envPublicURL, err)
+		}
+		publicURL = u
+	}
 	db, err := dbconn.Open(databaseURL)
 	if err != nil {
 		return xerrors.Errorf("%s: %w", envDatabaseURL, err)
@@ -42,7 +56,7 @@ func runClients(ctx context.Context, args []string, getenv func(string) string, 
 	if err := pgstore.CheckSchema(ctx, db); err != nil {
 		return xerrors.Errorf("check the schema: %w", err)
 	}
-	return clientsCommand(ctx, args, pgstore.New(db), time.Now(), stdout, stderr)
+	return clientsCommand(ctx, args, pgstore.New(db), publicURL, time.Now(), stdout, stderr)
 }
 
 // clientStore holds the clients and the subscriptions that services make.
@@ -56,10 +70,12 @@ func isClientsCommand(name string) bool {
 	return name == "create" || name == "list" || name == "disable"
 }
 
-func clientsCommand(ctx context.Context, args []string, store clientStore, now time.Time, stdout, stderr io.Writer) error {
+// clientsCommand runs one command. publicURL is nil when FAUCET_PUBLIC_URL is
+// unset.
+func clientsCommand(ctx context.Context, args []string, store clientStore, publicURL *url.URL, now time.Time, stdout, stderr io.Writer) error {
 	switch args[0] {
 	case "create":
-		return createClient(ctx, args[1:], store, now, stdout, stderr)
+		return createClient(ctx, args[1:], store, publicURL, now, stdout, stderr)
 	case "list":
 		if len(args) > 1 {
 			return xerrors.New(clientsUsage)
@@ -104,10 +120,14 @@ func (g *grantFlags) Set(v string) error {
 	return nil
 }
 
-func createClient(ctx context.Context, args []string, store oauth.Store, now time.Time, stdout, stderr io.Writer) error {
+func createClient(ctx context.Context, args []string, store oauth.Store, publicURL *url.URL, now time.Time, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("faucet clients create", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	resource := flags.String("resource", "", "the MCP endpoint that the client's tokens are for, such as https://faucet.example.com/github/mcp")
+	defaultResource := ""
+	if publicURL != nil {
+		defaultResource = publicURL.String() + clientEndpoint
+	}
+	resource := flags.String("resource", defaultResource, "the MCP endpoint that the client's tokens are for, such as https://faucet.example.com/github/mcp")
 	scopeList := flags.String("scope", strings.Join(scopeNames(faucet.AllScopes()), ","), "the scopes that the client's tokens can hold, comma separated")
 	var grants grantFlags
 	flags.Var(&grants, "grant", "a repository that the client may read, repo:<owner>/<name>; repeat it for more")
@@ -117,7 +137,7 @@ func createClient(ctx context.Context, args []string, store oauth.Store, now tim
 	if flags.NArg() != 1 {
 		return xerrors.New("name one client ID, after the flags\n" + clientsUsage)
 	}
-	if err := checkResource(*resource); err != nil {
+	if err := checkResource(*resource, publicURL); err != nil {
 		return err
 	}
 	var scopes []faucet.Scope
@@ -145,18 +165,25 @@ func createClient(ctx context.Context, args []string, store oauth.Store, now tim
 	return err
 }
 
-// checkResource accepts the URL of one of faucet's MCP endpoints: faucet's
-// public URL, in the form FAUCET_PUBLIC_URL takes, and an MCP path.
-func checkResource(resource string) error {
-	for _, path := range mcpPaths {
-		if origin, ok := strings.CutSuffix(resource, path); ok {
-			if _, err := parseOrigin(origin); err != nil {
-				return xerrors.Errorf("-resource: %w", err)
-			}
-			return nil
+// checkResource accepts the URL of faucet's GitHub MCP endpoint: faucet's
+// public URL, in the form FAUCET_PUBLIC_URL takes, and clientEndpoint. With
+// publicURL, it must be that server's, because the server issues no token
+// for another's.
+func checkResource(resource string, publicURL *url.URL) error {
+	if publicURL != nil {
+		if want := publicURL.String() + clientEndpoint; resource != want {
+			return xerrors.Errorf("-resource must be %s, the endpoint of %s", want, envPublicURL)
 		}
+		return nil
 	}
-	return xerrors.Errorf("-resource must be faucet's public URL and the path of an MCP endpoint, one of %s", strings.Join(mcpPaths, ", "))
+	origin, ok := strings.CutSuffix(resource, clientEndpoint)
+	if !ok {
+		return xerrors.Errorf("-resource must be faucet's public URL and %s; /mcp, the endpoint's old path, takes no new client", clientEndpoint)
+	}
+	if _, err := parseOrigin(origin); err != nil {
+		return xerrors.Errorf("-resource: %w", err)
+	}
+	return nil
 }
 
 func listClients(ctx context.Context, store oauth.Store, stdout io.Writer) error {

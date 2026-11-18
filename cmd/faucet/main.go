@@ -316,7 +316,11 @@ func newLogin(publicURL *url.URL, store loginStore, github *faucet.AccessCache, 
 	if err != nil {
 		return bearers{}, nil, nil, err
 	}
-	login, err := oauth.NewServer(oauth.ServerDeps{Store: store, Clock: clock, Logger: logger, Issuer: publicURL.String()})
+	resources := make([]string, len(mcpPaths))
+	for i, path := range mcpPaths {
+		resources[i] = tokens.resource(path)
+	}
+	login, err := oauth.NewServer(oauth.ServerDeps{Store: store, Clock: clock, Logger: logger, Issuer: publicURL.String(), Resources: resources})
 	if err != nil {
 		return bearers{}, nil, nil, xerrors.Errorf("create the login server: %w", err)
 	}

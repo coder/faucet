@@ -43,7 +43,7 @@ func newTokenHarness(t *testing.T) *tokenHarness {
 	c, secret, err := oauth.NewClient("ci-watcher", resource, bothScopes, []string{"repo:coder/faucet"}, clock.Now())
 	require.NoError(t, err)
 	require.NoError(t, store.InsertClient(context.Background(), c))
-	server, err := oauth.NewServer(oauth.ServerDeps{Store: store, Clock: clock, Logger: slog.Make(), Issuer: issuer})
+	server, err := oauth.NewServer(oauth.ServerDeps{Store: store, Clock: clock, Logger: slog.Make(), Issuer: issuer, Resources: []string{resource, issuer + "/mcp"}})
 	require.NoError(t, err)
 	mux := http.NewServeMux()
 	mux.Handle("GET "+oauth.MetadataPath, server.MetadataHandler())
@@ -134,7 +134,7 @@ func TestGoSDKAcceptsTheMetadata(t *testing.T) {
 	mux := http.NewServeMux()
 	srv = httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	server, err := oauth.NewServer(oauth.ServerDeps{Store: store, Clock: quartz.NewMock(t), Logger: slog.Make(), Issuer: srv.URL})
+	server, err := oauth.NewServer(oauth.ServerDeps{Store: store, Clock: quartz.NewMock(t), Logger: slog.Make(), Issuer: srv.URL, Resources: []string{srv.URL + "/github/mcp"}})
 	require.NoError(t, err)
 	mux.Handle("GET "+oauth.MetadataPath, server.MetadataHandler())
 
@@ -302,6 +302,23 @@ func TestTheTokenEndpointRefusesAMalformedRequest(t *testing.T) {
 
 // A disabled client gets no new token, and the token it holds fails on its
 // next request.
+// A client made for another server's endpoint, as when an operator typed
+// another origin or moved the server, gets no token it could not use, and
+// hears why.
+func TestClientCredentialsRefusesAClientForAnotherServer(t *testing.T) {
+	t.Parallel()
+	h := newTokenHarness(t)
+	c, secret, err := oauth.NewClient("elsewhere", "https://other.example.com/github/mcp", bothScopes, []string{"repo:coder/faucet"}, h.clock.Now())
+	require.NoError(t, err)
+	require.NoError(t, h.store.InsertClient(context.Background(), c))
+
+	reply := h.post(basic("elsewhere", secret), clientCredentials())
+	require.Equal(t, http.StatusUnauthorized, reply.status, reply.rawBody)
+	require.Equal(t, "invalid_client", reply.body["error"])
+	require.Contains(t, reply.body["error_description"], "https://other.example.com/github/mcp, which this server does not serve")
+	require.Zero(t, h.store.tokenCount())
+}
+
 func TestDisablingAClientFailsItsTokens(t *testing.T) {
 	t.Parallel()
 	h := newTokenHarness(t)
@@ -333,11 +350,13 @@ func TestAnAccessTokenLastsFifteenMinutes(t *testing.T) {
 
 func TestNewServerNeedsABareIssuer(t *testing.T) {
 	t.Parallel()
+	resources := []string{resource}
 	for _, d := range []oauth.ServerDeps{
-		{Clock: quartz.NewMock(t), Issuer: issuer},
-		{Store: newFakeStore(), Issuer: issuer},
-		{Store: newFakeStore(), Clock: quartz.NewMock(t)},
-		{Store: newFakeStore(), Clock: quartz.NewMock(t), Issuer: issuer + "/"},
+		{Clock: quartz.NewMock(t), Issuer: issuer, Resources: resources},
+		{Store: newFakeStore(), Issuer: issuer, Resources: resources},
+		{Store: newFakeStore(), Clock: quartz.NewMock(t), Resources: resources},
+		{Store: newFakeStore(), Clock: quartz.NewMock(t), Issuer: issuer + "/", Resources: resources},
+		{Store: newFakeStore(), Clock: quartz.NewMock(t), Issuer: issuer},
 	} {
 		_, err := oauth.NewServer(d)
 		require.Error(t, err)

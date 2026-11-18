@@ -64,7 +64,7 @@ func TestTheClientsCommandMakesListsAndDisablesClients(t *testing.T) {
 	require.Equal(t, []faucet.Scope{faucet.ScopeEventsRead}, c.Scopes)
 	require.Equal(t, []string{"repo:coder/faucet", "repo:coder/coder"}, c.Grants)
 
-	_, _, err = clients(t, getenv, "create", "-resource", "https://faucet.example.com/mcp", "-grant", "repo:coder/faucet", "triage")
+	_, _, err = clients(t, getenv, "create", "-resource", "https://faucet.example.com/github/mcp", "-grant", "repo:coder/faucet", "triage")
 	require.NoError(t, err)
 	triage, err := store.Client(ctx, "triage")
 	require.NoError(t, err)
@@ -106,6 +106,7 @@ func TestTheClientsCommandRefusesAClientThatCannotWork(t *testing.T) {
 		"a resource of no endpoint":  {"create", "-resource", "https://faucet.example.com/api", "-grant", "repo:coder/faucet", "ci"},
 		"a resource with a slash":    {"create", "-resource", "https://faucet.example.com/github/mcp/", "-grant", "repo:coder/faucet", "ci"},
 		"a resource of a bad origin": {"create", "-resource", "http://faucet.example.com/github/mcp", "-grant", "repo:coder/faucet", "ci"},
+		"the old /mcp path":          {"create", "-resource", "https://faucet.example.com/mcp", "-grant", "repo:coder/faucet", "ci"},
 		"no grant":                   {"create", "-resource", resource, "ci"},
 		"an org grant":               {"create", "-resource", resource, "-grant", "org:coder", "ci"},
 		"an unknown scope":           {"create", "-resource", resource, "-scope", "events:read,events:admin", "-grant", "repo:coder/faucet", "ci"},
@@ -123,6 +124,39 @@ func TestTheClientsCommandRefusesAClientThatCannotWork(t *testing.T) {
 	all, err := store.Clients(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, all)
+}
+
+// With FAUCET_PUBLIC_URL set, as on the server, a client can be made only for
+// that server's endpoint, and -resource defaults to it.
+func TestTheClientsCommandTakesTheEndpointOfFAUCETPUBLICURL(t *testing.T) {
+	t.Parallel()
+	withURL, store := newClientsDatabase(t)
+	getenv := func(name string) string {
+		if name == envPublicURL {
+			return "https://faucet.example.com"
+		}
+		return withURL(name)
+	}
+
+	_, _, err := clients(t, getenv, "create", "-grant", "repo:coder/faucet", "ci-watcher")
+	require.NoError(t, err)
+	c, err := store.Client(context.Background(), "ci-watcher")
+	require.NoError(t, err)
+	require.Equal(t, "https://faucet.example.com/github/mcp", c.Resource)
+
+	_, _, err = clients(t, getenv, "create", "-resource", "https://other.example.com/github/mcp", "-grant", "repo:coder/faucet", "elsewhere")
+	require.ErrorContains(t, err, "https://faucet.example.com/github/mcp")
+	_, _, err = clients(t, getenv, "create", "-resource", "https://faucet.example.com/mcp", "-grant", "repo:coder/faucet", "old")
+	require.Error(t, err)
+
+	bad := func(name string) string {
+		if name == envPublicURL {
+			return "https://faucet.example.com/"
+		}
+		return withURL(name)
+	}
+	_, _, err = clients(t, bad, "list")
+	require.ErrorContains(t, err, envPublicURL)
 }
 
 func TestTheClientsCommandNeedsACurrentDatabase(t *testing.T) {

@@ -117,15 +117,9 @@ describe('service accounts', () => {
         token_endpoint_auth_methods_supported: ['client_secret_basic'],
       });
 
-      const repoId = newRepoId();
-      const repo = `verify/r${repoId}`;
-      const secret = await createClient(started, 'old-agent', '/mcp', [`repo:${repo}`]);
-      await deliverRun(started, repoId);
-      const alias = await started.serviceAgent('/mcp', 'old-agent', secret, { repo, types: ['ci.run_completed'] });
-      expect(alias.code, alias.stderr).toBe(0);
-      expect(waited(alias.stdout).structuredContent?.events).toHaveLength(1);
-      const elsewhere = await started.serviceAgent('/github/mcp', 'old-agent', secret, { repo, types: ['ci.run_completed'] });
-      expect(elsewhere.code, 'a client\'s tokens are for its one endpoint').toBe(1);
+      const old = await started.clients(['create', '-resource', `${started.baseUrl}/mcp`, '-grant', 'repo:verify/r1', 'old-agent']);
+      expect(old.code, '/mcp, the old path, takes no new client').toBe(1);
+      expect(old.stderr).toContain('takes no new client');
     }, { publicUrl: true });
   });
 

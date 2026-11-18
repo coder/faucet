@@ -58,15 +58,19 @@ type ServerDeps struct {
 	// Issuer is faucet's public URL, such as https://faucet.example.com,
 	// with no path. A client compares it byte for byte.
 	Issuer string
+	// Resources are the endpoints that this server serves. A client whose
+	// resource is not one of them gets no token.
+	Resources []string
 }
 
 // Server is faucet's authorization server: its metadata and its token
 // endpoint.
 type Server struct {
-	store  Store
-	clock  quartz.Clock
-	logger slog.Logger
-	issuer string
+	store     Store
+	clock     quartz.Clock
+	logger    slog.Logger
+	issuer    string
+	resources []string
 }
 
 // NewServer returns the Server for d.
@@ -78,8 +82,10 @@ func NewServer(d ServerDeps) (*Server, error) {
 		return nil, xerrors.New("clock is required")
 	case d.Issuer == "" || strings.HasSuffix(d.Issuer, "/"):
 		return nil, xerrors.New("the issuer is faucet's public URL, with no trailing slash")
+	case len(d.Resources) == 0:
+		return nil, xerrors.New("the server needs the endpoints that it serves")
 	}
-	return &Server{store: d.Store, clock: d.Clock, logger: d.Logger, issuer: d.Issuer}, nil
+	return &Server{store: d.Store, clock: d.Clock, logger: d.Logger, issuer: d.Issuer, resources: slices.Clone(d.Resources)}, nil
 }
 
 type authServerMetadata struct {
@@ -273,6 +279,13 @@ func (s *Server) clientCredentials(r *http.Request, form url.Values) (tokenRespo
 	c, err := s.authenticateClient(ctx, r, form)
 	if err != nil {
 		return tokenResponse{}, err
+	}
+	if !slices.Contains(s.resources, c.Resource) {
+		s.logger.Warn(ctx, "a client is for an endpoint that this server does not serve", slog.F("client_id", c.ID), slog.F("resource", c.Resource))
+		return tokenResponse{}, &tokenError{
+			status: http.StatusUnauthorized, code: "invalid_client",
+			description: "the client is for " + c.Resource + ", which this server does not serve; an operator must make a client for this server",
+		}
 	}
 	scopes, err := grantedScopes(form, c.Scopes)
 	if err != nil {

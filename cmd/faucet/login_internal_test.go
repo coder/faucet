@@ -284,6 +284,22 @@ func TestAServiceIsCheckedByItsGrantsAndTheReposThatDeliveriesNamed(t *testing.T
 	require.Empty(t, paths)
 }
 
+// A client made for another server's endpoint gets no token here, and the
+// server logs a warning that names the client and the endpoint.
+func TestAClientForAnotherServerGetsNoToken(t *testing.T) {
+	t.Parallel()
+	srv := newLoginServer(t)
+	c, secret, err := oauth.NewClient("elsewhere", "https://faucet.example.com/github/mcp", bothScopes, []string{"repo:octo-org/octo-repo"}, time.Now())
+	require.NoError(t, err)
+	require.NoError(t, srv.store.InsertClient(context.Background(), c))
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	_, err = srv.connectService(ctx, t, "/github/mcp", "elsewhere", secret)
+	require.ErrorContains(t, err, "which this server does not serve")
+	requireLoggedAt(t, srv.logs.String(), "a client is for an endpoint that this server does not serve", "[warn]")
+}
+
 func TestDisablingAClientFailsItsTokenOnTheNextRequest(t *testing.T) {
 	t.Parallel()
 	srv := newLoginServer(t)
