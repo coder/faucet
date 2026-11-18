@@ -206,6 +206,12 @@ type Finish struct {
 	Failure CallbackReason
 	// Unreadable is the sealed secret that could not be opened, for FinishDead.
 	Unreadable []byte
+	// Gap owes the subscription a gap through the delivery's event, for a
+	// FinishGiveUp of a raw delivery that faucet could not send.
+	// RawStore.FinishRawDelivery writes it with the end of the delivery, and
+	// Store.FinishDelivery refuses it: a typed subscription learns of missed
+	// events from the purge mark.
+	Gap bool
 }
 
 // Validate checks the fields a caller supplies to Store.FinishDelivery.
@@ -219,6 +225,8 @@ func (f Finish) Validate() error {
 		return xerrors.New("a give-up carries no retry time or sealed secret, and its failure must be a category")
 	case f.Kind == FinishDead && (len(f.Unreadable) == 0 || !f.RetryAt.IsZero() || f.Failure != ""):
 		return xerrors.New("a dead delivery needs the sealed secret and nothing else")
+	case f.Gap && f.Kind != FinishGiveUp:
+		return xerrors.New("only a give-up owes a gap")
 	case f.Kind < FinishDelivered || f.Kind > FinishDead:
 		return xerrors.New("unknown finish kind")
 	}
@@ -256,7 +264,10 @@ const (
 // DeliverResult counts what one DeliverDue run did. Every delivery that ended
 // in the run is in Delivered or in one entry of GaveUp.
 type DeliverResult struct {
-	// Enqueued is the deliveries queued for events that the run read.
+	// Enqueued is the deliveries queued for events that the run read. A raw
+	// delivery is queued when its webhook delivery arrives, not by a run, so
+	// it is never in Enqueued. It is in the other counts when a run sends or
+	// ends it.
 	Enqueued int
 	// Gaps is the subscriptions that missed events because a purge deleted
 	// them before the run read them, and for which the run queued a gap
@@ -287,6 +298,10 @@ type DeliverResult struct {
 	// Incomplete says that due work was left, because the run reached its
 	// limit or its deadline.
 	Incomplete bool
+	// RawFailures counts the calls of the RawStore that failed. The first
+	// ends the raw part of the run, which then sends no more raw deliveries or
+	// raw gaps and goes on with the typed ones. The log has each error.
+	RawFailures int
 }
 
 // GaveUpTotal is the number of deliveries that ended without a success.

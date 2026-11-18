@@ -21,6 +21,7 @@ One file per user-facing behavior of the faucet server at PR 8b, from the point 
 | [Events poll](events-poll.md) | `POST /github/mcp`, `events/poll` | `tests/events-poll.e2e.ts` | tested |
 | [Events subscribe](events-subscribe.md) | `POST /github/mcp`, `events/subscribe` | `tests/events-subscribe.e2e.ts`, `tests/events-subscribe-types.e2e.ts` | tested |
 | [Field filters](field-filters.md) | `POST /github/mcp`, `events/poll`, `events/subscribe` and the wait tool with `base_branch`, `head_branch` or `conclusion`, then `GET /cron/deliver` | `tests/field-filters.e2e.ts` | tested |
+| [Raw events](raw-events.md) | `POST /webhook/github` for an event with no typed rule, `events/poll` and `events/subscribe` with a `github.<event>` name, `GET /cron/deliver`, `GET /cron/purge` | `tests/raw-events.e2e.ts`, `tests/events-list.e2e.ts` | tested |
 | [Events unsubscribe](events-unsubscribe.md) | `POST /github/mcp`, `events/unsubscribe` | `tests/events-unsubscribe.e2e.ts` | tested |
 | [Webhook handshake](webhook-handshake.md) | `POST /github/mcp`, `events/subscribe` in `handshake` mode, and the request that faucet sends to the callback URL | `tests/handshake.e2e.ts` | tested |
 | [Cron routes](cron-auth.md) | `GET /cron/purge`, `GET /cron/deliver`, `GET /cron/redeliver`, the secret check | `tests/cron-auth.e2e.ts` | tested |

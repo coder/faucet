@@ -8,7 +8,7 @@ import { createServer as createNetServer } from 'node:net';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { parseArgs, promisify } from 'node:util';
-import { childEnv } from './env.mjs';
+import { childEnv, RAW_EVENTS } from './env.mjs';
 import { endGroup } from './group.mjs';
 import { CALLBACK_ORIGIN, ENDPOINT_SAYS, runDir, stateFile } from './runstate.mjs';
 
@@ -680,6 +680,7 @@ async function runStack({ port }, abort) {
         FAUCET_GITHUB_API_URL: stubUrl,
         FAUCET_WEBHOOK_KEY: webhookKey,
         FAUCET_WEBHOOK_ALLOWED_ORIGINS: CALLBACK_ORIGIN,
+        FAUCET_RAW_EVENTS: RAW_EVENTS,
       },
       stdio: ['ignore', 'inherit', 'inherit'],
     });

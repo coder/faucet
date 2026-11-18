@@ -365,3 +365,14 @@ func (s *fakeRedeliveryStore) rowCount() int {
 	defer s.rmu.Unlock()
 	return len(s.rows)
 }
+
+// deliveries copies the state of every delivery that the store keeps.
+func (s *fakeRedeliveryStore) deliveries() map[string]fakeRedeliveryRow {
+	s.rmu.Lock()
+	defer s.rmu.Unlock()
+	rows := make(map[string]fakeRedeliveryRow, len(s.rows))
+	for guid, row := range s.rows {
+		rows[guid] = *row
+	}
+	return rows
+}

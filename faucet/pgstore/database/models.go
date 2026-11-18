@@ -85,6 +85,54 @@ type FaucetPurgeMark struct {
 	PurgedThrough int64
 }
 
+type FaucetRawDelivery struct {
+	KeyHash       []byte
+	Incarnation   time.Time
+	RawEventID    int64
+	EnqueuedAt    time.Time
+	NextAttemptAt time.Time
+	Attempts      int32
+	LeaseUntil    sql.NullTime
+}
+
+type FaucetRawEvent struct {
+	ID         int64
+	DeliveryID string
+	Event      string
+	Action     string
+	RepoID     int64
+	Body       []byte
+	Fields     []string
+	ReceivedAt time.Time
+}
+
+type FaucetRawGap struct {
+	KeyHash     []byte
+	Incarnation time.Time
+	Through     int64
+	LeaseUntil  sql.NullTime
+}
+
+type FaucetRawLease struct {
+	ID           []byte
+	KeyHash      []byte
+	Principal    string
+	Event        string
+	Actions      []string
+	Fields       []string
+	RepoID       int64
+	AckedThrough int64
+	CreatedAt    time.Time
+	PolledAt     time.Time
+	ExpiresAt    time.Time
+}
+
+type FaucetRawUnread struct {
+	LeaseID    []byte
+	RawEventID int64
+	Lost       bool
+}
+
 type FaucetRedelivery struct {
 	Guid           string
 	Hook           string

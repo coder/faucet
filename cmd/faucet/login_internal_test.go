@@ -79,10 +79,7 @@ func newLoginServer(t *testing.T, configure ...func(*loginConfig)) *loginServer 
 	}
 	tokens, login, authorizer, err := newLogin(publicURL, nil, logins, cache, nil, clock, logger)
 	require.NoError(t, err)
-	svc, err := faucet.New(faucet.Deps{
-		Store: store, Secret: []byte(testSecret), Logger: logger, Authorizer: authorizer, PrincipalFrom: principalFrom, Clock: clock,
-		RecordRepositories: true, Webhook: cfg.webhook,
-	})
+	svc, _, err := newServices(config{secret: testSecret, publicURL: publicURL, webhook: cfg.webhook, rawEvents: []string{"push"}}, store, authorizer, clock, logger)
 	require.NoError(t, err)
 	cron := cronRoutes{secret: []byte(loginCronSecret), svc: svc, retention: 24 * time.Hour, login: login, clock: clock, logger: logger}
 	srv.Config.Handler = newRouter(svc, tokens, login, cron, logger)

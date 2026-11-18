@@ -35,6 +35,28 @@ function waited(stdout: string): WaitResult {
   return JSON.parse(stdout) as WaitResult;
 }
 
+interface RawPoll {
+  events: { eventId: string; name: string; data: Record<string, unknown> }[];
+  cursor: string;
+  truncated: boolean;
+}
+
+// accessToken logs in as a client does, with its ID and secret in HTTP Basic and no scope or resource, and returns the token.
+async function accessToken(started: Faucet, id: string, secret: string): Promise<string> {
+  const reply = await started.request('/oauth/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Authorization: `Basic ${Buffer.from(`${id}:${secret}`).toString('base64')}`,
+    },
+    body: 'grant_type=client_credentials',
+  });
+  expect(reply.status, reply.body).toBe(200);
+  const token = (JSON.parse(reply.body) as { access_token: string }).access_token;
+  expect(token).toMatch(/^fct_[A-Za-z0-9_-]{43}$/);
+  return token;
+}
+
 describe('service accounts', () => {
   test('a service agent logs in with a client ID and secret alone and waits for an event', async ({ faucet }) => {
     await faucet.withFaucet({}, async (started, output) => {
@@ -86,6 +108,45 @@ describe('service accounts', () => {
       } finally {
         await client.close();
       }
+    }, { publicUrl: true });
+  });
+
+  // A service that reads only raw events can start. The push that nobody wants is not stored, and it still names the
+  // repository, so the first poll after it opens the lease that makes faucet store the next push.
+  test('a service agent polls the raw events of a granted repository once an ignored delivery named it', async ({ faucet }) => {
+    await faucet.withFaucet({}, async (started, output) => {
+      const repoId = newRepoId();
+      const repo = `verify/r${repoId}`;
+      const secret = await createClient(started, 'push-watcher', '/github/mcp', [`repo:${repo}`]);
+      const token = await accessToken(started, 'push-watcher', secret);
+      const poll = (cursor?: string) => started.mcp<RawPoll>('events/poll', { name: 'github.push', arguments: { repo }, cursor }, { token });
+      const payload = { ref: 'refs/heads/main', repository: { id: repoId, full_name: repo, owner: { id: 1, login: 'verify' } } };
+      const push = () => started.deliver({ event: 'push', delivery: newDeliveryId(), body: JSON.stringify(payload) });
+
+      const early = await poll();
+      expect(early.error?.code, early.body).toBe(-32024);
+      expect(early.error?.message).toContain(`faucet has received no webhook delivery from ${repo} yet`);
+
+      const unwanted = await push();
+      expect(unwanted.status).toBe(202);
+      expect(unwanted.body).toBe('ignored\n');
+      expect(await started.sql(`select count(*) from faucet_raw_events where repo_id = ${repoId}`)).toBe('0');
+      expect(await started.sql(`select count(*) from faucet_repos where repo_id = ${repoId}`), 'the ignored push named the repository').toBe('1');
+
+      const opened = await poll();
+      expect(opened.error, opened.body).toBeNull();
+      expect(opened.result?.events).toEqual([]);
+      const wanted = await push();
+      expect(wanted.status).toBe(200);
+      expect(wanted.body).toBe('stored\n');
+
+      const page = await poll(opened.result?.cursor);
+      expect(page.result?.events, page.body).toEqual([expect.objectContaining({ name: 'github.push', data: payload })]);
+      expect(page.result?.truncated).toBe(false);
+
+      expect(output()).not.toContain(secret);
+      expect(output()).not.toContain(token);
+      expect(started.leaksSecret(output())).toBe(false);
     }, { publicUrl: true });
   });
 

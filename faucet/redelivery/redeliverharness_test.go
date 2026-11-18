@@ -25,6 +25,8 @@ type ghAttempt struct {
 	at            time.Time
 	status        int
 	event, action string
+	// repoID is the repository_id that GitHub lists, and 0 lists null.
+	repoID int64
 }
 
 type cursorStyle int
@@ -95,23 +97,24 @@ func (g *fakeGitHub) deliver(guid string, at time.Time) ghAttempt {
 func (g *fakeGitHub) deliverEvent(guid string, at time.Time, event, action string) ghAttempt {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.deliverLocked(guid, at, event, action)
+	return g.deliverLocked(ghAttempt{guid: guid, at: at, event: event, action: action})
 }
 
-func (g *fakeGitHub) deliverLocked(guid string, at time.Time, event, action string) ghAttempt {
-	status := http200
+// deliverLocked records a with the status that faucet answers it with.
+func (g *fakeGitHub) deliverLocked(a ghAttempt) ghAttempt {
+	a.status = http200
 	if g.answer != nil {
-		status = g.answer(guid, at)
+		a.status = g.answer(a.guid, a.at)
 	}
-	if status >= 200 && status < 300 && event == handledEvent {
+	if a.status >= 200 && a.status < 300 && a.event == handledEvent {
 		_, _, err := g.store.InsertEvent(context.Background(), faucet.Event{
-			Source: "github", DeliveryID: guid, Type: "ci.run_completed", RepoID: eventRepoID, Data: []byte(`{}`),
+			Source: "github", DeliveryID: a.guid, Type: "ci.run_completed", RepoID: eventRepoID, Data: []byte(`{}`),
 		})
 		if err != nil {
 			panic(err)
 		}
 	}
-	return g.recordLocked(guid, at, status, event, action)
+	return g.addLocked(a)
 }
 
 const (
@@ -123,21 +126,24 @@ const (
 // record adds an attempt with the given status, whatever faucet would answer.
 // It stores nothing, so a failed attempt leaves its event unstored.
 func (g *fakeGitHub) record(guid string, at time.Time, status int) ghAttempt {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.recordLocked(guid, at, status, handledEvent, handledAction)
+	return g.add(ghAttempt{guid: guid, at: at, status: status, event: handledEvent, action: handledAction})
 }
 
 func (g *fakeGitHub) recordEvent(guid string, at time.Time, status int, event, action string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.recordLocked(guid, at, status, event, action)
+	g.add(ghAttempt{guid: guid, at: at, status: status, event: event, action: action})
 }
 
-func (g *fakeGitHub) recordLocked(guid string, at time.Time, status int, event, action string) ghAttempt {
+// add records a as it is, whatever faucet would answer, with the next ID.
+func (g *fakeGitHub) add(a ghAttempt) ghAttempt {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.addLocked(a)
+}
+
+func (g *fakeGitHub) addLocked(a ghAttempt) ghAttempt {
 	g.nextID++
-	a := ghAttempt{id: g.nextID, guid: guid, at: at, status: status, event: event, action: action}
-	i := sort.Search(len(g.attempts), func(i int) bool { return g.attempts[i].at.After(at) })
+	a.id = g.nextID
+	i := sort.Search(len(g.attempts), func(i int) bool { return g.attempts[i].at.After(a.at) })
 	g.attempts = slices.Insert(g.attempts, i, a)
 	return a
 }
@@ -201,7 +207,7 @@ func (g *fakeGitHub) ListDeliveries(ctx context.Context, cursor string) (redeliv
 	for i := start - 1; i >= end; i-- {
 		a := visible[i]
 		page.Deliveries = append(page.Deliveries, redelivery.HookDelivery{
-			ID: a.id, GUID: a.guid, DeliveredAt: a.at, StatusCode: a.status, Event: a.event, Action: a.action,
+			ID: a.id, GUID: a.guid, DeliveredAt: a.at, StatusCode: a.status, Event: a.event, Action: a.action, RepositoryID: a.repoID,
 		})
 	}
 	if end > 0 {
@@ -252,9 +258,10 @@ func (g *fakeGitHub) Redeliver(ctx context.Context, attemptID int64) error {
 				return err
 			}
 		}
-		now := g.now()
-		g.asks[a.guid] = append(g.asks[a.guid], now)
-		g.deliverLocked(a.guid, now, a.event, a.action)
+		redelivered := a
+		redelivered.at = g.now()
+		g.asks[a.guid] = append(g.asks[a.guid], redelivered.at)
+		g.deliverLocked(redelivered)
 		return nil
 	}
 	return fmt.Errorf("GitHub answered the redelivery request with status 404")
@@ -400,6 +407,7 @@ type envOptions struct {
 	maxPages, maxAsks int
 	pageSize          int
 	style             cursorStyle
+	wants             func(context.Context) (func(event, action string, repoID int64) bool, error)
 }
 
 type redeliveryEnv struct {
@@ -424,7 +432,7 @@ func newRedeliveryEnv(t *testing.T, opts ...func(*envOptions)) *redeliveryEnv {
 	logs := &captureSink{}
 
 	runner, err := redelivery.New(redelivery.Deps{
-		Store: store, Hooks: gh, Clock: clock, Logger: slog.Make(logs), MaxPagesPerRun: o.maxPages, MaxAsksPerRun: o.maxAsks,
+		Store: store, Hooks: gh, Clock: clock, Logger: slog.Make(logs), MaxPagesPerRun: o.maxPages, MaxAsksPerRun: o.maxAsks, Wants: o.wants,
 	})
 	require.NoError(t, err)
 	return &redeliveryEnv{t: t, clock: clock, store: store, gh: gh, runner: runner, logs: logs}
