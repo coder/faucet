@@ -558,6 +558,11 @@ func (s *fakeStore) StoreAccessCheck(ctx context.Context, c oauth.AccessCheck) e
 		return oauth.ErrUnknownConnection
 	}
 	key := accessCheckKey{c.ConnectionID, c.Repo}
+	if stored, ok := s.checks[key]; ok && c.Denied() && !stored.Denied() {
+		maps.DeleteFunc(s.checks, func(k accessCheckKey, alias oauth.AccessCheck) bool {
+			return k.connectionID == c.ConnectionID && k.repo != c.Repo && alias.RepoID == stored.RepoID && !alias.CheckedAt.After(c.CheckedAt)
+		})
+	}
 	if stored, ok := s.checks[key]; ok {
 		if stored.CheckedAt.After(c.CheckedAt) {
 			c.RepoID, c.CheckedAt = stored.RepoID, stored.CheckedAt

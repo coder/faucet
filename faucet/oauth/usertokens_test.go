@@ -156,7 +156,7 @@ func TestAnAccessCheckOfOneSessionDoesNotAnswerForAnother(t *testing.T) {
 
 	id, err := access.RepoID(ctx, first, "coder/faucet")
 	require.NoError(t, err)
-	require.EqualValues(t, grantRepoID, id)
+	require.EqualValues(t, grantRepoID("coder/faucet"), id)
 	h.clock.Advance(time.Minute)
 	second := h.principal(h.redeem(h.approve("login-2", 1)))
 	h.github.set(func(g *grantGitHub) { g.repoStatus = http.StatusNotFound })
@@ -198,7 +198,7 @@ func TestTheAccessCheckRefreshesATokenThatGitHubRejects(t *testing.T) {
 
 	id, err := access.RepoID(context.Background(), p, "coder/faucet")
 	require.NoError(t, err)
-	require.EqualValues(t, grantRepoID, id)
+	require.EqualValues(t, grantRepoID("coder/faucet"), id)
 	refreshes, checks := h.github.counts()
 	require.Equal(t, []int{1, 2}, []int{refreshes, checks})
 	_, err = access.RepoIDFresh(context.Background(), p, "coder/faucet")

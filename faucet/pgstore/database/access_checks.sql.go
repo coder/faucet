@@ -122,6 +122,17 @@ func (q *Queries) RecentAccessChecks(ctx context.Context, arg RecentAccessChecks
 }
 
 const storeAccessCheck = `-- name: StoreAccessCheck :execrows
+WITH aliased AS (
+  SELECT a.repo_id
+  FROM faucet_access_checks a
+  WHERE $2::bigint = 0 AND a.connection_id = $5 AND a.repo = $1::text
+    AND a.repo_id IS NOT NULL
+), aliases AS (
+  DELETE FROM faucet_access_checks a
+  USING aliased d
+  WHERE a.connection_id = $5 AND a.repo <> $1::text AND a.repo_id = d.repo_id
+    AND a.checked_at <= $3::timestamptz
+)
 INSERT INTO faucet_access_checks (connection_id, repo, repo_id, checked_at, last_used_at)
 SELECT c.id, $1::text, nullif($2::bigint, 0), $3::timestamptz, $4::timestamptz
 FROM faucet_connections c
@@ -143,7 +154,9 @@ type StoreAccessCheckParams struct {
 // StoreAccessCheck stores a check of a repository by a connection, a pass or
 // a denial, whose repo_id 0 is stored as NULL, in place of the stored one
 // unless that one started later. A conflict always updates the row, so no
-// row means no connection.
+// row means no connection. A denial also deletes the connection's checks of
+// the repository that the stored check held under its other names, a
+// repository renamed since, whose lookup started at or before the denial's.
 func (q *Queries) StoreAccessCheck(ctx context.Context, arg StoreAccessCheckParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, storeAccessCheck,
 		arg.Repo,

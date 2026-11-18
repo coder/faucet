@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -29,7 +30,6 @@ import (
 const (
 	grantClientID    = "https://agent.example.com/client.json"
 	grantRedirectURI = "http://127.0.0.1:33418/callback"
-	grantRepoID      = 4242
 	// grantGitHubLatency is how long the GitHub stub takes to answer a token
 	// request, so that refreshes which race overlap there.
 	grantGitHubLatency = 5 * time.Millisecond
@@ -55,6 +55,9 @@ type grantGitHub struct {
 	tokenStatus, repoStatus int
 	// denied are the repositories, owner/name, that no token can read.
 	denied map[string]bool
+	// renamed maps the old name of a renamed repository, owner/name, to its
+	// new one: GitHub answers the old name with the repository of the new.
+	renamed map[string]string
 	// onRefresh runs when a token request arrives, before the answer.
 	onRefresh func()
 	// onRepo runs when a repository lookup arrives, before the answer.
@@ -66,7 +69,10 @@ type grantGitHub struct {
 
 func newGrantGitHub(t *testing.T) *grantGitHub {
 	t.Helper()
-	g := &grantGitHub{logins: map[int64]string{}, access: map[string]int64{}, refresh: map[string]int64{}, denied: map[string]bool{}}
+	g := &grantGitHub{
+		logins: map[int64]string{}, access: map[string]int64{}, refresh: map[string]int64{},
+		denied: map[string]bool{}, renamed: map[string]string{},
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /login/oauth/access_token", g.token)
 	mux.HandleFunc("GET /user", g.user)
@@ -208,8 +214,20 @@ func (g *grantGitHub) repo(w http.ResponseWriter, r *http.Request) {
 	case g.denied[strings.ToLower(repo)]:
 		w.WriteHeader(http.StatusNotFound)
 	default:
-		grantJSON(w, map[string]any{"id": grantRepoID, "full_name": repo})
+		name := strings.ToLower(repo)
+		if renamed, ok := g.renamed[name]; ok {
+			name = renamed
+		}
+		grantJSON(w, map[string]any{"id": grantRepoID(name), "full_name": name})
 	}
+}
+
+// grantRepoID is the ID that the GitHub stub gives the repository with this
+// name, owner/name: one ID per name, whatever its case.
+func grantRepoID(repo string) int64 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(strings.ToLower(repo)))
+	return int64(h.Sum32()) + 1
 }
 
 // grantHarness serves the token endpoint of a server with a browser login,

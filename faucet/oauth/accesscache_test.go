@@ -88,7 +88,7 @@ func (h *grantHarness) storeChecks(userID int64, repos []string) {
 	now := h.clock.Now()
 	for i, repo := range repos {
 		require.NoError(h.t, h.store.StoreAccessCheck(context.Background(), oauth.AccessCheck{
-			ConnectionID: oauth.ConnectionID(oauth.ProviderGitHub, userID), Repo: repo, RepoID: grantRepoID,
+			ConnectionID: oauth.ConnectionID(oauth.ProviderGitHub, userID), Repo: repo, RepoID: grantRepoID(repo),
 			CheckedAt: now, LastUsedAt: now.Add(time.Duration(i) * time.Second),
 		}))
 	}
@@ -99,7 +99,7 @@ func (h *grantHarness) storeChecks(userID int64, repos []string) {
 func (h *grantHarness) storeCheck(userID int64, repo string, at time.Time) {
 	h.t.Helper()
 	require.NoError(h.t, h.store.StoreAccessCheck(context.Background(), oauth.AccessCheck{
-		ConnectionID: oauth.ConnectionID(oauth.ProviderGitHub, userID), Repo: repo, RepoID: grantRepoID,
+		ConnectionID: oauth.ConnectionID(oauth.ProviderGitHub, userID), Repo: repo, RepoID: grantRepoID(repo),
 		CheckedAt: at, LastUsedAt: at,
 	}))
 }
@@ -170,7 +170,7 @@ func TestAFreshAccessCheckAnswersWithoutGitHub(t *testing.T) {
 
 			got := h.repoID(access, p, "o/x")
 			require.NoError(t, got.err)
-			require.EqualValues(t, grantRepoID, got.id)
+			require.EqualValues(t, grantRepoID("o/x"), got.id)
 			require.Empty(t, got.asked, "the check of o/x answers")
 			require.Equal(t, []string{"o/x", "o/y"}, h.checkedRepos(1), "the use moved o/x first")
 			require.Empty(t, h.repoID(access, p, "O/X").asked, "GitHub ignores the case of a name, and so does the check")
@@ -280,7 +280,7 @@ func TestARenewalAlwaysAsksGitHub(t *testing.T) {
 	for range 2 {
 		got := h.repoIDFresh(access, p, "o/x")
 		require.NoError(t, got.err)
-		require.EqualValues(t, grantRepoID, got.id)
+		require.EqualValues(t, grantRepoID("o/x"), got.id)
 		require.Equal(t, []string{"o/x"}, got.asked, "a renewal asks GitHub")
 	}
 	require.Equal(t, []string{"o/x"}, h.checkedRepos(1))
@@ -426,6 +426,35 @@ func TestAnOlderPassThatLandsAfterADenialDoesNotAnswer(t *testing.T) {
 			got := h.repoID(access, p, "o/x")
 			require.NoError(t, got.err)
 			require.Equal(t, []string{"o/x"}, got.asked, "the older pass does not answer")
+		})
+	}
+}
+
+// A renamed repository that a user checks under its old and its new name
+// holds a check under each. A denial of the new name takes away the check
+// of the old one too, so the next check of the old name asks GitHub.
+func TestADenialTakesAwayTheChecksOfARenamedRepository(t *testing.T) {
+	t.Parallel()
+	for name, newStore := range usertokensStores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newGrantHarness(t, newStore(t))
+			p := h.principal(h.redeem(h.approve("login-1", 1)))
+			access := h.userAccess()
+			h.github.set(func(g *grantGitHub) { g.renamed["org/old"] = "org/new" })
+			require.NoError(t, h.repoID(access, p, "org/old").err)
+			h.clock.Advance(time.Minute)
+			require.NoError(t, h.repoID(access, p, "org/new").err)
+			require.NoError(t, h.repoID(access, p, "o/x").err)
+			require.Equal(t, []string{"o/x", "org/new", "org/old"}, h.checkedRepos(1))
+			h.clock.Advance(time.Minute)
+
+			h.github.set(func(g *grantGitHub) { g.denied["org/new"], g.denied["org/old"] = true, true })
+			require.ErrorIs(t, h.repoIDFresh(access, p, "org/new").err, faucet.ErrNoAccess)
+			require.Equal(t, []string{"o/x"}, h.checkedRepos(1), "the denial took both names away")
+			got := h.repoID(access, p, "org/old")
+			require.ErrorIs(t, got.err, faucet.ErrNoAccess)
+			require.Equal(t, []string{"org/old"}, got.asked, "the old name asks GitHub")
 		})
 	}
 }

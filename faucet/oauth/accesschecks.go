@@ -57,8 +57,11 @@ type AccessCheckStore interface {
 	// StoreAccessCheck stores c, a pass or a denial, in place of the
 	// connection's check of c.Repo. A stored check that started later stays
 	// as it is, pass or denial, and the last use becomes the later of the
-	// two. It returns ErrUnknownConnection when there is no such connection,
-	// and fails when c is not valid.
+	// two. A denial also deletes the connection's checks of the repository
+	// that the stored check of c.Repo held, under its other names, which a
+	// renamed repository has, when their lookup started at or before c's.
+	// It returns ErrUnknownConnection when there is no such connection, and
+	// fails when c is not valid.
 	StoreAccessCheck(ctx context.Context, c AccessCheck) error
 	// RecentAccessChecks returns up to limit passes of the connection whose
 	// last use came at or after usedSince, the most recently used first,
