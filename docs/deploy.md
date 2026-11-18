@@ -48,7 +48,7 @@ Service accounts and the browser login live at faucet's public URL. With `FAUCET
 
 ## Scheduled routes
 
-Each `/cron/*` route answers 200 with a JSON object, and the result type in the table documents each field. A failed `/cron/redeliver` run answers 500 with the same object, holding what the run did, and an `error` that names nothing; the log has the cause. A failed `/cron/deliver` or `/cron/purge` answers 500 with a line of text and no object. A failure of the raw event store fails neither: the route does its typed work, answers 200 and counts the failure in `raw_failures`, and the log has the cause. A route whose feature is off answers 503.
+Each `/cron/*` route answers 200 with a JSON object, and the result type in the table documents each field. A failed `/cron/redeliver` run answers 500 with the same object, holding what the run did, and an `error` that names nothing; the log has the cause. A failed `/cron/deliver` or `/cron/purge` answers 500 with a line of text and no object. When `/cron/deliver` can't read one subscription's events, it skips that subscription and still sends the others' webhooks before it answers 500. A read that takes more than 1 second is skipped the same way, but the run answers 200 with `incomplete` set, and the next run reads that subscription again. A failure of the raw event store fails neither: the route does its typed work, answers 200 and counts the failure in `raw_failures`, and the log has the cause. A route whose feature is off answers 503.
 
 <!-- BEGIN generated:cron-replies -->
 | Route | Reply fields | Documented on |

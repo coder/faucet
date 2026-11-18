@@ -336,16 +336,30 @@ var (
 	repoArgument  = map[string]any{"type": "string", "description": "The repository, written owner/name. Name one of repo, owner and all."}
 	ownerArgument = map[string]any{"type": "string", "description": "Every repository of this owner, a GitHub user or organization login. For service clients whose grants cover the owner."}
 	allArgument   = map[string]any{"type": "boolean", "const": true, "description": "Every repository that faucet receives events from. For service clients granted all."}
-	reposArgument = map[string]any{
-		"type": "array", "minItems": 1, "items": map[string]any{"type": "string"},
-		"description": "With owner or all, only the events of these repositories, each written owner/name.",
-	}
-	prArgument  = map[string]any{"type": "integer", "minimum": 1, "maximum": math.MaxInt32, "description": "Only events that mention this pull request number."}
-	shaArgument = map[string]any{"type": "string", "pattern": "^[0-9A-Fa-f]{40}$", "description": "Only events for this 40 character head commit SHA."}
+	reposArgument = listArgument(stringItem(), "With owner or all, only the events of these repositories, each written owner/name.")
+	prArgument    = map[string]any{"type": "integer", "minimum": 1, "maximum": math.MaxInt32, "description": "Only events that mention this pull request number."}
+	shaArgument   = map[string]any{"type": "string", "pattern": "^[0-9A-Fa-f]{40}$", "description": "Only events for this 40 character head commit SHA."}
 
 	prsProperty     = map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "Pull request numbers the event mentions."}
 	headSHAProperty = map[string]any{"type": "string", "description": "The head commit SHA. Absent when the event has none."}
 )
+
+// A field filter is matched once for each event that a read visits, so a
+// list argument costs the read its length times the events. maxListItems and
+// maxValueLength keep every list argument small.
+const (
+	maxListItems   = 32
+	maxValueLength = 255
+)
+
+// listArgument is the schema of a list argument of one or more items.
+func listArgument(items map[string]any, description string) map[string]any {
+	return map[string]any{"type": "array", "minItems": 1, "maxItems": maxListItems, "items": items, "description": description}
+}
+
+func stringItem() map[string]any {
+	return map[string]any{"type": "string", "maxLength": maxValueLength}
+}
 
 // argumentsSchema is the inputSchema of an event name: the target and the
 // filters of the name. It offers pr and sha unless the family's events name
@@ -360,20 +374,11 @@ func argumentsSchema(f *family, actions, filters []string) json.RawMessage {
 		properties["sha"] = shaArgument
 	}
 	if len(actions) > 0 {
-		properties["actions"] = map[string]any{
-			"type":        "array",
-			"minItems":    1,
-			"items":       map[string]any{"type": "string", "enum": actions},
-			"description": "Only events of these GitHub actions. Without it, events of every action.",
-		}
+		properties["actions"] = listArgument(map[string]any{"type": "string", "enum": actions},
+			"Only events of these GitHub actions. Without it, events of every action.")
 	}
 	for _, name := range filters {
-		properties[name] = map[string]any{
-			"type":        "array",
-			"minItems":    1,
-			"items":       map[string]any{"type": "string"},
-			"description": lookupFieldFilter(name).description,
-		}
+		properties[name] = listArgument(stringItem(), lookupFieldFilter(name).description)
 	}
 	return marshalRaw(map[string]any{"type": "object", "properties": properties, "additionalProperties": false})
 }

@@ -1,6 +1,7 @@
 package faucet
 
 import (
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -38,6 +39,10 @@ const (
 	// still have theirs.
 	maxScanBatches         = 5
 	maxScanTargetsPerBatch = 200
+	// scanTimeout bounds the read of one subscription's events. The reads of a
+	// run share the few seconds before the sends need the rest of its
+	// deadline, so a slow one must leave most of them to the others.
+	scanTimeout = time.Second
 	// maxEventBodyBytes is the largest body that faucet sends, the delivery
 	// profile of SEP-3415.
 	maxEventBodyBytes = 256 << 10
@@ -117,9 +122,16 @@ type webhookBody struct {
 // A call that dies between a claim and its result leaves the delivery to the
 // next call after the lease, and the attempt counts.
 //
+// A subscription whose events the call cannot read, because the Store fails
+// or the read takes longer than a second, is skipped for the rest of the
+// call, and the call goes on with the others and the sends. A read that ran
+// out of time is no failure: the result is Incomplete, and the next call reads
+// the subscription again.
+//
 // The error is the first failure of the Store. The result holds what happened
-// before it. A failure of the RawStore is no error of the call: it is logged
-// and counted in RawFailures, and the run goes on with the typed deliveries.
+// before it, and also what happened after it when the failure was a read. A
+// failure of the RawStore is no error of the call: it is logged and counted in
+// RawFailures, and the run goes on with the typed deliveries.
 // The method has no auth of its own. The host decides who may call it.
 func (s *Service) DeliverDue(ctx context.Context) (DeliverResult, error) {
 	if s.webhook == nil {
@@ -130,10 +142,10 @@ func (s *Service) DeliverDue(ctx context.Context) (DeliverResult, error) {
 		return run.result, run.unlessEnded(ctx, err)
 	}
 	if err := run.sweepExpired(ctx); err != nil {
-		return run.result, run.unlessEnded(ctx, err)
+		return run.result, cmp.Or(run.scanErr, run.unlessEnded(ctx, err))
 	}
 	run.sweepPreviousSecrets(ctx)
-	err := run.send(ctx)
+	err := cmp.Or(run.scanErr, run.send(ctx))
 	res := run.result
 	logger := s.logger.Debug
 	if res.Claimed > 0 || res.Enqueued > 0 || res.GaveUpTotal() > 0 {
@@ -161,6 +173,10 @@ type deliveryRun struct {
 	// rawDown is set by the first failure of the RawStore, and ends the raw
 	// part of the run.
 	rawDown atomic.Bool
+
+	// scanErr is the first failure of a subscription's read, which the run
+	// returns after the sends. Only enqueue sets it, before the sends start.
+	scanErr error
 }
 
 type endpointGate struct {
@@ -300,8 +316,11 @@ func (r *deliveryRun) unlessEnded(ctx context.Context, err error) error {
 // enqueue reads the events of the subscriptions that have some, in batches
 // that start with the ones furthest behind. It leaves the sends the time they
 // need: it starts no subscription with less than twice minTimeToStart left.
+// A subscription whose read failed stays the furthest behind, so later
+// batches pass over it.
 func (r *deliveryRun) enqueue(ctx context.Context) error {
 	s := r.svc
+	skipped := map[SubscriptionKeyHash]bool{}
 	for range maxScanBatches {
 		now := s.clock.Now()
 		targets, err := s.store.ScanTargets(ctx, now, MaxPendingDeliveries, maxScanTargetsPerBatch)
@@ -309,12 +328,15 @@ func (r *deliveryRun) enqueue(ctx context.Context) error {
 			return xerrors.Errorf("select subscriptions to scan: %w", err)
 		}
 		for _, target := range targets {
+			if skipped[target.KeyHash] {
+				continue
+			}
 			if ctx.Err() != nil || r.outOfTimeFor(ctx, 2*minTimeToStart) {
 				r.add(func(res *DeliverResult) { res.Incomplete = true })
 				return nil
 			}
-			if err := r.enqueueFor(ctx, now, target); err != nil {
-				return err
+			if !r.scan(ctx, now, target) {
+				skipped[target.KeyHash] = true
 			}
 		}
 		if len(targets) < maxScanTargetsPerBatch {
@@ -323,6 +345,30 @@ func (r *deliveryRun) enqueue(ctx context.Context) error {
 	}
 	r.add(func(res *DeliverResult) { res.Incomplete = true })
 	return nil
+}
+
+// scan runs enqueueFor within scanTimeout and reports whether it succeeded. A
+// read that the end of the run cut short leaves the run incomplete, as does
+// one that ran out of scanTimeout. Any other failure is kept as the run's
+// error.
+func (r *deliveryRun) scan(ctx context.Context, now time.Time, target ScanTarget) bool {
+	scanCtx, cancel := context.WithTimeout(ctx, scanTimeout)
+	defer cancel()
+	err := r.enqueueFor(scanCtx, now, target)
+	if err == nil {
+		return true
+	}
+	switch {
+	case ctx.Err() != nil && r.unlessEnded(ctx, err) == nil:
+		return false
+	case ctx.Err() == nil && scanCtx.Err() != nil:
+		r.add(func(res *DeliverResult) { res.Incomplete = true })
+	default:
+		r.scanErr = cmp.Or(r.scanErr, err)
+	}
+	r.svc.logger.Warn(ctx, "skipped a subscription whose events could not be read",
+		slog.F("subscription", target.KeyHash.ID()), slog.Error(err))
+	return false
 }
 
 func (r *deliveryRun) enqueueFor(ctx context.Context, now time.Time, target ScanTarget) error {

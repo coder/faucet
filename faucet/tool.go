@@ -103,8 +103,8 @@ type waitRequest struct {
 }
 
 // waitInputSchema is the schema that the SDK infers from waitInput, with all
-// held to true and repos to one repository at least, as the inputSchema of
-// every event name holds them.
+// held to true, repos to one repository at least, and every list to the
+// limits of a list argument, as the inputSchema of every event name holds them.
 func waitInputSchema() *jsonschema.Schema {
 	schema, err := jsonschema.For[waitInput](nil)
 	if err != nil {
@@ -112,6 +112,12 @@ func waitInputSchema() *jsonschema.Schema {
 	}
 	schema.Properties["all"].Const = jsonschema.Ptr[any](true)
 	schema.Properties["repos"].MinItems = jsonschema.Ptr(1)
+	for _, property := range schema.Properties {
+		if slices.Contains(property.Types, "array") || property.Type == "array" {
+			property.MaxItems = jsonschema.Ptr(maxListItems)
+			property.Items.MaxLength = jsonschema.Ptr(maxValueLength)
+		}
+	}
 	return schema
 }
 

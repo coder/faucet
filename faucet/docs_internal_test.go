@@ -37,6 +37,7 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"README.md", "long-polls (up to %d seconds)", []any{maxWaitSeconds}},
 		{"docs/deploy.md", "(a wait lasts up to %d seconds)", []any{maxWaitSeconds}},
 		{"docs/deploy.md", "which a live subscriber does within %d minutes", []any{minutes(maxSubscriptionTTL)}},
+		{"docs/deploy.md", "A read that takes more than %d second is skipped", []any{seconds(scanTimeout)}},
 		{"docs/security.md", "remembers a successful check for %d seconds per token", []any{seconds(accessCacheTTL)}},
 		{"docs/security.md", "a revocation can take up to %d seconds to reach", []any{seconds(accessCacheTTL)}},
 		{"docs/security.md", "can run for up to %d more seconds", []any{maxWaitSeconds}},

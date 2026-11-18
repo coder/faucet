@@ -20,7 +20,6 @@ const (
 	rawNamePrefix   = "github."
 	rawCursorPrefix = "r1."
 
-	maxFieldPaths        = 32
 	maxFieldPathSegments = 8
 	maxFieldPathBytes    = 128
 )
@@ -188,20 +187,10 @@ func init() {
 
 func rawArgumentsSchema() json.RawMessage {
 	properties := targetProperties()
-	properties["actions"] = map[string]any{
-		"type":        "array",
-		"minItems":    1,
-		"items":       map[string]any{"type": "string"},
-		"description": "Only deliveries whose action is one of these. Without it, every action, and events that have none.",
-	}
-	properties["fields"] = map[string]any{
-		"type":     "array",
-		"minItems": 1,
-		"maxItems": maxFieldPaths,
-		"items":    map[string]any{"type": "string"},
-		"description": fmt.Sprintf("Only these members of the payload, each a path of 1 to %d names of letters, digits, _ or - joined by dots and at most %d bytes long, such as commits.id, which keeps the id of each commit.",
-			maxFieldPathSegments, maxFieldPathBytes),
-	}
+	properties["actions"] = listArgument(stringItem(), "Only deliveries whose action is one of these. Without it, every action, and events that have none.")
+	properties["fields"] = listArgument(map[string]any{"type": "string", "maxLength": maxFieldPathBytes},
+		fmt.Sprintf("Only these members of the payload, each a path of 1 to %d names of letters, digits, _ or - joined by dots and at most %d bytes long, such as commits.id, which keeps the id of each commit.",
+			maxFieldPathSegments, maxFieldPathBytes))
 	return marshalRaw(map[string]any{"type": "object", "properties": properties, "additionalProperties": false})
 }
 
