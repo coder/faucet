@@ -23,6 +23,7 @@ var rawLeaseSubtests = []rawSubtest{
 	{"ReadRawLeasePassesOverDeletedClearedAndLostEvents", readRawLeasePassesOverDeletedClearedAndLostEvents},
 	{"ReadRawLeaseNextIsTheHeadWhenNothingIsUnread", readRawLeaseNextIsTheHeadWhenNothingIsUnread},
 	{"ReadRawLeaseCountsALostMarkOnceWhenItPassesIt", readRawLeaseCountsALostMarkOnceWhenItPassesIt},
+	{"ReadRawLeaseNeverReturnsALostEventThatAnotherLeaseHolds", readRawLeaseNeverReturnsALostEventThatAnotherLeaseHolds},
 	{"IngestRawKeepsOneLostMarkPerLeaseAtTheHighestID", ingestRawKeepsOneLostMarkPerLeaseAtTheHighestID},
 	{"RawLeasesOfOneKeyAreIndependent", rawLeasesOfOneKeyAreIndependent},
 	{"OpenRawLeaseEndsOnlyTheLeasePolledLongestAgoAtTheLimit", openRawLeaseEndsOnlyTheLeasePolledLongestAgoAtTheLimit},
@@ -431,4 +432,22 @@ func openRawLeaseEndsOnlyTheLeasePolledLongestAgoAtTheLimit(t *testing.T, s RawS
 	}
 	_, found = readAt(fourth, minute(8))
 	require.True(t, found)
+}
+
+func readRawLeaseNeverReturnsALostEventThatAnotherLeaseHolds(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	missed, served := r.open(rawSpec{}), r.open(rawSpec{principal: "bob"})
+	id := r.store(r.newDelivery(), func(interests []faucet.RawInterest) faucet.RawPlan {
+		return faucet.RawPlan{
+			Body:   rawBody,
+			Unread: []faucet.RawLeaseID{leaseInterest(t, interests, served).Lease},
+			Lost:   []faucet.RawLeaseID{leaseInterest(t, interests, missed).Lease},
+		}
+	})
+
+	page := r.read(r.query(missed, 0))
+	require.Empty(t, page.Events, "the lease that missed the event never reads it, though its body is stored")
+	require.Equal(t, 1, page.Skipped)
+	require.Equal(t, id, page.Next)
+	require.Equal(t, []int64{id}, rawIDs(r.read(r.query(served, 0)).Events), "the lease that the event was for reads it")
 }

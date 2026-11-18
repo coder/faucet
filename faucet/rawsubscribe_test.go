@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -310,4 +311,50 @@ func TestRenewalOfARawSubscriptionAfterRevokedAccessEndsItWithTheTerminatedEnvel
 	require.JSONEq(t, revokedEnvelope, string(requests[0].Body))
 	require.Empty(t, d.rows(), "the subscription is gone")
 	require.Equal(t, faucet.Terminations{Sent: 1}, d.svc.Terminations())
+}
+
+// cachingAuthorizer answers RepoID from what it saw last, as a cache does,
+// and asks inner on every RepoIDFresh.
+type cachingAuthorizer struct {
+	inner *fakeAuthorizer
+	mu    sync.Mutex
+	seen  map[string]int64
+}
+
+func (a *cachingAuthorizer) RepoID(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
+	a.mu.Lock()
+	id, ok := a.seen[repo]
+	a.mu.Unlock()
+	if ok {
+		return id, nil
+	}
+	return a.RepoIDFresh(ctx, p, repo)
+}
+
+func (a *cachingAuthorizer) RepoIDFresh(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
+	id, err := a.inner.RepoID(ctx, p, repo)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err == nil {
+		a.seen[repo] = id
+	} else {
+		delete(a.seen, repo)
+	}
+	return id, err
+}
+
+func TestSubscribeToARawNameAsksGitHubAndNotTheCache(t *testing.T) {
+	t.Parallel()
+
+	inner := &fakeAuthorizer{repos: map[string]int64{testRepo: repoID}}
+	h := newRawPollHarness(t, func(d *faucet.Deps) { d.Authorizer = &cachingAuthorizer{inner: inner, seen: map[string]int64{}} })
+	h.open()
+	inner.mu.Lock()
+	delete(inner.repos, testRepo)
+	inner.mu.Unlock()
+	h.open()
+
+	rpcErr := h.subscribeError(rawSubscribeTo("github.push", repoArgs(), callbackURL, newSecret(t, 32)))
+	require.EqualValues(t, codeForbidden, rpcErr.Code, "a cache that still holds the access does not make a subscription")
+	require.Empty(t, h.rows())
 }
