@@ -75,3 +75,6 @@ CREATE TABLE faucet_refresh_tokens (
   CONSTRAINT faucet_refresh_tokens_used_or_retired CHECK (used_at IS NULL OR retired_at IS NULL)
 );
 CREATE INDEX faucet_refresh_tokens_session_idx ON faucet_refresh_tokens (session_id);
+-- A session keeps every token it gave out, so the step of a rotation that
+-- retires the unused ones reads only those.
+CREATE INDEX faucet_refresh_tokens_unused_idx ON faucet_refresh_tokens (session_id) WHERE used_at IS NULL AND retired_at IS NULL;
