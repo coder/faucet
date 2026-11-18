@@ -78,7 +78,7 @@ var settings = []setting{
 	{"FAUCET_HOOK_ID", "for redelivery", "Numeric ID of the GitHub webhook to watch for failed deliveries."},
 	{"FAUCET_HOOK_ORG", "for an org hook", "The organization that owns the hook. Set this or `FAUCET_HOOK_REPO`, not both."},
 	{"FAUCET_HOOK_REPO", "for a repo hook", "The repository that owns the hook, as `owner/name`."},
-	{"FAUCET_PUBLIC_URL", "for service accounts", "Faucet's public URL, such as `https://faucet.example.com`, with no path or trailing slash. Turns on faucet's login server for service clients (see [docs/service-accounts.md](docs/service-accounts.md))."},
+	{"FAUCET_PUBLIC_URL", "for service accounts and the browser login", "Faucet's public URL, such as `https://faucet.example.com`, with no path or trailing slash. Turns on faucet's login server, which service clients use (see [docs/service-accounts.md](docs/service-accounts.md)) and which the browser login needs."},
 	{"FAUCET_GITHUB_APP_CLIENT_ID", "for the browser login", "The client ID of faucet's GitHub App. With the secret and the token key it turns on the browser login of coding agents (see [docs/browser-login.md](docs/browser-login.md)), and needs `FAUCET_PUBLIC_URL`."},
 	{"FAUCET_GITHUB_APP_CLIENT_SECRET", "for the browser login", "A client secret of faucet's GitHub App."},
 	{"FAUCET_TOKEN_KEY", "for the browser login", "The keys that seal the GitHub tokens of users at rest: one or more `<key_id>:<32 random bytes, base64>`, comma-separated. The first seals, every one opens (see [rotating the key](docs/browser-login.md#rotate-the-token-key))."},
