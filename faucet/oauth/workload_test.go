@@ -160,15 +160,23 @@ func TestAPastedKeySetHoldsAPublicKeyForSignatures(t *testing.T) {
 	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	require.NoError(t, err)
 	sub := map[string]string{"sub": "system:serviceaccount:ns:sa"}
+	public, err := jose.JSONWebKey{Key: &rsaKey.PublicKey, KeyID: "a", Use: "sig"}.MarshalJSON()
+	require.NoError(t, err)
+	b64 := base64.RawURLEncoding.EncodeToString
+	withPrimes := strings.TrimSuffix(string(public), "}") + `,"p":"` + b64(rsaKey.Primes[0].Bytes()) + `","q":"` + b64(rsaKey.Primes[1].Bytes()) + `"}`
+	x25519 := `{"kty":"OKP","crv":"X25519","kid":"b","x":"` + b64(bytes.Repeat([]byte{1}, 32)) + `","d":"` + b64(bytes.Repeat([]byte{2}, 32)) + `"}`
 	for name, c := range map[string]struct {
 		jwks json.RawMessage
 		want string
 	}{
-		"not JSON":        {json.RawMessage(`keys`), "a trust rule's JWKS must be a JSON object with a keys array"},
-		"a private key":   {trustKeySet(t, jose.JSONWebKey{Key: rsaKey, KeyID: "a"}), "a trust rule's JWKS must hold no private key"},
-		"a symmetric key": {trustKeySet(t, jose.JSONWebKey{Key: []byte("0123456789abcdef0123456789abcdef"), KeyID: "a"}), "must hold no private key"},
-		"no key":          {json.RawMessage(`{"keys":[]}`), "must hold an RSA key of 2048 bits or more, or a P-256 key, for signatures"},
-		"an unknown key":  {json.RawMessage(`{"keys":[{"kty":"XYZ","kid":"a"}]}`), "must hold an RSA key"},
+		"a private key that go-jose cannot read": {json.RawMessage(`{"keys":[` + string(public) + `,` + x25519 + `]}`), "must hold no private key"},
+		"an RSA key with its primes":             {json.RawMessage(`{"keys":[` + withPrimes + `]}`), "must hold no private key"},
+		"a key without a kid":                    {trustKeySet(t, jose.JSONWebKey{Key: &rsaKey.PublicKey, Use: "sig"}), "for signatures, named by a kid"},
+		"not JSON":                               {json.RawMessage(`keys`), "a trust rule's JWKS must be a JSON object with a keys array"},
+		"a private key":                          {trustKeySet(t, jose.JSONWebKey{Key: rsaKey, KeyID: "a"}), "a trust rule's JWKS must hold no private key"},
+		"a symmetric key":                        {trustKeySet(t, jose.JSONWebKey{Key: []byte("0123456789abcdef0123456789abcdef"), KeyID: "a"}), "must hold no private key"},
+		"no key":                                 {json.RawMessage(`{"keys":[]}`), "must hold an RSA key of 2048 bits or more, or a P-256 key, for signatures"},
+		"an unknown key":                         {json.RawMessage(`{"keys":[{"kty":"XYZ","kid":"a"}]}`), "must hold an RSA key"},
 		"a 1024-bit key": {
 			json.RawMessage(`{"keys":[{"kty":"RSA","kid":"a","e":"AQAB","n":"` + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xff}, 128)) + `"}]}`),
 			"must hold an RSA key",

@@ -172,10 +172,16 @@ func keyAlgorithm(k jose.JSONWebKey) jose.SignatureAlgorithm {
 	return ""
 }
 
+// secretKeyMembers are the members of a JWK that hold a private or a
+// symmetric key: the private parameters of RFC 7518 section 6, and priv,
+// which go-jose reads for an AKP key.
+var secretKeyMembers = []string{"d", "p", "q", "dp", "dq", "qi", "oth", "k", "priv"}
+
 // parseKeySet reads a JWK Set (RFC 7517 section 5) and keeps its public keys
-// for signatures with RS256 or ES256. It skips a key that it cannot read, as
-// section 5 says, and refuses a set that holds a private key or no key that
-// it keeps. Its errors complete the sentence "the key set ...".
+// that have a kid, for signatures with RS256 or ES256. It skips a key that it
+// cannot read, as section 5 says, and refuses a set in which a key has a
+// member of secretKeyMembers, read or not, or that holds no key that it
+// keeps. Its errors complete the sentence "the key set ...".
 func parseKeySet(body []byte) (jose.JSONWebKeySet, error) {
 	if len(body) > maxKeyDocumentBytes {
 		return jose.JSONWebKeySet{}, xerrors.Errorf("must be at most %d bytes", maxKeyDocumentBytes)
@@ -188,20 +194,26 @@ func parseKeySet(body []byte) (jose.JSONWebKeySet, error) {
 	}
 	var set jose.JSONWebKeySet
 	for _, entry := range raw.Keys {
+		var members map[string]json.RawMessage
+		if json.Unmarshal(entry, &members) != nil {
+			continue
+		}
+		for _, name := range secretKeyMembers {
+			if _, ok := members[name]; ok {
+				return jose.JSONWebKeySet{}, xerrors.New("must hold no private key")
+			}
+		}
 		var k jose.JSONWebKey
 		if err := k.UnmarshalJSON(entry); err != nil {
 			continue
 		}
-		if !k.IsPublic() {
-			return jose.JSONWebKeySet{}, xerrors.New("must hold no private key")
-		}
 		alg := keyAlgorithm(k)
-		if alg != "" && (k.Use == "" || k.Use == "sig") && (k.Algorithm == "" || k.Algorithm == string(alg)) {
+		if alg != "" && k.KeyID != "" && (k.Use == "" || k.Use == "sig") && (k.Algorithm == "" || k.Algorithm == string(alg)) {
 			set.Keys = append(set.Keys, k)
 		}
 	}
 	if len(set.Keys) == 0 {
-		return jose.JSONWebKeySet{}, xerrors.New("must hold an RSA key of 2048 bits or more, or a P-256 key, for signatures")
+		return jose.JSONWebKeySet{}, xerrors.New("must hold an RSA key of 2048 bits or more, or a P-256 key, for signatures, named by a kid")
 	}
 	return set, nil
 }
