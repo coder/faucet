@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -27,6 +28,13 @@ const workloadClockLeeway = time.Minute
 // whole seconds, and golang.org/x/oauth2 takes expires_in 0 for a token that
 // never expires.
 const minWorkloadTokenLifetime = time.Second
+
+// maxSubjectTokenLifetime is the longest that a subject token may live, from
+// the earlier of its iat and nbf to its exp. Faucet asks no platform whether
+// the workload of a token still exists, so this bounds how long a token
+// that outlives it logs in, such as one that kubectl create token --duration
+// made for a service account.
+const maxSubjectTokenLifetime = 24 * time.Hour
 
 // workloadAlgorithms are the signatures that faucet takes from an outside
 // issuer. Every other alg, none and the HMAC ones included, fails the parse.
@@ -124,6 +132,10 @@ func (c *workloadChecker) match(ctx context.Context, rule trustRule, jws *jose.J
 	if json.Unmarshal(payload, &registered) != nil || json.Unmarshal(payload, &claims) != nil {
 		return time.Time{}, refuseSigned("its claims must be a JSON object, with the registered claims of RFC 7519 in their types")
 	}
+	issued := registered.IssuedAt
+	if registered.NotBefore != nil && (issued == nil || registered.NotBefore.Time().Before(issued.Time())) {
+		issued = registered.NotBefore
+	}
 	switch {
 	case registered.Issuer != rule.Issuer:
 		return time.Time{}, refuseSigned("its iss must be the rule's issuer")
@@ -137,6 +149,10 @@ func (c *workloadChecker) match(ctx context.Context, rule trustRule, jws *jose.J
 		return time.Time{}, refuseSigned("its nbf is in the future")
 	case registered.IssuedAt != nil && registered.IssuedAt.Time().After(now.Add(workloadClockLeeway)):
 		return time.Time{}, refuseSigned("its iat is in the future")
+	case issued == nil:
+		return time.Time{}, refuseSigned("it must have an iat or an nbf")
+	case registered.Expiry.Time().Sub(issued.Time()) > maxSubjectTokenLifetime:
+		return time.Time{}, refuseSigned(fmt.Sprintf("it must expire at most %d hours after its iat and its nbf", int(maxSubjectTokenLifetime/time.Hour)))
 	}
 	for name, want := range rule.Claims {
 		if got, ok := claims[name].(string); !ok || got != want {

@@ -19,6 +19,7 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 	milliseconds := func(d time.Duration) int { return int(d / time.Millisecond) }
 	seconds := func(d time.Duration) int { return int(d / time.Second) }
 	minutes := func(d time.Duration) int { return int(d / time.Minute) }
+	hours := func(d time.Duration) int { return int(d / time.Hour) }
 	days := func(d time.Duration) int { return int(d / (24 * time.Hour)) }
 	require.Equal(t, 24*time.Hour, authRequestRetention, "the docs say \"a day\"")
 	require.Equal(t, 24*time.Hour, accessCheckRetention, "the docs say \"a day\"")
@@ -77,7 +78,8 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/browser-login.md", "Faucet keeps a denial only as a marker for %d minutes", []any{minutes(accessDenialRetention)}},
 		{"docs/browser-login.md", "After those %d minutes, every session that could take that pass", []any{minutes(accessDenialRetention)}},
 		{"docs/security.md", "Faucet keeps a denial only as a marker for %d minutes", []any{minutes(accessDenialRetention)}},
-		{"docs/service-accounts.md", "Its `exp` is at least a second away, and its `nbf` and `iat`, when it has them, are at most a minute ahead of faucet's clock.", nil},
+		{"docs/service-accounts.md", "Its `exp` is at least a second away. It has an `iat` or an `nbf`, each at most a minute ahead of faucet's clock, and it lives at most %d hours", []any{hours(maxSubjectTokenLifetime)}},
+		{"docs/security.md", "Faucet takes no token that lives more than %d hours, from its `iat` or `nbf` to its `exp`.", []any{hours(maxSubjectTokenLifetime)}},
 		{"docs/service-accounts.md", "Faucet's token lasts %d minutes, or until the platform's token expires", []any{minutes(accessTokenLifetime)}},
 		{"docs/service-accounts.md", "works until it expires, %d minutes at most", []any{minutes(accessTokenLifetime)}},
 		{"docs/service-accounts.md", "`Retry-After` gives the seconds until faucet fetches again, %d at most.", []any{seconds(keyFetchInterval)}},

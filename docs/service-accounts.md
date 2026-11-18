@@ -124,7 +124,7 @@ A token matches a rule when all of these hold:
 - It is a JWT in compact form, signed with RS256 or ES256, whose header names its key in `kid`.
 - Its signature verifies with the issuer's key of that `kid`. A discovery document must name the rule's issuer byte for byte.
 - Its `iss` is the rule's issuer, byte for byte, and its `aud` is faucet's public URL alone, such as `https://faucet.example.com`, as a string or an array of one. That is faucet's issuer, not the `/github/mcp` endpoint.
-- Its `exp` is at least a second away, and its `nbf` and `iat`, when it has them, are at most a minute ahead of faucet's clock.
+- Its `exp` is at least a second away. It has an `iat` or an `nbf`, each at most a minute ahead of faucet's clock, and it lives at most 24 hours, from the earlier of the two to its `exp`. Vercel and Kubernetes set both.
 - Each claim that the rule pins holds that value as a JSON string, byte for byte.
 
 Faucet tries the client's rules in the order they were added, and the first that matches wins.
