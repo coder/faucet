@@ -85,8 +85,9 @@ type LoginStore interface {
 	// as it is after. In the same step it retires at r.Now the session's
 	// other unused tokens that were issued at or before r.UsedAfter, which
 	// no client still holds. It deletes no token. When no live session
-	// holds such a token, or the session lacks a scope of r.Scopes, it
-	// returns ErrUnknownSession and changes nothing. It fails when r is not
+	// holds such a token, as when a rotation of another token at once
+	// retires it, or the session lacks a scope of r.Scopes, it returns
+	// ErrUnknownSession and changes nothing. It fails when r is not
 	// valid, or when a stored token has one of the next hashes.
 	RotateSession(ctx context.Context, r Rotation) (Session, error)
 	// EndSession ends the live session with this ID at now. A session that

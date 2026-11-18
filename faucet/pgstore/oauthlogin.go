@@ -211,7 +211,10 @@ func (s *Store) RotateSession(ctx context.Context, r oauth.Rotation) (_ oauth.Se
 		UsedAfter:       r.UsedAfter,
 	})
 	switch {
-	case xerrors.Is(err, sql.ErrNoRows):
+	case xerrors.Is(err, sql.ErrNoRows), isCheckViolation(err):
+		// A check fails when a rotation of another token of the session
+		// retired this one while this rotation waited for it: the token
+		// is retired, and the statement changed nothing.
 		return oauth.Session{}, oauth.ErrUnknownSession
 	case err != nil:
 		return oauth.Session{}, xerrors.Errorf("rotate session: %w", err)

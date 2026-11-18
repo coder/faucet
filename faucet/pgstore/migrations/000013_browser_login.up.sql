@@ -72,6 +72,6 @@ CREATE TABLE faucet_refresh_tokens (
   issued_at timestamptz NOT NULL,
   used_at timestamptz,
   retired_at timestamptz,
-  CHECK (used_at IS NULL OR retired_at IS NULL)
+  CONSTRAINT faucet_refresh_tokens_used_or_retired CHECK (used_at IS NULL OR retired_at IS NULL)
 );
 CREATE INDEX faucet_refresh_tokens_session_idx ON faucet_refresh_tokens (session_id);
