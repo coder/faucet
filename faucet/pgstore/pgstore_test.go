@@ -526,9 +526,13 @@ func TestOAuthStoreCallThatItsContextCutShortWrapsTheContextError(t *testing.T) 
 	tx, err := db.BeginTx(context.Background(), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = tx.Rollback() })
-	_, err = tx.Exec("LOCK TABLE faucet_access_tokens IN ACCESS EXCLUSIVE MODE")
-	require.NoError(t, err)
+	for _, table := range []string{"faucet_access_tokens", "faucet_service_clients"} {
+		_, err = tx.Exec("LOCK TABLE " + table + " IN ACCESS EXCLUSIVE MODE") //nolint:gosec // The names are constants.
+		require.NoError(t, err)
+	}
 
+	client, _, err := oauth.NewClient("ci-bot", "https://faucet.example.com/github/mcp", []faucet.Scope{faucet.ScopeEventsRead}, []string{"repo:coder/faucet"}, time.Now())
+	require.NoError(t, err)
 	token := oauth.AccessToken{
 		Hash: oauth.HashToken("fct_locked"), ExpiresAt: time.Now().Add(time.Minute), Scopes: []faucet.Scope{faucet.ScopeEventsRead},
 		Resource: "https://faucet.example.com/github/mcp", SubjectKind: oauth.SubjectService, Subject: "ci-bot",
@@ -537,6 +541,57 @@ func TestOAuthStoreCallThatItsContextCutShortWrapsTheContextError(t *testing.T) 
 		"InsertAccessToken": func(ctx context.Context) error { return store.InsertAccessToken(ctx, token) },
 		"AccessToken": func(ctx context.Context) error {
 			_, err := store.AccessToken(ctx, token.Hash)
+			return err
+		},
+		"DeleteExpiredAccessTokens": func(ctx context.Context) error {
+			_, err := store.DeleteExpiredAccessTokens(ctx, time.Now())
+			return err
+		},
+		"InsertClient": func(ctx context.Context) error { return store.InsertClient(ctx, client) },
+		"Client": func(ctx context.Context) error {
+			_, err := store.Client(ctx, client.ID)
+			return err
+		},
+		"Clients": func(ctx context.Context) error {
+			_, err := store.Clients(ctx)
+			return err
+		},
+		"DisableClient": func(ctx context.Context) error {
+			_, err := store.DisableClient(ctx, client.ID, time.Now())
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			require.ErrorIs(t, call(ctx), context.DeadlineExceeded, "the statement waits on the lock until the context ends it")
+		})
+	}
+}
+
+func TestRepositoryCallThatItsContextCutShortWrapsTheContextError(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	tx, err := db.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	for _, table := range []string{"faucet_repos", "faucet_subscriptions"} {
+		_, err = tx.Exec("LOCK TABLE " + table + " IN ACCESS EXCLUSIVE MODE") //nolint:gosec // The names are constants.
+		require.NoError(t, err)
+	}
+
+	repo := faucet.Repository{ID: 1, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/faucet"}
+	for name, call := range map[string]func(context.Context) error{
+		"RecordRepository": func(ctx context.Context) error { return store.RecordRepository(ctx, repo, time.Now()) },
+		"RenameRepository": func(ctx context.Context) error { return store.RenameRepository(ctx, repo, "coder/tap", time.Now()) },
+		"RepositoryByName": func(ctx context.Context) error {
+			_, err := store.RepositoryByName(ctx, repo.FullName)
+			return err
+		},
+		"DeleteSubscriptionsOf": func(ctx context.Context) error {
+			_, err := store.DeleteSubscriptionsOf(ctx, "svc:ci-bot")
 			return err
 		},
 	} {
