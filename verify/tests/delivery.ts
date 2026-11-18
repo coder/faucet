@@ -64,11 +64,12 @@ export interface DeliverReply {
   superseded: number;
   previous_secrets_cleared: number;
   incomplete: boolean;
+  raw_failures: number;
 }
 
 // counts is the reply of a run that did what over says and nothing else.
 export function counts(over: Partial<DeliverReply> = {}): DeliverReply {
-  return { enqueued: 0, gaps: 0, gaps_sent: 0, gaps_failed: 0, claimed: 0, sent: 0, delivered: 0, retried: 0, gave_up: {}, superseded: 0, previous_secrets_cleared: 0, incomplete: false, ...over };
+  return { enqueued: 0, gaps: 0, gaps_sent: 0, gaps_failed: 0, claimed: 0, sent: 0, delivered: 0, retried: 0, gave_up: {}, superseded: 0, previous_secrets_cleared: 0, incomplete: false, raw_failures: 0, ...over };
 }
 
 export function parseReply(reply: Reply): DeliverReply {

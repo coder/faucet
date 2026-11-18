@@ -223,6 +223,12 @@ func (s *Store) Purge(ctx context.Context, before time.Time) (_ faucet.PurgeResu
 // against the limit.
 func (s *Store) UpsertSubscription(ctx context.Context, sub faucet.Subscription, now time.Time, maxLive int) (_ faucet.Subscription, err error) {
 	defer func() { err = endedBy(ctx, err) }()
+	return s.upsertSubscriptionChecked(ctx, sub, now, maxLive, nil)
+}
+
+// upsertSubscriptionChecked runs check, when it is not nil, in the transaction of
+// the upsert, after the principal's limit passed and before the write.
+func (s *Store) upsertSubscriptionChecked(ctx context.Context, sub faucet.Subscription, now time.Time, maxLive int, check func(*database.Queries) error) (faucet.Subscription, error) {
 	if maxLive <= 0 {
 		return faucet.Subscription{}, xerrors.Errorf("max live subscriptions must be positive, got %d", maxLive)
 	}
@@ -249,6 +255,11 @@ func (s *Store) UpsertSubscription(ctx context.Context, sub faucet.Subscription,
 	}
 	if others >= int64(maxLive) {
 		return faucet.Subscription{}, faucet.ErrSubscriptionLimit
+	}
+	if check != nil {
+		if err := check(q); err != nil {
+			return faucet.Subscription{}, err
+		}
 	}
 	row, err := q.UpsertSubscription(ctx, database.UpsertSubscriptionParams{
 		KeyHash:             sub.KeyHash[:],

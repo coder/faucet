@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"net/url"
 	"os"
 	"strings"
@@ -43,6 +44,15 @@ func TestRedeliveryStore(t *testing.T) {
 
 	storetest.RunRedelivery(t, func(t *testing.T) storetest.RedeliveryStore {
 		return newGapRecordingStore(newDatabase(t, adminURL))
+	})
+}
+
+func TestRawStore(t *testing.T) {
+	t.Parallel()
+	adminURL := testDatabaseURL(t)
+
+	storetest.RunRaw(t, func(t *testing.T) storetest.RawStore {
+		return pgstore.New(newDatabase(t, adminURL))
 	})
 }
 
@@ -142,6 +152,15 @@ func TestRedeliveryStoreOverBinaryParameters(t *testing.T) {
 	})
 }
 
+func TestRawStoreOverBinaryParameters(t *testing.T) {
+	t.Parallel()
+	adminURL := withBinaryParameters(t, testDatabaseURL(t))
+
+	storetest.RunRaw(t, func(t *testing.T) storetest.RawStore {
+		return pgstore.New(newDatabase(t, adminURL))
+	})
+}
+
 // CursorAt(t) is the highest ID received before t, which is only a prefix of
 // the log if a later ID never carries an earlier time. A time taken when the
 // transaction starts breaks that for an insert that then waits for the lock.
@@ -198,6 +217,83 @@ func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {
 	var faucetVersion int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM `+pq.QuoteIdentifier(pgstore.MigrationsTable)).Scan(&faucetVersion))
 	require.EqualValues(t, 13, faucetVersion)
+}
+
+// The raw events migration adds tables of its own and one index. A down
+// leaves the event log as a build from before it reads it, with the raw
+// subscriptions as rows that such a build never scans, and an up starts raw
+// events empty.
+func TestTheRawEventsMigrationGoesDownAndUpAroundTheEventLog(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	ctx := context.Background()
+	migrate := func(direction string) {
+		t.Helper()
+		statements, err := os.ReadFile("migrations/000012_raw_events." + direction + ".sql")
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, string(statements))
+		require.NoError(t, err)
+	}
+	exists := func(relation string) (found bool) {
+		t.Helper()
+		require.NoError(t, db.QueryRowContext(ctx, `SELECT to_regclass($1::text) IS NOT NULL`, relation).Scan(&found))
+		return found
+	}
+	relations := []string{
+		"faucet_raw_events", "faucet_raw_deliveries", "faucet_raw_gaps", "faucet_raw_leases", "faucet_raw_unread", "faucet_subscriptions_raw",
+	}
+	now := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	arguments := json.RawMessage(`{"repo":"octo/repo"}`)
+	const callbackURL = "https://hooks.example.test/raw"
+	subscription := faucet.Subscription{
+		KeyHash:   faucet.NewSubscriptionKeyHash("octocat", callbackURL, "github.push", arguments),
+		Principal: "octocat", CallbackURL: callbackURL, EventType: "github.push", EventTypes: []string{"github.push"},
+		Arguments: arguments, RepoID: 42, SecretEnc: []byte("sealed"), Cursor: math.MaxInt64, ExpiresAt: now.Add(time.Hour),
+	}
+	push := faucet.RawDelivery{DeliveryID: "push-1", Event: "push", RepoID: 42}
+	serve := func(interests []faucet.RawInterest) faucet.RawPlan {
+		plan := faucet.RawPlan{Body: []byte(`{"ref":"refs/heads/main"}`)}
+		for _, in := range interests {
+			plan.Deliveries = append(plan.Deliveries, faucet.RawOutbox{Key: in.Subscription, Incarnation: in.Incarnation})
+		}
+		return plan
+	}
+
+	row, err := store.UpsertSubscription(ctx, subscription, now, 100)
+	require.NoError(t, err)
+	stored, err := store.IngestRaw(ctx, push, now, serve)
+	require.NoError(t, err)
+	require.Equal(t, faucet.RawIngest{Matched: true, ID: 1}, stored)
+
+	migrate("down")
+	for _, relation := range relations {
+		require.False(t, exists(relation), "%s is gone", relation)
+	}
+	_, inserted, err := store.InsertEvent(ctx, faucet.Event{Source: "github", DeliveryID: "run-1", Type: "ci.run_completed", RepoID: 42, Data: json.RawMessage(`{}`)})
+	require.NoError(t, err)
+	require.True(t, inserted, "the event log stores as before")
+	targets, err := store.ScanTargets(ctx, now, 100, 100)
+	require.NoError(t, err)
+	require.Empty(t, targets, "the raw subscription is a row that the event log never scans")
+	renewed, err := store.UpsertSubscription(ctx, subscription, now.Add(time.Minute), 100)
+	require.NoError(t, err)
+	require.True(t, row.CreatedAt.Equal(renewed.CreatedAt), "and its subscriber can still renew it")
+
+	migrate("up")
+	for _, relation := range relations {
+		require.True(t, exists(relation), "%s is back", relation)
+	}
+	head, err := store.RawHead(ctx)
+	require.NoError(t, err)
+	require.Zero(t, head, "raw events start empty")
+	again, err := store.IngestRaw(ctx, push, now.Add(time.Minute), serve)
+	require.NoError(t, err)
+	require.Equal(t, faucet.RawIngest{Matched: true, ID: 1}, again, "the delivery is no duplicate, and the subscription that outlived the down gets it")
+	claim, ok, err := store.ClaimRawDelivery(ctx, now.Add(time.Minute), time.Minute, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, row.KeyHash, claim.Ref.Key)
 }
 
 func TestTheClearMigrationMovesTheOldTopToTheClearAndBack(t *testing.T) {
@@ -313,6 +409,10 @@ func createDatabase(t *testing.T, adminURL string) *sql.DB {
 	require.NoError(t, err)
 	admin, err := sql.Open("postgres", adminURL)
 	require.NoError(t, err)
+	// The handle creates the database and drops it, and keeps no connection
+	// in between. One idle connection for each test that runs can pass the
+	// server's 100 connections.
+	admin.SetMaxIdleConns(0)
 	t.Cleanup(func() { _ = admin.Close() })
 
 	_, err = admin.ExecContext(ctx, "CREATE DATABASE "+pq.QuoteIdentifier(name))

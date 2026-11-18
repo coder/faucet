@@ -31,7 +31,8 @@ const (
 )
 
 // FailedAttempt is one attempt of GitHub to deliver an event that faucet
-// stores, which faucet answered with anything but 2xx.
+// stores, or that a live interest wants, which faucet answered with anything
+// but 2xx.
 type FailedAttempt struct {
 	GUID        string
 	AttemptID   int64
@@ -119,10 +120,12 @@ type RangeAdvance struct {
 type ScanStep struct {
 	Epoch int64
 	Now   time.Time
-	// Failed are the page's failed attempts of events that faucet stores.
+	// Failed are the page's failed attempts of events that faucet stores, or
+	// that a live interest wants.
 	Failed []FailedAttempt
-	// Succeeded are the GUIDs of the page's attempts of such events that
-	// faucet answered with 2xx.
+	// Succeeded are the GUIDs of every attempt on the page that faucet
+	// answered with 2xx, whatever its event. A pending delivery among them
+	// recovers, and any other GUID changes nothing.
 	Succeeded []string
 	// Top raises the stored top to this time. A zero time, or one that is not
 	// later than the stored top, leaves it.

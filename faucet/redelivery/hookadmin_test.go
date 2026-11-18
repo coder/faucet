@@ -106,7 +106,7 @@ func TestGitHubHookAdminListsDeliveriesNewestFirstWithACursor(t *testing.T) {
 	page, err := admin.ListDeliveries(context.Background(), "")
 	require.NoError(t, err)
 	require.Equal(t, []redelivery.HookDelivery{
-		{ID: 31, GUID: "guid-b", DeliveredAt: time.Date(2026, 11, 13, 10, 5, 0, 0, time.UTC), StatusCode: 500, Event: "workflow_run", Action: "completed"},
+		{ID: 31, GUID: "guid-b", DeliveredAt: time.Date(2026, 11, 13, 10, 5, 0, 0, time.UTC), StatusCode: 500, Event: "workflow_run", Action: "completed", RepositoryID: 1},
 		{ID: 30, GUID: "guid-a", DeliveredAt: time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC), StatusCode: 200, Event: "ping"},
 	}, page.Deliveries, "a null action reads as empty")
 	require.Equal(t, "v1_29", page.Next, "the next page is the rel=next cursor, not the rel=prev one")
@@ -124,6 +124,25 @@ func TestGitHubHookAdminListsDeliveriesNewestFirstWithACursor(t *testing.T) {
 	}
 	require.False(t, calls[0].query.Has("cursor"), "the first page has no cursor")
 	require.Equal(t, "v1_29", calls[1].query.Get("cursor"))
+}
+
+func TestGitHubHookAdminReadsTheRepositoryOfEachDelivery(t *testing.T) {
+	t.Parallel()
+
+	stub := newHookStub(t, jsonReply(http.StatusOK, `[
+  {"id": 3, "guid": "guid-c", "delivered_at": "2026-11-13T10:10:00Z", "status_code": 500, "event": "push", "action": null, "repository_id": 4294967296},
+  {"id": 2, "guid": "guid-b", "delivered_at": "2026-11-13T10:05:00Z", "status_code": 500, "event": "push", "action": null, "repository_id": null},
+  {"id": 1, "guid": "guid-a", "delivered_at": "2026-11-13T10:00:00Z", "status_code": 500, "event": "push", "action": null}
+]`))
+	admin := newHookAdmin(t, stub, orgHook)
+
+	page, err := admin.ListDeliveries(context.Background(), "")
+	require.NoError(t, err)
+	var repos []int64
+	for _, d := range page.Deliveries {
+		repos = append(repos, d.RepositoryID)
+	}
+	require.Equal(t, []int64{4294967296, 0, 0}, repos, "an ID above 32 bits is read whole, and a null or missing repository_id reads as 0")
 }
 
 func TestGitHubHookAdminTakesGitHubsClockFromTheDateHeader(t *testing.T) {

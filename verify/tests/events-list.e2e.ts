@@ -1,9 +1,13 @@
+import { RAW_EVENTS } from '../env.mjs';
 import { describe, expect, newRepoId, test } from './support';
 import { newMarker, subscribe, subscribeParams, unsubscribe } from './subscriptions';
 
 const EVENTS_EXTENSION = 'io.modelcontextprotocol/events';
 const families = ['ci.runs', 'ci.jobs', 'ci.checks', 'ci.suites', 'ci.statuses', 'pr.activity', 'pr.reviews', 'pr.comments', 'pr.review_comments', 'pr.review_threads'];
 const eventNames = [...families, 'ci.check_completed', 'ci.run_completed', 'pr.closed', 'pr.comment_created', 'pr.review_submitted'];
+const RAW_PREFIX = 'github.';
+// rawNames are the raw names that follow the typed ones: those of FAUCET_RAW_EVENTS, in rising order.
+const rawNames = RAW_EVENTS.split(',').map((e) => RAW_PREFIX + e).sort();
 const noHeadCommit = ['pr.comments', 'pr.comment_created'];
 const noPullRequest = ['ci.jobs', 'ci.statuses'];
 const fieldFilters: Record<string, string[]> = {
@@ -38,6 +42,19 @@ interface ListResult {
   events: EventDescriptor[];
 }
 
+function typedOf(events: EventDescriptor[]): EventDescriptor[] {
+  return events.filter((e) => !e.name.startsWith(RAW_PREFIX));
+}
+
+// expectRawNames checks the names after the typed ones: every one is github.<event>, in rising order and once.
+function expectRawNames(events: EventDescriptor[]): EventDescriptor[] {
+  const raw = events.slice(eventNames.length);
+  const names = raw.map((e) => e.name);
+  expect(events.map((e) => e.name).slice(0, eventNames.length)).toEqual(eventNames);
+  expect(names).toEqual(rawNames);
+  return raw;
+}
+
 describe('events list', () => {
   test('server/discover advertises the events extension', async ({ faucet }) => {
     const reply = await faucet.mcp<{ capabilities: { extensions?: Record<string, unknown> } }>('server/discover');
@@ -49,7 +66,7 @@ describe('events list', () => {
 
   test('events/list returns every family and then the five exact types, each with poll and webhook delivery and two schemas', async ({ faucet }) => {
     const reply = await faucet.mcp<ListResult>('events/list');
-    const events = reply.result?.events ?? [];
+    const events = typedOf(reply.result?.events ?? []);
 
     expect(reply.status).toBe(200);
     expect(reply.error).toBeNull();
@@ -84,6 +101,31 @@ describe('events list', () => {
     }
   });
 
+  test('events/list returns the raw GitHub event names after the typed ones, each with repo, actions and fields', async ({ faucet }) => {
+    const reply = await faucet.mcp<ListResult>('events/list');
+
+    expect(reply.status).toBe(200);
+    for (const event of expectRawNames(reply.result?.events ?? [])) {
+      expect(event.description, `${event.name} description`).not.toBe('');
+      expect(event.delivery, `${event.name} delivery`).toEqual(['poll', 'webhook']);
+      expect(event.inputSchema.type, `${event.name} inputSchema`).toBe('object');
+      expect(Object.keys(event.inputSchema.properties).sort(), `${event.name} inputSchema properties`).toEqual(['actions', 'fields', 'repo']);
+      expect(event.inputSchema.required, `${event.name} inputSchema required`).toEqual(['repo']);
+      expect(event.payloadSchema.type, `${event.name} payloadSchema`).toBe('object');
+    }
+  });
+
+  test('without FAUCET_RAW_EVENTS events/list offers no raw name, and a raw name is unknown', async ({ faucet }) => {
+    await faucet.withFaucet({ FAUCET_RAW_EVENTS: '' }, async (off) => {
+      const list = await off.mcp<ListResult>('events/list');
+      const poll = await off.mcp('events/poll', { name: 'github.push', arguments: { repo: 'verify/raw' } });
+
+      expect(list.result?.events.map((e) => e.name)).toEqual(eventNames);
+      expect(poll.error?.code, poll.body).toBe(-32023);
+      expect(poll.error?.message).toContain('unknown event type "github.push"');
+    });
+  });
+
   test('with webhook mode off events/list offers poll only, and subscribe and unsubscribe are -32026 and write nothing', async ({ faucet }) => {
     await faucet.withFaucet({}, async (off) => {
       const params = subscribeParams(newRepoId(), newMarker());
@@ -93,7 +135,7 @@ describe('events list', () => {
       const unsubscribed = await unsubscribe(off, params);
       const invalid = await subscribe(off, { ...params, delivery: null });
 
-      expect(list.result?.events.map((e) => e.name)).toEqual(eventNames);
+      expectRawNames(list.result?.events ?? []);
       for (const event of list.result?.events ?? []) expect(event.delivery, `${event.name} delivery`).toEqual(['poll']);
       for (const reply of [subscribed, unsubscribed, invalid]) {
         expect(reply.status).toBe(200);
@@ -110,7 +152,7 @@ describe('events list', () => {
 
     for (const reply of [without, stray]) {
       expect(reply.status).toBe(200);
-      expect(reply.result?.events).toHaveLength(eventNames.length);
+      expect(reply.result?.events).toHaveLength(eventNames.length + rawNames.length);
     }
   });
 

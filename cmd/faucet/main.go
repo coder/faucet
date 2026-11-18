@@ -56,6 +56,9 @@ const (
 	// envPublicURL is faucet's public URL. Set, it turns on faucet's own
 	// login server and the discovery documents that lead clients to it.
 	envPublicURL = "FAUCET_PUBLIC_URL"
+	// envRawEvents lists the GitHub events, comma-separated, that faucet
+	// offers raw as github.<event>. Unset offers none.
+	envRawEvents = "FAUCET_RAW_EVENTS"
 
 	defaultRetentionDays = 30
 	maxRetentionDays     = 3650
@@ -100,6 +103,8 @@ type config struct {
 	publicURL *url.URL
 	// browserLogin is nil when the browser login is off.
 	browserLogin *oauth.BrowserLogin
+	// rawEvents are the GitHub events offered raw. Empty offers none.
+	rawEvents []string
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -148,6 +153,16 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	if err := loadBrowserLoginConfig(getenv, &cfg); err != nil {
 		return config{}, err
+	}
+	if raw := getenv(envRawEvents); raw != "" {
+		events := strings.Split(raw, ",")
+		for i := range events {
+			events[i] = strings.TrimSpace(events[i])
+		}
+		if err := faucet.CheckRawEvents(events); err != nil {
+			return config{}, xerrors.Errorf("%s: %w", envRawEvents, err)
+		}
+		cfg.rawEvents = events
 	}
 	return cfg, nil
 }
@@ -261,28 +276,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	deps := faucet.Deps{
-		Store:         store,
-		Secret:        []byte(cfg.secret),
-		Logger:        logger,
-		Authorizer:    authorizer,
-		PrincipalFrom: principalFrom,
-		Clock:         clock,
-		Webhook:       cfg.webhook,
-		// The grants of services name repositories, which the login server
-		// finds by the deliveries that named them.
-		RecordRepositories: cfg.publicURL != nil,
-	}
-	svc, err := faucet.New(deps)
+	svc, redeliverer, err := newServices(cfg, store, authorizer, clock, logger)
 	if err != nil {
-		return xerrors.Errorf("create service: %w", err)
-	}
-	var redeliverer *redelivery.Runner
-	if cfg.hookAdmin != nil {
-		redeliverer, err = redelivery.New(redelivery.Deps{Store: store, Hooks: cfg.hookAdmin, Clock: clock, Logger: logger})
-		if err != nil {
-			return xerrors.Errorf("create service: redelivery: %w", err)
-		}
+		return err
 	}
 	if err := migrateSchema(ctx, cfg, db); err != nil {
 		return err
@@ -373,6 +369,38 @@ func (a kindAuthorizer) RepoID(ctx context.Context, p faucet.Principal, repo str
 
 func (a kindAuthorizer) RepoIDFresh(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
 	return a.of(p).RepoIDFresh(ctx, p, repo)
+}
+
+// newServices builds the event service and, when a webhook to redeliver is
+// configured, the redelivery runner. Both use one store, which also holds
+// the raw events, and the runner asks the service which failed deliveries
+// a live raw interest wants.
+func newServices(cfg config, store *pgstore.Store, authorizer faucet.Authorizer, clock quartz.Clock, logger slog.Logger) (*faucet.Service, *redelivery.Runner, error) {
+	svc, err := faucet.New(faucet.Deps{
+		Store:         store,
+		RawStore:      store,
+		RawEvents:     cfg.rawEvents,
+		Secret:        []byte(cfg.secret),
+		Logger:        logger,
+		Authorizer:    authorizer,
+		PrincipalFrom: principalFrom,
+		Clock:         clock,
+		Webhook:       cfg.webhook,
+		// The grants of services name repositories, which the login server
+		// finds by the deliveries that named them.
+		RecordRepositories: cfg.publicURL != nil,
+	})
+	if err != nil {
+		return nil, nil, xerrors.Errorf("create service: %w", err)
+	}
+	if cfg.hookAdmin == nil {
+		return svc, nil, nil
+	}
+	redeliverer, err := redelivery.New(redelivery.Deps{Store: store, Hooks: cfg.hookAdmin, Clock: clock, Logger: logger, Wants: svc.RawWants})
+	if err != nil {
+		return nil, nil, xerrors.Errorf("create service: redelivery: %w", err)
+	}
+	return svc, redeliverer, nil
 }
 
 // migrateSchema runs prepareSchema with a connection to cfg.migrateURL, which

@@ -466,6 +466,7 @@ func TestCronDeliverReportsWhatTheRunDid(t *testing.T) {
 	require.Equal(t, map[string]any{
 		"enqueued": 0.0, "gaps": 0.0, "gaps_sent": 0.0, "gaps_failed": 0.0, "claimed": 1.0, "sent": 0.0, "delivered": 0.0, "retried": 0.0,
 		"gave_up": map[string]any{"event_purged": 1.0}, "superseded": 0.0, "previous_secrets_cleared": 2.0, "incomplete": false,
+		"raw_failures": 0.0,
 	}, got, "the reply holds counts and reasons, nothing else")
 	srv.requireNoSecrets(t, body)
 }

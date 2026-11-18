@@ -7,6 +7,7 @@ import { createServer } from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { test as base } from '@e2e-dev/web';
+import { RAW_EVENTS } from '../env.mjs';
 import { stateFile } from '../runstate.mjs';
 
 export { describe } from '@e2e-dev/web';
@@ -344,7 +345,7 @@ export class Faucet {
   }
 
   // withFaucet starts one more faucet on its own database, runs fn against it and stops it. The new faucet has a random
-  // CRON_SECRET and webhook mode off. env adds the rest. fn gets the faucet and a function that returns its
+  // CRON_SECRET, webhook mode off and the raw events of RAW_EVENTS. env adds the rest, and FAUCET_RAW_EVENTS: '' offers none. fn gets the faucet and a function that returns its
   // output so far. opts.e2eBuild runs the binary that was built with -tags faucet_e2e, whose callback client reaches loopback
   // over http. opts.publicUrl sets FAUCET_PUBLIC_URL to the new faucet's own URL, which turns on its login server.
   // opts.browserLogin also turns on its browser login, with the stub as GitHub and its GitHub App, and a random token key. It
@@ -372,6 +373,7 @@ export class Faucet {
         PORT: String(port),
         FAUCET_GITHUB_API_URL: cron.stubUrl,
         CRON_SECRET: cronSecret,
+        FAUCET_RAW_EVENTS: RAW_EVENTS,
         ...(opts.publicUrl === true || login ? { FAUCET_PUBLIC_URL: `http://127.0.0.1:${port}` } : {}),
         ...(tokenKey !== null
           ? {

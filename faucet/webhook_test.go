@@ -48,6 +48,13 @@ type fakeStore struct {
 	repoWrites    int
 	// repoErr fails UpsertRepository and RepositoryByName.
 	repoErr error
+
+	rawEvents     []faucet.RawEvent
+	rawLastID     int64
+	rawReceivedAt time.Time
+	rawOutbox     map[fakeRawOutboxKey]*fakeRawOutbox
+	rawGaps       map[fakeRawGapKey]*fakeGap
+	rawLeases     map[faucet.RawLeaseID]*fakeRawLease
 }
 
 func (s *fakeStore) InsertEvent(_ context.Context, ev faucet.Event) (faucet.Event, bool, error) {

@@ -119,8 +119,7 @@ func (wh *webhookState) post(ctx context.Context, callbackURL, subscriptionID st
 // failure is logged and counted. The send does not follow the request's
 // cancellation, because the row is already gone and the envelope is the
 // subscription's only notice.
-func (s *Service) endRevokedSubscription(ctx context.Context, logger slog.Logger, wh *webhookState, principal Principal, req subscribeRequest) {
-	key := NewSubscriptionKeyHash(principal.Login, req.callbackURL, req.entry.name, req.canonical)
+func (s *Service) endRevokedSubscription(ctx context.Context, logger slog.Logger, wh *webhookState, principal Principal, key SubscriptionKeyHash) {
 	row, found, err := s.store.DeleteLiveSubscription(ctx, principal.Login, key, s.clock.Now())
 	if err != nil {
 		logger.Error(ctx, "end a subscription whose access was revoked", slog.Error(err))

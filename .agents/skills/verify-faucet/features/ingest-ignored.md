@@ -4,7 +4,7 @@ faucet acknowledges every delivery it has no rule for with 202 and stores nothin
 
 ## Sub-features
 
-- An event name with no rule at all (`push`) is 202.
+- An event name with no typed rule (`push`) is 202 while no live subscription or poll lease wants it. With one it is stored, see [Raw events](raw-events.md).
 - A handled event name with an unhandled action (`pull_request` with an action GitHub does not document, `check_run` `rerequested`, `check_suite` `requested`) is 202. Repository and organization webhooks never receive those two CI actions, so faucet has no rule for them.
 - A comment on a plain issue, as opposed to a pull request, is 202.
 - A comment on a pull request is not ignored.

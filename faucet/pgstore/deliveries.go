@@ -191,6 +191,9 @@ func (s *Store) FinishDelivery(ctx context.Context, ref faucet.DeliveryRef, now 
 	if err := f.Validate(); err != nil {
 		return faucet.FinishResult{}, xerrors.Errorf("validate finish: %w", err)
 	}
+	if f.Gap {
+		return faucet.FinishResult{}, xerrors.New("a typed delivery owes no gap of its own")
+	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return faucet.FinishResult{}, xerrors.Errorf("begin transaction: %w", err)

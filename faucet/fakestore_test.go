@@ -205,6 +205,12 @@ func (s *fakeStore) advanceSubscriptionsThatLoseNothingLocked(doomed int64) {
 func (s *fakeStore) UpsertSubscription(_ context.Context, sub faucet.Subscription, now time.Time, maxLive int) (faucet.Subscription, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.upsertSubscriptionLocked(sub, now, maxLive, nil)
+}
+
+// upsertSubscriptionLocked runs check, when it is not nil, after the
+// principal's limit passed and before the write.
+func (s *fakeStore) upsertSubscriptionLocked(sub faucet.Subscription, now time.Time, maxLive int, check func() error) (faucet.Subscription, error) {
 	if s.err != nil {
 		return faucet.Subscription{}, s.err
 	}
@@ -227,6 +233,11 @@ func (s *fakeStore) UpsertSubscription(_ context.Context, sub faucet.Subscriptio
 	}
 	if others >= maxLive {
 		return faucet.Subscription{}, faucet.ErrSubscriptionLimit
+	}
+	if check != nil {
+		if err := check(); err != nil {
+			return faucet.Subscription{}, err
+		}
 	}
 	sub.CreatedAt, sub.UpdatedAt = now, now
 	sub.Status = faucet.DeliveryStatus{}

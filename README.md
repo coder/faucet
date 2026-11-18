@@ -41,6 +41,8 @@ An agent asks for events of one `repo` by name, optionally narrowed by `sha`, `p
 | `pr.review_threads` | `pull_request_review_thread` | none |
 <!-- END generated:events -->
 
+The operator can also offer other GitHub events of a repository, such as `push`, `release` and `issues`, raw as `github.<event>`, by listing them in `FAUCET_RAW_EVENTS`. Faucet stores one only while a subscription or a poller wants it (see [raw events](docs/events.md#raw-events)).
+
 A caller of `/github/mcp` proves who it is in one of three ways, and faucet returns events only for repositories that the caller may read (see [docs/security.md](docs/security.md)):
 
 - **A GitHub token** as `Authorization: Bearer <GitHub token>`. Faucet asks GitHub with it and keeps it for that request only.
@@ -94,6 +96,7 @@ Point any MCP client at `https://<your host>/github/mcp` with a GitHub token as 
 | `FAUCET_GITHUB_APP_CLIENT_SECRET` | for the browser login | A client secret of faucet's GitHub App. |
 | `FAUCET_TOKEN_KEY` | for the browser login | The keys that seal the GitHub tokens of users at rest: one or more `<key_id>:<32 random bytes, base64>`, comma-separated. The first seals, every one opens (see [rotating the key](docs/browser-login.md#rotate-the-token-key)). |
 | `FAUCET_GITHUB_URL` | no | GitHub's web host, which serves the App's login page. Default `https://github.com`. |
+| `FAUCET_RAW_EVENTS` | for raw events | Comma-separated GitHub events, such as `push,release,issues`, that faucet offers raw as `github.<event>` (see [docs/events.md](docs/events.md#raw-events)). Unset offers none. The server refuses to start on an event whose payload GitHub shows only to people with more than read access. |
 | `VERCEL` | set by Vercel | Marks a Vercel deployment. There the server never migrates without `VERCEL_ENV`. |
 | `VERCEL_ENV` | set by Vercel | When set, the server migrates only if it is `production`, and otherwise starts only on a current schema. |
 <!-- END generated:settings -->
@@ -108,7 +111,7 @@ Faucet sends nothing on its own between requests. A scheduler calls these with `
 | --- | --- | --- |
 | `GET /cron/deliver` | every minute | Sends due webhooks to subscribers and retries failed ones. |
 | `GET /cron/redeliver` | every 10 minutes | Asks GitHub to resend webhooks that faucet failed to store. |
-| `GET /cron/purge` | hourly | Deletes events past retention, expired subscriptions, and the login server's expired tokens and login requests. |
+| `GET /cron/purge` | hourly | Deletes events past retention, expired subscriptions and leases, the raw payloads that nobody waits for, and the login server's expired tokens, login requests and dead sessions. |
 
 [`vercel.json`](vercel.json) sets these schedules for Vercel Cron.
 
