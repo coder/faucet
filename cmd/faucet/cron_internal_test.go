@@ -351,6 +351,7 @@ func TestCronPurgeDeletesWhatIsOlderThanTheRetention(t *testing.T) {
 		require.Equal(t, int64(11), got.PurgedThrough)
 		require.Equal(t, int64(2), got.ExpiredSubscriptions, "the reply counts the expired subscriptions")
 		require.Equal(t, int64(5), got.EndedDeliveries, "and the deliveries that ended with them")
+		require.NotContains(t, body, "expired_access_tokens", "a server without FAUCET_PUBLIC_URL keeps no access token to count")
 	}
 }
 

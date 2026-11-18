@@ -86,14 +86,25 @@ func (c cronRoutes) purge(w http.ResponseWriter, r *http.Request) {
 		PurgedThrough        int64 `json:"purged_through"`
 		ExpiredSubscriptions int64 `json:"expired_subscriptions"`
 		EndedDeliveries      int64 `json:"ended_deliveries"`
-		ExpiredAccessTokens  int64 `json:"expired_access_tokens"`
 		RawEventsCleared     int64 `json:"raw_events_cleared"`
 		RawEventsDeleted     int64 `json:"raw_events_deleted"`
 		ExpiredLeases        int64 `json:"expired_leases"`
+		// ExpiredAccessTokens is left out without the login server, which
+		// keeps no access token.
+		ExpiredAccessTokens *int64 `json:"expired_access_tokens,omitempty"`
 	}{
-		res.Deleted, res.PurgedThrough, res.ExpiredSubscriptions, res.EndedDeliveries, tokens.ExpiredAccessTokens,
-		res.Raw.Cleared, res.Raw.Deleted, res.Raw.ExpiredLeases,
+		res.Deleted, res.PurgedThrough, res.ExpiredSubscriptions, res.EndedDeliveries,
+		res.Raw.Cleared, res.Raw.Deleted, res.Raw.ExpiredLeases, c.loginCount(tokens.ExpiredAccessTokens),
 	})
+}
+
+// loginCount is n when the login server is on, and nil, which omitempty
+// leaves out of a reply, when it is off.
+func (c cronRoutes) loginCount(n int64) *int64 {
+	if c.login == nil {
+		return nil
+	}
+	return &n
 }
 
 func (c cronRoutes) deliver(w http.ResponseWriter, r *http.Request) {

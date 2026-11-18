@@ -223,6 +223,7 @@ func TestFaucetTokensNeverReachGitHub(t *testing.T) {
 		paths, _ := srv.github.seen()
 		require.Empty(t, paths, "a token with a faucet prefix is faucet's own, so GitHub never sees it")
 		requireLoggedAt(t, srv.logs.String(), "faucet token rejected", "[debu]")
+		require.NotContains(t, srv.logs.String(), ".go:", "each rejection is one line, with no stack frame")
 		requireNoTokenPiece(t, srv.logs.String(), tokens)
 	})
 	t.Run("with a faucet verifier", func(t *testing.T) {
@@ -240,6 +241,7 @@ func TestFaucetTokensNeverReachGitHub(t *testing.T) {
 		requireLoggedAt(t, logs, "faucet token rejected", "[debu]")
 		require.Contains(t, logs, "not an access token", "the debug log says why")
 		require.Contains(t, logs, "unknown access token")
+		require.NotContains(t, logs, ".go:", "each rejection is one line, with no stack frame")
 		requireNoTokenPiece(t, logs, tokens)
 	})
 }
