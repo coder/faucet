@@ -42,8 +42,9 @@ const (
 type loginGitHub struct {
 	*httptest.Server
 	mu sync.Mutex
-	// authorizes counts the browsers that reached the authorize page.
-	authorizes int
+	// authorizes counts the browsers that reached the authorize page, and
+	// trades the calls of the token endpoint.
+	authorizes, trades int
 	// codes are the codes that the authorize page gave and the token
 	// endpoint has not traded yet.
 	codes map[string]loginGitHubCode
@@ -92,6 +93,7 @@ func (g *loginGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Redirect(w, r, q.Get("redirect_uri")+"?"+back.Encode(), http.StatusFound)
 	case "/login/oauth/access_token":
+		g.trades++
 		_ = r.ParseForm()
 		code, ok := g.codes[r.PostForm.Get("code")]
 		delete(g.codes, r.PostForm.Get("code"))
@@ -129,6 +131,12 @@ func (g *loginGitHub) authorizeCount() int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.authorizes
+}
+
+func (g *loginGitHub) tradeCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.trades
 }
 
 func (g *loginGitHub) set(change func(g *loginGitHub)) {
