@@ -12,9 +12,13 @@ import (
 	"golang.org/x/xerrors"
 )
 
-// maxKeyDocumentBytes bounds a key set, pasted or fetched, and a discovery
-// document.
-const maxKeyDocumentBytes = 32 << 10
+const (
+	// maxKeyDocumentBytes bounds a key set, pasted or fetched, and a
+	// discovery document.
+	maxKeyDocumentBytes = 32 << 10
+	maxTrustRuleClaims  = 16
+	maxClaimBytes       = 256
+)
 
 // TrustRule lets the tokens that an outside issuer signs for a workload, such
 // as a Vercel function or a Kubernetes pod, act as one service client. A token
@@ -80,6 +84,16 @@ var issuerProfiles = map[string]issuerProfile{
 	},
 }
 
+// registeredClaims are the claims of RFC 7519 that no rule may pin, and why.
+var registeredClaims = map[string]string{
+	"iss": "the rule's issuer is the token's iss",
+	"aud": "faucet takes a token whose aud is faucet alone, and Kubernetes sends aud as an array, which no pin matches",
+	"exp": "faucet checks it, and it is a number, which no pin matches",
+	"nbf": "faucet checks it, and it is a number, which no pin matches",
+	"iat": "faucet checks it, and it is a number, which no pin matches",
+	"jti": "it names one token, so the rule would match one token at most",
+}
+
 var otherIssuers = issuerProfile{
 	pins: []requiredPin{{claim: "sub", why: "every workload of the issuer can get a token for faucet, and sub names one of them"}},
 }
@@ -106,9 +120,10 @@ func profileOf(u *url.URL) issuerProfile {
 }
 
 // ValidateTrustRule reports whether a service client may hold r: its issuer
-// is an https URL, it pins at least one claim to a value, it pins the claims
-// that the profile of its issuer requires, and a pasted key set holds a
-// public key that faucet can use. Its error says what to change and why.
+// is an https URL, it pins at least one claim to a value and no registered
+// claim, it pins the claims that the profile of its issuer requires, and a
+// pasted key set holds a public key that faucet can use. Its error says what
+// to change and why.
 func ValidateTrustRule(r TrustRule) error {
 	_, err := parseTrustRule(r)
 	return err
@@ -119,14 +134,21 @@ func parseTrustRule(r TrustRule) (trustRule, error) {
 	switch {
 	case len(r.Issuer) > maxURIBytes:
 		return trustRule{}, xerrors.Errorf("a trust rule's issuer must be at most %d bytes", maxURIBytes)
-	case err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || strings.Contains(r.Issuer, "#"):
+	case err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || strings.Contains(r.Issuer, "#"):
 		return trustRule{}, xerrors.New("a trust rule's issuer must be an https URL with a host, and no user info, query or fragment")
 	case len(r.Claims) == 0:
 		return trustRule{}, xerrors.New("a trust rule must pin at least one claim, or every token of its issuer matches")
+	case len(r.Claims) > maxTrustRuleClaims:
+		return trustRule{}, xerrors.Errorf("a trust rule pins at most %d claims", maxTrustRuleClaims)
 	}
 	for name, value := range r.Claims {
-		if name == "" || value == "" {
+		switch why, registered := registeredClaims[name]; {
+		case name == "" || value == "":
 			return trustRule{}, xerrors.New("a trust rule pins each claim to a value, and neither the name nor the value can be empty")
+		case len(name) > maxClaimBytes || len(value) > maxClaimBytes:
+			return trustRule{}, xerrors.Errorf("a trust rule's claim names and values must be at most %d bytes", maxClaimBytes)
+		case registered:
+			return trustRule{}, xerrors.Errorf("a trust rule cannot pin %s: %s", name, why)
 		}
 	}
 	profile := profileOf(u)

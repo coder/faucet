@@ -688,8 +688,7 @@ func TestTheFirstRuleThatMatchesWins(t *testing.T) {
 	other := testKubernetesRule(t, key)
 	other.Claims = map[string]string{"sub": "system:serviceaccount:default:default"}
 	first := testKubernetesRule(t, key)
-	second := testKubernetesRule(t, key)
-	second.Claims["jti"] = "ea28ed49-2e11-4280-9ec5-bc3d1d84661a"
+	second := testKubernetesRule(t, key, publicJWK(testRSAKey(), testKID))
 	token := signToken(t, jose.ES256, testECDSAKey(), "ec", kubernetesClaims(now))
 	for range 10 {
 		m, err := checkAt(t, c, now, token, other, first, second)

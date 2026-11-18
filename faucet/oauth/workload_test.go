@@ -8,6 +8,8 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"testing"
@@ -142,8 +144,36 @@ func TestARuleNamesAnHTTPSIssuerAndPinsAClaimToAValue(t *testing.T) {
 		"no claim":       {oauth.TrustRule{Issuer: "https://issuer.example.com"}, "must pin at least one claim, or every token of its issuer matches"},
 		"an empty value": {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": ""}}, "neither the name nor the value can be empty"},
 		"an empty name":  {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a", "": "b"}}, "neither the name nor the value can be empty"},
+		"a bare query":   {oauth.TrustRule{Issuer: "https://issuer.example.com?", Claims: sub}, "no user info, query or fragment"},
+		"17 claims":      {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: claimsOfSize(17, 8)}, "a trust rule pins at most 16 claims"},
+		"a long name":    {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": "a", strings.Repeat("n", 257): "b"}}, "a trust rule's claim names and values must be at most 256 bytes"},
+		"a long value":   {oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: map[string]string{"sub": strings.Repeat("v", 257)}}, "must be at most 256 bytes"},
 	} {
 		require.ErrorContains(t, oauth.ValidateTrustRule(c.rule), c.want, name)
+	}
+	require.NoError(t, oauth.ValidateTrustRule(oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: claimsOfSize(16, 256)}))
+}
+
+// claimsOfSize pins sub and n-1 other claims, each name and value of size
+// bytes.
+func claimsOfSize(n, size int) map[string]string {
+	claims := map[string]string{"sub": strings.Repeat("s", size)}
+	for i := range n - 1 {
+		claims[fmt.Sprintf("%03d", i)+strings.Repeat("n", size-3)] = strings.Repeat("v", size)
+	}
+	return claims
+}
+
+// Faucet checks the registered claims of a token itself, and a pin of one
+// matches no token, or one token at most.
+func TestARuleCannotPinARegisteredClaim(t *testing.T) {
+	t.Parallel()
+	sub := map[string]string{"sub": "system:serviceaccount:ns:sa"}
+	for _, claim := range []string{"iss", "aud", "exp", "nbf", "iat", "jti"} {
+		claims := maps.Clone(sub)
+		claims[claim] = "https://issuer.example.com"
+		err := oauth.ValidateTrustRule(oauth.TrustRule{Issuer: "https://issuer.example.com", Claims: claims})
+		require.ErrorContains(t, err, "a trust rule cannot pin "+claim+": ", claim)
 	}
 }
 
