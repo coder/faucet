@@ -179,7 +179,8 @@ func TestMCPEventsPollDeniesARepoTheCallerCannotSee(t *testing.T) {
 }
 
 // TestMCPTakesOneMessagePerRequest uses 2025-03-26, the last protocol version
-// that lets a body batch requests, for the SDK client and for the batch.
+// that lets a body batch requests and the one the SDK assumes when a request
+// has no MCP-Protocol-Version.
 func TestMCPTakesOneMessagePerRequest(t *testing.T) {
 	t.Parallel()
 
