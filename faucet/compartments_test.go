@@ -41,8 +41,8 @@ var (
 // core.
 var coreUses = map[string][]string{
 	"oauth": {
-		"AllScopes", "Authorizer", "ErrInvalidToken", "ErrNoAccess", "ErrUnknownRepository", "NewService", "ParseScope",
-		"Principal", "Repository", "Scope", "ServiceClient",
+		"AllScopes", "Authorizer", "ErrInvalidToken", "ErrNoAccess", "ErrUnknownRepository", "NewOAuthUser", "NewPrincipal",
+		"NewService", "OAuthSession", "ParseScope", "Principal", "Repository", "Scope", "ServiceClient",
 	},
 	"redelivery": {"StoresDelivery"},
 }

@@ -138,11 +138,30 @@ func (c connections) renew(ctx context.Context, current Connection) (Connection,
 	return next, tokens.access, nil
 }
 
+// userTokenMargin is how long the GitHub token of a user must last when the
+// access check sends it, so that it does not expire on the way.
+const userTokenMargin = time.Minute
+
 // UserResolver returns the SubjectResolver of users who logged in through a
-// browser.
-func UserResolver(_ Store) SubjectResolver {
-	return func(context.Context, string, []faucet.Scope) (faucet.Principal, error) {
-		return faucet.Principal{}, xerrors.New("not built yet")
+// browser. The subject is a session ID, and the principal is an OAuth user
+// of that session, never of another session of the same user. An unknown
+// or ended session is faucet.ErrInvalidToken.
+func UserResolver(store Store) SubjectResolver {
+	return func(ctx context.Context, id string, scopes []faucet.Scope) (faucet.Principal, error) {
+		session, err := store.Session(ctx, id)
+		switch {
+		case xerrors.Is(err, ErrUnknownSession):
+			return faucet.Principal{}, rejected("unknown session")
+		case err != nil:
+			return faucet.Principal{}, xerrors.Errorf("read the session: %w", err)
+		case !session.Live():
+			return faucet.Principal{}, rejected("the session ended")
+		}
+		c, err := store.Connection(ctx, session.ConnectionID)
+		if err != nil {
+			return faucet.Principal{}, xerrors.Errorf("read the connection of the session: %w", err)
+		}
+		return faucet.NewOAuthUser(c.Login, faucet.OAuthSession{SessionID: session.ID, ConnectionID: session.ConnectionID}, scopes)
 	}
 }
 
@@ -162,18 +181,69 @@ type UserAccessDeps struct {
 }
 
 // UserAccess is the faucet.Authorizer of users who logged in through a
-// browser.
-type UserAccess struct{}
-
-// NewUserAccess returns the UserAccess for d.
-func NewUserAccess(UserAccessDeps) (UserAccess, error) { return UserAccess{}, nil }
-
-// RepoID implements faucet.Authorizer.
-func (UserAccess) RepoID(context.Context, faucet.Principal, string) (int64, error) {
-	return 0, xerrors.New("not built yet")
+// browser. GitHub answers each check with the GitHub token that faucet
+// keeps for the user, so a user reads what their GitHub login can read.
+type UserAccess struct {
+	tokens connections
+	repos  RepoChecker
+	logger slog.Logger
 }
 
-// RepoIDFresh implements faucet.Authorizer.
-func (UserAccess) RepoIDFresh(context.Context, faucet.Principal, string) (int64, error) {
-	return 0, xerrors.New("not built yet")
+var _ faucet.Authorizer = UserAccess{}
+
+// NewUserAccess returns the UserAccess for d.
+func NewUserAccess(d UserAccessDeps) (UserAccess, error) {
+	switch {
+	case d.Store == nil:
+		return UserAccess{}, xerrors.New("store is required")
+	case d.Clock == nil:
+		return UserAccess{}, xerrors.New("clock is required")
+	case d.Repos == nil:
+		return UserAccess{}, xerrors.New("the repository checker is required")
+	}
+	login, err := newBrowserLogin(d.Login)
+	if err != nil {
+		return UserAccess{}, xerrors.Errorf("the browser login: %w", err)
+	}
+	return UserAccess{tokens: newConnections(d.Store, d.Clock, d.Logger, login), repos: d.Repos, logger: d.Logger}, nil
+}
+
+// RepoIDFresh implements faucet.Authorizer. UserAccess remembers nothing, so
+// it is RepoID.
+func (a UserAccess) RepoIDFresh(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
+	return a.RepoID(ctx, p, repo)
+}
+
+// RepoID implements faucet.Authorizer: it asks the RepoChecker with the
+// user's GitHub token, refreshed first when it expires within a minute.
+// When GitHub rejects the token, it refreshes the token once and asks once
+// more. A principal that is not an OAuth user is faucet.ErrNoAccess.
+func (a UserAccess) RepoID(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
+	session, ok := p.OAuthSession()
+	if !ok {
+		return 0, xerrors.Errorf("only a user who logged in through a browser is checked with the GitHub token that faucet keeps: %w", faucet.ErrNoAccess)
+	}
+	token, err := a.tokens.accessToken(ctx, session.ConnectionID, a.tokens.expiresWithin(userTokenMargin))
+	if err != nil {
+		return 0, err
+	}
+	id, err := a.check(ctx, p.Login, token, repo)
+	if !xerrors.Is(err, faucet.ErrInvalidToken) {
+		return id, err
+	}
+	a.logger.Info(ctx, "GitHub rejected the stored token of a connection, refreshing it", slog.F("session_id", session.SessionID), slog.F("connection_id", session.ConnectionID))
+	rejectedToken := token
+	token, err = a.tokens.accessToken(ctx, session.ConnectionID, func(_ Connection, access string) bool { return access == rejectedToken })
+	if err != nil {
+		return 0, err
+	}
+	return a.check(ctx, p.Login, token, repo)
+}
+
+func (a UserAccess) check(ctx context.Context, login, token, repo string) (int64, error) {
+	p, err := faucet.NewPrincipal(login, token)
+	if err != nil {
+		return 0, err
+	}
+	return a.repos.RepoID(ctx, p, repo)
 }
