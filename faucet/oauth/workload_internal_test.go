@@ -515,24 +515,39 @@ func TestAnUnknownKidCostsOneFetchAMinute(t *testing.T) {
 	require.NoError(t, err)
 
 	s.serveVercelKeys(t, publicJWK(testRSAKey(), testKID), publicJWK(otherRSAKey(), "rotated"))
+	clock.Advance(20 * time.Second)
+	requireWaitsForKeys := func(err error, retryAt time.Time, msgAndArgs ...any) {
+		t.Helper()
+		var keys issuerKeysError
+		require.ErrorAs(t, err, &keys, msgAndArgs...)
+		require.NotErrorIs(t, err, errSubjectToken, msgAndArgs...)
+		require.Equal(t, retryAt, keys.retryAt, msgAndArgs...)
+		require.NoError(t, keys.fetch, msgAndArgs...)
+	}
 	for i := range 20 {
 		token := signToken(t, jose.RS256, testRSAKey(), fmt.Sprintf("made-up-%d", i), vercelClaims(now))
-		_, err := checkAt(t, c, now, token, testVercelRule())
-		requireTokenRefused(t, err, "its kid and alg name no key of its issuer")
+		_, err := checkAt(t, c, clock.Now(), token, testVercelRule())
+		requireWaitsForKeys(err, now.Add(keyFetchInterval), "a made-up kid within a minute of the fetch")
 	}
 	rotated := signToken(t, jose.RS256, otherRSAKey(), "rotated", vercelClaims(now))
-	_, err = checkAt(t, c, now, rotated, testVercelRule())
-	requireTokenRefused(t, err, "its kid and alg name no key of its issuer")
+	_, err = checkAt(t, c, clock.Now(), rotated, testVercelRule())
+	requireWaitsForKeys(err, now.Add(keyFetchInterval), "a rotated key may come at the next fetch")
 	require.Equal(t, 1, s.hitsOf(testVercelDiscovery))
 	require.Equal(t, 1, s.hitsOf(testVercelKeys))
 
-	clock.Advance(keyFetchInterval)
+	clock.Advance(keyFetchInterval - 20*time.Second)
 	now = clock.Now()
 	_, err = checkAt(t, c, now, signToken(t, jose.RS256, otherRSAKey(), "rotated", vercelClaims(now)), testVercelRule())
 	require.NoError(t, err, "the added key works a minute after the last fetch")
 	_, err = checkAt(t, c, now, signToken(t, jose.RS256, testRSAKey(), "made-up", vercelClaims(now)), testVercelRule())
-	requireTokenRefused(t, err, "its kid and alg name no key of its issuer")
+	requireWaitsForKeys(err, now.Add(keyFetchInterval))
 	require.Equal(t, 2, s.hitsOf(testVercelKeys))
+
+	clock.Advance(keyFetchInterval)
+	now = clock.Now()
+	_, err = checkAt(t, c, now, signToken(t, jose.RS256, testRSAKey(), "made-up", vercelClaims(now)), testVercelRule())
+	requireTokenRefused(t, err, "its kid and alg name no key of its issuer", "the keys of a fetch for the kid lack it")
+	require.Equal(t, 3, s.hitsOf(testVercelKeys))
 }
 
 func TestTheKeysOfAnIssuerAreKeptForTheirLifetime(t *testing.T) {

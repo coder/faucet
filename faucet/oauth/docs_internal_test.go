@@ -80,8 +80,8 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/service-accounts.md", "Its `exp` is at least a second away, and its `nbf` and `iat`, when it has them, are at most a minute ahead of faucet's clock.", nil},
 		{"docs/service-accounts.md", "Faucet's token lasts %d minutes, or until the platform's token expires", []any{minutes(accessTokenLifetime)}},
 		{"docs/service-accounts.md", "works until it expires, %d minutes at most", []any{minutes(accessTokenLifetime)}},
-		{"docs/service-accounts.md", "`Retry-After: %d`", []any{seconds(keyFetchInterval)}},
-		{"docs/service-accounts.md", "Ask again after a minute.", nil},
+		{"docs/service-accounts.md", "`Retry-After` gives the seconds until faucet fetches again, %d at most.", []any{seconds(keyFetchInterval)}},
+		{"docs/service-accounts.md", "or it ended less than a minute ago and the issuer may have added the key since", nil},
 		{"docs/security.md", "It then mints its own token, which lasts %d minutes and never past the platform's token.", []any{minutes(accessTokenLifetime)}},
 		{"docs/security.md", "must arrive within %d seconds together, and each must be %d KiB at most", []any{seconds(keyFetchTimeout), MaxKeyDocumentBytes >> 10}},
 		{"docs/security.md", "Faucet keeps an issuer's keys for %d minutes**, so a key that the issuer drops stops working within %d minutes", []any{minutes(keySetLifetime), minutes(keySetLifetime)}},
@@ -89,7 +89,7 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/security.md", "It keeps the keys of up to %d issuers.", []any{maxCachedKeySets}},
 		{"docs/security.md", "keeps the keys that faucet holds** until their %d minutes end", []any{minutes(keySetLifetime)}},
 		{"docs/security.md", "Faucet keeps the failure for a minute, so while an issuer fails", nil},
-		{"docs/security.md", "`Retry-After: %d`", []any{seconds(keyFetchInterval)}},
+		{"docs/security.md", "with `Retry-After` set to the seconds left of the minute", nil},
 	} {
 		doc, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(p.file)))
 		require.NoError(t, err)

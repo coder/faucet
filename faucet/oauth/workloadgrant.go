@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"time"
 
 	"golang.org/x/xerrors"
 
@@ -92,15 +93,20 @@ func (s *Server) exchange(ctx context.Context, form url.Values) (tokenResponse, 
 // exchangeAnswer is the answer to a token exchange of clientID that failed
 // with err, which it logs with its reason.
 func (s *Server) exchangeAnswer(ctx context.Context, clientID string, err error) error {
+	var keys issuerKeysError
 	var refusal workloadClientError
 	var token subjectTokenError
 	var answer *tokenError
 	switch {
-	case xerrors.Is(err, errIssuerKeys):
-		s.logger.Warn(ctx, "a workload's token waits for the keys of its issuer", slog.F("client_id", clientID), slog.Error(err))
+	case xerrors.As(err, &keys):
+		log := s.logger.Info
+		if keys.fetch != nil {
+			log = s.logger.Warn
+		}
+		log(ctx, "a workload's token waits for the keys of its issuer", slog.F("client_id", clientID), slog.Error(err))
 		return &tokenError{
-			status: http.StatusServiceUnavailable, code: "temporarily_unavailable", retryAfter: keyFetchInterval,
-			description: "faucet could not fetch the keys of the subject token's issuer: try again in a minute",
+			status: http.StatusServiceUnavailable, code: "temporarily_unavailable", retryAfter: max(time.Second, keys.retryAt.Sub(s.clock.Now())),
+			description: "faucet cannot get the key of the subject token from its issuer yet: try again after Retry-After seconds",
 		}
 	case xerrors.As(err, &refusal), xerrors.As(err, &token) && !token.signed:
 		s.logger.Info(ctx, "a token exchange was refused", slog.F("client_id", clientID), slog.F("reason", err.Error()))

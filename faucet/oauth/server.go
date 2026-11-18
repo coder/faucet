@@ -347,7 +347,7 @@ func (s *Server) writeTokenError(w http.ResponseWriter, r *http.Request, err err
 		w.Header().Set("WWW-Authenticate", `Basic realm="faucet"`)
 	}
 	if te.retryAfter > 0 {
-		w.Header().Set("Retry-After", strconv.Itoa(int(te.retryAfter/time.Second)))
+		w.Header().Set("Retry-After", strconv.Itoa(int((te.retryAfter+time.Second-1)/time.Second)))
 	}
 	writeJSON(w, te.status, map[string]string{"error": te.code, "error_description": te.description})
 }

@@ -115,6 +115,11 @@ func TestAWorkloadTokenLastsAtLeastASecond(t *testing.T) {
 	}, reply.body)
 }
 
+var waitForKeys = map[string]any{
+	"error": "temporarily_unavailable", "error_description": "faucet cannot get the key of the subject token from its issuer yet: try again after Retry-After seconds",
+}
+
+// Retry-After gives the seconds until faucet fetches the keys again.
 func TestATokenExchangeWaitsWhileTheKeysOfItsIssuerFail(t *testing.T) {
 	t.Parallel()
 	h, failKeys := newWorkloadHarness(t)
@@ -123,9 +128,34 @@ func TestATokenExchangeWaitsWhileTheKeysOfItsIssuerFail(t *testing.T) {
 	reply := h.post("", exchange(h.vercelToken()))
 	require.Equal(t, http.StatusServiceUnavailable, reply.status, reply.rawBody)
 	require.Equal(t, "60", reply.header.Get("Retry-After"))
-	require.Equal(t, map[string]any{
-		"error": "temporarily_unavailable", "error_description": "faucet could not fetch the keys of the subject token's issuer: try again in a minute",
-	}, reply.body)
+	require.Equal(t, waitForKeys, reply.body)
+	require.True(t, logged(h.logs.String(), "[warn]", "a workload's token waits for the keys of its issuer", "client_id=digest-bot", "404"), h.logs.String())
+
+	h.clock.Advance(15*time.Second + time.Millisecond)
+	reply = h.post("", exchange(h.vercelToken()))
+	require.Equal(t, http.StatusServiceUnavailable, reply.status, reply.rawBody)
+	require.Equal(t, "45", reply.header.Get("Retry-After"), "the failure is kept for a minute")
+}
+
+// Within a minute of a fetch, a kid that the keys lack may be a key that
+// the issuer added since, so the workload waits for the next fetch.
+func TestATokenExchangeWaitsForTheNextFetchForAKidThatTheKeysLack(t *testing.T) {
+	t.Parallel()
+	h, _ := newWorkloadHarness(t)
+	reply := h.post("", exchange(h.vercelToken()))
+	require.Equal(t, http.StatusOK, reply.status, reply.rawBody)
+
+	h.clock.Advance(20 * time.Second)
+	rotated := oauth.SignAsVercelUnder(t, "rotated", oauth.VercelFunctionClaims(h.clock.Now()))
+	reply = h.post("", exchange(rotated))
+	require.Equal(t, http.StatusServiceUnavailable, reply.status, reply.rawBody)
+	require.Equal(t, "40", reply.header.Get("Retry-After"))
+	require.Equal(t, waitForKeys, reply.body)
+	require.True(t, logged(h.logs.String(), "[info]", "a workload's token waits for the keys of its issuer", "client_id=digest-bot"), h.logs.String())
+
+	h.clock.Advance(40 * time.Second)
+	reply = h.post("", exchange(rotated))
+	require.Equal(t, refusedExchange, reply.body, "the keys that faucet fetched for the kid lack it")
 }
 
 func TestATokenExchangeCarriesNoSecretAndNoActor(t *testing.T) {

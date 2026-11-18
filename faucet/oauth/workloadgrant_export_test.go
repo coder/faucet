@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/go-jose/go-jose/v4"
 )
 
 // ServeVercel serves Vercel's real discovery document of the team codercom
@@ -29,6 +31,11 @@ func VercelFunctionClaims(now time.Time) map[string]any { return vercelClaims(no
 
 // SignAsVercel signs claims with the key that ServeVercel adds.
 func SignAsVercel(t *testing.T, claims map[string]any) string { return signVercel(t, claims) }
+
+// SignAsVercelUnder signs claims as SignAsVercel does, with kid in the header.
+func SignAsVercelUnder(t *testing.T, kid string, claims map[string]any) string {
+	return signToken(t, jose.RS256, testRSAKey(), kid, claims)
+}
 
 // VercelRule is a trust rule that VercelFunctionClaims match.
 func VercelRule() TrustRule { return testVercelRule() }
