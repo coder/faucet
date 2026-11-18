@@ -196,6 +196,33 @@ func TestTheClientsCommandTakesTheEndpointOfFAUCETPUBLICURL(t *testing.T) {
 	require.ErrorContains(t, err, envPublicURL)
 }
 
+// On Vercel production the commands take the public URL as the server does,
+// so a client is made for the endpoint that the server serves.
+func TestTheClientsCommandTakesThePublicURLFromVercelAsTheServerDoes(t *testing.T) {
+	t.Parallel()
+	withDB, store := newClientsDatabase(t)
+	vercel := map[string]string{envVercel: "1", envVercelEnv: "production", envVercelProductionURL: "faucet.example.com"}
+	getenv := func(name string) string {
+		if v, ok := vercel[name]; ok {
+			return v
+		}
+		return withDB(name)
+	}
+
+	_, notice, err := clients(t, getenv, "create", "-grant", "repo:coder/faucet", "ci-watcher")
+	require.NoError(t, err)
+	require.Contains(t, notice, "public URL taken from VERCEL_PROJECT_PRODUCTION_URL: https://faucet.example.com")
+	c, err := store.Client(context.Background(), "ci-watcher")
+	require.NoError(t, err)
+	require.Equal(t, "https://faucet.example.com/github/mcp", c.Resource)
+	_, _, err = clients(t, getenv, "create", "-resource", "https://other.example.com/github/mcp", "-grant", "repo:coder/faucet", "elsewhere")
+	require.ErrorContains(t, err, "-resource must be https://faucet.example.com/github/mcp")
+
+	vercel[envVercelEnv] = "preview"
+	_, _, err = clients(t, getenv, "create", "-grant", "repo:coder/faucet", "preview")
+	require.ErrorContains(t, err, "-resource must be faucet's public URL", "a preview derives nothing, as the server does not")
+}
+
 func TestTheClientsCommandNeedsACurrentDatabase(t *testing.T) {
 	t.Parallel()
 	_, _, err := clients(t, func(string) string { return "" }, "list")

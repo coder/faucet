@@ -147,7 +147,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if err := (faucet.TokenAuthorizer{BaseURL: githubAPI}).Validate(); err != nil {
 		return config{}, xerrors.Errorf("%s: %w", envAPIURL, err)
 	}
-	cfg := config{databaseURL: getenv(envDatabaseURL), deployment: deployment{onVercel: getenv(envVercel) != "", env: getenv(envVercelEnv)}, secret: getenv(envSecret), port: port, githubAPI: githubAPI}
+	cfg := config{databaseURL: getenv(envDatabaseURL), deployment: deploymentOf(getenv), secret: getenv(envSecret), port: port, githubAPI: githubAPI}
 	cfg.migrateURL, cfg.migrateVar = cfg.databaseURL, envDatabaseURL
 	if direct := getenv(envDatabaseURLUnpooled); direct != "" {
 		cfg.migrateURL, cfg.migrateVar = direct, envDatabaseURLUnpooled
@@ -158,9 +158,11 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if err := loadWebhookConfig(getenv, &cfg); err != nil {
 		return config{}, err
 	}
-	if err := loadPublicURL(getenv, &cfg); err != nil {
+	publicURL, derived, err := loadPublicURL(getenv, cfg.deployment)
+	if err != nil {
 		return config{}, err
 	}
+	cfg.publicURL, cfg.publicURLDerived = publicURL, derived
 	if err := loadBrowserLoginConfig(getenv, &cfg); err != nil {
 		return config{}, err
 	}
@@ -182,20 +184,23 @@ func loadConfig(getenv func(string) string) (config, error) {
 // Vercel sets that host in previews too, and a preview must not take the
 // issuer of production, so only a process with VERCEL set and VERCEL_ENV
 // production derives it.
-func loadPublicURL(getenv func(string) string, cfg *config) error {
+// The server and the clients commands both read it here, so a client is
+// made for the endpoint that the server serves. derived reports that the
+// URL came from VERCEL_PROJECT_PRODUCTION_URL, and u is nil when there is
+// none.
+func loadPublicURL(getenv func(string) string, dep deployment) (u *url.URL, derived bool, err error) {
 	name, raw := envPublicURL, getenv(envPublicURL)
-	if host := getenv(envVercelProductionURL); raw == "" && host != "" && cfg.deployment.onVercel && cfg.deployment.env == "production" {
-		name, raw, cfg.publicURLDerived = envVercelProductionURL, "https://"+host, true
+	if host := getenv(envVercelProductionURL); raw == "" && host != "" && dep.onVercel && dep.env == "production" {
+		name, raw, derived = envVercelProductionURL, "https://"+host, true
 	}
 	if raw == "" {
-		return nil
+		return nil, false, nil
 	}
-	u, err := parseOrigin(raw)
+	u, err = parseOrigin(raw)
 	if err != nil {
-		return xerrors.Errorf("%s: %w", name, err)
+		return nil, false, xerrors.Errorf("%s: %w", name, err)
 	}
-	cfg.publicURL = u
-	return nil
+	return u, derived, nil
 }
 
 // loadCronConfig reads the optional settings of the cron routes. No error
@@ -461,6 +466,12 @@ func migrateSchema(ctx context.Context, cfg config, db *sql.DB) error {
 	}
 	defer func() { _ = migrateDB.Close() }()
 	return prepareSchema(ctx, db, migrateDB, cfg.deployment)
+}
+
+// deploymentOf reads where the process runs from the variables that Vercel
+// sets.
+func deploymentOf(getenv func(string) string) deployment {
+	return deployment{onVercel: getenv(envVercel) != "", env: getenv(envVercelEnv)}
 }
 
 // deployment says where the process runs.

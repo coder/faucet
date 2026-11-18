@@ -23,8 +23,9 @@ const clientsUsage = `usage:
   faucet clients list
   faucet clients disable <client-id>
 
-The commands read DATABASE_URL and FAUCET_PUBLIC_URL, as the server does.
--resource defaults to FAUCET_PUBLIC_URL and /github/mcp.
+The commands read DATABASE_URL and faucet's public URL as the server does:
+FAUCET_PUBLIC_URL, or on Vercel production https://$VERCEL_PROJECT_PRODUCTION_URL.
+-resource defaults to the public URL and /github/mcp.
 A grant is repo:<owner>/<name> for one repository, org:<login> for every
 repository of the user or organization that holds the login now, under any
 later login too, or all for every repository. org:<login>#<account ID> is
@@ -45,13 +46,14 @@ func runClients(ctx context.Context, args []string, getenv func(string) string, 
 	if databaseURL == "" {
 		return xerrors.Errorf("missing required environment variable %s", envDatabaseURL)
 	}
-	var publicURL *url.URL
-	if raw := getenv(envPublicURL); raw != "" {
-		u, err := parseOrigin(raw)
-		if err != nil {
-			return xerrors.Errorf("%s: %w", envPublicURL, err)
+	publicURL, derived, err := loadPublicURL(getenv, deploymentOf(getenv))
+	if err != nil {
+		return err
+	}
+	if derived {
+		if _, err := fmt.Fprintf(stderr, "public URL taken from %s: %s\n", envVercelProductionURL, publicURL); err != nil {
+			return err
 		}
-		publicURL = u
 	}
 	// DATABASE_URL can be a transaction-mode pooler, as on Vercel with Neon.
 	db, err := dbconn.OpenPooled(databaseURL)
@@ -77,8 +79,8 @@ func isClientsCommand(name string) bool {
 	return name == "create" || name == "list" || name == "disable"
 }
 
-// clientsCommand runs one command. publicURL is nil when FAUCET_PUBLIC_URL is
-// unset.
+// clientsCommand runs one command. publicURL is nil when the server has no
+// public URL.
 func clientsCommand(ctx context.Context, args []string, store clientStore, publicURL *url.URL, now time.Time, stdout, stderr io.Writer) error {
 	switch args[0] {
 	case "create":
