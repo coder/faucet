@@ -9,67 +9,64 @@
 <meta charset="utf-8">
 <title>faucet pictures</title>
 <style>
+  /*
+    Colours and type follow the Coder Kit product design system (the
+    coder-brand skill's kit/coder-kit.css): zinc neutrals, one accent (the link
+    blue) for faucet itself, Geist and Geist Mono. The hsl values are the Kit's
+    role tokens, except --edge, zinc-500, which keeps borders and lifelines at
+    3:1 against their card in both schemes. fonts/ holds Geist under the SIL
+    Open Font License, so every host renders the same glyphs.
+  */
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-Variable.woff2") format("woff2"); font-weight: 100 900; }
+  @font-face { font-family: "Geist Mono"; src: url("fonts/GeistMono-Variable.woff2") format("woff2"); font-weight: 100 900; }
   :root {
-    --bg: #f6f8fa;
-    --ink: #1f2328;
-    --muted: #424a53;
-    --line: #424a53;
-    --card: #ffffff;
-    --edge: #6e7781;
-    --blue: #0969da;
-    --blue-fill: #ddf4ff;
-    --green: #1a7f37;
-    --green-fill: #dafbe1;
-    --purple: #8250df;
-    --purple-fill: #fbefff;
-    --orange: #bc4c00;
-    --orange-fill: #fff1e5;
+    --bg: hsl(240 5% 96%);          /* surface-secondary */
+    --card: hsl(0 0% 100%);         /* surface-primary */
+    --ink: hsl(240 10% 4%);         /* content-primary */
+    --muted: hsl(240 5% 34%);       /* content-secondary */
+    --line: hsl(240 5% 34%);        /* content-secondary */
+    --edge: hsl(240 4% 46%);        /* zinc-500 */
+    --accent: hsl(221 83% 53%);     /* content-link */
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #161b22;
-      --ink: #f0f6fc;
-      --muted: #c3cad3;
-      --line: #b1bac4;
-      --card: #0d1117;
-      --edge: #7d8590;
-      --blue: #4493f8;
-      --blue-fill: #0c2d6b;
-      --green: #3fb950;
-      --green-fill: #04260f;
-      --purple: #ab7df8;
-      --purple-fill: #271052;
-      --orange: #f0883e;
-      --orange-fill: #3d1d00;
+      --bg: hsl(240 6% 10%);
+      --card: hsl(240 10% 4%);
+      --ink: hsl(0 0% 100%);
+      --muted: hsl(240 5% 65%);
+      --line: hsl(240 5% 65%);
+      --edge: hsl(240 4% 46%);
+      --accent: hsl(213 94% 68%);
     }
   }
   body { margin: 0; padding: 24px; background: #808080; }
   [data-picture] { width: 960px; margin-bottom: 24px; background: var(--bg); }
   svg { display: block; }
-  text { font-family: Arial, "Liberation Sans", Helvetica, sans-serif; font-size: 22px; fill: var(--ink); }
-  .mono { font-family: Menlo, "DejaVu Sans Mono", monospace; font-size: 20px; }
-  .route { font-family: Menlo, "DejaVu Sans Mono", monospace; font-weight: 700; }
-  .title { font-size: 30px; font-weight: 700; }
-  .big { font-size: 40px; font-weight: 700; }
+  text { font-family: "Geist", sans-serif; font-size: 22px; fill: var(--ink); }
+  .mono { font-family: "Geist Mono", monospace; font-size: 20px; }
+  .route { font-family: "Geist Mono", monospace; font-weight: 600; }
+  .title { font-size: 30px; font-weight: 600; }
+  .big { font-size: 40px; font-weight: 600; }
+  .accent { fill: var(--accent); }
   .muted { fill: var(--muted); }
   .mid { text-anchor: middle; }
-  .halo { paint-order: stroke; stroke: var(--card); stroke-width: 8px; stroke-linejoin: round; }
-  .box { stroke-width: 3; }
-  .plain { fill: var(--card); stroke: var(--ink); }
-  .faucet { fill: var(--blue-fill); stroke: var(--blue); stroke-width: 3; }
-  .port { fill: var(--card); stroke: var(--blue); stroke-width: 2.5; }
-  .agent { fill: var(--green-fill); stroke: var(--green); }
-  .agent-port { fill: var(--card); stroke: var(--green); stroke-width: 2.5; }
-  .db { fill: var(--purple-fill); stroke: var(--purple); }
-  .cron { fill: var(--orange-fill); stroke: var(--orange); }
-  .card { fill: var(--card); stroke: var(--edge); stroke-width: 2.5; }
+  .halo { font-size: 20px; paint-order: stroke; stroke: var(--card); stroke-width: 8px; stroke-linejoin: round; }
+  .box { stroke-width: 2.5; }
+  .plain { fill: var(--card); stroke: var(--edge); }
+  .faucet { fill: var(--card); stroke: var(--accent); stroke-width: 3; }
+  .port { fill: var(--bg); stroke: var(--accent); stroke-width: 2; }
+  .agent { fill: var(--card); stroke: var(--edge); }
+  .agent-port { fill: var(--bg); stroke: var(--edge); stroke-width: 2; }
+  .db { fill: var(--card); stroke: var(--edge); }
+  .cron { fill: var(--card); stroke: var(--edge); }
+  .card { fill: var(--card); stroke: var(--edge); stroke-width: 2; }
   .wire { fill: none; stroke: var(--line); stroke-width: 3; }
   .dashed { stroke-dasharray: 8 7; }
   .lifeline { fill: none; stroke: var(--edge); stroke-width: 2.5; stroke-dasharray: 5 7; }
   .head { fill: var(--line); }
-  .busy { fill: var(--blue-fill); stroke: var(--blue); stroke-width: 2.5; }
-  .frame { fill: none; stroke: var(--edge); stroke-width: 2.5; }
-  .tab { fill: var(--bg); stroke: var(--edge); stroke-width: 2.5; }
+  .busy { fill: var(--bg); stroke: var(--accent); stroke-width: 2.5; }
+  .frame { fill: none; stroke: var(--edge); stroke-width: 2; }
+  .tab { fill: var(--bg); stroke: var(--edge); stroke-width: 2; }
 </style>
 </head>
 <body>
@@ -84,7 +81,7 @@
 
   <!-- faucet and its routes -->
   <rect class="faucet" x="324" y="24" width="328" height="588" rx="18"/>
-  <text class="big mid" x="488" y="76">faucet</text>
+  <text class="big mid accent" x="488" y="76">faucet</text>
 
   <rect class="port" x="340" y="96" width="296" height="76" rx="10"/>
   <text class="route" x="354" y="128">POST /webhook/github</text>
@@ -157,7 +154,7 @@
     <rect class="box agent" x="10" y="112" width="96" height="44" rx="8"/>
     <text class="mid" x="58" y="142">agent</text>
     <rect class="box faucet" x="190" y="112" width="96" height="44" rx="8"/>
-    <text class="mid" x="238" y="142">faucet</text>
+    <text class="mid accent" x="238" y="142">faucet</text>
     <path class="lifeline" d="M58,160 V500 M238,160 V500"/>
     <rect class="busy" x="230" y="212" width="16" height="232"/>
     <path class="wire" d="M58,212 H228" marker-end="url(#ways-head)"/>
@@ -176,7 +173,7 @@
     <rect class="box agent" x="10" y="112" width="96" height="44" rx="8"/>
     <text class="mid" x="58" y="142">agent</text>
     <rect class="box faucet" x="190" y="112" width="96" height="44" rx="8"/>
-    <text class="mid" x="238" y="142">faucet</text>
+    <text class="mid accent" x="238" y="142">faucet</text>
     <path class="lifeline" d="M58,160 V500 M238,160 V500"/>
     <path class="wire" d="M58,212 H236" marker-end="url(#ways-head)"/>
     <text class="mid halo" x="148" y="200">cursor</text>
@@ -199,7 +196,7 @@
     <rect class="box agent" x="10" y="112" width="96" height="44" rx="8"/>
     <text class="mid" x="58" y="142">agent</text>
     <rect class="box faucet" x="190" y="112" width="96" height="44" rx="8"/>
-    <text class="mid" x="238" y="142">faucet</text>
+    <text class="mid accent" x="238" y="142">faucet</text>
     <path class="lifeline" d="M58,160 V500 M238,160 V500"/>
     <path class="wire" d="M58,212 H236" marker-end="url(#ways-head)"/>
     <text class="mid halo" x="148" y="200">subscribe once</text>

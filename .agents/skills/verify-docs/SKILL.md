@@ -32,7 +32,7 @@ A name check that fails on a path or a variable that faucet does not serve or re
 
 `docs/diagrams/source.html` is one page of inline SVG and CSS. Each picture is an element with `data-picture="<name>"`, 960 CSS px wide, and its colours switch on `prefers-color-scheme`. `npm run docs:images` (`verify/docs-images.mjs`) screenshots each picture at twice its size in both schemes to `docs/images/<name>-light.png` and `<name>-dark.png`, then writes `SOURCE_SHA256`: one sha256sum line for the page and one for each PNG. Commit the page, the PNGs and the hash together. The README shows each picture with `<picture>`: a `prefers-color-scheme: dark` source, a light source and a light `<img>` with alt text. A new picture needs that block in the README.
 
-The PNG bytes depend on the fonts of the host, so another host can give different bytes for the same page; commit the PNGs and the hash file from one run. Keep text at 20 px or more at 960 px width, and borders, arrows and lifelines at 3:1 contrast or more against their background in both schemes (text 4.5:1).
+The page follows the Coder Kit product look: zinc neutrals, one accent (the link blue) that marks faucet itself, and Geist and Geist Mono from `docs/diagrams/fonts/` (SIL Open Font License). Give a new part a neutral role from the page's `:root` block, not a new colour. The PNG bytes still depend on the host's font rasteriser, so another host can give different bytes for the same page; commit the PNGs and the hash file from one run. Keep text at 20 px or more at 960 px width, and borders, arrows and lifelines at 3:1 contrast or more against their background in both schemes (text 4.5:1).
 
 ## Look at them
 

@@ -43,6 +43,8 @@ async function render() {
       deviceScaleFactor: 2,
     });
     await page.goto(pathToFileURL(source).href);
+    // The page loads Geist from docs/diagrams/fonts; render no picture before it.
+    await page.evaluate(() => document.fonts.ready);
     const pictures = page.locator("[data-picture]");
     const names = await pictures.evaluateAll((els) => els.map((el) => el.dataset.picture));
     checkNames(names);
