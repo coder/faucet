@@ -1,0 +1,221 @@
+<!doctype html>
+<!--
+  Source of the README pictures. Each [data-picture] element becomes
+  docs/images/<name>-light.png and <name>-dark.png. After an edit, run
+  `npm run docs:images` in verify/ and commit the images with this file.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>faucet pictures</title>
+<style>
+  :root {
+    --bg: #f6f8fa;
+    --ink: #1f2328;
+    --muted: #424a53;
+    --line: #424a53;
+    --card: #ffffff;
+    --edge: #6e7781;
+    --blue: #0969da;
+    --blue-fill: #ddf4ff;
+    --green: #1a7f37;
+    --green-fill: #dafbe1;
+    --purple: #8250df;
+    --purple-fill: #fbefff;
+    --orange: #bc4c00;
+    --orange-fill: #fff1e5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161b22;
+      --ink: #f0f6fc;
+      --muted: #c3cad3;
+      --line: #b1bac4;
+      --card: #0d1117;
+      --edge: #7d8590;
+      --blue: #4493f8;
+      --blue-fill: #0c2d6b;
+      --green: #3fb950;
+      --green-fill: #04260f;
+      --purple: #ab7df8;
+      --purple-fill: #271052;
+      --orange: #f0883e;
+      --orange-fill: #3d1d00;
+    }
+  }
+  body { margin: 0; padding: 24px; background: #808080; }
+  [data-picture] { width: 960px; margin-bottom: 24px; background: var(--bg); }
+  svg { display: block; }
+  text { font-family: Arial, "Liberation Sans", Helvetica, sans-serif; font-size: 22px; fill: var(--ink); }
+  .mono { font-family: Menlo, "DejaVu Sans Mono", monospace; font-size: 20px; }
+  .route { font-family: Menlo, "DejaVu Sans Mono", monospace; font-weight: 700; }
+  .title { font-size: 30px; font-weight: 700; }
+  .big { font-size: 40px; font-weight: 700; }
+  .muted { fill: var(--muted); }
+  .mid { text-anchor: middle; }
+  .halo { paint-order: stroke; stroke: var(--card); stroke-width: 8px; stroke-linejoin: round; }
+  .box { stroke-width: 3; }
+  .plain { fill: var(--card); stroke: var(--ink); }
+  .faucet { fill: var(--blue-fill); stroke: var(--blue); stroke-width: 3; }
+  .port { fill: var(--card); stroke: var(--blue); stroke-width: 2.5; }
+  .agent { fill: var(--green-fill); stroke: var(--green); }
+  .agent-port { fill: var(--card); stroke: var(--green); stroke-width: 2.5; }
+  .db { fill: var(--purple-fill); stroke: var(--purple); }
+  .cron { fill: var(--orange-fill); stroke: var(--orange); }
+  .card { fill: var(--card); stroke: var(--edge); stroke-width: 2.5; }
+  .wire { fill: none; stroke: var(--line); stroke-width: 3; }
+  .dashed { stroke-dasharray: 8 7; }
+  .lifeline { fill: none; stroke: var(--edge); stroke-width: 2.5; stroke-dasharray: 5 7; }
+  .head { fill: var(--line); }
+  .busy { fill: var(--blue-fill); stroke: var(--blue); stroke-width: 2.5; }
+  .frame { fill: none; stroke: var(--edge); stroke-width: 2.5; }
+  .tab { fill: var(--bg); stroke: var(--edge); stroke-width: 2.5; }
+</style>
+</head>
+<body>
+
+<div data-picture="map">
+<svg width="960" height="636" viewBox="0 0 960 636" role="img" aria-label="How faucet connects GitHub, Postgres, a scheduler and agents">
+  <defs>
+    <marker id="map-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="4.5" markerHeight="4.5" orient="auto-start-reverse">
+      <path class="head" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+
+  <!-- faucet and its routes -->
+  <rect class="faucet" x="324" y="24" width="328" height="588" rx="18"/>
+  <text class="big mid" x="488" y="76">faucet</text>
+
+  <rect class="port" x="340" y="96" width="296" height="76" rx="10"/>
+  <text class="route" x="354" y="128">POST /webhook/github</text>
+  <text class="muted" x="354" y="158">stores GitHub events</text>
+
+  <rect class="port" x="340" y="186" width="296" height="76" rx="10"/>
+  <text class="route" x="354" y="218">GET /cron/redeliver</text>
+  <text class="muted" x="354" y="248">asks GitHub to resend</text>
+
+  <rect class="port" x="340" y="276" width="296" height="76" rx="10"/>
+  <text class="route" x="354" y="308">GET /cron/purge</text>
+  <text class="muted" x="354" y="338">old events, expired subs</text>
+
+  <rect class="port" x="340" y="366" width="296" height="76" rx="10"/>
+  <text class="route" x="354" y="398">GET /cron/deliver</text>
+  <text class="muted" x="354" y="428">sends due webhooks</text>
+
+  <rect class="port" x="340" y="456" width="296" height="140" rx="10"/>
+  <text class="route" x="354" y="488">POST /github/mcp</text>
+  <text class="mono" x="354" y="520">wait_for_github_events</text>
+  <text class="mono" x="354" y="548">events/poll</text>
+  <text class="mono" x="354" y="576">events/subscribe</text>
+
+  <!-- GitHub -->
+  <rect class="box plain" x="24" y="82" width="236" height="104" rx="14"/>
+  <text class="title mid" x="142" y="126">GitHub</text>
+  <text class="muted mid" x="142" y="162">org or repo webhook</text>
+  <path class="wire" d="M260,134 H338" marker-end="url(#map-head)"/>
+  <path class="wire dashed" d="M340,224 H170 V189" marker-end="url(#map-head)"/>
+
+  <!-- Postgres -->
+  <path class="box db" d="M732,92 V170 A92,16 0 0 0 916,170 V92"/>
+  <ellipse class="box db" cx="824" cy="92" rx="92" ry="16"/>
+  <text class="title mid" x="824" y="156">Postgres</text>
+  <path class="wire" d="M636,134 H729" marker-end="url(#map-head)"/>
+
+  <!-- scheduler -->
+  <rect class="box cron" x="712" y="204" width="224" height="220" rx="14"/>
+  <text class="title mid" x="824" y="308">Scheduler</text>
+  <text class="muted mid" x="824" y="344">Vercel Cron</text>
+  <path class="wire" d="M712,224 H638" marker-end="url(#map-head)"/>
+  <path class="wire" d="M712,314 H638" marker-end="url(#map-head)"/>
+  <path class="wire" d="M712,404 H638" marker-end="url(#map-head)"/>
+
+  <!-- agent -->
+  <rect class="box agent" x="24" y="318" width="236" height="206" rx="14"/>
+  <text class="title mid" x="142" y="356">Agent</text>
+  <rect class="agent-port" x="44" y="380" width="196" height="48" rx="8"/>
+  <text class="mid" x="142" y="412">callback URL</text>
+  <rect class="agent-port" x="44" y="456" width="196" height="48" rx="8"/>
+  <text class="mid" x="142" y="488">MCP client</text>
+  <path class="wire" d="M340,404 H242" marker-end="url(#map-head)"/>
+  <path class="wire" d="M240,480 H338" marker-end="url(#map-head)"/>
+</svg>
+</div>
+
+<div data-picture="ways">
+<svg width="960" height="552" viewBox="0 0 960 552" role="img" aria-label="Three ways for an agent to get events from faucet: wait, poll and subscribe">
+  <defs>
+    <marker id="ways-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="4.5" markerHeight="4.5" orient="auto-start-reverse">
+      <path class="head" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+
+  <!-- Wait -->
+  <g transform="translate(16 16)">
+    <rect class="card" width="296" height="520" rx="16"/>
+    <text class="big" x="18" y="56">Wait</text>
+    <text class="mono" x="18" y="90">wait_for_github_events</text>
+    <rect class="box agent" x="10" y="112" width="96" height="44" rx="8"/>
+    <text class="mid" x="58" y="142">agent</text>
+    <rect class="box faucet" x="190" y="112" width="96" height="44" rx="8"/>
+    <text class="mid" x="238" y="142">faucet</text>
+    <path class="lifeline" d="M58,160 V500 M238,160 V500"/>
+    <rect class="busy" x="230" y="212" width="16" height="232"/>
+    <path class="wire" d="M58,212 H228" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="148" y="200">one tool call</text>
+    <text class="mid halo" x="144" y="336">waits up to 50 s</text>
+    <path class="wire" d="M230,444 H60" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="144" y="432">first match</text>
+    <text class="mid halo" x="144" y="472">with a cursor</text>
+  </g>
+
+  <!-- Poll -->
+  <g transform="translate(332 16)">
+    <rect class="card" width="296" height="520" rx="16"/>
+    <text class="big" x="18" y="56">Poll</text>
+    <text class="mono" x="18" y="90">events/poll</text>
+    <rect class="box agent" x="10" y="112" width="96" height="44" rx="8"/>
+    <text class="mid" x="58" y="142">agent</text>
+    <rect class="box faucet" x="190" y="112" width="96" height="44" rx="8"/>
+    <text class="mid" x="238" y="142">faucet</text>
+    <path class="lifeline" d="M58,160 V500 M238,160 V500"/>
+    <path class="wire" d="M58,212 H236" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="148" y="200">cursor</text>
+    <path class="wire" d="M238,272 H60" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="148" y="260">events, cursor</text>
+    <rect class="frame" x="12" y="304" width="272" height="188" rx="10"/>
+    <path class="tab" d="M12,314 A10,10 0 0 1 22,304 H142 V328 L128,342 H12 Z"/>
+    <text x="22" y="331">call again</text>
+    <path class="wire" d="M58,396 H236" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="148" y="384">cursor</text>
+    <path class="wire" d="M238,456 H60" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="148" y="444">events, cursor</text>
+  </g>
+
+  <!-- Subscribe -->
+  <g transform="translate(648 16)">
+    <rect class="card" width="296" height="520" rx="16"/>
+    <text class="big" x="18" y="56">Subscribe</text>
+    <text class="mono" x="18" y="90">events/subscribe</text>
+    <rect class="box agent" x="10" y="112" width="96" height="44" rx="8"/>
+    <text class="mid" x="58" y="142">agent</text>
+    <rect class="box faucet" x="190" y="112" width="96" height="44" rx="8"/>
+    <text class="mid" x="238" y="142">faucet</text>
+    <path class="lifeline" d="M58,160 V500 M238,160 V500"/>
+    <path class="wire" d="M58,212 H236" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="148" y="200">subscribe once</text>
+    <rect class="frame" x="12" y="244" width="272" height="160" rx="10"/>
+    <path class="tab" d="M12,254 A10,10 0 0 1 22,244 H142 V268 L128,282 H12 Z"/>
+    <text x="22" y="271">each event</text>
+    <path class="wire" d="M238,336 H60" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="148" y="324">signed POST</text>
+    <text class="mid halo" x="148" y="364">to your URL</text>
+    <path class="wire" d="M58,444 H236" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="148" y="432">renew</text>
+    <text class="mid halo" x="148" y="472">within 10 min</text>
+  </g>
+
+</svg>
+</div>
+
+</body>
+</html>
