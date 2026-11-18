@@ -1,0 +1,57 @@
+package oauth
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+)
+
+// The docs state numbers that come from the constants of this package. A
+// change to a constant fails here until the docs say the new number.
+func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
+	t.Parallel()
+
+	seconds := func(d time.Duration) int { return int(d / time.Second) }
+	minutes := func(d time.Duration) int { return int(d / time.Minute) }
+	days := func(d time.Duration) int { return int(d / (24 * time.Hour)) }
+	require.Equal(t, 24*time.Hour, authRequestRetention, "the docs say \"a day\"")
+
+	for _, p := range []struct {
+		file, format string
+		args         []any
+	}{
+		{"docs/security.md", "each valid for %d minutes on the one endpoint", []any{minutes(accessTokenLifetime)}},
+		{"docs/security.md", "A code works once, for %d seconds.", []any{seconds(codeLifetime)}},
+		{"docs/security.md", "A fetch must end within %d seconds, and the document must be %d KiB at most", []any{seconds(documentTimeout), maxDocumentBytes >> 10}},
+		{"docs/service-accounts.md", "an fct_ access token for %d minutes", []any{minutes(accessTokenLifetime)}},
+		{"docs/browser-login.md", "an access token for %d minutes", []any{minutes(accessTokenLifetime)}},
+		{"docs/browser-login.md", "an fct_ access token for %d minutes", []any{minutes(accessTokenLifetime)}},
+		{"docs/browser-login.md", "| Its SHA-256. | %d minutes.", []any{minutes(accessTokenLifetime)}},
+		{"docs/browser-login.md", "The page works for %d minutes.", []any{minutes(authRequestLifetime)}},
+		{"docs/browser-login.md", "trade the code for faucet's tokens within %d seconds", []any{seconds(codeLifetime)}},
+		{"docs/browser-login.md", "and of the code. | %d minutes to finish in the browser, then %d seconds to redeem the code", []any{minutes(authRequestLifetime), seconds(codeLifetime)}},
+		{"docs/browser-login.md", "deletes the request a day after it expired", nil},
+		{"docs/browser-login.md", "The refresh token went unused for %d days.", []any{days(sessionIdleLifetime)}},
+		{"docs/upgrading.md", "deletes login requests a day after they expired", nil},
+	} {
+		doc, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(p.file)))
+		require.NoError(t, err)
+		requireDocSays(t, p.file, string(doc), p.format, p.args...)
+	}
+}
+
+// requireDocSays fails unless doc says the phrase that format and args give,
+// each time it says the words before the first verb, so that a second copy
+// with an old number fails too.
+func requireDocSays(t *testing.T, file, doc, format string, args ...any) {
+	t.Helper()
+	phrase := fmt.Sprintf(format, args...)
+	lead, _, _ := strings.Cut(format, "%")
+	require.True(t, strings.Contains(doc, phrase), "%s does not say %q", file, phrase)
+	require.Equal(t, strings.Count(doc, lead), strings.Count(doc, phrase), "%s: every %q must go on as %q", file, lead, phrase)
+}
