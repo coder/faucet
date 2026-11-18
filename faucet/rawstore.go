@@ -358,7 +358,8 @@ type RawStore interface {
 	// plan.Deliveries due at now, one unread event per plan.Unread, a gap owed
 	// by each of plan.Gaps through the new raw ID, and the new raw ID as the
 	// mark of each of plan.Lost. An interest that is acknowledged before the
-	// call starts is among the interests.
+	// call starts is among the interests. When ctx has ended by the time plan
+	// returns, it writes nothing and returns ctx's error.
 	IngestRaw(ctx context.Context, d RawDelivery, now time.Time, plan func([]RawInterest) RawPlan) (RawIngest, error)
 	// RawHead returns the highest raw ID stored, or 0.
 	RawHead(ctx context.Context) (int64, error)

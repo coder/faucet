@@ -1,6 +1,7 @@
 package faucet
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -61,8 +62,50 @@ func BenchmarkPlanRawIngest(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			for b.Loop() {
 				doc, _ := parseRawDocument(body)
-				planRawIngest(doc, interests)
+				planRawIngest(context.Background(), doc, interests)
 			}
 		})
 	}
+}
+
+// BenchmarkPlanRawIngestOfTheLargestPush parses and plans a push of about 23
+// MiB, 2000 commits of 12 KiB, for leases that all name commits.id.
+func BenchmarkPlanRawIngestOfTheLargestPush(b *testing.B) {
+	commits := make([]map[string]any, 2000)
+	for i := range commits {
+		commits[i] = map[string]any{"id": fmt.Sprintf("%040d", i), "message": strings.Repeat("m", 12<<10)}
+	}
+	body, err := json.Marshal(map[string]any{"ref": "refs/heads/main", "commits": commits, "repository": map[string]any{"id": 42}})
+	require.NoError(b, err)
+	b.Logf("payload %d bytes", len(body))
+	for _, n := range []int{50, 200} {
+		interests := fieldLeases(n, func(int) []string { return []string{"commits.id"} })
+		b.Run(fmt.Sprintf("%dLeases", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				doc, _ := parseRawDocument(body)
+				planRawIngest(context.Background(), doc, interests)
+			}
+		})
+	}
+}
+
+func TestAPlanWhoseContextEndedServesNobody(t *testing.T) {
+	t.Parallel()
+	doc := largePush(t)
+	interests := []RawInterest{
+		{IsLease: true, Lease: RawLeaseID{1}, Fields: []string{"commits.id"}},
+		{IsLease: true, Lease: RawLeaseID{2}, Fields: []string{"commits.message"}},
+		{Subscription: SubscriptionKeyHash{3}, Fields: []string{"ref"}},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	plan, _ := planRawIngest(ctx, doc, interests)
+	require.Equal(t, RawPlan{}, plan, "a plan that its request outlived does no more work, and the store writes none")
+
+	plan, _ = planRawIngest(context.Background(), doc, interests)
+	require.Equal(t, []RawLeaseID{{1}}, plan.Unread)
+	require.Equal(t, []RawLeaseID{{2}}, plan.Lost)
+	require.Len(t, plan.Deliveries, 1)
 }

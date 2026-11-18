@@ -163,6 +163,9 @@ func (s *fakeStore) IngestRaw(ctx context.Context, d faucet.RawDelivery, now tim
 	// The plan runs without the mutex, as a store plans outside its
 	// transaction: an interest can end before the plan is written.
 	p := plan(interests)
+	if err := ctx.Err(); err != nil {
+		return faucet.RawIngest{}, err
+	}
 	if err := p.Validate(); err != nil {
 		return faucet.RawIngest{}, err
 	}

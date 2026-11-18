@@ -1,6 +1,7 @@
 package faucet
 
 import (
+	"context"
 	"fmt"
 	"strings"
 )
@@ -41,8 +42,9 @@ type rawMisses struct {
 // get it, and the others are served. A lease that misses the event keeps a
 // mark, and a subscription is owed a gap. The stored body is the whole
 // payload when a served interest wants it whole, and else only the union of
-// the fields that the served interests want.
-func planRawIngest(doc rawDocument, interests []RawInterest) (RawPlan, rawMisses) {
+// the fields that the served interests want. Once ctx has ended it projects
+// no more and returns an empty plan, which RawStore.IngestRaw does not write.
+func planRawIngest(ctx context.Context, doc rawDocument, interests []RawInterest) (RawPlan, rawMisses) {
 	var plan RawPlan
 	var missed rawMisses
 	var open, served []RawInterest
@@ -58,7 +60,7 @@ func planRawIngest(doc rawDocument, interests []RawInterest) (RawPlan, rawMisses
 			open = append(open, in)
 		}
 	}
-	fits := doc.fitsFor(open)
+	fits := doc.fitsFor(ctx, open)
 	for _, in := range open {
 		switch fit := fits(in.Fields); {
 		case in.IsLease && !fit:
@@ -75,6 +77,9 @@ func planRawIngest(doc rawDocument, interests []RawInterest) (RawPlan, rawMisses
 			served = append(served, in)
 		}
 	}
+	if ctx.Err() != nil {
+		return RawPlan{}, rawMisses{}
+	}
 	plan.Body, plan.Fields = doc.bodyFor(served)
 	return plan, missed
 }
@@ -84,13 +89,13 @@ func planRawIngest(doc rawDocument, interests []RawInterest) (RawPlan, rawMisses
 // one of more paths, so when the union of the paths of interests fits, all
 // of them do, and the payload is projected once. Otherwise each distinct set
 // of paths is projected once.
-func (d rawDocument) fitsFor(interests []RawInterest) func(fields []string) bool {
+func (d rawDocument) fitsFor(ctx context.Context, interests []RawInterest) func(fields []string) bool {
 	whole := len(d.body) <= maxEventBodyBytes
 	var union []string
 	for _, in := range interests {
 		union = append(union, in.Fields...)
 	}
-	if len(union) == 0 {
+	if len(union) == 0 || ctx.Err() != nil {
 		return func([]string) bool { return whole }
 	}
 	if _, fits := d.projectWithin(sortedSet(union), maxEventBodyBytes); fits {
@@ -102,7 +107,7 @@ func (d rawDocument) fitsFor(interests []RawInterest) func(fields []string) bool
 			return whole
 		}
 		key := strings.Join(sortedSet(fields), "\n")
-		if _, known := fit[key]; !known {
+		if _, known := fit[key]; !known && ctx.Err() == nil {
 			_, fit[key] = d.projectWithin(fields, maxEventBodyBytes)
 		}
 		return fit[key]

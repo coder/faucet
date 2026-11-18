@@ -45,6 +45,7 @@ func RunRaw(t *testing.T, newStore func(t *testing.T) RawStore) {
 
 var rawIngestSubtests = []rawSubtest{
 	{"IngestRawWritesNothingWithoutAnInterest", ingestRawWritesNothingWithoutAnInterest},
+	{"IngestRawWritesNoPlanAfterItsContextEnded", ingestRawWritesNoPlanAfterItsContextEnded},
 	{"IngestRawGivesThePlanEachMatchingInterestOnce", ingestRawGivesThePlanEachMatchingInterestOnce},
 	{"IngestRawMatchesOnRepositoryEventLivenessAndAction", ingestRawMatchesOnRepositoryEventLivenessAndAction},
 	{"IngestRawWritesWhatThePlanSays", ingestRawWritesWhatThePlanSays},
@@ -358,6 +359,22 @@ func (r *rawRig) purge(p faucet.RawPurge) faucet.RawPurgeResult {
 	res, err := r.s.PurgeRawEvents(r.ctx, p)
 	require.NoError(r.t, err)
 	return res
+}
+
+func ingestRawWritesNoPlanAfterItsContextEnded(t *testing.T, s RawStore) {
+	r := newRawRig(t, s)
+	r.subscribe(1, rawSpec{})
+	lease := r.open(rawSpec{})
+	ctx, cancel := context.WithCancel(r.ctx)
+	defer cancel()
+	_, err := s.IngestRaw(ctx, r.newDelivery(), r.now, func(interests []faucet.RawInterest) faucet.RawPlan {
+		cancel()
+		return serveAll(rawBody)(interests)
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(t, r.head(), "a plan that its context outlived is not written")
+	require.Empty(t, r.claimAll(r.now))
+	require.Empty(t, r.read(r.query(lease, 0)).Events)
 }
 
 func ingestRawWritesNothingWithoutAnInterest(t *testing.T, s RawStore) {

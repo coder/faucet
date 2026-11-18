@@ -29,7 +29,7 @@ func (s *Service) serveRawWebhook(w http.ResponseWriter, r *http.Request, logger
 	var plan RawPlan
 	var missed rawMisses
 	res, err := s.raw.IngestRaw(r.Context(), d, s.clock.Now(), func(interests []RawInterest) RawPlan {
-		plan, missed = planRawIngest(doc, interests)
+		plan, missed = planRawIngest(r.Context(), doc, interests)
 		return plan
 	})
 	switch {

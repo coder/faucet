@@ -48,6 +48,9 @@ func (s *Store) IngestRaw(ctx context.Context, d faucet.RawDelivery, now time.Ti
 		}
 	}
 	p := plan(interests)
+	if err := ctx.Err(); err != nil {
+		return faucet.RawIngest{}, xerrors.Errorf("plan: %w", err)
+	}
 	if err := p.Validate(); err != nil {
 		return faucet.RawIngest{}, xerrors.Errorf("validate plan: %w", err)
 	}
