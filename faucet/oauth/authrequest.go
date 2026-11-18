@@ -104,6 +104,8 @@ func (r AuthRequest) Validate() error {
 		return xerrors.New("a new authorization request is pending")
 	case r.ClientID == "" || r.RedirectURI == "" || r.Resource == "" || r.CodeChallenge == "":
 		return xerrors.New("an authorization request needs a client ID, a redirect URI, a resource and a code challenge")
+	case r.ClientHost() == "":
+		return xerrors.New("the client ID of an authorization request needs a host")
 	case len(r.Scopes) == 0:
 		return xerrors.New("an authorization request needs at least one scope")
 	case r.BrowserHash == TokenHash{}:

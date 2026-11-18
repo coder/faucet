@@ -93,6 +93,15 @@ func githubFailure(status int, err error) *refusal {
 	}}
 }
 
+// tooManyLogins refuses an authorization request while faucet holds as many
+// logins in progress as a limit allows.
+func tooManyLogins() *refusal {
+	return &refusal{status: http.StatusTooManyRequests, reason: "too many logins in progress", page: errorPage{
+		Title:   "Too many logins in progress",
+		Message: "faucet has too many logins in progress to start another one now. Try again in a few minutes.",
+	}}
+}
+
 func wrongMethod(method string) *refusal {
 	return &refusal{status: http.StatusMethodNotAllowed, reason: "method " + method, page: errorPage{
 		Title:   "This page takes a link",
@@ -160,7 +169,12 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	now := s.clock.Now()
 	request.ID, request.State, request.BrowserHash = id, AuthRequestPending, HashToken(browser)
 	request.CreatedAt, request.ExpiresAt = now, now.Add(authRequestLifetime)
-	if err := s.store.InsertAuthRequest(ctx, request, pendingLimits); err != nil {
+	err = s.store.InsertAuthRequest(ctx, request, pendingLimits)
+	switch {
+	case xerrors.Is(err, ErrTooManyAuthRequests):
+		s.refuse(w, r, tooManyLogins(), host)
+		return
+	case err != nil:
 		s.refuse(w, r, failure(xerrors.Errorf("store the authorization request: %w", err)), host)
 		return
 	}

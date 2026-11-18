@@ -173,7 +173,7 @@ func (q *Queries) ExpireAuthRequest(ctx context.Context, id string) error {
 }
 
 const getAuthRequestByCode = `-- name: GetAuthRequestByCode :one
-SELECT id, state, client_id, client_name, redirect_uri, client_state, resource, scopes, code_challenge,
+SELECT id, state, client_id, client_host, client_name, redirect_uri, client_state, resource, scopes, code_challenge,
   browser_hash, github_state_hash, code_hash, connection_id, created_at, expires_at
 FROM faucet_auth_requests
 WHERE code_hash = $1
@@ -186,6 +186,7 @@ func (q *Queries) GetAuthRequestByCode(ctx context.Context, codeHash []byte) (Fa
 		&i.ID,
 		&i.State,
 		&i.ClientID,
+		&i.ClientHost,
 		&i.ClientName,
 		&i.RedirectUri,
 		&i.ClientState,
@@ -203,7 +204,7 @@ func (q *Queries) GetAuthRequestByCode(ctx context.Context, codeHash []byte) (Fa
 }
 
 const getAuthRequestByGitHubState = `-- name: GetAuthRequestByGitHubState :one
-SELECT id, state, client_id, client_name, redirect_uri, client_state, resource, scopes, code_challenge,
+SELECT id, state, client_id, client_host, client_name, redirect_uri, client_state, resource, scopes, code_challenge,
   browser_hash, github_state_hash, code_hash, connection_id, created_at, expires_at
 FROM faucet_auth_requests
 WHERE github_state_hash = $1
@@ -216,6 +217,7 @@ func (q *Queries) GetAuthRequestByGitHubState(ctx context.Context, githubStateHa
 		&i.ID,
 		&i.State,
 		&i.ClientID,
+		&i.ClientHost,
 		&i.ClientName,
 		&i.RedirectUri,
 		&i.ClientState,
@@ -232,17 +234,26 @@ func (q *Queries) GetAuthRequestByGitHubState(ctx context.Context, githubStateHa
 	return i, err
 }
 
-const insertAuthRequest = `-- name: InsertAuthRequest :exec
+const insertAuthRequest = `-- name: InsertAuthRequest :execrows
 INSERT INTO faucet_auth_requests (
-  id, state, client_id, client_name, redirect_uri, client_state, resource, scopes, code_challenge, browser_hash, created_at, expires_at
-) VALUES (
-  $1, 'pending', $2, $3, $4, $5, $6, $7::text[], $8, $9, $10, $11
+  id, state, client_id, client_host, client_name, redirect_uri, client_state, resource, scopes, code_challenge, browser_hash, created_at, expires_at
 )
+SELECT $1::text, 'pending', $2::text, $3::text, $4::text, $5::text, $6::text,
+  $7::text, $8::text[], $9::text, $10::bytea, $11::timestamptz, $12::timestamptz
+WHERE (
+    SELECT count(*) FROM faucet_auth_requests
+    WHERE state = 'pending' AND client_host = $3::text AND expires_at > $11::timestamptz
+  ) < $13::bigint
+  AND (
+    SELECT count(*) FROM faucet_auth_requests
+    WHERE state = 'pending' AND expires_at > $11::timestamptz
+  ) < $14::bigint
 `
 
 type InsertAuthRequestParams struct {
 	ID            string
 	ClientID      string
+	ClientHost    string
 	ClientName    string
 	RedirectUri   string
 	ClientState   string
@@ -252,12 +263,18 @@ type InsertAuthRequestParams struct {
 	BrowserHash   []byte
 	CreatedAt     time.Time
 	ExpiresAt     time.Time
+	PerClientHost int64
+	Total         int64
 }
 
-func (q *Queries) InsertAuthRequest(ctx context.Context, arg InsertAuthRequestParams) error {
-	_, err := q.db.ExecContext(ctx, insertAuthRequest,
+// InsertAuthRequest stores a pending request unless the pending requests
+// that have not expired at its creation reach a limit: those of its client
+// host, or all of them.
+func (q *Queries) InsertAuthRequest(ctx context.Context, arg InsertAuthRequestParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, insertAuthRequest,
 		arg.ID,
 		arg.ClientID,
+		arg.ClientHost,
 		arg.ClientName,
 		arg.RedirectUri,
 		arg.ClientState,
@@ -267,6 +284,11 @@ func (q *Queries) InsertAuthRequest(ctx context.Context, arg InsertAuthRequestPa
 		arg.BrowserHash,
 		arg.CreatedAt,
 		arg.ExpiresAt,
+		arg.PerClientHost,
+		arg.Total,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

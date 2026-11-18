@@ -16,15 +16,17 @@ import (
 var _ oauth.LoginStore = (*Store)(nil)
 
 // InsertAuthRequest implements oauth.LoginStore. A second request with the
-// same ID fails on the primary key.
-func (s *Store) InsertAuthRequest(ctx context.Context, r oauth.AuthRequest, _ oauth.AuthRequestLimits) (err error) {
+// same ID fails on the primary key. One statement counts and inserts, so
+// inserts that run at once can each count before another one inserts.
+func (s *Store) InsertAuthRequest(ctx context.Context, r oauth.AuthRequest, limits oauth.AuthRequestLimits) (err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if err := r.Validate(); err != nil {
 		return xerrors.Errorf("validate authorization request: %w", err)
 	}
-	if err := s.q.InsertAuthRequest(ctx, database.InsertAuthRequestParams{
+	n, err := s.q.InsertAuthRequest(ctx, database.InsertAuthRequestParams{
 		ID:            r.ID,
 		ClientID:      r.ClientID,
+		ClientHost:    r.ClientHost(),
 		ClientName:    r.ClientName,
 		RedirectUri:   r.RedirectURI,
 		ClientState:   r.ClientState,
@@ -34,8 +36,14 @@ func (s *Store) InsertAuthRequest(ctx context.Context, r oauth.AuthRequest, _ oa
 		BrowserHash:   r.BrowserHash[:],
 		CreatedAt:     r.CreatedAt,
 		ExpiresAt:     r.ExpiresAt,
-	}); err != nil {
+		PerClientHost: int64(limits.PerClientHost),
+		Total:         int64(limits.Total),
+	})
+	switch {
+	case err != nil:
 		return xerrors.Errorf("insert authorization request: %w", err)
+	case n == 0:
+		return oauth.ErrTooManyAuthRequests
 	}
 	return nil
 }

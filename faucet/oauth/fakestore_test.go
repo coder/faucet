@@ -174,12 +174,24 @@ func cloneConnection(c oauth.Connection) oauth.Connection {
 	return c
 }
 
-func (s *fakeStore) InsertAuthRequest(_ context.Context, r oauth.AuthRequest, _ oauth.AuthRequestLimits) error {
+func (s *fakeStore) InsertAuthRequest(_ context.Context, r oauth.AuthRequest, limits oauth.AuthRequestLimits) error {
 	if err := r.Validate(); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var ofHost, total int
+	for _, o := range s.requests {
+		if o.State == oauth.AuthRequestPending && o.ExpiresAt.After(r.CreatedAt) {
+			total++
+			if o.ClientHost() == r.ClientHost() {
+				ofHost++
+			}
+		}
+	}
+	if ofHost >= limits.PerClientHost || total >= limits.Total {
+		return oauth.ErrTooManyAuthRequests
+	}
 	if _, ok := s.requests[r.ID]; ok {
 		return xerrors.New("duplicate authorization request ID")
 	}
