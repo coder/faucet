@@ -237,3 +237,29 @@ describe('startup configuration', () => {
     });
   });
 });
+
+describe('the public URL on Vercel', () => {
+  const vercel = { VERCEL: '1', VERCEL_ENV: 'production', VERCEL_PROJECT_PRODUCTION_URL: 'faucet-prod.verify.test' };
+  const derived = /\[info\].*public URL taken from VERCEL_PROJECT_PRODUCTION_URL.*public_url=https:\/\/faucet-prod\.verify\.test/;
+
+  async function issuerOf(started: Faucet): Promise<string> {
+    const metadata = await started.request('/.well-known/oauth-authorization-server', {});
+    expect(metadata.status, metadata.body).toBe(200);
+    return (JSON.parse(metadata.body) as { issuer: string }).issuer;
+  }
+
+  test('production without FAUCET_PUBLIC_URL takes https and the production URL, and logs it once', async ({ faucet }) => {
+    await faucet.withFaucet(vercel, async (started, output) => {
+      expect(await issuerOf(started), 'the login server is on at the production URL').toBe('https://faucet-prod.verify.test');
+      expect(output()).toMatch(derived);
+      expect(occurrences(output(), 'public URL taken from'), 'one line at startup').toBe(1);
+    });
+  });
+
+  test('an explicit FAUCET_PUBLIC_URL wins over the production URL', async ({ faucet }) => {
+    await faucet.withFaucet({ ...vercel, FAUCET_PUBLIC_URL: 'https://events.verify.test' }, async (started, output) => {
+      expect(await issuerOf(started)).toBe('https://events.verify.test');
+      expect(output()).not.toContain('public URL taken from');
+    });
+  });
+});

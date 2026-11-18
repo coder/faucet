@@ -56,7 +56,7 @@ func loadBrowserLoginConfig(getenv func(string) string, cfg *config) error {
 			Client: &http.Client{Timeout: githubTimeout},
 		},
 		Keys:      keys,
-		Documents: faucet.NewHTTPClient(faucet.HTTPClientOptions{AllowInsecureLoopback: allowInsecureLoopback}),
+		Documents: faucet.HTTPClientOptions{AllowInsecureLoopback: allowInsecureLoopback},
 	}
 	if err := login.GitHub.Validate(); err != nil {
 		return xerrors.Errorf("%s: %w", envGitHubURL, err)

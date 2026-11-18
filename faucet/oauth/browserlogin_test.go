@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/sloghuman"
 	"github.com/coder/faucet/faucet"
 	"github.com/coder/faucet/faucet/oauth"
 	"github.com/coder/quartz"
@@ -38,7 +40,7 @@ func testBrowserLogin(t *testing.T, githubURL string) *oauth.BrowserLogin {
 			Client: &http.Client{Timeout: 5 * time.Second},
 		},
 		Keys:      testTokenKeys(t),
-		Documents: faucet.NewHTTPClient(faucet.HTTPClientOptions{AllowInsecureLoopback: true}),
+		Documents: faucet.HTTPClientOptions{AllowInsecureLoopback: true},
 	}
 }
 
@@ -84,12 +86,11 @@ func TestWithoutABrowserLoginTheMetadataNamesNoClientDocuments(t *testing.T) {
 func TestNewServerRefusesABrowserLoginThatLacksAPart(t *testing.T) {
 	t.Parallel()
 	for name, mutate := range map[string]func(*oauth.BrowserLogin){
-		"no client ID":       func(l *oauth.BrowserLogin) { l.GitHub.ClientID = "" },
-		"no client secret":   func(l *oauth.BrowserLogin) { l.GitHub.ClientSecret = "" },
-		"a plain http host":  func(l *oauth.BrowserLogin) { l.GitHub.WebURL = "http://github.example.com" },
-		"no API URL":         func(l *oauth.BrowserLogin) { l.GitHub.APIURL = "" },
-		"no token key":       func(l *oauth.BrowserLogin) { l.Keys = oauth.TokenKeys{} },
-		"no document client": func(l *oauth.BrowserLogin) { l.Documents = nil },
+		"no client ID":      func(l *oauth.BrowserLogin) { l.GitHub.ClientID = "" },
+		"no client secret":  func(l *oauth.BrowserLogin) { l.GitHub.ClientSecret = "" },
+		"a plain http host": func(l *oauth.BrowserLogin) { l.GitHub.WebURL = "http://github.example.com" },
+		"no API URL":        func(l *oauth.BrowserLogin) { l.GitHub.APIURL = "" },
+		"no token key":      func(l *oauth.BrowserLogin) { l.Keys = oauth.TokenKeys{} },
 	} {
 		login := testBrowserLogin(t, "https://github.example.com")
 		mutate(login)
@@ -104,6 +105,24 @@ func TestNewServerRefusesABrowserLoginThatLacksAPart(t *testing.T) {
 		Login: testBrowserLogin(t, "https://github.example.com"),
 	})
 	require.Error(t, err, "no repository checker")
+}
+
+// A document client that reaches loopback is for tests, so a server that has
+// one says so in its log, and a server for production says nothing.
+func TestNewServerWarnsOfADocumentClientThatReachesLoopback(t *testing.T) {
+	t.Parallel()
+	const warning = "the client that fetches client documents reaches loopback over http, which is for tests only"
+	for loopback, want := range map[bool]bool{true: true, false: false} {
+		logs := &loginLogs{}
+		login := testBrowserLogin(t, "https://github.example.com")
+		login.Documents.AllowInsecureLoopback = loopback
+		_, err := oauth.NewServer(oauth.ServerDeps{
+			Store: newFakeStore(), Clock: quartz.NewMock(t), Logger: slog.Make(sloghuman.Sink(logs)), Issuer: issuer,
+			Resources: []string{resource}, Login: login, Repos: noRepos,
+		})
+		require.NoError(t, err)
+		require.Equal(t, want, strings.Contains(logs.String(), "[warn]") && strings.Contains(logs.String(), warning), "AllowInsecureLoopback %v: %s", loopback, logs.String())
+	}
 }
 
 // noRepos is the RepoChecker of a server whose test asks GitHub about no

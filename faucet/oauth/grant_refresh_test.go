@@ -76,6 +76,30 @@ func TestARetiredRefreshTokenEndsTheSession(t *testing.T) {
 	require.False(t, h.session("login-1").Live(), "the session ended")
 }
 
+// A refresh token that comes back after its reuse grace ends its session
+// before faucet does anything else for the request: though the user's
+// GitHub token is due for a refresh, faucet asks GitHub nothing and keeps
+// the pair that it holds.
+func TestALateReuseOfARefreshTokenEndsItsSessionWithoutAskingGitHub(t *testing.T) {
+	t.Parallel()
+	h := newGrantHarness(t, newFakeStore())
+	first := h.redeem(h.approve("login-1", 1))
+	h.refresh(first)
+	h.clock.Advance(8*time.Hour - 10*time.Minute)
+	id := oauth.ConnectionID(oauth.ProviderGitHub, 1)
+	held, err := h.store.Connection(context.Background(), id)
+	require.NoError(t, err)
+
+	grantRequireRefused(t, h.post("", grantRefreshForm(first.refresh)), http.StatusBadRequest, "invalid_grant", "the token hours after its first use")
+	require.False(t, h.session("login-1").Live(), "the session ended")
+	refreshes, repoChecks := h.github.counts()
+	require.Zero(t, refreshes, "faucet asks GitHub for no new pair for a request that it refuses")
+	require.Zero(t, repoChecks)
+	kept, err := h.store.Connection(context.Background(), id)
+	require.NoError(t, err)
+	require.Equal(t, held, kept, "the connection keeps its pair")
+}
+
 // grantCountingStore counts the reads of a session by its refresh token.
 type grantCountingStore struct {
 	oauth.Store

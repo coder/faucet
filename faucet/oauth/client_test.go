@@ -1,6 +1,7 @@
 package oauth_test
 
 import (
+	"context"
 	"net/url"
 	"regexp"
 	"strings"
@@ -50,6 +51,18 @@ func TestNewClientRefusesAClientThatCannotWork(t *testing.T) {
 		"an org grant of no login": func() (oauth.Client, string, error) {
 			return oauth.NewClient("ci", resource, bothScopes, []string{"org:"}, time.Now())
 		},
+		"an org grant of no account": func() (oauth.Client, string, error) {
+			return oauth.NewClient("ci", resource, bothScopes, []string{"org:coder"}, time.Now())
+		},
+		"an org grant of account 0": func() (oauth.Client, string, error) {
+			return oauth.NewClient("ci", resource, bothScopes, []string{"org:coder#0"}, time.Now())
+		},
+		"an org grant of account 07": func() (oauth.Client, string, error) {
+			return oauth.NewClient("ci", resource, bothScopes, []string{"org:coder#07"}, time.Now())
+		},
+		"an org grant of an account and no login": func() (oauth.Client, string, error) {
+			return oauth.NewClient("ci", resource, bothScopes, []string{"org:#7"}, time.Now())
+		},
 		"all of a repository": func() (oauth.Client, string, error) {
 			return oauth.NewClient("ci", resource, bothScopes, []string{"all:coder/faucet"}, time.Now())
 		},
@@ -83,7 +96,32 @@ func TestNewClientRefusesAClientThatCannotWork(t *testing.T) {
 	}
 	_, _, err := oauth.NewClient(strings.Repeat("a", 64), resource, bothScopes, grants, time.Now())
 	require.NoError(t, err, "64 bytes is the longest ID")
-	c, _, err := oauth.NewClient("ci", resource, bothScopes, []string{"repo:coder/faucet", "org:coder", "all"}, time.Now())
-	require.NoError(t, err, "a grant names a repository, an owner or every repository")
-	require.Equal(t, []string{"repo:coder/faucet", "org:coder", "all"}, c.Grants)
+	c, _, err := oauth.NewClient("ci", resource, bothScopes, []string{"repo:coder/faucet", "org:coder#7", "all"}, time.Now())
+	require.NoError(t, err, "a grant names a repository, an account or every repository")
+	require.Equal(t, []string{"repo:coder/faucet", "org:coder#7", "all"}, c.Grants)
+}
+
+// An operator writes an org grant by login, and the client holds it for the
+// account that holds the login now, under the login that faucet holds.
+func TestBindGrantsNamesTheAccountThatHoldsTheLoginNow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	owners := fakeRepos{owners: map[string]faucet.Owner{"coder": {ID: 7, Login: "Coder"}}}
+
+	bound, err := oauth.BindGrants(ctx, owners, []string{"repo:coder/faucet", "org:coder", "all"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"repo:coder/faucet", "org:Coder#7", "all"}, bound)
+
+	_, err = oauth.BindGrants(ctx, owners, []string{"org:octo"})
+	require.ErrorIs(t, err, faucet.ErrUnknownOwner)
+	require.ErrorContains(t, err, "faucet has received no webhook delivery from octo or a repository of it, so it cannot tell which account org:octo names")
+	bound, err = oauth.BindGrants(ctx, owners, []string{"org:CODER#7"})
+	require.NoError(t, err, "an operator can name the account that holds the login")
+	require.Equal(t, []string{"org:Coder#7"}, bound)
+	_, err = oauth.BindGrants(ctx, owners, []string{"org:coder#8"})
+	require.ErrorContains(t, err, "org:coder#8 names account 8, and faucet's latest delivery gives coder to account 7")
+	for _, grant := range []string{"org:coder#07", "org:coder#", "org:#7", "org:coder/faucet", "repo:coder", "everything"} {
+		_, err = oauth.BindGrants(ctx, owners, []string{grant})
+		require.ErrorContains(t, err, "is not repo:<owner>/<name>, org:<login>, org:<login>#<account ID> or all", grant)
+	}
 }

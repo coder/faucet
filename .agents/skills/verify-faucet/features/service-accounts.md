@@ -35,5 +35,5 @@ service-discovery|http|skeptic|Fetch every 401 and metadata document on /github/
 ## Gotchas
 
 - `FAUCET_PUBLIC_URL` must be the URL that clients call, in the form they compute: no trailing slash, no default port, a lower-case host. faucet refuses to start otherwise.
-- A `repo:` grant matches a repository by name. After a rename, the grant must name the new name, and faucet learns the rename only from a `repository` delivery. An `org:` grant matches by the owner's ID, which faucet learns from a delivery of any repository of the owner.
+- A `repo:` grant matches a repository by name. After a rename, the grant must name the new name, and faucet learns the rename only from a `repository` delivery. An `org:` grant matches by the owner's ID, which `faucet clients create` takes from faucet's owners when it makes the client, so a delivery of the owner or any repository of it must come first.
 - `-grant` takes one grant; repeat it for more. `createClient` of `tests/services.ts` passes `-scope events:read` unless told otherwise, so a test that subscribes passes `events:read,events:subscribe`, comma separated.

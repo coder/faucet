@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/coder/faucet/faucet"
 )
 
 // testTokenKey is the value of FAUCET_TOKEN_KEY for one made-up key.
@@ -45,7 +47,7 @@ func TestLoadConfigTurnsTheBrowserLoginOnOnlyWithEveryPart(t *testing.T) {
 	require.Equal(t, "Iv1.faucet", cfg.browserLogin.GitHub.ClientID)
 	require.Equal(t, defaultGitHubURL, cfg.browserLogin.GitHub.WebURL)
 	require.Equal(t, defaultAPIURL, cfg.browserLogin.GitHub.APIURL)
-	require.NotNil(t, cfg.browserLogin.Documents)
+	require.Equal(t, faucet.HTTPClientOptions{AllowInsecureLoopback: allowInsecureLoopback}, cfg.browserLogin.Documents)
 
 	env := browserLoginEnv()
 	env[envGitHubURL], env[envAPIURL] = "https://github.example.com", "https://github.example.com/api/v3"

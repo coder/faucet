@@ -2,6 +2,23 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## To a public URL from Vercel
+
+This came in [#60](https://github.com/coder/faucet/pull/60). On Vercel production with `FAUCET_PUBLIC_URL` unset, faucet now takes `https://` and `VERCEL_PROJECT_PRODUCTION_URL` as its public URL, so the routes of its login server exist there from this deploy on: the metadata documents, `/oauth/token`, `/oauth/authorize` and `/oauth/revoke`, and a 401 from `/github/mcp` names the metadata. A preview or development deployment, and every host outside Vercel, sees no change. Set `FAUCET_PUBLIC_URL` to pin the URL, because a shorter custom domain added later changes it (see [deploy.md](deploy.md#the-public-url)).
+
+## To org grants bound to their account (migration `000016_org_grant_accounts`)
+
+This came in [#60](https://github.com/coder/faucet/pull/60). An `org:` grant now names the account that held its login when `faucet clients create` made it, so it follows the account through a rename, and neither a later holder of the login nor a delivery that a hook admin sends again by hand points it at another account (see [service-accounts.md](service-accounts.md#grants)).
+
+- **The migration binds the `org:` grants of existing clients** to the account that holds each login at the migration, which is the account that each grant reads at that moment, so it gives no client more than it had. After the migration, check the account ID after each `#` in `faucet clients list`. A grant whose login no account holds then keeps its form, reads nothing from then on, and shows in `faucet clients list` without `#<account ID>`. Make a new client for it once a delivery has named the account. The down file turns each bound grant back into the login that its account holds then, so the build before reads the same account. A grant whose account holds no login then keeps its bound form, which the build before reads as no grant.
+- **`faucet clients create` refuses an `org:` grant of a login that no delivery has named.** Make the client after GitHub has sent a delivery from the account or one of its repositories.
+- **A rolling deploy:** until every instance runs this build, an instance of the build before reads a bound grant as no grant and refuses what only that grant allows.
+- **A host that embeds faucet:** `oauth.NewClient` takes an `org:` grant only as `org:<login>#<account ID>`. `oauth.BindGrants` turns the `org:<login>` that an operator writes into that form.
+
+## To faucet's own document client
+
+This came in [#60](https://github.com/coder/faucet/pull/60). It matters to a host that embeds faucet. `oauth.BrowserLogin.Documents` is now a `faucet.HTTPClientOptions`, not an `*http.Client`: faucet builds the client that fetches client ID metadata documents itself, with `faucet.NewHTTPClient`, because the client of the login chooses their URL. Leave it at its zero value in production. Before, a host that passed a client of its own, such as `http.DefaultClient`, let anyone who opened `/oauth/authorize` make faucet fetch from the host's network and follow redirects. `AllowInsecureLoopback` exists for tests only, and `oauth.NewServer` logs a warning when it is set.
+
 ## To stored repository checks (migration `000015_access_checks`)
 
 This came in [#56](https://github.com/coder/faucet/pull/56). Faucet stores the repository checks of browser logins, so a poll or a wait of a browser login asks GitHub only when no check newer than its session's last refresh answers (see [browser-login.md](browser-login.md#how-faucet-checks-a-repository)). Each refresh of a browser login asks GitHub again about up to 50 repositories, which can make the refresh take up to 5 seconds longer. The migration adds `faucet_access_checks`, which stays empty until a browser login checks a repository. `/cron/purge` deletes a stored check a day after a session last used it, and a stored denial 15 minutes after its check, and counts both in `unused_access_checks`, which is 0 while the browser login is off.

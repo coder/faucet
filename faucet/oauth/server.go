@@ -121,6 +121,9 @@ func NewServer(d ServerDeps) (*Server, error) {
 		s.login = login
 		s.access = repoAccess{tokens: newConnections(d.Store, d.Clock, d.Logger, login), repos: d.Repos}
 		maps.Copy(s.grants, loginGrants)
+		if d.Login.Documents.AllowInsecureLoopback {
+			d.Logger.Warn(context.Background(), "the client that fetches client documents reaches loopback over http, which is for tests only")
+		}
 	}
 	return s, nil
 }

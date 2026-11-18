@@ -49,8 +49,8 @@ type Repositories interface {
 }
 
 // ServiceAccess is the faucet.Authorizer and the faucet.ServiceGrants of
-// services. A grant names a repository, an owner or every repository, and a
-// grant of an owner covers its repositories by the owner's account ID. Names
+// services. A grant names a repository, an account or every repository, and a
+// grant of an account covers its repositories by the account's ID. Names
 // match as GitHub matches them, ignoring case. The IDs come from the
 // deliveries that named the repositories, so a service never calls GitHub,
 // and a repository or an owner that no delivery has named yet is not
@@ -156,66 +156,80 @@ func (a ServiceAccess) liveGrants(ctx context.Context, p faucet.Principal) ([]cl
 }
 
 // repoGranted returns the ID of repo when a grant names it, names every
-// repository, or names its owner: the owner of an org grant is the account
-// that the latest delivery named by that login, and it must be the owner
-// that the delivery of the repository named.
+// repository, or names the account that owns it.
 func (a ServiceAccess) repoGranted(ctx context.Context, grants []clientGrant, repo string) (int64, error) {
 	repoOwner, _, err := githubapi.ParseRepo(repo)
 	if err != nil {
 		return 0, err
 	}
 	named := slices.ContainsFunc(grants, func(g clientGrant) bool { return g.all || strings.EqualFold(g.repo, repo) })
-	orgs := slices.DeleteFunc(slices.Clone(grants), func(g clientGrant) bool { return g.owner == "" })
 	notGranted := xerrors.Errorf("no grant of this service names %s: %w", repo, faucet.ErrNoAccess)
-	if !named && len(orgs) == 0 {
+	if !named && !slices.ContainsFunc(grants, clientGrant.namesAnAccount) {
 		return 0, notGranted
 	}
 	r, err := a.repos.RepositoryByName(ctx, repo)
 	switch {
-	case xerrors.Is(err, faucet.ErrUnknownRepository) && !named &&
-		!slices.ContainsFunc(orgs, func(g clientGrant) bool { return strings.EqualFold(g.owner, repoOwner) }):
-		// Only a grant that names the repository or its owner learns that
-		// faucet has not seen it, so a service cannot probe which repositories
-		// of other owners faucet hears from.
-		return 0, notGranted
 	case xerrors.Is(err, faucet.ErrUnknownRepository):
+		if !named {
+			// Only a grant that names the repository or its owner learns
+			// that faucet has not seen it, so a service cannot probe which
+			// repositories of other owners faucet hears from.
+			granted, err := a.ownerOfGranted(ctx, grants, repoOwner)
+			switch {
+			case err != nil:
+				return 0, err
+			case !granted:
+				return 0, notGranted
+			}
+		}
 		return 0, xerrors.Errorf("faucet has received no webhook delivery from %s yet, so it cannot tell which repository the grant names; it can once GitHub sends one: %w", repo, faucet.ErrNoAccess)
 	case err != nil:
 		return 0, xerrors.Errorf("look up the repository: %w", err)
-	case named:
+	case named || slices.ContainsFunc(grants, func(g clientGrant) bool { return g.accountID == r.OwnerID }):
 		return r.ID, nil
-	}
-	for _, g := range orgs {
-		o, err := a.repos.OwnerByLogin(ctx, g.owner)
-		switch {
-		case xerrors.Is(err, faucet.ErrUnknownOwner):
-			continue
-		case err != nil:
-			return 0, xerrors.Errorf("look up the owner: %w", err)
-		case o.ID == r.OwnerID:
-			return r.ID, nil
-		}
 	}
 	return 0, notGranted
 }
 
-// ownerGranted returns the account ID of owner when a grant names it or
-// names every repository.
+// ownerOfGranted reports whether a grant names the account that holds login.
+func (a ServiceAccess) ownerOfGranted(ctx context.Context, grants []clientGrant, login string) (bool, error) {
+	o, err := a.repos.OwnerByLogin(ctx, login)
+	switch {
+	case xerrors.Is(err, faucet.ErrUnknownOwner):
+		return false, nil
+	case err != nil:
+		return false, xerrors.Errorf("look up the owner: %w", err)
+	}
+	return slices.ContainsFunc(grants, func(g clientGrant) bool { return g.accountID == o.ID }), nil
+}
+
+// ownerGranted returns the account ID of owner when a grant names that
+// account or every repository.
 func (a ServiceAccess) ownerGranted(ctx context.Context, grants []clientGrant, owner string) (int64, error) {
 	if !githubapi.ValidOwner(owner) {
 		return 0, xerrors.New("owner must be a GitHub login")
 	}
-	if !slices.ContainsFunc(grants, func(g clientGrant) bool { return g.all || strings.EqualFold(g.owner, owner) }) {
-		return 0, xerrors.Errorf("no grant of this service names the owner %s: %w", owner, faucet.ErrNoAccess)
+	all := slices.ContainsFunc(grants, func(g clientGrant) bool { return g.all })
+	notGranted := xerrors.Errorf("no grant of this service names the owner %s: %w", owner, faucet.ErrNoAccess)
+	if i := slices.IndexFunc(grants, func(g clientGrant) bool { return g.namesAnAccount() && strings.EqualFold(g.login, owner) }); i >= 0 {
+		// The grant was made for the account that held this login then.
+		notGranted = xerrors.Errorf("the grant org:%s names an account that holds another login now; name the owner by the login of its latest delivery: %w", grants[i].login, faucet.ErrNoAccess)
+	}
+	if !all && !slices.ContainsFunc(grants, clientGrant.namesAnAccount) {
+		return 0, notGranted
 	}
 	o, err := a.repos.OwnerByLogin(ctx, owner)
 	switch {
-	case xerrors.Is(err, faucet.ErrUnknownOwner):
+	case xerrors.Is(err, faucet.ErrUnknownOwner) && all:
 		return 0, xerrors.Errorf("faucet has received no webhook delivery from a repository of %s yet, so it cannot tell which owner the grant names; it can once GitHub sends one: %w", owner, faucet.ErrNoAccess)
+	case xerrors.Is(err, faucet.ErrUnknownOwner):
+		return 0, notGranted
 	case err != nil:
 		return 0, xerrors.Errorf("look up the owner: %w", err)
+	case all || slices.ContainsFunc(grants, func(g clientGrant) bool { return g.accountID == o.ID }):
+		return o.ID, nil
 	}
-	return o.ID, nil
+	return 0, notGranted
 }
 
 func allGranted(grants []clientGrant) error {

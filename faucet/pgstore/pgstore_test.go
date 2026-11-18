@@ -217,7 +217,7 @@ func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {
 	require.EqualValues(t, 400, hostVersion)
 	var faucetVersion int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM `+pq.QuoteIdentifier(pgstore.MigrationsTable)).Scan(&faucetVersion))
-	require.EqualValues(t, 15, faucetVersion)
+	require.EqualValues(t, 16, faucetVersion)
 }
 
 // The raw events migration adds tables of its own and one index. A down
@@ -387,6 +387,53 @@ func TestTheOwnerTargetsMigrationGoesDownToRepositoryRowsAndUpAgain(t *testing.T
 			bad.repoID, bad.ownerID, now)
 		require.Error(t, err, "a raw event after the up names a repository or an owner, and no negative ID: %+v", bad)
 	}
+}
+
+// The org grants migration binds each org grant of a client made before it to
+// the account that holds its login, under the login that the account holds,
+// and keeps a grant whose login no account holds, which then reads nothing.
+// Its down turns each bound grant back into the login that its account holds
+// at the down, so a build that resolves logins reads the same account. A
+// grant whose account holds no login keeps its bound form, which that build
+// reads as no grant.
+func TestTheOrgGrantsMigrationBindsEachLoginToTheAccountThatHoldsItAndBack(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	ctx := context.Background()
+	require.NoError(t, store.RecordOwner(ctx, faucet.Owner{ID: 7, Login: "Coder"}))
+	require.NoError(t, store.RecordOwner(ctx, faucet.Owner{ID: 9, Login: "octo"}))
+	grantsOf := func(id string) []string {
+		t.Helper()
+		var grants []string
+		require.NoError(t, db.QueryRowContext(ctx, `SELECT grants FROM faucet_service_clients WHERE client_id = $1`, id).Scan(pq.Array(&grants)))
+		return grants
+	}
+
+	runMigrationFile(t, db, "000016_org_grant_accounts.down.sql")
+	for id, grants := range map[string][]string{
+		"orgs":    {"repo:coder/faucet", "org:coder", "all", "org:OCTO", "org:gone"},
+		"repos":   {"repo:coder/faucet"},
+		"nothing": {},
+	} {
+		_, err := db.ExecContext(ctx, `INSERT INTO faucet_service_clients (client_id, secret_hash, resource, grants, scopes, created_at)
+			VALUES ($1::text, sha256(convert_to($1::text, 'UTF8')), 'https://faucet.example.com/github/mcp', $2, '{events:read}', now())`, id, pq.Array(grants))
+		require.NoError(t, err)
+	}
+	runMigrationFile(t, db, "000016_org_grant_accounts.up.sql")
+	require.Equal(t, []string{"repo:coder/faucet", "org:Coder#7", "all", "org:octo#9", "org:gone"}, grantsOf("orgs"))
+	require.Equal(t, []string{"repo:coder/faucet"}, grantsOf("repos"))
+	require.Empty(t, grantsOf("nothing"))
+	c, err := store.Client(ctx, "orgs")
+	require.NoError(t, err)
+	require.Error(t, c.Validate(), "org:gone names no account, so it is no grant that a new client can hold")
+
+	require.NoError(t, store.RecordOwner(ctx, faucet.Owner{ID: 7, Login: "coder-legacy"}))
+	require.NoError(t, store.RecordOwner(ctx, faucet.Owner{ID: 99, Login: "coder"}))
+	require.NoError(t, store.RecordOwner(ctx, faucet.Owner{ID: 10, Login: "octo"}))
+	runMigrationFile(t, db, "000016_org_grant_accounts.down.sql")
+	require.Equal(t, []string{"repo:coder/faucet", "org:coder-legacy", "all", "org:octo#9", "org:gone"}, grantsOf("orgs"),
+		"a renamed account's grant takes its new login, not the old one that account 99 holds now, and account 9 lost its login to 10")
 }
 
 func TestTheClearMigrationMovesTheOldTopToTheClearAndBack(t *testing.T) {

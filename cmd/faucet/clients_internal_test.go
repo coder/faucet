@@ -64,12 +64,14 @@ func TestTheClientsCommandMakesListsAndDisablesClients(t *testing.T) {
 	require.Equal(t, []faucet.Scope{faucet.ScopeEventsRead}, c.Scopes)
 	require.Equal(t, []string{"repo:coder/faucet", "repo:coder/coder"}, c.Grants)
 
-	_, _, err = clients(t, getenv, "create", "-resource", "https://faucet.example.com/github/mcp", "-grant", "org:coder", "-grant", "all", "triage")
+	require.NoError(t, store.RecordOwner(ctx, faucet.Owner{ID: 7, Login: "Coder"}))
+	_, notice, err = clients(t, getenv, "create", "-resource", "https://faucet.example.com/github/mcp", "-grant", "org:coder", "-grant", "all", "triage")
 	require.NoError(t, err)
+	require.Contains(t, notice, "The client holds org:Coder#7, all.", "the operator sees which account the org grant names")
 	triage, err := store.Client(ctx, "triage")
 	require.NoError(t, err)
 	require.Equal(t, faucet.AllScopes(), triage.Scopes, "a client holds every scope by default")
-	require.Equal(t, []string{"org:coder", "all"}, triage.Grants, "a grant names an owner or every repository too")
+	require.Equal(t, []string{"org:Coder#7", "all"}, triage.Grants, "an org grant names the account that holds the login, under the login that faucet holds")
 
 	out, _, err = clients(t, getenv, "list")
 	require.NoError(t, err)
@@ -77,7 +79,7 @@ func TestTheClientsCommandMakesListsAndDisablesClients(t *testing.T) {
 	require.Len(t, lines, 3)
 	require.Regexp(t, `^CLIENT ID\s+RESOURCE\s+SCOPES\s+GRANTS\s+CREATED\s+DISABLED$`, lines[0])
 	require.Regexp(t, `^ci-watcher\s+https://faucet.example.com/github/mcp\s+events:read\s+repo:coder/faucet,repo:coder/coder\s+\S+Z\s+-$`, lines[1])
-	require.Regexp(t, `^triage\s+\S+\s+\S+\s+org:coder,all\s+\S+Z\s+-$`, lines[2])
+	require.Regexp(t, `^triage\s+\S+\s+\S+\s+org:Coder#7,all\s+\S+Z\s+-$`, lines[2])
 	require.NotContains(t, out, secret)
 
 	out, _, err = clients(t, getenv, "disable", "ci-watcher")
@@ -103,21 +105,25 @@ func TestTheClientsCommandRefusesAClientThatCannotWork(t *testing.T) {
 	getenv, store := newClientsDatabase(t)
 	const resource = "https://faucet.example.com/github/mcp"
 
+	require.NoError(t, store.RecordOwner(context.Background(), faucet.Owner{ID: 7, Login: "coder"}))
 	for name, args := range map[string][]string{
-		"no resource":                {"create", "-grant", "repo:coder/faucet", "ci"},
-		"a resource of no endpoint":  {"create", "-resource", "https://faucet.example.com/api", "-grant", "repo:coder/faucet", "ci"},
-		"a resource with a slash":    {"create", "-resource", "https://faucet.example.com/github/mcp/", "-grant", "repo:coder/faucet", "ci"},
-		"a resource of a bad origin": {"create", "-resource", "http://faucet.example.com/github/mcp", "-grant", "repo:coder/faucet", "ci"},
-		"the old /mcp path":          {"create", "-resource", "https://faucet.example.com/mcp", "-grant", "repo:coder/faucet", "ci"},
-		"no grant":                   {"create", "-resource", resource, "ci"},
-		"an org grant of a repo":     {"create", "-resource", resource, "-grant", "org:coder/faucet", "ci"},
-		"an unknown scope":           {"create", "-resource", resource, "-scope", "events:read,events:admin", "-grant", "repo:coder/faucet", "ci"},
-		"no client ID":               {"create", "-resource", resource, "-grant", "repo:coder/faucet"},
-		"a flag after the ID":        {"create", "-resource", resource, "ci", "-grant", "repo:coder/faucet"},
-		"an upper-case ID":           {"create", "-resource", resource, "-grant", "repo:coder/faucet", "CI"},
-		"an unknown command":         {"delete", "ci"},
-		"no command":                 {},
-		"disable with no ID":         {"disable"},
+		"no resource":                     {"create", "-grant", "repo:coder/faucet", "ci"},
+		"a resource of no endpoint":       {"create", "-resource", "https://faucet.example.com/api", "-grant", "repo:coder/faucet", "ci"},
+		"a resource with a slash":         {"create", "-resource", "https://faucet.example.com/github/mcp/", "-grant", "repo:coder/faucet", "ci"},
+		"a resource of a bad origin":      {"create", "-resource", "http://faucet.example.com/github/mcp", "-grant", "repo:coder/faucet", "ci"},
+		"the old /mcp path":               {"create", "-resource", "https://faucet.example.com/mcp", "-grant", "repo:coder/faucet", "ci"},
+		"no grant":                        {"create", "-resource", resource, "ci"},
+		"an org grant of a repo":          {"create", "-resource", resource, "-grant", "org:coder/faucet", "ci"},
+		"an org grant of another account": {"create", "-resource", resource, "-grant", "org:coder#8", "ci"},
+		"an org grant of account 07":      {"create", "-resource", resource, "-grant", "org:coder#07", "ci"},
+		"an org grant of no account":      {"create", "-resource", resource, "-grant", "org:nobody", "ci"},
+		"an unknown scope":                {"create", "-resource", resource, "-scope", "events:read,events:admin", "-grant", "repo:coder/faucet", "ci"},
+		"no client ID":                    {"create", "-resource", resource, "-grant", "repo:coder/faucet"},
+		"a flag after the ID":             {"create", "-resource", resource, "ci", "-grant", "repo:coder/faucet"},
+		"an upper-case ID":                {"create", "-resource", resource, "-grant", "repo:coder/faucet", "CI"},
+		"an unknown command":              {"delete", "ci"},
+		"no command":                      {},
+		"disable with no ID":              {"disable"},
 	} {
 		out, _, err := clients(t, getenv, args...)
 		require.Error(t, err, name)
@@ -126,6 +132,35 @@ func TestTheClientsCommandRefusesAClientThatCannotWork(t *testing.T) {
 	all, err := store.Clients(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, all)
+}
+
+// An operator can name the account of an org grant too, and the command makes
+// the client only when that account holds the login now.
+func TestTheClientsCommandTakesAnOrgGrantWithTheAccountThatHoldsItsLogin(t *testing.T) {
+	t.Parallel()
+	getenv, store := newClientsDatabase(t)
+	ctx := context.Background()
+	require.NoError(t, store.RecordOwner(ctx, faucet.Owner{ID: 7, Login: "coder"}))
+	const resource = "https://faucet.example.com/github/mcp"
+
+	_, _, err := clients(t, getenv, "create", "-resource", resource, "-grant", "org:coder#8", "elsewhere")
+	require.ErrorContains(t, err, "org:coder#8 names account 8, and faucet's latest delivery gives coder to account 7")
+	_, _, err = clients(t, getenv, "create", "-resource", resource, "-grant", "org:Coder#7", "triage")
+	require.NoError(t, err)
+	triage, err := store.Client(ctx, "triage")
+	require.NoError(t, err)
+	require.Equal(t, []string{"org:coder#7"}, triage.Grants)
+}
+
+// An org grant names the account that holds its login when the client is
+// made, so faucet must have heard of the login from a delivery.
+func TestTheClientsCommandRefusesAnOrgGrantOfALoginThatFaucetHasNotSeen(t *testing.T) {
+	t.Parallel()
+	getenv, store := newClientsDatabase(t)
+	_, _, err := clients(t, getenv, "create", "-resource", "https://faucet.example.com/github/mcp", "-grant", "org:coder", "triage")
+	require.ErrorContains(t, err, "faucet has received no webhook delivery from coder or a repository of it, so it cannot tell which account org:coder names")
+	_, err = store.Client(context.Background(), "triage")
+	require.ErrorIs(t, err, oauth.ErrUnknownClient, "no client is made")
 }
 
 // With FAUCET_PUBLIC_URL set, as on the server, a client can be made only for
@@ -159,6 +194,42 @@ func TestTheClientsCommandTakesTheEndpointOfFAUCETPUBLICURL(t *testing.T) {
 	}
 	_, _, err = clients(t, bad, "list")
 	require.ErrorContains(t, err, envPublicURL)
+}
+
+// On Vercel production the commands take the public URL as the server does,
+// so a client is made for the endpoint that the server serves, unless the
+// operator names another with -resource.
+func TestTheClientsCommandTakesThePublicURLFromVercelAsTheServerDoes(t *testing.T) {
+	t.Parallel()
+	withDB, store := newClientsDatabase(t)
+	vercel := map[string]string{envVercel: "1", envVercelEnv: "production", envVercelProductionURL: "faucet.example.com"}
+	getenv := func(name string) string {
+		if v, ok := vercel[name]; ok {
+			return v
+		}
+		return withDB(name)
+	}
+
+	_, notice, err := clients(t, getenv, "create", "-grant", "repo:coder/faucet", "ci-watcher")
+	require.NoError(t, err)
+	require.Contains(t, notice, "public URL taken from VERCEL_PROJECT_PRODUCTION_URL: https://faucet.example.com")
+	c, err := store.Client(context.Background(), "ci-watcher")
+	require.NoError(t, err)
+	require.Equal(t, "https://faucet.example.com/github/mcp", c.Resource)
+	// Production can pin FAUCET_PUBLIC_URL to another domain, and an
+	// environment pulled from Vercel lacks a sensitive value, so the derived
+	// URL is only the default.
+	_, _, err = clients(t, getenv, "create", "-resource", "https://events.example.com/github/mcp", "-grant", "repo:coder/faucet", "pinned")
+	require.NoError(t, err)
+	pinned, err := store.Client(context.Background(), "pinned")
+	require.NoError(t, err)
+	require.Equal(t, "https://events.example.com/github/mcp", pinned.Resource)
+	_, _, err = clients(t, getenv, "create", "-resource", "https://events.example.com/mcp", "-grant", "repo:coder/faucet", "old-path")
+	require.ErrorContains(t, err, "-resource must be faucet's public URL and /github/mcp", "the shape is still checked")
+
+	vercel[envVercelEnv] = "preview"
+	_, _, err = clients(t, getenv, "create", "-grant", "repo:coder/faucet", "preview")
+	require.ErrorContains(t, err, "-resource must be faucet's public URL", "a preview derives nothing, as the server does not")
 }
 
 func TestTheClientsCommandNeedsACurrentDatabase(t *testing.T) {

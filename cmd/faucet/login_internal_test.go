@@ -98,7 +98,9 @@ func newLoginServer(t *testing.T, configure ...func(*loginConfig)) *loginServer 
 // granted grants, and returns its secret.
 func (s *loginServer) client(t *testing.T, id, path string, scopes []faucet.Scope, grants ...string) string {
 	t.Helper()
-	c, secret, err := oauth.NewClient(id, s.URL+path, scopes, grants, time.Now())
+	bound, err := oauth.BindGrants(context.Background(), s.store, grants)
+	require.NoError(t, err)
+	c, secret, err := oauth.NewClient(id, s.URL+path, scopes, bound, time.Now())
 	require.NoError(t, err)
 	require.NoError(t, s.store.InsertClient(context.Background(), c))
 	return secret

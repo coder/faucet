@@ -4,7 +4,7 @@ import { describe, expect, newRepoId, test } from './support';
 import { EVENT, delivery, newMarker, subscribe, subscribed, type Params } from './subscriptions';
 
 const SERVICE_ONLY = 'owner and all targets are for service clients; name one repository with repo';
-const UNKNOWN_OWNER = 'faucet has received no webhook delivery from a repository of verify yet';
+const UNSEEN_LOGIN = 'faucet has received no webhook delivery from verify or a repository of it, so it cannot tell which account org:verify names';
 const BOTH_SCOPES = 'events:read,events:subscribe';
 
 function paramsAt(at: Endpoint, args: Params): Params {
@@ -12,23 +12,23 @@ function paramsAt(at: Endpoint, args: Params): Params {
 }
 
 describe('owner targets', () => {
-  // The owner is known from the first repository's delivery, and the second repository has never sent one before the
-  // subscription exists. Both reach the one subscription, and an event of another owner does not.
+  // An org grant names the account that holds its login, so the client can be made only once a delivery named the owner.
+  // The second repository has never sent one before the subscription exists. Both reach the one subscription, and an
+  // event of another owner does not.
   test('a service with an org grant gets the events of every repository of the owner through one subscription', async ({ faucet, receiver }) => {
     await withDeliveryFaucet(faucet, async (started, output) => {
       const known = newRepoId();
       const fresh = newRepoId();
+      const early = await started.clients(['create', '-resource', `${started.baseUrl}/github/mcp`, '-grant', 'org:verify', 'org-watcher']);
+      expect(early.code, 'faucet cannot tell which account the login names yet').not.toBe(0);
+      expect(early.stderr).toContain(UNSEEN_LOGIN);
+      expect(early.stdout, 'a refused create prints no secret').toBe('');
+
+      await deliverRun(started, known, { runId: 9000 });
       const secret = await createClient(started, 'org-watcher', '/github/mcp', ['org:verify'], BOTH_SCOPES);
       const token = await accessToken(started, 'org-watcher', secret);
       const everything = await endpoint(receiver, 'ok');
       const one = await endpoint(receiver, 'ok');
-
-      const early = await subscribe(started, paramsAt(everything, { owner: 'verify' }), { token });
-      expect(early.error?.code, early.body).toBe(-32024);
-      expect(early.error?.message).toContain(UNKNOWN_OWNER);
-      expect(await started.subscriptions(everything.id), 'a refused subscribe writes no row').toEqual([]);
-
-      await deliverRun(started, known, { runId: 9000 });
       const owned = await subscribed(started, paramsAt(everything, { owner: 'verify' }), { token });
       const narrowed = await subscribed(started, paramsAt(one, { owner: 'verify', repos: [`Verify/R${fresh}`] }), { token });
       const target = `select target_kind, owner_id, repo_id from faucet_subscriptions where position('${everything.id}' in callback_url) > 0`;
@@ -49,7 +49,7 @@ describe('owner targets', () => {
       expect(waited.events?.map((event) => event.repo_id)).toEqual([known, known, fresh]);
 
       const list = await started.clients(['list']);
-      expect(list.stdout).toMatch(/^org-watcher\s+\S+\/github\/mcp\s+events:read,events:subscribe\s+org:verify\s/m);
+      expect(list.stdout, 'the grant names the account that held the login').toMatch(/^org-watcher\s+\S+\/github\/mcp\s+events:read,events:subscribe\s+org:verify#1\s/m);
       expect(output()).not.toContain(secret);
       expect(output()).not.toContain(token);
       expect(started.leaksSecret(output())).toBe(false);

@@ -193,7 +193,7 @@ func browserLoginFor(githubURL string, roots *x509.CertPool) (*oauth.BrowserLogi
 	if err != nil {
 		return nil, err
 	}
-	cfg.browserLogin.Documents = faucet.NewHTTPClient(faucet.HTTPClientOptions{AllowInsecureLoopback: true, RootCAs: roots})
+	cfg.browserLogin.Documents = faucet.HTTPClientOptions{AllowInsecureLoopback: true, RootCAs: roots}
 	return cfg.browserLogin, nil
 }
 

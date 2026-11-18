@@ -4,11 +4,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"net/http"
 	"time"
 
 	"golang.org/x/xerrors"
 
+	"github.com/coder/faucet/faucet"
 	"github.com/coder/quartz"
 )
 
@@ -34,10 +34,11 @@ type BrowserLogin struct {
 	GitHub GitHubApp
 	// Keys seal the GitHub tokens that faucet keeps for its users.
 	Keys TokenKeys
-	// Documents fetches client ID metadata documents. It must be the
-	// guarded client of faucet.NewHTTPClient, because a client chooses the
-	// URL.
-	Documents *http.Client
+	// Documents sets up the client that fetches client ID metadata
+	// documents. A client chooses their URL, so faucet builds that client
+	// itself with faucet.NewHTTPClient, and the zero value is the one for
+	// production.
+	Documents faucet.HTTPClientOptions
 }
 
 // browserLogin is a BrowserLogin that passed its checks.
@@ -51,13 +52,10 @@ func newBrowserLogin(d BrowserLogin, clock quartz.Clock) (*browserLogin, error) 
 	if err := d.GitHub.Validate(); err != nil {
 		return nil, err
 	}
-	switch {
-	case d.Keys.empty():
+	if d.Keys.empty() {
 		return nil, xerrors.New("a token key is required")
-	case d.Documents == nil:
-		return nil, xerrors.New("the client that fetches client documents is required")
 	}
-	return &browserLogin{github: d.GitHub, keys: d.Keys, documents: newDocumentFetcher(d.Documents, clock)}, nil
+	return &browserLogin{github: d.GitHub, keys: d.Keys, documents: newDocumentFetcher(faucet.NewHTTPClient(d.Documents), clock)}, nil
 }
 
 // newID returns the ID of a new authorization request: 16 random bytes in

@@ -1,9 +1,11 @@
 package oauth
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +20,9 @@ const (
 	repoGrantPrefix  = "repo:"
 	orgGrantPrefix   = "org:"
 	allGrant         = "all"
+	// accountSeparator comes between the login and the account ID of a
+	// bound org grant. No GitHub login holds it.
+	accountSeparator = "#"
 )
 
 // Client is a service client as a store keeps it. An operator makes it with
@@ -33,8 +38,9 @@ type Client struct {
 	// https://faucet.example.com/github/mcp.
 	Resource string
 	// Grants name what the client may read: "repo:<owner>/<name>" one
-	// repository, "org:<owner>" every repository of a user or organization,
-	// and "all" every repository.
+	// repository, "org:<login>#<account ID>" every repository of a user or
+	// organization, and "all" every repository. BindGrants turns the
+	// "org:<login>" that an operator writes into the second form.
 	Grants []string
 	// Scopes are the most that a token of the client can hold.
 	Scopes    []faucet.Scope
@@ -114,32 +120,47 @@ func ValidateClientID(id string) error {
 	return nil
 }
 
-// clientGrant is what one grant names: a repository, written owner/name, every
-// repository of an owner, by login, or every repository.
+// clientGrant is what one grant names: a repository, written owner/name,
+// every repository of an account, by its ID, or every repository. login is
+// the account's login when the client was made, which only says what an
+// operator granted.
 type clientGrant struct {
-	repo  string
-	owner string
-	all   bool
+	repo      string
+	login     string
+	accountID int64
+	all       bool
 }
 
-// parseGrant reads a grant in one of its three forms.
+// namesAnAccount reports whether g is an org grant.
+func (g clientGrant) namesAnAccount() bool { return g.accountID > 0 }
+
+// parseGrant reads a grant in one of its three forms as a client holds it.
 func parseGrant(g string) (clientGrant, error) {
 	if g == allGrant {
 		return clientGrant{all: true}, nil
 	}
-	if owner, ok := strings.CutPrefix(g, orgGrantPrefix); ok && githubapi.ValidOwner(owner) {
-		return clientGrant{owner: owner}, nil
+	if rest, ok := strings.CutPrefix(g, orgGrantPrefix); ok {
+		login, id, bound := strings.Cut(rest, accountSeparator)
+		accountID, err := strconv.ParseInt(id, 10, 64)
+		switch {
+		case bound && githubapi.ValidOwner(login) && err == nil && accountID > 0 && strconv.FormatInt(accountID, 10) == id:
+			return clientGrant{login: login, accountID: accountID}, nil
+		case !bound && githubapi.ValidOwner(login):
+			return clientGrant{}, xerrors.Errorf("grant %q names no account: BindGrants binds it to the account that holds the login", g)
+		}
 	}
 	if repo, ok := strings.CutPrefix(g, repoGrantPrefix); ok {
 		if _, _, err := githubapi.ParseRepo(repo); err == nil {
 			return clientGrant{repo: repo}, nil
 		}
 	}
-	return clientGrant{}, xerrors.Errorf("grant %q is not repo:<owner>/<name>, org:<owner> or all", g)
+	return clientGrant{}, xerrors.Errorf("grant %q is not repo:<owner>/<name>, org:<login>#<account ID> or all", g)
 }
 
 // parseGrants reads the grants that a client holds. A store keeps only grants
-// that parse, so one that does not names nothing.
+// that parse, so one that does not names nothing. That includes an org grant
+// of a client made before org grants named an account, which the migration
+// could not bind because no account held its login.
 func parseGrants(grants []string) []clientGrant {
 	parsed := make([]clientGrant, 0, len(grants))
 	for _, g := range grants {
@@ -148,6 +169,48 @@ func parseGrants(grants []string) []clientGrant {
 		}
 	}
 	return parsed
+}
+
+// BindGrants returns grants as an operator writes them, as a client holds
+// them: each "org:<login>" becomes "org:<login>#<account ID>", under the
+// login that owners holds, for the account that holds the login now. So the
+// grant follows that account through a rename, and no later holder of the
+// login gets it. An operator who writes "org:<login>#<account ID>" gets it
+// only when that account holds the login now. A login that no delivery has
+// named is an error that wraps faucet.ErrUnknownOwner, because faucet cannot
+// tell which account it is.
+func BindGrants(ctx context.Context, owners Repositories, grants []string) ([]string, error) {
+	bound := make([]string, 0, len(grants))
+	for _, g := range grants {
+		rest, ok := strings.CutPrefix(g, orgGrantPrefix)
+		if !ok {
+			if _, err := parseGrant(g); err != nil {
+				return nil, errOperatorGrant(g)
+			}
+			bound = append(bound, g)
+			continue
+		}
+		login, _, hasID := strings.Cut(rest, accountSeparator)
+		named, err := parseGrant(g)
+		if hasID && err != nil || !hasID && !githubapi.ValidOwner(login) {
+			return nil, errOperatorGrant(g)
+		}
+		o, err := owners.OwnerByLogin(ctx, login)
+		switch {
+		case xerrors.Is(err, faucet.ErrUnknownOwner):
+			return nil, xerrors.Errorf("faucet has received no webhook delivery from %s or a repository of it, so it cannot tell which account %s names; grant it once GitHub has sent one: %w", login, g, err)
+		case err != nil:
+			return nil, xerrors.Errorf("look up the owner of %s: %w", g, err)
+		case hasID && o.ID != named.accountID:
+			return nil, xerrors.Errorf("%s names account %d, and faucet's latest delivery gives %s to account %d", g, named.accountID, login, o.ID)
+		}
+		bound = append(bound, orgGrantPrefix+o.Login+accountSeparator+strconv.FormatInt(o.ID, 10))
+	}
+	return bound, nil
+}
+
+func errOperatorGrant(g string) error {
+	return xerrors.Errorf("grant %q is not repo:<owner>/<name>, org:<login>, org:<login>#<account ID> or all", g)
 }
 
 // newSecret returns prefix and 32 random bytes in base64url without padding.
