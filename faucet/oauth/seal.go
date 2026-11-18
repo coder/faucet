@@ -90,6 +90,9 @@ func parseTokenKey(position int, entry string) (*tokenKey, error) {
 	return &tokenKey{id: id, aead: aead}, nil
 }
 
+// empty reports whether k holds no key, as the zero TokenKeys does.
+func (k TokenKeys) empty() bool { return k.sealing == nil }
+
 // Format implements fmt.Formatter so that no verb can print a key.
 func (TokenKeys) Format(f fmt.State, _ rune) {
 	_, _ = fmt.Fprint(f, "TokenKeys{}")
