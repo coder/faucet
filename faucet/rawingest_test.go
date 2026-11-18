@@ -346,6 +346,81 @@ func TestRawIngestTypedStaysTyped(t *testing.T) {
 	})
 }
 
+// A host that checks services by repo grants records the repository of every
+// signed delivery, and a service can ask for the raw events of a repository
+// only once the store knows it. So a delivery names its repository before the
+// handler looks for an interest: one that nobody wants is recorded too, and
+// the first poll after it opens the lease that stores the next one.
+func TestRawIngestRecordsTheRepository(t *testing.T) {
+	t.Parallel()
+
+	recording := func(d *faucet.Deps) { d.RecordRepositories = true }
+	named := func(fullName string) map[string]any {
+		return map[string]any{"repository": map[string]any{"id": repoID, "full_name": fullName, "owner": map[string]any{"id": 9, "login": "octo"}}}
+	}
+	recorded := func(fullName string, at time.Time) []fakeRepo {
+		return []fakeRepo{{repo: faucet.Repository{ID: repoID, OwnerID: 9, OwnerLogin: "octo", FullName: fullName}, seenAt: at}}
+	}
+
+	t.Run("IgnoredThenStored", func(t *testing.T) {
+		t.Parallel()
+		h := newIngestHarness(t, recording)
+		body := rawPayload(repoID, "", named(testRepo))
+		first := h.clock.Now()
+		code, msg := h.post("push", "d-1", body)
+		require.Equal(t, http.StatusAccepted, code)
+		require.Equal(t, "ignored", msg)
+		require.Zero(t, h.head())
+		require.Equal(t, recorded(testRepo, first), h.store.repos, "a delivery that no interest wants names its repository too")
+
+		h.clock.Advance(time.Minute)
+		lease := h.openLease(ingestInterest{})
+		code, msg = h.post("push", "d-2", body)
+		require.Equal(t, http.StatusOK, code)
+		require.Equal(t, "stored", msg)
+		page := lease.poll()
+		require.Len(t, page.Events, 1)
+		require.Equal(t, body, []byte(page.Events[0].Body))
+		require.Equal(t, recorded(testRepo, first), h.store.repos, "the repository keeps the row of its first delivery")
+	})
+
+	// The Repositories event that renames a granted repository is a raw event
+	// too: it gives the row its new name, and a lease of github.repository
+	// reads it.
+	t.Run("RenameIsRecordedAndStored", func(t *testing.T) {
+		t.Parallel()
+		h := newIngestHarness(t, recording)
+		lease := h.openLease(ingestInterest{event: "repository"})
+		code, _ := h.post("push", "d-1", rawPayload(repoID, "", named(testRepo)))
+		require.Equal(t, http.StatusAccepted, code, "the lease wants repository events, not pushes")
+
+		h.clock.Advance(time.Minute)
+		renamed := named("octo/tap")
+		renamed["changes"] = map[string]any{"repository": map[string]any{"name": map[string]any{"from": "repo"}}}
+		body := rawPayload(repoID, "renamed", renamed)
+		code, msg := h.post("repository", "d-2", body)
+		require.Equal(t, http.StatusOK, code)
+		require.Equal(t, "stored", msg)
+		require.Equal(t, recorded("octo/tap", h.clock.Now()), h.store.repos)
+		page := lease.poll()
+		require.Len(t, page.Events, 1)
+		require.Equal(t, "renamed", page.Events[0].Action)
+		require.Equal(t, body, []byte(page.Events[0].Body))
+	})
+
+	t.Run("StoredWhenTheRepositoryWriteFails", func(t *testing.T) {
+		t.Parallel()
+		h := newIngestHarness(t, recording)
+		h.store.repoErr = xerrors.New("connection to db-host-canary refused")
+		lease := h.openLease(ingestInterest{})
+		code, msg := h.post("push", "d-1", rawPayload(repoID, "", named(testRepo)))
+		require.Equal(t, http.StatusOK, code)
+		require.Equal(t, "stored", msg)
+		require.Len(t, lease.poll().Events, 1)
+		require.Empty(t, h.store.repos)
+	})
+}
+
 func TestRawIngestDuplicate(t *testing.T) {
 	t.Parallel()
 	h := newIngestHarness(t)
