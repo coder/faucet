@@ -36,7 +36,7 @@ An `Authorizer` answers `RepoID`, which may remember, and `RepoIDFresh`, which e
 
 These checks keep another site, another browser and another client from finishing a user's login:
 
-- **Another site cannot press Continue.** The consent page sets a cookie for its own login, and its form carries a token derived from that cookie. Faucet goes on only when the post carries the cookie, the matching form token and an `Origin` that equals `FAUCET_PUBLIC_URL`. Any other post ends the login, so a page of another site that posts the form makes nothing, and the user must start again.
+- **Another site cannot press Continue.** The consent page sets a cookie for its own login, and its form carries a token derived from that cookie. Faucet goes on only when the post carries the cookie, the matching form token and an `Origin` that equals `FAUCET_PUBLIC_URL`. Any other post ends the login, so a page of another site that posts the form makes nothing, and the user must start again. Continue works only once the page has been visible and in focus for 500 milliseconds, so that a page of another site cannot open the consent page under a click that the user meant for that site, such as the second click of a double-click.
 - **Each login has its own cookies.** Their names end with the login's ID, so two logins in one browser do not mix. They are `__Host-` cookies, which only faucet's own origin can set, over `https`.
 - **GitHub's answer counts only in the browser that pressed Continue.** The state that faucet sends to GitHub, and the PKCE verifier of faucet's own exchange with GitHub, both derive from a random value in a second cookie. A callback in another browser is refused.
 - **Faucet redirects to a client only at the end.** `/oauth/authorize` answers every error with a page and never with a redirect, because nothing proves yet that the browser is the user's. Only the callback redirects to a client, and the redirect names faucet in `iss` (RFC 9207).
@@ -46,7 +46,7 @@ These checks keep another site, another browser and another client from finishin
 - **Client documents come through the guarded client** of [callback URLs](#callback-urls): `https` and public addresses only, and no redirects. A fetch must end within 3 seconds, and the document must be 5 KiB at most. A document that holds a client secret is refused, because anyone can read it.
 - **The consent page shows the host, not the name.** The host of the client ID is the large text, and the name that the document gives is marked as unchecked, because anyone can write any name in a document. The host must be ASCII, with an internationalized name in its `xn--` form, and the name may hold no control or format character, so that neither can pass for another.
 - **Redirect URIs match exactly.** A request's redirect URI must equal one of the document's byte for byte, and a loopback `http` one may differ in its port only (RFC 8252). The token request must name the same redirect URI. Schemes that a browser runs, such as `javascript`, are refused.
-- **The pages load nothing and run no script,** and no other site can frame them.
+- **The pages load nothing and run one script,** the wait of Continue, which their Content-Security-Policy allows by its hash. No other site can frame them.
 
 ## Callback URLs
 

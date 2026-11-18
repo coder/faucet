@@ -16,6 +16,7 @@ import (
 func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 	t.Parallel()
 
+	milliseconds := func(d time.Duration) int { return int(d / time.Millisecond) }
 	seconds := func(d time.Duration) int { return int(d / time.Second) }
 	minutes := func(d time.Duration) int { return int(d / time.Minute) }
 	days := func(d time.Duration) int { return int(d / (24 * time.Hour)) }
@@ -27,12 +28,14 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 	}{
 		{"docs/security.md", "each valid for %d minutes on the one endpoint", []any{minutes(accessTokenLifetime)}},
 		{"docs/security.md", "A code works once, for %d seconds.", []any{seconds(codeLifetime)}},
+		{"docs/security.md", "visible and in focus for %d milliseconds", []any{milliseconds(continueDelay)}},
 		{"docs/security.md", "A fetch must end within %d seconds, and the document must be %d KiB at most", []any{seconds(documentTimeout), maxDocumentBytes >> 10}},
 		{"docs/service-accounts.md", "an fct_ access token for %d minutes", []any{minutes(accessTokenLifetime)}},
 		{"docs/browser-login.md", "an access token for %d minutes", []any{minutes(accessTokenLifetime)}},
 		{"docs/browser-login.md", "an fct_ access token for %d minutes", []any{minutes(accessTokenLifetime)}},
 		{"docs/browser-login.md", "| Its SHA-256. | %d minutes.", []any{minutes(accessTokenLifetime)}},
 		{"docs/browser-login.md", "The page works for %d minutes.", []any{minutes(authRequestLifetime)}},
+		{"docs/browser-login.md", "visible and in focus for %d milliseconds", []any{milliseconds(continueDelay)}},
 		{"docs/browser-login.md", "trade the code for faucet's tokens within %d seconds", []any{seconds(codeLifetime)}},
 		{"docs/browser-login.md", "and of the code. | %d minutes to finish in the browser, then %d seconds to redeem the code", []any{minutes(authRequestLifetime), seconds(codeLifetime)}},
 		{"docs/browser-login.md", "deletes the request a day after it expired", nil},
