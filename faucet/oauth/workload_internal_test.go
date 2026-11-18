@@ -208,6 +208,12 @@ func (s *issuerServer) serve(at string, body []byte) {
 	s.docs[at] = body
 }
 
+func (s *issuerServer) unserve(at string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.docs, at)
+}
+
 func (s *issuerServer) hitsOf(at string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -549,6 +555,53 @@ func TestAFailedFetchIsKeptForAMinute(t *testing.T) {
 	clock.Advance(keyFetchInterval)
 	require.NoError(t, check())
 	require.Equal(t, 2, s.hitsOf(testVercelDiscovery))
+}
+
+// A token with a made-up kid makes faucet fetch again once a minute, and a
+// fetch that fails then keeps the keys that faucet holds until their own
+// lifetime ends.
+func TestAFailedFetchKeepsTheKeysThatFaucetHolds(t *testing.T) {
+	t.Parallel()
+	s := newIssuerServer(t)
+	s.serveVercel(t, publicJWK(testRSAKey(), testKID))
+	clock := quartz.NewMock(t)
+	c := newWorkloadChecker(s.client, clock)
+	check := func(kid string) error {
+		now := clock.Now()
+		_, err := checkAt(t, c, now, signToken(t, jose.RS256, testRSAKey(), kid, vercelClaims(now)), testVercelRule())
+		return err
+	}
+	require.NoError(t, check(testKID))
+	s.unserve(testVercelKeys)
+	clock.Advance(keyFetchInterval)
+	for range 3 {
+		err := check("made-up")
+		require.ErrorIs(t, err, errIssuerKeys, "a kid that faucet lacks while its issuer fails")
+		require.NotErrorIs(t, err, errSubjectToken)
+		require.NoError(t, check(testKID), "a kid of the keys that faucet holds")
+	}
+	require.Equal(t, 2, s.hitsOf(testVercelKeys))
+
+	clock.Advance(keySetLifetime - keyFetchInterval - time.Second)
+	require.NoError(t, check(testKID))
+	require.Equal(t, 2, s.hitsOf(testVercelKeys))
+	clock.Advance(time.Second)
+	require.ErrorIs(t, check(testKID), errIssuerKeys, "the keys last their lifetime from the fetch that got them")
+	require.Equal(t, 3, s.hitsOf(testVercelKeys))
+}
+
+func TestAKeySourceStartsNoFetchOnceTheContextHasEnded(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int64
+	offline := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return nil, net.ErrClosed
+	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := newKeySource(offline, quartz.NewMock(t)).keySet(ctx, testVercelIssuer, testKID)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(t, requests.Load())
 }
 
 func TestADiscoveryDocumentOfAnotherIssuerIsNotTrusted(t *testing.T) {

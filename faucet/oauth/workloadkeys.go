@@ -51,18 +51,31 @@ type keySource struct {
 	flights map[string]*keySetFlight
 }
 
-// fetchedKeySet is the outcome of the last fetch of an issuer's keys.
+// fetchedKeySet is what faucet holds of an issuer's keys.
 type fetchedKeySet struct {
-	keys jose.JSONWebKeySet
-	err  error
-	at   time.Time
+	// keys are the keys of the last fetch that worked, which ended at
+	// fetchedAt. A fetch that fails keeps them.
+	keys      jose.JSONWebKeySet
+	fetchedAt time.Time
+	// err is the error of the last fetch, which ended at triedAt, or nil.
+	err     error
+	triedAt time.Time
+}
+
+// keysAt returns the keys while they last.
+func (f fetchedKeySet) keysAt(now time.Time) jose.JSONWebKeySet {
+	if now.Before(f.fetchedAt.Add(keySetLifetime)) {
+		return f.keys
+	}
+	return jose.JSONWebKeySet{}
 }
 
 func (f fetchedKeySet) keptUntil() time.Time {
-	if f.err != nil {
-		return f.at.Add(keyFetchInterval)
+	keys, cooldown := f.fetchedAt.Add(keySetLifetime), f.triedAt.Add(keyFetchInterval)
+	if cooldown.After(keys) {
+		return cooldown
 	}
-	return f.at.Add(keySetLifetime)
+	return keys
 }
 
 // keySetFlight is a fetch that callers share. keys and err are set before
@@ -78,17 +91,26 @@ func newKeySource(client *http.Client, clock quartz.Clock) *keySource {
 }
 
 // keySet returns the keys of issuer, for a token whose header names kid. It
-// fetches them when it holds none, or when the ones it holds lack kid, unless
-// a fetch of issuer ended less than keyFetchInterval ago: then it returns what
-// that fetch got, failure included. Every error but the end of ctx wraps
-// errIssuerKeys.
+// fetches them when the keys that it holds, which last keySetLifetime from
+// the fetch that got them, lack kid, unless a fetch of issuer ended less than
+// keyFetchInterval ago: then it returns the keys that it holds, or the error
+// of that fetch. A fetch that fails keeps the keys. It starts no fetch once
+// ctx has ended, and every error but the end of ctx wraps errIssuerKeys.
 func (s *keySource) keySet(ctx context.Context, issuer, kid string) (jose.JSONWebKeySet, error) {
 	s.mu.Lock()
 	now := s.clock.Now()
-	if f, ok := s.sets[issuer]; ok && now.Before(f.keptUntil()) &&
-		(now.Before(f.at.Add(keyFetchInterval)) || len(f.keys.Key(kid)) > 0) {
+	f := s.sets[issuer]
+	keys := f.keysAt(now)
+	switch {
+	case len(keys.Key(kid)) > 0:
 		s.mu.Unlock()
-		return f.keys, f.err
+		return keys, nil
+	case now.Before(f.triedAt.Add(keyFetchInterval)):
+		s.mu.Unlock()
+		return keys, f.err
+	case ctx.Err() != nil:
+		s.mu.Unlock()
+		return jose.JSONWebKeySet{}, ctx.Err()
 	}
 	if fl, ok := s.flights[issuer]; ok {
 		s.mu.Unlock()
@@ -111,8 +133,12 @@ func (s *keySource) keySet(ctx context.Context, issuer, kid string) (jose.JSONWe
 	}
 	s.mu.Lock()
 	delete(s.flights, issuer)
-	f := fetchedKeySet{keys: keys, err: err, at: s.clock.Now()}
-	keep(s.sets, issuer, f, maxCachedKeySets, f.at, fetchedKeySet.keptUntil)
+	f = s.sets[issuer]
+	f.err, f.triedAt = err, s.clock.Now()
+	if err == nil {
+		f.keys, f.fetchedAt = keys, f.triedAt
+	}
+	keep(s.sets, issuer, f, maxCachedKeySets, f.triedAt, fetchedKeySet.keptUntil)
 	s.mu.Unlock()
 	fl.keys, fl.err = keys, err
 	close(fl.done)
