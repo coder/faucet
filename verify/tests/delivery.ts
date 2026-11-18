@@ -29,8 +29,13 @@ export async function endpoint(receiver: Receiver, behavior: string): Promise<En
 }
 
 // withDeliveryFaucet starts a faucet that verifies callbacks by the handshake and reaches the receiver on loopback.
-export function withDeliveryFaucet<T>(faucet: Faucet, fn: (started: Faucet, output: () => string) => Promise<T>): Promise<T> {
-  return faucet.withFaucet(HANDSHAKE_ENV, fn, { e2eBuild: true });
+// opts.publicUrl turns on its login server for service clients, as withFaucet's does.
+export function withDeliveryFaucet<T>(
+  faucet: Faucet,
+  fn: (started: Faucet, output: () => string) => Promise<T>,
+  opts: { publicUrl?: boolean } = {},
+): Promise<T> {
+  return faucet.withFaucet(HANDSHAKE_ENV, fn, { e2eBuild: true, ...opts });
 }
 
 export function paramsFor(repoId: number, at: Endpoint, args: Record<string, unknown> = {}, name: string = EVENT): Params {
