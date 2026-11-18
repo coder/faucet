@@ -32,7 +32,7 @@ type rawSubtest struct {
 // Every call to newStore must return an empty store that does not share state
 // with the others, because the subtests run in parallel.
 func RunRaw(t *testing.T, newStore func(t *testing.T) RawStore) {
-	groups := [][]rawSubtest{rawIngestSubtests, rawLeaseSubtests, rawDeliverySubtests, rawPurgeSubtests, rawConcurrencySubtests, rawLimitSubtests}
+	groups := [][]rawSubtest{rawIngestSubtests, rawLeaseSubtests, rawDeliverySubtests, rawPurgeSubtests, rawConcurrencySubtests, rawLimitSubtests, rawTargetSubtests}
 	for _, group := range groups {
 		for _, st := range group {
 			t.Run(st.name, func(t *testing.T) {
@@ -58,6 +58,7 @@ var rawIngestSubtests = []rawSubtest{
 
 const (
 	rawRepo    int64 = 42
+	rawOwner   int64 = 7
 	rawEvent         = "push"
 	rawMaxLive       = 100
 	// rawMaxPerTarget is the limit of interests per event and repository
@@ -68,13 +69,23 @@ const (
 var rawBody = []byte(`{"ref":"refs/heads/main"}`)
 
 // rawSpec says what a raw subscription or a lease wants. Its zero value is
-// every push of rawRepo, whole, for octocat.
+// every push of rawRepo, whole, for octocat. A target, when set, replaces
+// the repository repoID, and repos limits it to those full names.
 type rawSpec struct {
 	principal string
 	event     string
 	repoID    int64
+	target    faucet.Target
+	repos     []string
 	actions   []string
 	fields    []string
+}
+
+func (w rawSpec) targetOf() faucet.Target {
+	if w.target.Kind() != "" {
+		return w.target
+	}
+	return faucet.RepoTarget(w.repoID)
 }
 
 func (w rawSpec) withDefaults() rawSpec {
@@ -92,10 +103,16 @@ func (w rawSpec) withDefaults() rawSpec {
 
 func (w rawSpec) arguments() json.RawMessage {
 	args := `{"repo":"octo/repo"`
+	switch w.target.Kind() {
+	case faucet.TargetOwner:
+		args = `{"owner":"octo"`
+	case faucet.TargetAll:
+		args = `{"all":true`
+	}
 	for _, member := range []struct {
 		name   string
 		values []string
-	}{{"actions", w.actions}, {"fields", w.fields}} {
+	}{{"actions", w.actions}, {"fields", w.fields}, {"repos", w.repos}} {
 		if len(member.values) == 0 {
 			continue
 		}
@@ -120,7 +137,7 @@ func newRawSubscription(n int, w rawSpec, expiresAt time.Time) faucet.Subscripti
 		EventType:   eventType,
 		EventTypes:  []string{eventType},
 		Arguments:   w.arguments(),
-		RepoID:      w.repoID,
+		Target:      w.targetOf(),
 		SecretEnc:   []byte("sealed-1"),
 		Cursor:      math.MaxInt64,
 		ExpiresAt:   expiresAt,
@@ -135,7 +152,8 @@ func newRawLease(n uint64, w rawSpec, expiresAt time.Time) faucet.RawLease {
 		Event:     w.event,
 		Actions:   w.actions,
 		Fields:    w.fields,
-		RepoID:    w.repoID,
+		Target:    w.targetOf(),
+		RepoNames: w.repos,
 		ExpiresAt: expiresAt,
 	}
 	binary.BigEndian.PutUint64(lease.ID[8:], n)
@@ -291,7 +309,7 @@ func leaseInterest(t *testing.T, interests []faucet.RawInterest, lease faucet.Ra
 
 func (r *rawRig) query(lease faucet.RawLease, after int64) faucet.RawRead {
 	return faucet.RawRead{
-		Lease: lease.ID, Key: lease.Key, RepoID: lease.RepoID, After: after,
+		Lease: lease.ID, Key: lease.Key, Target: lease.Target, After: after,
 		Limit: 100, MaxBytes: 1 << 30, Now: r.now, ExpiresAt: r.now.Add(time.Hour),
 	}
 }
@@ -402,7 +420,7 @@ func ingestRawWritesNothingWithoutAnInterest(t *testing.T, s RawStore) {
 func ingestRawGivesThePlanEachMatchingInterestOnce(t *testing.T, s RawStore) {
 	r := newRawRig(t, s)
 	typed := newSubscription("octocat", "https://hooks.example.test/typed", r.now.Add(time.Hour))
-	typed.RepoID = rawRepo
+	typed.Target = faucet.RepoTarget(rawRepo)
 	_, err := s.UpsertSubscription(r.ctx, typed, r.now, rawMaxLive)
 	require.NoError(t, err)
 	projected := r.subscribe(1, rawSpec{fields: []string{"ref"}})

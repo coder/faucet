@@ -55,9 +55,8 @@ type Subscription struct {
 	EventTypes []string
 	// Arguments is the canonical JSON of the event arguments.
 	Arguments json.RawMessage
-	// RepoID is the GitHub ID of the repository that the principal could read
-	// at the last subscribe.
-	RepoID int64
+	// Target is what the principal could read at the last subscribe.
+	Target Target
 	// SecretEnc is the subscriber's signing secret, sealed. It is never the
 	// plaintext.
 	SecretEnc []byte
@@ -105,8 +104,8 @@ func (s Subscription) Validate(now time.Time) error {
 		return xerrors.New("stored event types are required")
 	case !json.Valid(s.Arguments) || !bytes.HasPrefix(s.Arguments, []byte("{")):
 		return xerrors.New("arguments must be a JSON object")
-	case s.RepoID <= 0:
-		return xerrors.New("repo ID must be positive")
+	case s.Target.Validate() != nil:
+		return xerrors.Errorf("target: %w", s.Target.Validate())
 	case len(s.SecretEnc) == 0:
 		return xerrors.New("sealed secret is required")
 	case s.Cursor < 0:

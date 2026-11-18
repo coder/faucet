@@ -181,7 +181,7 @@ func scanTargetsListsLiveSubscriptionsBehindTheHead(t *testing.T, s faucet.Store
 	first := targets[0]
 	require.Equal(t, []string{"ci.run_completed"}, first.EventTypes)
 	require.JSONEq(t, `{"repo":"octo/repo"}`, string(first.Arguments))
-	require.EqualValues(t, 42, first.RepoID)
+	require.Equal(t, faucet.RepoTarget(42), first.Target)
 	require.EqualValues(t, 0, first.ScannedThrough)
 	require.Zero(t, first.Pending)
 
@@ -390,7 +390,7 @@ func claimDeliveryReturnsTheDeliveryWithItsEventSecretAndWatermark(t *testing.T,
 	require.Equal(t, r.sub.EventType, first.EventType)
 	require.Equal(t, r.sub.CallbackURL, first.CallbackURL)
 	require.Equal(t, r.sub.SecretEnc, first.SecretEnc)
-	require.EqualValues(t, 42, first.RepoID)
+	require.Equal(t, faucet.RepoTarget(42), first.Target)
 	require.Equal(t, r.events[0].ID-1, first.Watermark)
 	require.NotNil(t, first.Event)
 	requireSameEvent(t, r.events[0], *first.Event)
@@ -839,7 +839,7 @@ func purgeLeavesBelowTheMarkOnlyTheSubscriptionsThatLostEvents(t *testing.T, s f
 	r := newRig(t, s, 0)
 	quiet := r.sub
 	lossy := subscriptionAt(2, r.now.Add(time.Hour))
-	lossy.RepoID = 77
+	lossy.Target = faucet.RepoTarget(77)
 	lossy.Cursor = 0
 	_, err := s.UpsertSubscription(r.ctx, lossy, r.now, 10)
 	require.NoError(t, err)
@@ -1115,12 +1115,12 @@ func claimDeliveryCarriesTheRepositoryTheSubscriptionIsGrantedNow(t *testing.T, 
 	r := newRig(t, s, 1)
 	r.enqueue(r.events...)
 	moved := r.sub
-	moved.RepoID = 77
+	moved.Target = faucet.RepoTarget(77)
 	_, err := s.UpsertSubscription(r.ctx, moved, r.now, 10)
 	require.NoError(t, err)
 
 	claim := r.mustClaim(r.now)
-	require.EqualValues(t, 77, claim.RepoID, "the claim carries the repository that the subscription is granted now")
+	require.Equal(t, faucet.RepoTarget(77), claim.Target, "the claim carries the repository that the subscription is granted now")
 	require.NotNil(t, claim.Event)
 	require.EqualValues(t, 42, claim.Event.RepoID, "and the event keeps its own, so that the run can tell they differ")
 }

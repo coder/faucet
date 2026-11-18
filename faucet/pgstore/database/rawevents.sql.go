@@ -49,9 +49,9 @@ WITH due AS (
 )
 SELECT
   c.key_hash, c.incarnation, c.raw_event_id, c.attempts, c.enqueued_at,
-  s.event_type, s.arguments, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.repo_id,
+  s.event_type, s.arguments, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.target_kind, s.repo_id, s.owner_id,
   (SELECT COALESCE(MIN(p.raw_event_id), c.raw_event_id) - 1 FROM faucet_raw_deliveries p WHERE p.key_hash = c.key_hash AND p.incarnation = c.incarnation)::bigint AS watermark,
-  e.id AS stored_event_id, e.delivery_id, e.event, e.action, e.repo_id AS event_repo_id, e.body, e.fields, e.received_at
+  e.id AS stored_event_id, e.delivery_id, e.event, e.action, e.repo_id AS event_repo_id, e.owner_id AS event_owner_id, e.body, e.fields, e.received_at
 FROM claimed c
 JOIN faucet_subscriptions s ON s.key_hash = c.key_hash AND s.created_at = c.incarnation
 LEFT JOIN faucet_raw_events e ON e.id = c.raw_event_id AND e.body IS NOT NULL
@@ -75,13 +75,16 @@ type ClaimRawDeliveryRow struct {
 	SecretEnc           []byte
 	PreviousSecretEnc   []byte
 	PreviousSecretUntil sql.NullTime
+	TargetKind          string
 	RepoID              int64
+	OwnerID             int64
 	Watermark           int64
 	StoredEventID       sql.NullInt64
 	DeliveryID          sql.NullString
 	Event               sql.NullString
 	Action              sql.NullString
 	EventRepoID         sql.NullInt64
+	EventOwnerID        sql.NullInt64
 	Body                []byte
 	Fields              []string
 	ReceivedAt          sql.NullTime
@@ -103,13 +106,16 @@ func (q *Queries) ClaimRawDelivery(ctx context.Context, arg ClaimRawDeliveryPara
 		&i.SecretEnc,
 		&i.PreviousSecretEnc,
 		&i.PreviousSecretUntil,
+		&i.TargetKind,
 		&i.RepoID,
+		&i.OwnerID,
 		&i.Watermark,
 		&i.StoredEventID,
 		&i.DeliveryID,
 		&i.Event,
 		&i.Action,
 		&i.EventRepoID,
+		&i.EventOwnerID,
 		&i.Body,
 		pq.Array(&i.Fields),
 		&i.ReceivedAt,
@@ -216,11 +222,13 @@ func (q *Queries) ClearRawBodies(ctx context.Context, clearBefore sql.NullTime) 
 const countRawInterests = `-- name: CountRawInterests :one
 WITH subs AS (
   SELECT s.principal FROM faucet_subscriptions s
-  WHERE s.repo_id = $2 AND s.event_type = 'github.' || $3::text
-    AND s.expires_at > $4 AND s.key_hash IS DISTINCT FROM $5::bytea
+  WHERE s.target_kind = $2 AND s.repo_id = $3 AND s.owner_id = $4
+    AND s.event_type = 'github.' || $5::text
+    AND s.expires_at > $6 AND s.key_hash IS DISTINCT FROM $7::bytea
 ), leases AS (
   SELECT l.principal FROM faucet_raw_leases l
-  WHERE l.repo_id = $2 AND l.event = $3::text AND l.expires_at > $4
+  WHERE l.target_kind = $2 AND l.repo_id = $3 AND l.owner_id = $4
+    AND l.event = $5::text AND l.expires_at > $6
 )
 SELECT
   ((SELECT COUNT(*) FROM subs) + (SELECT COUNT(*) FROM leases))::bigint AS interests,
@@ -229,11 +237,13 @@ SELECT
 `
 
 type CountRawInterestsParams struct {
-	Principal string
-	RepoID    int64
-	Event     string
-	Now       time.Time
-	ExceptKey []byte
+	Principal  string
+	TargetKind string
+	RepoID     int64
+	OwnerID    int64
+	Event      string
+	Now        time.Time
+	ExceptKey  []byte
 }
 
 type CountRawInterestsRow struct {
@@ -245,7 +255,9 @@ type CountRawInterestsRow struct {
 func (q *Queries) CountRawInterests(ctx context.Context, arg CountRawInterestsParams) (CountRawInterestsRow, error) {
 	row := q.db.QueryRowContext(ctx, countRawInterests,
 		arg.Principal,
+		arg.TargetKind,
 		arg.RepoID,
+		arg.OwnerID,
 		arg.Event,
 		arg.Now,
 		arg.ExceptKey,
@@ -349,8 +361,9 @@ const endOldestRawLeaseOfTarget = `-- name: EndOldestRawLeaseOfTarget :many
 DELETE FROM faucet_raw_leases l
 WHERE l.id IN (
   SELECT o.id FROM faucet_raw_leases o
-  WHERE o.principal = $1 AND o.repo_id = $2 AND o.event = $3
-    AND o.expires_at > $4
+  WHERE o.principal = $1 AND o.event = $2
+    AND o.target_kind = $3 AND o.repo_id = $4 AND o.owner_id = $5
+    AND o.expires_at > $6
   ORDER BY o.polled_at, o.id
   LIMIT 1
   FOR UPDATE
@@ -359,10 +372,12 @@ RETURNING l.id
 `
 
 type EndOldestRawLeaseOfTargetParams struct {
-	Principal string
-	RepoID    int64
-	Event     string
-	Now       time.Time
+	Principal  string
+	Event      string
+	TargetKind string
+	RepoID     int64
+	OwnerID    int64
+	Now        time.Time
 }
 
 // The lease to end is waited for, not passed over, when a poll holds it, so
@@ -372,8 +387,10 @@ type EndOldestRawLeaseOfTargetParams struct {
 func (q *Queries) EndOldestRawLeaseOfTarget(ctx context.Context, arg EndOldestRawLeaseOfTargetParams) ([][]byte, error) {
 	rows, err := q.db.QueryContext(ctx, endOldestRawLeaseOfTarget,
 		arg.Principal,
-		arg.RepoID,
 		arg.Event,
+		arg.TargetKind,
+		arg.RepoID,
+		arg.OwnerID,
 		arg.Now,
 	)
 	if err != nil {
@@ -550,14 +567,15 @@ func (q *Queries) InsertRawDeliveries(ctx context.Context, arg InsertRawDeliveri
 }
 
 const insertRawEvent = `-- name: InsertRawEvent :one
-INSERT INTO faucet_raw_events (delivery_id, event, action, repo_id, body, fields, received_at)
+INSERT INTO faucet_raw_events (delivery_id, event, action, repo_id, owner_id, body, fields, received_at)
 VALUES (
   $1,
   $2,
   $3,
   $4,
-  CASE WHEN $5::boolean THEN $6::bytea END,
-  $7::text[],
+  $5,
+  CASE WHEN $6::boolean THEN $7::bytea END,
+  $8::text[],
   clock_timestamp()
 )
 ON CONFLICT (delivery_id) DO NOTHING
@@ -569,6 +587,7 @@ type InsertRawEventParams struct {
 	Event      string
 	Action     string
 	RepoID     int64
+	OwnerID    int64
 	HasBody    bool
 	Body       []byte
 	Fields     []string
@@ -580,6 +599,7 @@ func (q *Queries) InsertRawEvent(ctx context.Context, arg InsertRawEventParams) 
 		arg.Event,
 		arg.Action,
 		arg.RepoID,
+		arg.OwnerID,
 		arg.HasBody,
 		arg.Body,
 		pq.Array(arg.Fields),
@@ -590,7 +610,7 @@ func (q *Queries) InsertRawEvent(ctx context.Context, arg InsertRawEventParams) 
 }
 
 const insertRawLease = `-- name: InsertRawLease :one
-INSERT INTO faucet_raw_leases (id, key_hash, principal, event, actions, fields, repo_id, acked_through, created_at, polled_at, expires_at)
+INSERT INTO faucet_raw_leases (id, key_hash, principal, event, actions, fields, target_kind, repo_id, owner_id, repos, acked_through, created_at, polled_at, expires_at)
 VALUES (
   $1,
   $2,
@@ -599,24 +619,30 @@ VALUES (
   $5::text[],
   $6::text[],
   $7,
+  $8,
+  $9,
+  $10::text[],
   (SELECT COALESCE(MAX(e.id), 0) FROM faucet_raw_events e),
-  $8,
-  $8,
-  $9
+  $11,
+  $11,
+  $12
 )
 RETURNING acked_through
 `
 
 type InsertRawLeaseParams struct {
-	ID        []byte
-	KeyHash   []byte
-	Principal string
-	Event     string
-	Actions   []string
-	Fields    []string
-	RepoID    int64
-	Now       time.Time
-	ExpiresAt time.Time
+	ID         []byte
+	KeyHash    []byte
+	Principal  string
+	Event      string
+	Actions    []string
+	Fields     []string
+	TargetKind string
+	RepoID     int64
+	OwnerID    int64
+	Repos      []string
+	Now        time.Time
+	ExpiresAt  time.Time
 }
 
 func (q *Queries) InsertRawLease(ctx context.Context, arg InsertRawLeaseParams) (int64, error) {
@@ -627,7 +653,10 @@ func (q *Queries) InsertRawLease(ctx context.Context, arg InsertRawLeaseParams) 
 		arg.Event,
 		pq.Array(arg.Actions),
 		pq.Array(arg.Fields),
+		arg.TargetKind,
 		arg.RepoID,
+		arg.OwnerID,
+		pq.Array(arg.Repos),
 		arg.Now,
 		arg.ExpiresAt,
 	)
@@ -700,16 +729,28 @@ func (q *Queries) LockRawLeases(ctx context.Context, principal string) error {
 }
 
 const lockRawTarget = `-- name: LockRawTarget :exec
-SELECT pg_advisory_xact_lock(hashtextextended($1::text || '/' || $2::bigint::text, 2))
+SELECT pg_advisory_xact_lock(hashtextextended($1::text || '/' || CASE $2::text
+  WHEN 'repo' THEN $3::bigint::text
+  WHEN 'owner' THEN 'owner/' || $4::bigint::text
+  ELSE $2::text
+END, 2))
 `
 
 type LockRawTargetParams struct {
-	Event  string
-	RepoID int64
+	Event      string
+	TargetKind string
+	RepoID     int64
+	OwnerID    int64
 }
 
+// A repository target keeps the key it had before owner and all targets.
 func (q *Queries) LockRawTarget(ctx context.Context, arg LockRawTargetParams) error {
-	_, err := q.db.ExecContext(ctx, lockRawTarget, arg.Event, arg.RepoID)
+	_, err := q.db.ExecContext(ctx, lockRawTarget,
+		arg.Event,
+		arg.TargetKind,
+		arg.RepoID,
+		arg.OwnerID,
+	)
 	return err
 }
 
@@ -835,22 +876,24 @@ func (q *Queries) RawInterests(ctx context.Context, arg RawInterestsParams) ([]R
 
 const rawWants = `-- name: RawWants :many
 SELECT
-  s.repo_id,
+  s.target_kind, s.repo_id, s.owner_id,
   substring(s.event_type from 8)::text AS event,
   ARRAY(SELECT a FROM jsonb_array_elements_text(COALESCE(s.arguments -> 'actions', '[]'::jsonb)) AS a ORDER BY a COLLATE "C")::text[] AS actions
 FROM faucet_subscriptions s
 WHERE s.event_type LIKE 'github.%' AND s.expires_at > $1
 UNION
-SELECT l.repo_id, l.event, ARRAY(SELECT a FROM unnest(l.actions) AS a ORDER BY a COLLATE "C")::text[]
+SELECT l.target_kind, l.repo_id, l.owner_id, l.event, ARRAY(SELECT a FROM unnest(l.actions) AS a ORDER BY a COLLATE "C")::text[]
 FROM faucet_raw_leases l
 WHERE l.expires_at > $1
-ORDER BY 1, 2, 3
+ORDER BY 1, 2, 3, 4, 5
 `
 
 type RawWantsRow struct {
-	RepoID  int64
-	Event   string
-	Actions []string
+	TargetKind string
+	RepoID     int64
+	OwnerID    int64
+	Event      string
+	Actions    []string
 }
 
 func (q *Queries) RawWants(ctx context.Context, now time.Time) ([]RawWantsRow, error) {
@@ -862,7 +905,13 @@ func (q *Queries) RawWants(ctx context.Context, now time.Time) ([]RawWantsRow, e
 	var items []RawWantsRow
 	for rows.Next() {
 		var i RawWantsRow
-		if err := rows.Scan(&i.RepoID, &i.Event, pq.Array(&i.Actions)); err != nil {
+		if err := rows.Scan(
+			&i.TargetKind,
+			&i.RepoID,
+			&i.OwnerID,
+			&i.Event,
+			pq.Array(&i.Actions),
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -904,7 +953,7 @@ WITH head AS (
 )
 SELECT
   summary.head, summary.skipped, summary.last_open, summary.more,
-  e.id, e.delivery_id, e.event, e.action, e.repo_id, e.body, e.fields, e.received_at
+  e.id, e.delivery_id, e.event, e.action, e.repo_id, e.owner_id, e.body, e.fields, e.received_at
 FROM summary
 LEFT JOIN ranked r ON r.open AND r.served
 LEFT JOIN faucet_raw_events e ON e.id = r.raw_event_id
@@ -929,6 +978,7 @@ type ReadRawLeasePageRow struct {
 	Event      sql.NullString
 	Action     sql.NullString
 	RepoID     sql.NullInt64
+	OwnerID    sql.NullInt64
 	Body       []byte
 	Fields     []string
 	ReceivedAt sql.NullTime
@@ -963,6 +1013,7 @@ func (q *Queries) ReadRawLeasePage(ctx context.Context, arg ReadRawLeasePagePara
 			&i.Event,
 			&i.Action,
 			&i.RepoID,
+			&i.OwnerID,
 			&i.Body,
 			pq.Array(&i.Fields),
 			&i.ReceivedAt,
@@ -1023,7 +1074,9 @@ func (q *Queries) RescheduleRawDelivery(ctx context.Context, arg RescheduleRawDe
 const touchRawLease = `-- name: TouchRawLease :one
 WITH found AS (
   SELECT l.id, l.acked_through FROM faucet_raw_leases l
-  WHERE l.id = $4 AND l.key_hash = $5 AND l.repo_id = $6 AND l.expires_at > $2
+  WHERE l.id = $4 AND l.key_hash = $5
+    AND l.target_kind = $6 AND l.repo_id = $7 AND l.owner_id = $8
+    AND l.expires_at > $2
   FOR UPDATE
 )
 UPDATE faucet_raw_leases l
@@ -1034,12 +1087,14 @@ RETURNING found.acked_through AS acked_before
 `
 
 type TouchRawLeaseParams struct {
-	After     int64
-	Now       time.Time
-	ExpiresAt time.Time
-	ID        []byte
-	KeyHash   []byte
-	RepoID    int64
+	After      int64
+	Now        time.Time
+	ExpiresAt  time.Time
+	ID         []byte
+	KeyHash    []byte
+	TargetKind string
+	RepoID     int64
+	OwnerID    int64
 }
 
 func (q *Queries) TouchRawLease(ctx context.Context, arg TouchRawLeaseParams) (int64, error) {
@@ -1049,7 +1104,9 @@ func (q *Queries) TouchRawLease(ctx context.Context, arg TouchRawLeaseParams) (i
 		arg.ExpiresAt,
 		arg.ID,
 		arg.KeyHash,
+		arg.TargetKind,
 		arg.RepoID,
+		arg.OwnerID,
 	)
 	var acked_before int64
 	err := row.Scan(&acked_before)

@@ -39,6 +39,8 @@ type FaucetEvent struct {
 	HeadSha    sql.NullString
 	Data       json.RawMessage
 	ReceivedAt time.Time
+	OwnerID    int64
+	RepoName   string
 }
 
 type FaucetPurgeMark struct {
@@ -65,6 +67,7 @@ type FaucetRawEvent struct {
 	Body       []byte
 	Fields     []string
 	ReceivedAt time.Time
+	OwnerID    int64
 }
 
 type FaucetRawGap struct {
@@ -86,6 +89,9 @@ type FaucetRawLease struct {
 	CreatedAt    time.Time
 	PolledAt     time.Time
 	ExpiresAt    time.Time
+	TargetKind   string
+	OwnerID      int64
+	Repos        []string
 }
 
 type FaucetRawUnread struct {
@@ -164,4 +170,6 @@ type FaucetSubscription struct {
 	GapThrough          int64
 	GapLeaseUntil       sql.NullTime
 	EventTypes          []string
+	TargetKind          string
+	OwnerID             int64
 }

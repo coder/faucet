@@ -181,7 +181,7 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err != nil {
 		return nil, waitOutput{}, err
 	}
-	req.query.RepoID = repoID
+	req.query.Target = RepoTarget(repoID)
 
 	release, ok := s.waits.acquire(p.Login)
 	if !ok {

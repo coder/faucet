@@ -99,7 +99,7 @@ func (s *Service) pollRaw(ctx context.Context, entry *rawEntry, p *eventsPollPar
 		Event:     entry.event,
 		Actions:   req.args.Actions,
 		Fields:    req.args.Fields,
-		RepoID:    repoID,
+		Target:    RepoTarget(repoID),
 		ExpiresAt: now.Add(rawLeaseTTL),
 	}
 	if _, err := rand.Read(lease.ID[:]); err != nil {
@@ -121,7 +121,7 @@ func (s *Service) readRawLease(ctx context.Context, logger slog.Logger, req rawP
 	q := RawRead{
 		Lease:     req.cursor.lease,
 		Key:       key,
-		RepoID:    repoID,
+		Target:    RepoTarget(repoID),
 		After:     req.cursor.pos,
 		Limit:     req.limit,
 		MaxBytes:  rawPageBytes,

@@ -128,7 +128,7 @@ func (q *Queries) DeleteExpiredSubscriptionsOf(ctx context.Context, arg DeleteEx
 const deleteLiveSubscription = `-- name: DeleteLiveSubscription :one
 DELETE FROM faucet_subscriptions
 WHERE key_hash = $1 AND principal = $2 AND expires_at > $3
-RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until, gap_through, gap_lease_until, event_types
+RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until, gap_through, gap_lease_until, event_types, target_kind, owner_id
 `
 
 type DeleteLiveSubscriptionParams struct {
@@ -161,6 +161,8 @@ func (q *Queries) DeleteLiveSubscription(ctx context.Context, arg DeleteLiveSubs
 		&i.GapThrough,
 		&i.GapLeaseUntil,
 		pq.Array(&i.EventTypes),
+		&i.TargetKind,
+		&i.OwnerID,
 	)
 	return i, err
 }
@@ -195,7 +197,7 @@ func (q *Queries) DeleteSubscriptionsOf(ctx context.Context, principal string) (
 }
 
 const eventsAfter = `-- name: EventsAfter :many
-SELECT id, source, delivery_id, type, repo_id, prs, head_sha, data, received_at FROM faucet_events
+SELECT id, source, delivery_id, type, repo_id, prs, head_sha, data, received_at, owner_id, repo_name FROM faucet_events
 WHERE id > $1
 ORDER BY id
 LIMIT $2
@@ -225,6 +227,8 @@ func (q *Queries) EventsAfter(ctx context.Context, arg EventsAfterParams) ([]Fau
 			&i.HeadSha,
 			&i.Data,
 			&i.ReceivedAt,
+			&i.OwnerID,
+			&i.RepoName,
 		); err != nil {
 			return nil, err
 		}
@@ -240,7 +244,7 @@ func (q *Queries) EventsAfter(ctx context.Context, arg EventsAfterParams) ([]Fau
 }
 
 const getEventByDelivery = `-- name: GetEventByDelivery :one
-SELECT id, source, delivery_id, type, repo_id, prs, head_sha, data, received_at FROM faucet_events WHERE delivery_id = $1
+SELECT id, source, delivery_id, type, repo_id, prs, head_sha, data, received_at, owner_id, repo_name FROM faucet_events WHERE delivery_id = $1
 `
 
 func (q *Queries) GetEventByDelivery(ctx context.Context, deliveryID string) (FaucetEvent, error) {
@@ -256,24 +260,28 @@ func (q *Queries) GetEventByDelivery(ctx context.Context, deliveryID string) (Fa
 		&i.HeadSha,
 		&i.Data,
 		&i.ReceivedAt,
+		&i.OwnerID,
+		&i.RepoName,
 	)
 	return i, err
 }
 
 const insertEvent = `-- name: InsertEvent :one
-INSERT INTO faucet_events (source, delivery_id, type, repo_id, prs, head_sha, data, received_at)
+INSERT INTO faucet_events (source, delivery_id, type, repo_id, owner_id, repo_name, prs, head_sha, data, received_at)
 VALUES (
   $1,
   $2,
   $3,
   $4,
-  $5::int[],
-  NULLIF($6::text, ''),
-  $7::text::jsonb,
+  $5,
+  $6,
+  $7::int[],
+  NULLIF($8::text, ''),
+  $9::text::jsonb,
   clock_timestamp()
 )
 ON CONFLICT (delivery_id) DO NOTHING
-RETURNING id, source, delivery_id, type, repo_id, prs, head_sha, data, received_at
+RETURNING id, source, delivery_id, type, repo_id, prs, head_sha, data, received_at, owner_id, repo_name
 `
 
 type InsertEventParams struct {
@@ -281,6 +289,8 @@ type InsertEventParams struct {
 	DeliveryID string
 	Type       string
 	RepoID     int64
+	OwnerID    int64
+	RepoName   string
 	Prs        []int32
 	HeadSha    string
 	Data       string
@@ -292,6 +302,8 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (Fauce
 		arg.DeliveryID,
 		arg.Type,
 		arg.RepoID,
+		arg.OwnerID,
+		arg.RepoName,
 		pq.Array(arg.Prs),
 		arg.HeadSha,
 		arg.Data,
@@ -307,6 +319,8 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (Fauce
 		&i.HeadSha,
 		&i.Data,
 		&i.ReceivedAt,
+		&i.OwnerID,
+		&i.RepoName,
 	)
 	return i, err
 }
@@ -345,7 +359,7 @@ WITH mark AS (
   SELECT GREATEST(COALESCE(MAX(id), 0), (SELECT purged_through FROM mark))::bigint AS max_id
   FROM faucet_events
 ), page AS (
-  SELECT e.id, e.source, e.delivery_id, e.type, e.repo_id, e.prs, e.head_sha, e.data, e.received_at FROM faucet_events e
+  SELECT e.id, e.source, e.delivery_id, e.type, e.repo_id, e.prs, e.head_sha, e.data, e.received_at, e.owner_id, e.repo_name FROM faucet_events e
   WHERE e.repo_id = $1
     AND e.id > $2
     AND (cardinality($3::text[]) = 0 OR e.type = ANY($3::text[]))
@@ -361,7 +375,7 @@ WITH mark AS (
 SELECT
   head.max_id,
   (SELECT purged_through FROM mark)::bigint AS purged_through,
-  page.id, page.source, page.delivery_id, page.type, page.repo_id, page.prs, page.head_sha,
+  page.id, page.source, page.delivery_id, page.type, page.repo_id, page.owner_id, page.repo_name, page.prs, page.head_sha,
   COALESCE(page.data, 'null'::jsonb)::jsonb AS data,
   page.received_at
 FROM head LEFT JOIN page ON true
@@ -386,6 +400,8 @@ type PollEventsRow struct {
 	DeliveryID    sql.NullString
 	Type          sql.NullString
 	RepoID        sql.NullInt64
+	OwnerID       sql.NullInt64
+	RepoName      sql.NullString
 	Prs           []int32
 	HeadSha       sql.NullString
 	Data          json.RawMessage
@@ -417,6 +433,8 @@ func (q *Queries) PollEvents(ctx context.Context, arg PollEventsParams) ([]PollE
 			&i.DeliveryID,
 			&i.Type,
 			&i.RepoID,
+			&i.OwnerID,
+			&i.RepoName,
 			pq.Array(&i.Prs),
 			&i.HeadSha,
 			&i.Data,
@@ -449,7 +467,7 @@ func (q *Queries) RaisePurgeMark(ctx context.Context, through int64) (int64, err
 }
 
 const upsertSubscription = `-- name: UpsertSubscription :one
-INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, event_types, arguments, repo_id, secret_enc, cursor, scanned_through, created_at, updated_at, expires_at)
+INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, event_types, arguments, target_kind, repo_id, owner_id, secret_enc, cursor, scanned_through, created_at, updated_at, expires_at)
 VALUES (
   $1,
   $2,
@@ -460,27 +478,31 @@ VALUES (
   $7,
   $8,
   $9,
-  $9,
   $10,
-  $10,
-  $11
+  $11,
+  $11,
+  $12,
+  $12,
+  $13
 )
 ON CONFLICT (key_hash) DO UPDATE SET
   event_types = EXCLUDED.event_types,
+  target_kind = EXCLUDED.target_kind,
   repo_id = EXCLUDED.repo_id,
+  owner_id = EXCLUDED.owner_id,
   previous_secret_enc = CASE
     WHEN faucet_subscriptions.secret_enc = EXCLUDED.secret_enc THEN faucet_subscriptions.previous_secret_enc
-    WHEN $12::timestamptz IS NULL THEN NULL
+    WHEN $14::timestamptz IS NULL THEN NULL
     ELSE faucet_subscriptions.secret_enc
   END,
   previous_secret_until = CASE
     WHEN faucet_subscriptions.secret_enc = EXCLUDED.secret_enc THEN faucet_subscriptions.previous_secret_until
-    ELSE $12::timestamptz
+    ELSE $14::timestamptz
   END,
   secret_enc = EXCLUDED.secret_enc,
   updated_at = EXCLUDED.updated_at,
   expires_at = EXCLUDED.expires_at
-RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until, gap_through, gap_lease_until, event_types
+RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until, gap_through, gap_lease_until, event_types, target_kind, owner_id
 `
 
 type UpsertSubscriptionParams struct {
@@ -490,7 +512,9 @@ type UpsertSubscriptionParams struct {
 	EventType           string
 	EventTypes          []string
 	Arguments           string
+	TargetKind          string
 	RepoID              int64
+	OwnerID             int64
 	SecretEnc           []byte
 	Cursor              int64
 	Now                 time.Time
@@ -506,7 +530,9 @@ func (q *Queries) UpsertSubscription(ctx context.Context, arg UpsertSubscription
 		arg.EventType,
 		pq.Array(arg.EventTypes),
 		arg.Arguments,
+		arg.TargetKind,
 		arg.RepoID,
+		arg.OwnerID,
 		arg.SecretEnc,
 		arg.Cursor,
 		arg.Now,
@@ -535,6 +561,8 @@ func (q *Queries) UpsertSubscription(ctx context.Context, arg UpsertSubscription
 		&i.GapThrough,
 		&i.GapLeaseUntil,
 		pq.Array(&i.EventTypes),
+		&i.TargetKind,
+		&i.OwnerID,
 	)
 	return i, err
 }

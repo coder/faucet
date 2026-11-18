@@ -2,12 +2,14 @@
 SELECT pg_advisory_xact_lock(sqlc.arg(key)::bigint);
 
 -- name: InsertEvent :one
-INSERT INTO faucet_events (source, delivery_id, type, repo_id, prs, head_sha, data, received_at)
+INSERT INTO faucet_events (source, delivery_id, type, repo_id, owner_id, repo_name, prs, head_sha, data, received_at)
 VALUES (
   sqlc.arg(source),
   sqlc.arg(delivery_id),
   sqlc.arg(type),
   sqlc.arg(repo_id),
+  sqlc.arg(owner_id),
+  sqlc.arg(repo_name),
   sqlc.arg(prs)::int[],
   NULLIF(sqlc.arg(head_sha)::text, ''),
   sqlc.arg(data)::text::jsonb,
@@ -48,7 +50,7 @@ WITH mark AS (
 SELECT
   head.max_id,
   (SELECT purged_through FROM mark)::bigint AS purged_through,
-  page.id, page.source, page.delivery_id, page.type, page.repo_id, page.prs, page.head_sha,
+  page.id, page.source, page.delivery_id, page.type, page.repo_id, page.owner_id, page.repo_name, page.prs, page.head_sha,
   COALESCE(page.data, 'null'::jsonb)::jsonb AS data,
   page.received_at
 FROM head LEFT JOIN page ON true
@@ -96,7 +98,7 @@ DELETE FROM faucet_subscriptions WHERE principal = sqlc.arg(principal) AND expir
 SELECT COUNT(*)::bigint AS others FROM faucet_subscriptions WHERE principal = sqlc.arg(principal) AND key_hash <> sqlc.arg(key_hash);
 
 -- name: UpsertSubscription :one
-INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, event_types, arguments, repo_id, secret_enc, cursor, scanned_through, created_at, updated_at, expires_at)
+INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, event_types, arguments, target_kind, repo_id, owner_id, secret_enc, cursor, scanned_through, created_at, updated_at, expires_at)
 VALUES (
   sqlc.arg(key_hash),
   sqlc.arg(principal),
@@ -104,7 +106,9 @@ VALUES (
   sqlc.arg(event_type),
   sqlc.arg(event_types)::text[],
   sqlc.arg(arguments)::text::jsonb,
+  sqlc.arg(target_kind),
   sqlc.arg(repo_id),
+  sqlc.arg(owner_id),
   sqlc.arg(secret_enc),
   sqlc.arg(cursor),
   sqlc.arg(cursor),
@@ -114,7 +118,9 @@ VALUES (
 )
 ON CONFLICT (key_hash) DO UPDATE SET
   event_types = EXCLUDED.event_types,
+  target_kind = EXCLUDED.target_kind,
   repo_id = EXCLUDED.repo_id,
+  owner_id = EXCLUDED.owner_id,
   previous_secret_enc = CASE
     WHEN faucet_subscriptions.secret_enc = EXCLUDED.secret_enc THEN faucet_subscriptions.previous_secret_enc
     WHEN sqlc.narg(previous_secret_until)::timestamptz IS NULL THEN NULL

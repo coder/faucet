@@ -98,7 +98,7 @@ func (s *fakeStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.Po
 	var page faucet.PollPage
 	for _, e := range s.events {
 		head = max(head, e.ID)
-		if e.ID <= q.After || e.RepoID != q.RepoID || len(page.Events) == int(q.Limit) {
+		if e.ID <= q.After || e.RepoID != q.Target.RepoID() || len(page.Events) == int(q.Limit) {
 			continue
 		}
 		if len(q.Types) > 0 && !slices.Contains(q.Types, e.Type) {
@@ -195,7 +195,7 @@ func (s *fakeStore) advanceSubscriptionsThatLoseNothingLocked(doomed int64) {
 			continue
 		}
 		if !slices.ContainsFunc(s.events, func(e faucet.Event) bool {
-			return e.RepoID == sub.RepoID && slices.Contains(sub.EventTypes, e.Type) && e.ID > pos && e.ID <= doomed
+			return e.RepoID == sub.Target.RepoID() && slices.Contains(sub.EventTypes, e.Type) && e.ID > pos && e.ID <= doomed
 		}) {
 			s.scanned[key] = doomed
 		}

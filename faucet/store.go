@@ -21,7 +21,12 @@ type Event struct {
 	// Type is the normalized event type, for example "ci.run_completed".
 	Type   string
 	RepoID int64
-	PRs    []int32
+	// OwnerID is the GitHub ID of the repository's owner, and RepoName its
+	// full name, owner/name, as the delivery wrote it. An event stored before
+	// faucet recorded them, or of a payload that names none, has 0 and "".
+	OwnerID  int64
+	RepoName string
+	PRs      []int32
 	// HeadSHA is empty when the event carries none.
 	HeadSHA string
 	Data    json.RawMessage
@@ -46,6 +51,8 @@ func (e Event) Validate() error {
 		return xerrors.New("type is required")
 	case e.RepoID == 0:
 		return xerrors.New("repo ID is required")
+	case e.OwnerID < 0:
+		return xerrors.New("owner ID must not be negative")
 	case len(e.Data) == 0:
 		return xerrors.New("data is required")
 	case !json.Valid(e.Data):
@@ -62,9 +69,12 @@ func (e Event) Validate() error {
 	return nil
 }
 
-// PollQuery selects the events one repository's waiter wants to see.
+// PollQuery selects the events one waiter wants to see.
 type PollQuery struct {
-	RepoID int64
+	Target Target
+	// RepoNames limits the result to events whose RepoName, in lower case,
+	// is one of these lower-case full names. Empty means no limit.
+	RepoNames []string
 	// Types limits the result to these event types. Empty means every type.
 	Types []string
 	// HeadSHA limits the result to events with this head SHA. Empty means no limit.
@@ -83,8 +93,8 @@ type PollQuery struct {
 // Validate checks the fields a caller supplies to Store.PollEvents.
 func (q PollQuery) Validate() error {
 	switch {
-	case q.RepoID <= 0:
-		return xerrors.New("repo ID must be positive")
+	case q.Target.Validate() != nil:
+		return xerrors.Errorf("target: %w", q.Target.Validate())
 	case q.Limit <= 0:
 		return xerrors.New("limit must be positive")
 	case q.After < 0:
@@ -197,14 +207,14 @@ type Store interface {
 	//
 	// In the same transaction it moves every subscription whose read position
 	// is at or above the old mark and below the new one up to the new mark,
-	// unless an event of that subscription's repository and event type lies
-	// above its position and at or below the new mark. What stays below the mark
+	// unless an event that its target covers, of its event types, lies above
+	// its position and at or below the new mark. What stays below the mark
 	// is then exactly what lost events, so a subscription that had nothing to
 	// read is not reported as a gap.
 	Purge(ctx context.Context, before time.Time) (PurgeResult, error)
 	// UpsertSubscription stores sub and returns the stored row. It calls
 	// sub.Validate(now). A row with the same KeyHash that expires after now is
-	// live: the call replaces its RepoID, SecretEnc and ExpiresAt and keeps its
+	// live: the call replaces its Target, SecretEnc and ExpiresAt and keeps its
 	// CreatedAt and Cursor. When the new SecretEnc differs from the row's, the
 	// row's becomes PreviousSecretEnc until now plus RotationGrace (and a
 	// previous secret from an earlier rotation is dropped). When it is equal,

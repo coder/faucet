@@ -200,7 +200,7 @@ func TestSubscribeStoresASubscriptionForAReadableRepository(t *testing.T) {
 	require.Equal(t, callbackURL, row.CallbackURL)
 	require.Equal(t, "ci.run_completed", row.EventType)
 	require.JSONEq(t, `{"repo":"octo/repo","pr":7}`, string(row.Arguments))
-	require.EqualValues(t, repoID, row.RepoID, "GitHub's repository ID, not the name")
+	require.Equal(t, faucet.RepoTarget(repoID), row.Target, "GitHub's repository ID, not the name")
 	require.Equal(t, got.ID, row.KeyHash.ID())
 	require.Equal(t, head, row.Cursor)
 	require.Equal(t, 1, h.verifier.callCount())
@@ -894,7 +894,7 @@ func TestUnsubscribeEndsAShaSubscriptionToCommentEventsThatAnOlderVersionStored(
 		EventType:   "pr.comment_created",
 		EventTypes:  []string{"pr.comment_created"},
 		Arguments:   arguments,
-		RepoID:      repoID,
+		Target:      faucet.RepoTarget(repoID),
 		SecretEnc:   []byte("sealed"),
 		ExpiresAt:   h.clock.Now().Add(5 * time.Minute),
 	}, h.clock.Now(), 100)

@@ -178,7 +178,7 @@ func subscriptionOf(principal, callbackURL string, expiresAt time.Time) faucet.S
 	return faucet.Subscription{
 		KeyHash: faucet.NewSubscriptionKeyHash(principal, callbackURL, "ci.run_completed", arguments), Principal: principal,
 		CallbackURL: callbackURL, EventType: "ci.run_completed", EventTypes: []string{"ci.run_completed"}, Arguments: arguments,
-		RepoID: 42, SecretEnc: []byte("sealed"), ExpiresAt: expiresAt,
+		Target: faucet.RepoTarget(42), SecretEnc: []byte("sealed"), ExpiresAt: expiresAt,
 	}
 }
 

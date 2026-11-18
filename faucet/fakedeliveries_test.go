@@ -88,7 +88,7 @@ func (s *fakeStore) ScanTargets(ctx context.Context, now time.Time, maxPending, 
 			continue
 		}
 		targets = append(targets, faucet.ScanTarget{
-			KeyHash: key, Principal: sub.Principal, EventTypes: slices.Clone(sub.EventTypes), Arguments: slices.Clone(sub.Arguments), RepoID: sub.RepoID,
+			KeyHash: key, Principal: sub.Principal, EventTypes: slices.Clone(sub.EventTypes), Arguments: slices.Clone(sub.Arguments), Target: sub.Target,
 			ScannedThrough: s.scanned[key], Pending: pending,
 		})
 	}
@@ -182,7 +182,7 @@ func (s *fakeStore) ClaimDelivery(ctx context.Context, now time.Time, lease time
 		SecretEnc:           slices.Clone(sub.SecretEnc),
 		PreviousSecretEnc:   slices.Clone(sub.PreviousSecretEnc),
 		PreviousSecretUntil: sub.PreviousSecretUntil,
-		RepoID:              sub.RepoID,
+		Target:              sub.Target,
 		Watermark:           watermark - 1,
 	}
 	for _, e := range s.events {
@@ -330,8 +330,21 @@ func (s *fakeStore) hasSomethingToReadLocked(key faucet.SubscriptionKeyHash, sub
 		return true
 	}
 	return slices.ContainsFunc(s.events, func(e faucet.Event) bool {
-		return e.RepoID == sub.RepoID && slices.Contains(sub.EventTypes, e.Type) && e.ID > s.scanned[key]
+		return e.RepoID == sub.Target.RepoID() && slices.Contains(sub.EventTypes, e.Type) && e.ID > s.scanned[key]
 	})
+}
+
+// retarget gives the subscription with this handle another target, as a
+// subscribe of an owner or of every repository stores.
+func (s *fakeStore) retarget(id string, target faucet.Target) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, sub := range s.subs {
+		if key.ID() == id {
+			sub.Target = target
+			s.subs[key] = sub
+		}
+	}
 }
 
 // A row sealed before rotation windows existed looks like this after its first

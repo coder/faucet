@@ -134,7 +134,7 @@ func (s *Service) subscribeRaw(ctx context.Context, wh *webhookState, entry *raw
 		EventType:     entry.name,
 		EventTypes:    []string{entry.name},
 		Arguments:     canonical,
-		RepoID:        repoID,
+		Target:        RepoTarget(repoID),
 		SecretEnc:     sealSecret(wh.aead, wh.nonceKey, req.secret, key[:]),
 		Cursor:        math.MaxInt64,
 		ExpiresAt:     expiresAt,

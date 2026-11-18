@@ -253,7 +253,7 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 		EventType:   req.entry.name,
 		EventTypes:  req.entry.types(req.arguments.Actions),
 		Arguments:   req.canonical,
-		RepoID:      repoID,
+		Target:      RepoTarget(repoID),
 		SecretEnc:   sealed,
 		Cursor:      start,
 		ExpiresAt:   expiresAt,

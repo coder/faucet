@@ -231,7 +231,7 @@ func (s *Service) pollEventsMethod(ctx context.Context, _ *mcp.ServerSession, p 
 	if err != nil {
 		return nil, accessError(err)
 	}
-	req.query.RepoID = repoID
+	req.query.Target = RepoTarget(repoID)
 
 	res, err := s.readEvents(ctx, req)
 	if err != nil {

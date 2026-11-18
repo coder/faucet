@@ -41,7 +41,7 @@ func (s *Service) RawWants(ctx context.Context) (func(event, action string, repo
 		if _, offered := s.rawEntry(rawNamePrefix + w.Event); !offered {
 			continue
 		}
-		key := rawWantKey{repoID: w.RepoID, event: w.Event}
+		key := rawWantKey{repoID: w.Target.RepoID(), event: w.Event}
 		if len(w.Actions) == 0 {
 			every[key] = true
 			continue
