@@ -47,6 +47,13 @@ func newMCPHandler(svc *faucet.Service) http.Handler {
 		JSONResponse:                 true,
 		PropagateRequestCancellation: true,
 		MaxRequestBodyBytes:          faucet.MaxRequestBodyBytes,
+		// The SDK refuses a request that reaches a loopback listener under any
+		// other Host, against DNS rebinding of a local server that trusts the
+		// browser. Vercel hands every request to the function on a loopback
+		// address under faucet's public Host, so that check refused every MCP
+		// request in production. Faucet trusts no browser: each request carries
+		// a bearer token that requireBearer checked before it got here.
+		DisableLocalhostProtection: true,
 	}))
 }
 
