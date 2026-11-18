@@ -120,8 +120,8 @@ func TestSubscriptionsWhoseReadsFailDoNotStopTheRunFromTheOthers(t *testing.T) {
 func TestSlowReplaysMoveOnInEveryRunAndEnd(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		const backlog = 20_000
-		d := newSlowScanHarness(t, &slowScans{perEvent: 75 * time.Microsecond})
+		const backlog = 200_000
+		d := newSlowScanHarness(t, &slowScans{perEvent: 10 * time.Microsecond})
 		d.store.appendRunEvents(backlog)
 		for i := range 5 {
 			d.as(fmt.Sprintf("replayer-%d", i))
@@ -167,4 +167,30 @@ func TestARunEndsAStoredSubscriptionWhoseListsArePastTheLimits(t *testing.T) {
 		require.Empty(t, q.Fields, "the run never read its events")
 	}
 	require.True(t, d.logsContain("stored arguments do not decode or pass the limits"))
+}
+
+// Two principals' stalled subscriptions fill a whole batch of the
+// subscriptions furthest behind. Once both have used their share, the next
+// batch must pass over them to reach the rest.
+func TestAFullBatchOfStalledSubscriptionsDoesNotHideTheRest(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		d := newSlowScanHarness(t, &slowScans{stall: true})
+		for _, login := range []string{"mallory", "trudy"} {
+			d.as(login)
+			for i := range 100 {
+				d.subscribeEndpoint(d.endpoint(fmt.Sprintf("/%s-%d", login, i), "sha", testShaA))
+			}
+		}
+		d.advance(time.Second)
+		d.newRunEvent()
+		d.advance(time.Second)
+		d.as("octocat")
+		d.subscribeEndpoint(d.endpoint("/healthy"))
+		d.newRunEvent()
+
+		res, err := deliverWithCronDeadline(d)
+		require.NoError(t, err)
+		require.Equal(t, 1, res.Delivered, "the subscription behind the full batch is read and sent")
+	})
 }
