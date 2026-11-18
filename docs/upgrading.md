@@ -4,7 +4,7 @@ The server applies every schema change at start (on Vercel, in production only, 
 
 ## To owner and all targets
 
-A service can now read every repository of an owner or every repository (see [service-accounts.md](service-accounts.md#grants) and [events.md](events.md#targets)). A caller that names `repo` sees no change, and a subscription made before keeps its key.
+This came in [#55](https://github.com/coder/faucet/pull/55). A service can now read every repository of an owner or every repository (see [service-accounts.md](service-accounts.md#grants) and [events.md](events.md#targets)). A caller that names `repo` sees no change, and a subscription made before keeps its key.
 
 - **Grant a service an owner or all repositories** with `faucet clients create -grant org:<login>` or `-grant all`. A client made before keeps its `repo:` grants.
 - **Migration `000014_owner_targets`** adds the owner and the name of the repository to each event, the kind of target to subscriptions and raw leases, and two indexes. It rewrites no row, but it builds `faucet_events_owner` over the events table, which blocks event writes while it runs. An event stored before it records no owner, so an `owner` target never reads it, while an `all` target does. Its down file deletes every owner and all subscription and lease, and the raw events of deliveries that named no repository.
