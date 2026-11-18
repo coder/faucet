@@ -335,6 +335,11 @@ func (s *Server) authenticateClient(ctx context.Context, r *http.Request, form u
 	if form.Has("client_id") && form.Get("client_id") != id {
 		return Client{}, badRequest("invalid_request", "client_id differs from the client of the Authorization header")
 	}
+	// An ID that no client has never reaches the store, which may not be
+	// able to compare it at all.
+	if ValidateClientID(id) != nil {
+		return Client{}, errClientAuth
+	}
 	c, err := s.store.Client(ctx, id)
 	switch {
 	case xerrors.Is(err, ErrUnknownClient):

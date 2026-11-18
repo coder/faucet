@@ -244,3 +244,14 @@ func TestTheTestPoolerFailsAStatementBoundInASecondRoundTrip(t *testing.T) {
 	err = db.QueryRowContext(context.Background(), "SELECT $1::int", 1).Scan(&one)
 	require.ErrorContains(t, err, "unnamed prepared statement does not exist")
 }
+
+// A client ID that no client can have is refused before the database sees it,
+// which would fail on a NUL byte or bytes that are not UTF-8.
+func TestDisablingAnImpossibleClientIDIsRefused(t *testing.T) {
+	t.Parallel()
+	getenv, _ := newClientsDatabase(t)
+	for _, id := range []string{"a\x00b", "\xff", "CI"} {
+		_, _, err := clients(t, getenv, "disable", id)
+		require.ErrorContains(t, err, "a client ID is", "%q", id)
+	}
+}

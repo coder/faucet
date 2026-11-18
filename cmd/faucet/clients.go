@@ -96,6 +96,9 @@ func clientsCommand(ctx context.Context, args []string, store clientStore, publi
 // they queued: faucet owns that state. Disabling a disabled client deletes
 // what is left.
 func disableClient(ctx context.Context, id string, store clientStore, now time.Time, stdout io.Writer) error {
+	if err := oauth.ValidateClientID(id); err != nil {
+		return err
+	}
 	c, err := store.DisableClient(ctx, id, now)
 	if xerrors.Is(err, oauth.ErrUnknownClient) {
 		return xerrors.Errorf("there is no client %q", id)

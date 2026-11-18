@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -387,5 +389,26 @@ func TestLoadConfigTakesThePublicURLOnlyInTheFormAClientComputes(t *testing.T) {
 	} {
 		_, err := load(bad)
 		require.ErrorContains(t, err, envPublicURL, bad)
+	}
+}
+
+// A client ID that no client can have, such as one with a NUL byte or a byte
+// that is not UTF-8, which Postgres refuses to compare, is a failed client
+// authentication, not a server error.
+func TestATokenRequestWithAnImpossibleClientIDIsUnauthorized(t *testing.T) {
+	t.Parallel()
+	srv := newLoginServer(t)
+	for _, credentials := range []string{"a%00b:secret", "%ff:secret", "ci%2Fwatcher:secret", "%E2%82%AC:secret"} {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/oauth/token", strings.NewReader("grant_type=client_credentials"))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(credentials)))
+		resp, err := srv.Client().Do(req)
+		require.NoError(t, err)
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		require.NoError(t, err)
+		require.Equal(t, http.StatusUnauthorized, resp.StatusCode, "%s: %s", credentials, body)
+		require.Contains(t, string(body), `"invalid_client"`, credentials)
 	}
 }

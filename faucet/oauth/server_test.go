@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -382,5 +383,19 @@ func TestTheAuthorizationEndpointTakesNoResponseTypeYet(t *testing.T) {
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode, method)
 		require.Empty(t, resp.Header.Get("Location"))
 		require.Equal(t, "unsupported_response_type", body["error"], method)
+	}
+}
+
+// A client ID that no client can have is refused before the store is asked.
+func TestAnImpossibleClientIDNeverReachesTheStore(t *testing.T) {
+	t.Parallel()
+	h := newTokenHarness(t)
+	h.store.mu.Lock()
+	h.store.err = errors.New("the store was asked")
+	h.store.mu.Unlock()
+	for _, credentials := range []string{"a%00b:secret", "%ff:secret", "CI:secret", ":secret", strings.Repeat("a", 65) + ":secret"} {
+		reply := h.post("Basic "+base64.StdEncoding.EncodeToString([]byte(credentials)), clientCredentials())
+		require.Equal(t, http.StatusUnauthorized, reply.status, "%s: %s", credentials, reply.rawBody)
+		require.Equal(t, "invalid_client", reply.body["error"], credentials)
 	}
 }

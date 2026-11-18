@@ -46,7 +46,7 @@ func (c Client) Live() bool { return c.DisabledAt.IsZero() }
 
 // Validate reports whether a store may keep c.
 func (c Client) Validate() error {
-	if err := validClientID(c.ID); err != nil {
+	if err := ValidateClientID(c.ID); err != nil {
 		return err
 	}
 	switch {
@@ -92,13 +92,14 @@ func NewClient(id, resource string, scopes []faucet.Scope, grants []string, now 
 	return c, secret, nil
 }
 
-// errClientID is the error of an ID that validClientID refuses.
+// errClientID is the error of an ID that ValidateClientID refuses.
 var errClientID = xerrors.Errorf("a client ID is 1 to %d lower-case letters, digits and hyphens, with no hyphen at either end", maxClientIDBytes)
 
-// validClientID accepts 1 to 64 lower-case letters, digits and hyphens, with
-// a letter or digit at each end. No such ID changes when a client
-// URL-encodes it for HTTP Basic authentication.
-func validClientID(id string) error {
+// ValidateClientID accepts 1 to 64 lower-case letters, digits and hyphens,
+// with a letter or digit at each end, which every client ID is. No such ID
+// changes when a client URL-encodes it for HTTP Basic authentication, and
+// none holds a byte that a store cannot compare, such as NUL.
+func ValidateClientID(id string) error {
 	ok := id != "" && len(id) <= maxClientIDBytes && id[0] != '-' && id[len(id)-1] != '-'
 	for _, c := range id {
 		ok = ok && ('a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '-')
