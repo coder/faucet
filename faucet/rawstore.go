@@ -408,7 +408,8 @@ type RawStore interface {
 	// ExpireRawDeliveries deletes the raw deliveries and gaps that no live
 	// subscription holds: the subscription expired at or before now, was
 	// deleted, or was made again. It leaves the ones that a claim holds, and
-	// returns how many deliveries it deleted.
+	// returns how many deliveries it deleted. A call that fails deletes
+	// nothing, so that no delivery leaves the queue uncounted.
 	ExpireRawDeliveries(ctx context.Context, now time.Time) (int64, error)
 	// PurgeRawEvents deletes the leases that expired at or before p.Now with
 	// their unread events, drops the body of every raw event that no delivery

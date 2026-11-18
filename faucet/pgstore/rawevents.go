@@ -493,14 +493,26 @@ func (s *Store) FinishRawGap(ctx context.Context, ref faucet.GapRef) (err error)
 	return nil
 }
 
+// ExpireRawDeliveries deletes the deliveries and the gaps in one transaction,
+// so that a call that fails has deleted nothing, and the count it would have
+// returned is never lost.
 func (s *Store) ExpireRawDeliveries(ctx context.Context, now time.Time) (_ int64, err error) {
 	defer func() { err = endedBy(ctx, err) }()
-	deleted, err := s.q.ExpireRawDeliveries(ctx, now)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return 0, xerrors.Errorf("begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	q := s.q.WithTx(tx)
+	deleted, err := q.ExpireRawDeliveries(ctx, now)
 	if err != nil {
 		return 0, xerrors.Errorf("expire raw deliveries: %w", err)
 	}
-	if err := s.q.ExpireRawGaps(ctx, now); err != nil {
+	if err := q.ExpireRawGaps(ctx, now); err != nil {
 		return 0, xerrors.Errorf("expire raw gaps: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, xerrors.Errorf("commit: %w", err)
 	}
 	return deleted, nil
 }
