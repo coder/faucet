@@ -48,7 +48,7 @@ A family also takes filters named after a field of its data, so an agent wakes o
 
 ## What an event carries
 
-An event carries enough to route it and to fetch the rest from GitHub, and no free text: no pull request, comment or review body, no `changes`, no log, step output or commit message, and no status description. A `pr.activity` event does carry short names: the title, the branches, a label or a milestone. Each `payloadSchema` lists every field. `pr.comments` events carry no head SHA, because GitHub names no head commit in a comment. `ci.jobs` and `ci.statuses` events name no pull request, so their `prs` is empty and they take no `pr` argument.
+A typed event carries enough to route it and to fetch the rest from GitHub, and no free text: no pull request, comment or review body, no `changes`, no log, step output or commit message, and no status description. A `pr.activity` event does carry short names: the title, the branches, a label or a milestone. Each `payloadSchema` lists every field. `pr.comments` events carry no head SHA, because GitHub names no head commit in a comment. `ci.jobs` and `ci.statuses` events name no pull request, so their `prs` is empty and they take no `pr` argument.
 
 ## Raw events
 
