@@ -165,8 +165,10 @@ func theLimitsOfAnEventCountTheInterestsOfEachTargetApart(t *testing.T, s RawSto
 		_, err := s.OpenRawLease(r.ctx, newRawLease(r.leases.Add(1), rawSpec{principal: "alice", target: target}, r.now.Add(time.Hour)), r.now, limits)
 		require.NoError(t, err, name)
 	}
+	n := 0
 	for name, target := range targets {
-		_, err := s.UpsertRawSubscription(r.ctx, newRawSubscription(int(r.leases.Add(1)), rawSpec{principal: "bob", target: target}, r.now.Add(time.Hour)), r.now, limits)
+		n++
+		_, err := s.UpsertRawSubscription(r.ctx, newRawSubscription(n, rawSpec{principal: "bob", target: target}, r.now.Add(time.Hour)), r.now, limits)
 		require.ErrorIs(t, err, faucet.ErrRawInterestLimit, name)
 	}
 }
