@@ -28,6 +28,7 @@ func RunOAuth(t *testing.T, newStore func(t *testing.T) oauth.Store) {
 		{"DeleteExpiredAccessTokensLeavesTheLiveOnes", deleteExpiredAccessTokensLeavesTheLiveOnes},
 		{"DeleteAccessTokenDeletesThatTokenOnly", deleteAccessTokenDeletesThatTokenOnly},
 		{"ClientReadsBackAsInserted", clientReadsBackAsInserted},
+		{"AClientWithNoSecretReadsBackWithNone", aClientWithNoSecretReadsBackWithNone},
 		{"ClientOfAnUnknownIDIsUnknown", clientOfAnUnknownIDIsUnknown},
 		{"InsertClientRefusesAnIDThatAnyClientHeld", insertClientRefusesAnIDThatAnyClientHeld},
 		{"DisableClientKeepsTheFirstTime", disableClientKeepsTheFirstTime},
@@ -199,9 +200,10 @@ func deleteAccessTokenDeletesThatTokenOnly(t *testing.T, s oauth.Store) {
 // clientAt is a valid live client created at created, which has no time
 // below a microsecond, as Postgres keeps it.
 func clientAt(id string, created time.Time) oauth.Client {
+	secretHash := oauth.HashToken("fcs_" + id)
 	return oauth.Client{
 		ID:         id,
-		SecretHash: oauth.HashToken("fcs_" + id),
+		SecretHash: &secretHash,
 		Resource:   "https://faucet.example.com/github/mcp",
 		Grants:     []string{"repo:coder/faucet", "repo:coder/coder"},
 		Scopes:     []faucet.Scope{faucet.ScopeEventsRead, faucet.ScopeEventsSubscribe},
@@ -240,6 +242,26 @@ func clientReadsBackAsInserted(t *testing.T, s oauth.Store) {
 	requireSameClient(t, second, all[1])
 }
 
+// A client made with no secret reads back with no hash, never with the zero
+// hash, which would make it a client with a secret.
+func aClientWithNoSecretReadsBackWithNone(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	at := time.Now()
+	workload := clientAt("digest-bot", at)
+	workload.SecretHash = nil
+	require.NoError(t, s.InsertClient(ctx, workload))
+	require.NoError(t, s.InsertClient(ctx, clientAt("ci-watcher", at.Add(time.Second))))
+
+	got, err := s.Client(ctx, "digest-bot")
+	require.NoError(t, err)
+	requireSameClient(t, workload, got)
+	all, err := s.Clients(ctx)
+	require.NoError(t, err)
+	require.Len(t, all, 2)
+	requireSameClient(t, workload, all[0])
+	require.NotNil(t, all[1].SecretHash, "the other client keeps its secret")
+}
+
 func clientOfAnUnknownIDIsUnknown(t *testing.T, s oauth.Store) {
 	ctx := context.Background()
 	require.NoError(t, s.InsertClient(ctx, clientAt("ci-watcher", time.Now())))
@@ -259,7 +281,8 @@ func insertClientRefusesAnIDThatAnyClientHeld(t *testing.T, s oauth.Store) {
 	first := clientAt("ci-watcher", time.Now())
 	require.NoError(t, s.InsertClient(ctx, first))
 	again := clientAt("ci-watcher", time.Now())
-	again.SecretHash = oauth.HashToken("fcs_another")
+	another := oauth.HashToken("fcs_another")
+	again.SecretHash = &another
 	require.ErrorIs(t, s.InsertClient(ctx, again), oauth.ErrClientExists)
 
 	_, err := s.DisableClient(ctx, "ci-watcher", time.Now())
@@ -301,7 +324,7 @@ func insertClientValidatesInput(t *testing.T, s oauth.Store) {
 		"no ID":              func(c *oauth.Client) { c.ID = "" },
 		"an upper-case ID":   func(c *oauth.Client) { c.ID = "CI" },
 		"an ID with a colon": func(c *oauth.Client) { c.ID = "ci:bot" },
-		"no secret hash":     func(c *oauth.Client) { c.SecretHash = oauth.TokenHash{} },
+		"a zero secret hash": func(c *oauth.Client) { c.SecretHash = &oauth.TokenHash{} },
 		"no resource":        func(c *oauth.Client) { c.Resource = "" },
 		"no scope":           func(c *oauth.Client) { c.Scopes = nil },
 		"an unknown scope":   func(c *oauth.Client) { c.Scopes = []faucet.Scope{"events:everything"} },
@@ -322,12 +345,12 @@ func clientSharesNoSliceWithItsCaller(t *testing.T, s oauth.Store) {
 	inserted := clientAt("ci-watcher", time.Now())
 	want := clientAt("ci-watcher", inserted.CreatedAt)
 	require.NoError(t, s.InsertClient(ctx, inserted))
-	inserted.Grants[0], inserted.Scopes[0] = "repo:evil/repo", faucet.ScopeEventsSubscribe
+	inserted.Grants[0], inserted.Scopes[0], *inserted.SecretHash = "repo:evil/repo", faucet.ScopeEventsSubscribe, oauth.HashToken("fcs_evil")
 
 	got, err := s.Client(ctx, "ci-watcher")
 	require.NoError(t, err)
 	requireSameClient(t, want, got)
-	got.Grants[0], got.Scopes[0] = "repo:evil/repo", faucet.ScopeEventsSubscribe
+	got.Grants[0], got.Scopes[0], *got.SecretHash = "repo:evil/repo", faucet.ScopeEventsSubscribe, oauth.HashToken("fcs_evil")
 	again, err := s.Client(ctx, "ci-watcher")
 	require.NoError(t, err)
 	requireSameClient(t, want, again)

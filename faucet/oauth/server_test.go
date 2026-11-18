@@ -268,6 +268,27 @@ func TestClientCredentialsRefusesAClientThatDoesNotAuthenticate(t *testing.T) {
 	require.Zero(t, h.store.tokenCount())
 }
 
+// A client with no secret logs in only as a workload, so the client
+// credentials grant refuses it whatever secret comes, the empty one included.
+func TestClientCredentialsRefusesAClientWithNoSecret(t *testing.T) {
+	t.Parallel()
+	h := newTokenHarness(t)
+	workload, err := oauth.NewSecretlessClient("digest-bot", resource, bothScopes, []string{"repo:coder/faucet"}, h.clock.Now())
+	require.NoError(t, err)
+	require.NoError(t, h.store.InsertClient(context.Background(), workload))
+
+	for name, secret := range map[string]string{
+		"an empty secret":  "",
+		"another's secret": h.secret,
+		"a made-up secret": "fcs_" + strings.Repeat("A", 43),
+	} {
+		reply := h.post(basic("digest-bot", secret), clientCredentials())
+		require.Equal(t, http.StatusUnauthorized, reply.status, name)
+		require.Equal(t, map[string]any{"error": "invalid_client", "error_description": "client authentication failed"}, reply.body, name)
+	}
+	require.Zero(t, h.store.tokenCount())
+}
+
 func TestTheTokenEndpointRefusesAMalformedRequest(t *testing.T) {
 	t.Parallel()
 	h := newTokenHarness(t)

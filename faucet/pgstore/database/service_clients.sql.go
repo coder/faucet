@@ -62,7 +62,7 @@ func (q *Queries) GetServiceClient(ctx context.Context, clientID string) (Faucet
 
 const insertServiceClient = `-- name: InsertServiceClient :execrows
 INSERT INTO faucet_service_clients (client_id, secret_hash, resource, grants, scopes, created_at)
-VALUES ($1, $2, $3, $4::text[], $5::text[], $6)
+VALUES ($1, nullif($2::bytea, ''), $3, $4::text[], $5::text[], $6)
 ON CONFLICT (client_id) DO NOTHING
 `
 

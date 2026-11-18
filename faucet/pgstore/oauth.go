@@ -86,9 +86,15 @@ func (s *Store) InsertClient(ctx context.Context, c oauth.Client) (err error) {
 	if err := c.Validate(); err != nil {
 		return xerrors.Errorf("validate client: %w", err)
 	}
+	// The query keeps an empty hash as NULL, as lib/pq sends a nil []byte as
+	// an empty bytea.
+	var secretHash []byte
+	if c.SecretHash != nil {
+		secretHash = c.SecretHash[:]
+	}
 	n, err := s.q.InsertServiceClient(ctx, database.InsertServiceClientParams{
 		ClientID:   c.ID,
-		SecretHash: c.SecretHash[:],
+		SecretHash: secretHash,
 		Resource:   c.Resource,
 		Grants:     append([]string{}, c.Grants...),
 		Scopes:     scopeNames(c.Scopes),
@@ -148,14 +154,17 @@ func (s *Store) DisableClient(ctx context.Context, id string, now time.Time) (_ 
 }
 
 func clientOf(row database.FaucetServiceClient) (oauth.Client, error) {
-	var hash oauth.TokenHash
-	if len(row.SecretHash) != len(hash) {
-		return oauth.Client{}, xerrors.Errorf("client %q has a secret hash of %d bytes", row.ClientID, len(row.SecretHash))
-	}
-	copy(hash[:], row.SecretHash)
 	c := oauth.Client{
-		ID: row.ClientID, SecretHash: hash, Resource: row.Resource,
+		ID: row.ClientID, Resource: row.Resource,
 		Scopes: make([]faucet.Scope, len(row.Scopes)), CreatedAt: row.CreatedAt,
+	}
+	if row.SecretHash != nil {
+		var hash oauth.TokenHash
+		if len(row.SecretHash) != len(hash) {
+			return oauth.Client{}, xerrors.Errorf("client %q has a secret hash of %d bytes", row.ClientID, len(row.SecretHash))
+		}
+		copy(hash[:], row.SecretHash)
+		c.SecretHash = &hash
 	}
 	if len(row.Grants) > 0 {
 		c.Grants = row.Grants

@@ -100,6 +100,10 @@ func (s *fakeStore) callErr(ctx context.Context, method string) error {
 
 func cloneClient(c oauth.Client) oauth.Client {
 	c.Grants, c.Scopes = slices.Clone(c.Grants), slices.Clone(c.Scopes)
+	if c.SecretHash != nil {
+		hash := *c.SecretHash
+		c.SecretHash = &hash
+	}
 	return c
 }
 

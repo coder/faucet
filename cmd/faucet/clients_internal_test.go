@@ -59,7 +59,8 @@ func TestTheClientsCommandMakesListsAndDisablesClients(t *testing.T) {
 
 	c, err := store.Client(ctx, "ci-watcher")
 	require.NoError(t, err)
-	require.Equal(t, oauth.HashToken(secret), c.SecretHash, "the store keeps the hash of the secret it printed")
+	hash := oauth.HashToken(secret)
+	require.Equal(t, &hash, c.SecretHash, "the store keeps the hash of the secret it printed")
 	require.Equal(t, "https://faucet.example.com/github/mcp", c.Resource)
 	require.Equal(t, []faucet.Scope{faucet.ScopeEventsRead}, c.Scopes)
 	require.Equal(t, []string{"repo:coder/faucet", "repo:coder/coder"}, c.Grants)

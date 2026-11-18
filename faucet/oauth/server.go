@@ -449,6 +449,11 @@ func (s *Server) authenticateClient(ctx context.Context, r *http.Request, form u
 	case err != nil:
 		return Client{}, xerrors.Errorf("read the client: %w", err)
 	}
+	// A client with no secret logs in only as a workload, so no secret, the
+	// empty one included, authenticates it.
+	if c.SecretHash == nil {
+		return Client{}, errClientAuth
+	}
 	hash := HashToken(secret)
 	if subtle.ConstantTimeCompare(hash[:], c.SecretHash[:]) != 1 || !c.Live() {
 		return Client{}, errClientAuth
