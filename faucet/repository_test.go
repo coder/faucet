@@ -24,6 +24,7 @@ func newRepositoryHarness(t *testing.T, mutate ...func(*faucet.Deps)) (*fakeStor
 	deps := testDeps(store)
 	deps.Clock = clock
 	deps.RecordRepositories = true
+	deps.Redelivered = noRedeliveries
 	for _, m := range mutate {
 		m(&deps)
 	}
@@ -31,6 +32,9 @@ func newRepositoryHarness(t *testing.T, mutate ...func(*faucet.Deps)) (*fakeStor
 	require.NoError(t, err)
 	return store, clock, svc.WebhookHandler()
 }
+
+// noRedeliveries is the Redelivered of a host that runs no redelivery.
+func noRedeliveries(context.Context, string) (bool, error) { return false, nil }
 
 func serveWebhook(handler http.Handler, req *http.Request) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()

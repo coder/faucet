@@ -266,6 +266,7 @@ func TestNewRequiresCollaborators(t *testing.T) {
 		"authorizer":     func(d *faucet.Deps) { d.Authorizer = nil },
 		"principal from": func(d *faucet.Deps) { d.PrincipalFrom = nil },
 		"clock":          func(d *faucet.Deps) { d.Clock = nil },
+		"redelivered":    func(d *faucet.Deps) { d.RecordRepositories = true },
 	} {
 		deps := testDeps(&fakeStore{})
 		mutate(&deps)

@@ -131,9 +131,6 @@ func (s *Service) recordOwner(ctx context.Context, logger slog.Logger, owner Own
 // moves no login: a login that stays stale until the next delivery is safer
 // than one that a replay gives back.
 func (s *Service) replayed(ctx context.Context, logger slog.Logger, deliveryID string) bool {
-	if s.redelivered == nil {
-		return false
-	}
 	replay, err := s.redelivered(ctx, deliveryID)
 	if err != nil {
 		logger.Warn(ctx, "could not tell whether the delivery is a redelivery, so it moves no login", slog.Error(err))

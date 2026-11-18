@@ -53,7 +53,11 @@ type Deps struct {
 	RecordRepositories bool
 	// Redelivered reports whether faucet's redelivery asked GitHub to send
 	// the delivery of this ID again. Such a replay names accounts as they
-	// were when it first came, so it moves no login. Nil knows no replay.
+	// were when it first came, so it moves no login. RecordRepositories needs
+	// it: pgstore.Store.Redelivered, or a func that answers false when the
+	// host runs no redelivery. There is no default, because one that answered
+	// no would let the host's own redeliveries move logins back, and one that
+	// answered yes would keep every login as first seen.
 	Redelivered func(ctx context.Context, deliveryID string) (bool, error)
 	// MaxWaitsPerLogin caps how many wait_for_github_events calls one login
 	// holds open at once in this process, so a client that opens waits and
@@ -117,6 +121,8 @@ func New(d Deps) (*Service, error) {
 		return nil, xerrors.New("clock is required")
 	case len(d.RawEvents) > 0 && d.RawStore == nil:
 		return nil, xerrors.New("raw events need a RawStore")
+	case d.RecordRepositories && d.Redelivered == nil:
+		return nil, xerrors.New("recording repositories needs Redelivered: pgstore.Store.Redelivered, or a func that answers false when the host runs no redelivery")
 	}
 	offered, err := offeredRawEntries(d.RawEvents)
 	if err != nil {
