@@ -56,6 +56,10 @@ const (
 	// envPublicURL is faucet's public URL. Set, it turns on faucet's own
 	// login server and the discovery documents that lead clients to it.
 	envPublicURL = "FAUCET_PUBLIC_URL"
+	// envVercelProductionURL is the host of a project's production
+	// deployment: its shortest custom domain, or its vercel.app domain.
+	// Vercel sets it in every environment, previews too.
+	envVercelProductionURL = "VERCEL_PROJECT_PRODUCTION_URL"
 	// envRawEvents lists the GitHub events, comma-separated, that faucet
 	// offers raw as github.<event>. Unset offers none.
 	envRawEvents = "FAUCET_RAW_EVENTS"
@@ -108,6 +112,9 @@ type config struct {
 	webhook   *faucet.WebhookDeps
 	// publicURL is nil when faucet's login server is off.
 	publicURL *url.URL
+	// publicURLDerived is true when publicURL came from
+	// VERCEL_PROJECT_PRODUCTION_URL, not FAUCET_PUBLIC_URL.
+	publicURLDerived bool
 	// browserLogin is nil when the browser login is off.
 	browserLogin *oauth.BrowserLogin
 	// rawEvents are the GitHub events offered raw. Empty offers none.
@@ -151,12 +158,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if err := loadWebhookConfig(getenv, &cfg); err != nil {
 		return config{}, err
 	}
-	if raw := getenv(envPublicURL); raw != "" {
-		u, err := parseOrigin(raw)
-		if err != nil {
-			return config{}, xerrors.Errorf("%s: %w", envPublicURL, err)
-		}
-		cfg.publicURL = u
+	if err := loadPublicURL(getenv, &cfg); err != nil {
+		return config{}, err
 	}
 	if err := loadBrowserLoginConfig(getenv, &cfg); err != nil {
 		return config{}, err
@@ -172,6 +175,26 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.rawEvents = events
 	}
 	return cfg, nil
+}
+
+// loadPublicURL reads faucet's public URL: FAUCET_PUBLIC_URL, or on Vercel
+// production, where it is unset, https and the project's production host.
+// Vercel sets that host in previews too, and a preview must not take the
+// issuer of production, so no other environment derives it.
+func loadPublicURL(getenv func(string) string, cfg *config) error {
+	name, raw := envPublicURL, getenv(envPublicURL)
+	if host := getenv(envVercelProductionURL); raw == "" && host != "" && cfg.deployment.env == "production" {
+		name, raw, cfg.publicURLDerived = envVercelProductionURL, "https://"+host, true
+	}
+	if raw == "" {
+		return nil
+	}
+	u, err := parseOrigin(raw)
+	if err != nil {
+		return xerrors.Errorf("%s: %w", name, err)
+	}
+	cfg.publicURL = u
+	return nil
 }
 
 // loadCronConfig reads the optional settings of the cron routes. No error
@@ -264,6 +287,9 @@ func run() error {
 	logger := slog.Make(sloghuman.Sink(os.Stderr))
 	if allowInsecureLoopback {
 		logger.Warn(ctx, "built with faucet_e2e: the callback client reaches loopback over http, do not ship this binary")
+	}
+	if cfg.publicURLDerived {
+		logger.Info(ctx, "public URL taken from "+envVercelProductionURL+", because "+envPublicURL+" is unset", slog.F("public_url", cfg.publicURL.String()))
 	}
 
 	db, err := dbconn.OpenPooled(cfg.databaseURL)

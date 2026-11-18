@@ -35,12 +35,16 @@ A preview runs any branch's code, and the Neon integration gives previews the pr
    | `FAUCET_WEBHOOK_KEY` | `openssl rand -base64 32` |
    | `FAUCET_WEBHOOK_CALLBACK_VERIFICATION` | `handshake`, or unset it and set `FAUCET_WEBHOOK_ALLOWED_ORIGINS` instead. |
 
-   To turn on [redelivery](redelivery.md), also set `FAUCET_HOOK_TOKEN`, `FAUCET_HOOK_ID` and `FAUCET_HOOK_ORG` or `FAUCET_HOOK_REPO` once the GitHub webhook exists. To turn on the [browser login](browser-login.md), also set `FAUCET_PUBLIC_URL`, `FAUCET_GITHUB_APP_CLIENT_ID`, `FAUCET_GITHUB_APP_CLIENT_SECRET` and `FAUCET_TOKEN_KEY`, and keep a copy of the key outside Vercel, because a rotation needs it.
+   To turn on [redelivery](redelivery.md), also set `FAUCET_HOOK_TOKEN`, `FAUCET_HOOK_ID` and `FAUCET_HOOK_ORG` or `FAUCET_HOOK_REPO` once the GitHub webhook exists. To turn on the [browser login](browser-login.md), also set `FAUCET_GITHUB_APP_CLIENT_ID`, `FAUCET_GITHUB_APP_CLIENT_SECRET` and `FAUCET_TOKEN_KEY`, and keep a copy of the key outside Vercel, because a rotation needs it. Set `FAUCET_PUBLIC_URL` too (see [the public URL](#the-public-url)).
 
 3. **Deploy by pushing to `main`.** A variable change only applies to deployments built after it. Don't run `vercel deploy` by hand: on a project with no production deployment, it created one.
 
 4. **Point the GitHub webhook** at `https://<production domain>/webhook/github`. Don't put Vercel Deployment Protection on that domain, because GitHub and MCP clients can't pass it.
 5. **With the browser login on, rate limit its consent form at the edge.** Each `POST /oauth/authorize` that carries a valid form stores a login request for 10 minutes, and a script can send faucet's `Origin` and keep the cookie, so faucet bounds the rows only by time (see [security.md](security.md#the-browser-login)). Add a rule under the project's **Firewall** in the same change that sets the browser login's variables: when the request path equals `/oauth/authorize` and the method is `POST`, rate limit by IP, such as 10 requests a minute, and deny the rest with 429. A person presses Continue once per login, so the limit only stops scripts. Leave `GET /oauth/authorize` out of the rule: it stores nothing.
+
+### The public URL
+
+Service accounts and the browser login live at faucet's public URL. With `FAUCET_PUBLIC_URL` unset, a production deployment takes `https://` and `VERCEL_PROJECT_PRODUCTION_URL`, which Vercel sets to the shortest custom domain of the project's production deployment, or its `vercel.app` domain, and logs the URL once at start. A preview or a development deployment never does, so it runs without the login server. **Set `FAUCET_PUBLIC_URL` to pin the URL.** Without it, adding a custom domain shorter than the current one changes the URL at the next deploy. Faucet's issuer and its endpoint's URL change with it, so every browser session and access token ends, and every service client made for the old URL gets `invalid_client` until an operator makes a new one.
 
 ## Scheduled routes
 

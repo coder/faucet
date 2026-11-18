@@ -2,6 +2,10 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## To a public URL from Vercel
+
+This came in [#60](https://github.com/coder/faucet/pull/60). On Vercel production with `FAUCET_PUBLIC_URL` unset, faucet now takes `https://` and `VERCEL_PROJECT_PRODUCTION_URL` as its public URL, so the routes of its login server exist there from this deploy on: the metadata documents, `/oauth/token`, `/oauth/authorize` and `/oauth/revoke`, and a 401 from `/github/mcp` names the metadata. A preview or development deployment, and every host outside Vercel, sees no change. Set `FAUCET_PUBLIC_URL` to pin the URL, because a shorter custom domain added later changes it (see [deploy.md](deploy.md#the-public-url)).
+
 ## To org grants bound to their account (migration `000016_org_grant_accounts`)
 
 This came in [#60](https://github.com/coder/faucet/pull/60). An `org:` grant now names the account that held its login when `faucet clients create` made it, so it follows the account through a rename, and neither a later holder of the login nor a delivery that a hook admin sends again by hand points it at another account (see [service-accounts.md](service-accounts.md#grants)).
