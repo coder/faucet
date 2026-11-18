@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/base64"
 	"net/http"
 	"net/url"
 	"slices"
@@ -18,10 +19,22 @@ import (
 const (
 	minVerifierBytes = 43
 	maxVerifierBytes = 128
+	// githubRefreshMargin is how long the GitHub token of a user must last
+	// when the refresh grant issues tokens. The grant refreshes a token that
+	// expires sooner, so the access check seldom has to.
+	githubRefreshMargin = 10 * time.Minute
 )
 
-// errUnknownCode is the answer to a code that is unknown, expired or used.
-var errUnknownCode = badRequest("invalid_grant", "the code is unknown, expired or used: log in again")
+var (
+	// errUnknownCode is the answer to a code that is unknown, expired or
+	// used.
+	errUnknownCode = badRequest("invalid_grant", "the code is unknown, expired or used: log in again")
+	// errUnknownRefreshToken is the answer to a refresh token that faucet
+	// did not issue or no longer knows.
+	errUnknownRefreshToken = badRequest("invalid_grant", "the refresh token is unknown or revoked: log in again")
+	// errSessionEnded is the answer to a refresh token whose session ended.
+	errSessionEnded = badRequest("invalid_grant", "the session of the refresh token ended: log in again")
+)
 
 // publicClient returns the client ID of a client that logs in through a
 // browser, which has no secret (auth method none). The ID comes in the
@@ -85,7 +98,7 @@ func (s *Server) authorizationCode(r *http.Request, form url.Values) (tokenRespo
 	now := s.clock.Now()
 	switch {
 	case req.State == AuthRequestRedeemed:
-		return tokenResponse{}, s.endSessionOfCode(ctx, req, now, "a code was used again, its session ended")
+		return tokenResponse{}, s.endSession(ctx, req.ID, now, errUnknownCode, "a code was used again, its session ended", slog.F("client_id", req.ClientID))
 	case req.State != AuthRequestApproved || !req.ExpiresAt.After(now):
 		return tokenResponse{}, errUnknownCode
 	case req.ClientID != clientID:
@@ -111,7 +124,7 @@ func (s *Server) authorizationCode(r *http.Request, form url.Values) (tokenRespo
 	case xerrors.Is(err, ErrUnknownAuthRequest):
 		// Between the read and this step another request redeemed the code,
 		// so it was used twice, or the code expired and there is no session.
-		return tokenResponse{}, s.endSessionOfCode(ctx, req, now, "a code lost the race to redeem it, its session ended")
+		return tokenResponse{}, s.endSession(ctx, req.ID, now, errUnknownCode, "a code lost the race to redeem it, its session ended", slog.F("client_id", req.ClientID))
 	case err != nil:
 		return tokenResponse{}, xerrors.Errorf("redeem the code: %w", err)
 	}
@@ -119,14 +132,14 @@ func (s *Server) authorizationCode(r *http.Request, form url.Values) (tokenRespo
 	return tokens.response(session.Scopes), nil
 }
 
-// endSessionOfCode ends the session that the code of req made, and returns
-// the answer to the code.
-func (s *Server) endSessionOfCode(ctx context.Context, req AuthRequest, now time.Time, msg string) error {
-	if err := s.store.EndSession(ctx, req.ID, now); err != nil {
-		return xerrors.Errorf("end the session of a code used twice: %w", err)
+// endSession ends the session with this ID at now, logs msg, and returns
+// answer, the refusal of the request that ended it.
+func (s *Server) endSession(ctx context.Context, id string, now time.Time, answer *tokenError, msg string, fields ...slog.Field) error {
+	if err := s.store.EndSession(ctx, id, now); err != nil {
+		return xerrors.Errorf("end session %s: %w", id, err)
 	}
-	s.logger.Info(ctx, msg, slog.F("session_id", req.ID), slog.F("client_id", req.ClientID), slog.F("connection_id", req.ConnectionID))
-	return errUnknownCode
+	s.logger.Info(ctx, msg, append([]slog.Field{slog.F("session_id", id)}, fields...)...)
+	return answer
 }
 
 // servedResource refuses the tokens of a login whose resource is not one
@@ -186,7 +199,106 @@ func validVerifier(v string) bool {
 	return true
 }
 
-// refreshToken is the refresh_token grant of a browser login.
-func (s *Server) refreshToken(_ *http.Request, _ url.Values) (tokenResponse, error) {
-	return tokenResponse{}, xerrors.New("not built yet")
+// refreshToken is the refresh_token grant (RFC 6749 section 6) of a browser
+// login: the client trades its refresh token for the next one and a new
+// access token. A refused request changes nothing, except that a refresh
+// token presented again after its rotation, and one whose session went
+// unused for 180 days, end the session.
+func (s *Server) refreshToken(r *http.Request, form url.Values) (tokenResponse, error) {
+	ctx := r.Context()
+	clientID, err := publicClient(r, form)
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	presented := form.Get("refresh_token")
+	switch {
+	case presented == "":
+		return tokenResponse{}, badRequest("invalid_request", "refresh_token is required")
+	case !wellFormedRefreshToken(presented):
+		return tokenResponse{}, errUnknownRefreshToken
+	}
+	presentedHash := HashToken(presented)
+	session, current, err := s.store.SessionByRefreshToken(ctx, presentedHash)
+	switch {
+	case xerrors.Is(err, ErrUnknownSession):
+		return tokenResponse{}, errUnknownRefreshToken
+	case err != nil:
+		return tokenResponse{}, xerrors.Errorf("read the session of the refresh token: %w", err)
+	}
+	now := s.clock.Now()
+	switch {
+	case !session.Live():
+		return tokenResponse{}, errSessionEnded
+	case !current:
+		// The token has two holders, and one of them is not the client (R14).
+		return tokenResponse{}, s.endSession(ctx, session.ID, now, errSessionEnded, "a rotated-out refresh token came again, its session ended", slog.F("client_id", session.ClientID))
+	case !now.Before(session.RefreshedAt.Add(sessionIdleLifetime)):
+		return tokenResponse{}, s.endSession(ctx, session.ID, now, errSessionEnded, "a session went unused for 180 days, it ended", slog.F("client_id", session.ClientID))
+	case session.ClientID != clientID:
+		s.logger.Info(ctx, "a refresh token was sent by another client", slog.F("session_id", session.ID), slog.F("client_id", session.ClientID), slog.F("sent_client_id", clientID))
+		return tokenResponse{}, badRequest("invalid_grant", "the refresh token was issued to another client")
+	}
+	scopes, err := grantedScopes(form, session.Scopes)
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	if err := s.servedResource(form, session.Resource); err != nil {
+		return tokenResponse{}, err
+	}
+	// The GitHub token is refreshed before the rotation, never after: a
+	// failure after the rotation would leave the client with the previous
+	// token, which ends its session when it tries again.
+	if err := s.freshenGitHubToken(ctx, session); err != nil {
+		return tokenResponse{}, err
+	}
+	tokens, err := newUserTokens()
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	now = s.clock.Now()
+	rotated, err := s.store.RotateSession(ctx, Rotation{
+		Presented: presentedHash, Next: HashToken(tokens.refresh), Access: HashToken(tokens.access),
+		AccessExpiresAt: now.Add(accessTokenLifetime), Scopes: scopes, Now: now,
+	})
+	switch {
+	case xerrors.Is(err, ErrUnknownSession):
+		// Since the read, another request rotated the token or the session
+		// ended: the token had two holders (R14).
+		return tokenResponse{}, s.endSession(ctx, session.ID, now, errSessionEnded, "a refresh token lost the race to rotate it, its session ended", slog.F("client_id", session.ClientID))
+	case err != nil:
+		return tokenResponse{}, xerrors.Errorf("rotate the session: %w", err)
+	}
+	s.logger.Debug(ctx, "session refreshed", slog.F("session_id", rotated.ID), slog.F("client_id", rotated.ClientID), slog.F("connection_id", rotated.ConnectionID))
+	return tokens.response(scopes), nil
+}
+
+// freshenGitHubToken refreshes the GitHub token of the session's user when it
+// expires within githubRefreshMargin. GitHub refusing the refresh token
+// ended the user's sessions, and refuses the grant. A token that does not
+// open is an error. Any other failure is logged, and the grant goes on with
+// the stored token, which the access check refreshes when it must.
+func (s *Server) freshenGitHubToken(ctx context.Context, session Session) error {
+	tokens := newConnections(s.store, s.clock, s.logger, s.login)
+	_, err := tokens.accessToken(ctx, session.ConnectionID, tokens.expiresWithin(githubRefreshMargin))
+	switch {
+	case err == nil:
+		return nil
+	case xerrors.Is(err, faucet.ErrInvalidToken):
+		return badRequest("invalid_grant", "GitHub ended the login of this user: log in again")
+	case xerrors.Is(err, ErrUnreadableToken):
+		return err
+	}
+	s.logger.Warn(ctx, "could not refresh the GitHub token of a session, the grant goes on", slog.F("session_id", session.ID), slog.F("connection_id", session.ConnectionID), slog.Error(err))
+	return nil
+}
+
+// wellFormedRefreshToken reports whether token has the form of a refresh
+// token: the prefix and 32 bytes in base64url without padding.
+func wellFormedRefreshToken(token string) bool {
+	body, ok := strings.CutPrefix(token, refreshTokenPrefix)
+	if !ok || len(body) != base64.RawURLEncoding.EncodedLen(secretBytes) {
+		return false
+	}
+	_, err := base64.RawURLEncoding.Strict().DecodeString(body)
+	return err == nil
 }
