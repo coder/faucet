@@ -29,7 +29,7 @@ func rawTestSubscription(n int, principal string, expiresAt time.Time) faucet.Su
 		EventType:   "github.push",
 		EventTypes:  []string{"github.push"},
 		Arguments:   args,
-		RepoID:      rawTestRepo,
+		Target:      faucet.RepoTarget(rawTestRepo),
 		SecretEnc:   []byte("sealed"),
 		Cursor:      math.MaxInt64,
 		ExpiresAt:   expiresAt,
@@ -41,7 +41,7 @@ func rawTestLease(n byte, principal string, expiresAt time.Time) faucet.RawLease
 		Key:       faucet.NewSubscriptionKeyHash(principal, "", "github.push", json.RawMessage(`{"repo":"o/r"}`)),
 		Principal: principal,
 		Event:     "push",
-		RepoID:    rawTestRepo,
+		Target:    faucet.RepoTarget(rawTestRepo),
 		ExpiresAt: expiresAt,
 	}
 	lease.ID[15] = n
