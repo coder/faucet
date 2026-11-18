@@ -277,7 +277,7 @@ func (a fieldArguments) canonical() fieldArguments {
 // types that the filter of a name narrows.
 func (a fieldArguments) fieldFilters(typesOf func(name string) []string) []FieldFilter {
 	var out []FieldFilter
-	values := a.byName()
+	values := a.canonical().byName()
 	for _, f := range fieldFilters {
 		if len(values[f.name]) == 0 {
 			continue
@@ -332,12 +332,16 @@ var (
 	catalog     []*catalogEntry
 )
 
+// A read compares each event that it scans with each item of a list argument,
+// so maxListItems bounds that work.
+const maxListItems = 100
+
 var (
 	repoArgument  = map[string]any{"type": "string", "description": "The repository, written owner/name. Name one of repo, owner and all."}
 	ownerArgument = map[string]any{"type": "string", "description": "Every repository of this owner, a GitHub user or organization login. For service clients whose grants cover the owner."}
 	allArgument   = map[string]any{"type": "boolean", "const": true, "description": "Every repository that faucet receives events from. For service clients granted all."}
 	reposArgument = map[string]any{
-		"type": "array", "minItems": 1, "items": map[string]any{"type": "string"},
+		"type": "array", "minItems": 1, "maxItems": maxListItems, "items": map[string]any{"type": "string"},
 		"description": "With owner or all, only the events of these repositories, each written owner/name.",
 	}
 	prArgument  = map[string]any{"type": "integer", "minimum": 1, "maximum": math.MaxInt32, "description": "Only events that mention this pull request number."}
@@ -363,6 +367,7 @@ func argumentsSchema(f *family, actions, filters []string) json.RawMessage {
 		properties["actions"] = map[string]any{
 			"type":        "array",
 			"minItems":    1,
+			"maxItems":    maxListItems,
 			"items":       map[string]any{"type": "string", "enum": actions},
 			"description": "Only events of these GitHub actions. Without it, events of every action.",
 		}
@@ -371,6 +376,7 @@ func argumentsSchema(f *family, actions, filters []string) json.RawMessage {
 		properties[name] = map[string]any{
 			"type":        "array",
 			"minItems":    1,
+			"maxItems":    maxListItems,
 			"items":       map[string]any{"type": "string"},
 			"description": lookupFieldFilter(name).description,
 		}

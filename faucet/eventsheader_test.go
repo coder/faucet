@@ -122,15 +122,18 @@ func TestRequireEventName(t *testing.T) {
 	}
 }
 
-func TestRequireEventNameRefusesABodyBeyondTheSDKLimit(t *testing.T) {
+func TestRequireEventNameRefusesABodyOver256KiB(t *testing.T) {
 	t.Parallel()
 
-	reached := false
-	handler := faucet.RequireEventName(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
-	body := strings.Repeat(" ", mcp.DefaultMaxRequestBodyBytes+1)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body)))
+	const limit = 256 << 10
+	for size, want := range map[int]int{limit: http.StatusOK, limit + 1: http.StatusRequestEntityTooLarge} {
+		reached := false
+		handler := faucet.RequireEventName(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
+		body := strings.Repeat(" ", size-len("null")) + "null"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body)))
 
-	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
-	require.False(t, reached)
+		require.Equal(t, want, rec.Code, "a body of %d bytes", size)
+		require.Equal(t, want == http.StatusOK, reached, "a body of %d bytes", size)
+	}
 }

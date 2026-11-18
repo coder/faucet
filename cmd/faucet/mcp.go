@@ -46,6 +46,7 @@ func newMCPHandler(svc *faucet.Service) http.Handler {
 		Stateless:                    true,
 		JSONResponse:                 true,
 		PropagateRequestCancellation: true,
+		MaxRequestBodyBytes:          faucet.MaxRequestBodyBytes,
 	}))
 }
 
