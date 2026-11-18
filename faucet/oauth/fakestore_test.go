@@ -5,6 +5,7 @@ import (
 	"context"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ type fakeStore struct {
 	sessions    map[string]oauth.Session
 	refresh     map[oauth.TokenHash]oauth.RefreshToken
 	connections map[string]oauth.Connection
+	checks      map[accessCheckKey]oauth.AccessCheck
 	// connectionLocks holds a lock per connection ID, which RefreshConnection
 	// holds while its callback runs and ApproveAuthRequest takes, as the row
 	// lock does in Postgres. A caller takes it before mu, never while it
@@ -39,9 +41,14 @@ func newFakeStore() *fakeStore {
 		sessions:        map[string]oauth.Session{},
 		refresh:         map[oauth.TokenHash]oauth.RefreshToken{},
 		connections:     map[string]oauth.Connection{},
+		checks:          map[accessCheckKey]oauth.AccessCheck{},
 		connectionLocks: map[string]*sync.Mutex{},
 	}
 }
+
+// accessCheckKey is what names an access check: a connection has one check
+// per repository.
+type accessCheckKey struct{ connectionID, repo string }
 
 func cloneClient(c oauth.Client) oauth.Client {
 	c.Grants, c.Scopes = slices.Clone(c.Grants), slices.Clone(c.Scopes)
@@ -469,6 +476,7 @@ func (s *fakeStore) DeleteUnusedConnections(_ context.Context, updatedBefore tim
 			slices.ContainsFunc(slices.Collect(maps.Values(s.requests)), func(r oauth.AuthRequest) bool { return r.ConnectionID == id })
 		if !named && c.UpdatedAt.Before(updatedBefore) {
 			delete(s.connections, id)
+			maps.DeleteFunc(s.checks, func(k accessCheckKey, _ oauth.AccessCheck) bool { return k.connectionID == id })
 			n++
 		}
 	}
@@ -487,6 +495,72 @@ func (s *fakeStore) DeleteExpiredAuthRequests(_ context.Context, now, codesBefor
 		}
 	}
 	return n, nil
+}
+
+func (s *fakeStore) FreshAccessCheck(_ context.Context, sessionID, repo string, now time.Time) (int64, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[sessionID]
+	if !ok {
+		return 0, false, nil
+	}
+	key := accessCheckKey{session.ConnectionID, repo}
+	c, ok := s.checks[key]
+	if !ok || c.CheckedAt.Before(session.RefreshedAt) {
+		return 0, false, nil
+	}
+	if now.After(c.LastUsedAt) {
+		c.LastUsedAt = now
+	}
+	s.checks[key] = c
+	return c.RepoID, true, nil
+}
+
+func (s *fakeStore) StoreAccessCheck(_ context.Context, c oauth.AccessCheck) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.connections[c.ConnectionID]; !ok {
+		return oauth.ErrUnknownConnection
+	}
+	key := accessCheckKey{c.ConnectionID, c.Repo}
+	if stored, ok := s.checks[key]; ok {
+		if stored.CheckedAt.After(c.CheckedAt) {
+			c.RepoID, c.CheckedAt = stored.RepoID, stored.CheckedAt
+		}
+		if stored.LastUsedAt.After(c.LastUsedAt) {
+			c.LastUsedAt = stored.LastUsedAt
+		}
+	}
+	s.checks[key] = c
+	return nil
+}
+
+func (s *fakeStore) DeleteAccessCheck(_ context.Context, connectionID, repo string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.checks, accessCheckKey{connectionID, repo})
+	return nil
+}
+
+func (s *fakeStore) RecentAccessChecks(_ context.Context, connectionID string, limit int) ([]oauth.AccessCheck, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var checks []oauth.AccessCheck
+	for key, c := range s.checks {
+		if key.connectionID == connectionID {
+			checks = append(checks, c)
+		}
+	}
+	slices.SortFunc(checks, func(a, b oauth.AccessCheck) int {
+		if c := b.LastUsedAt.Compare(a.LastUsedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Repo, b.Repo)
+	})
+	return checks[:min(len(checks), max(limit, 0))], nil
 }
 
 func TestFakeStore(t *testing.T) {

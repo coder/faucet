@@ -116,8 +116,8 @@ type LoginStore interface {
 	DeleteEndedSessions(ctx context.Context, now, idleSince time.Time) (int64, error)
 	// DeleteUnusedConnections deletes every connection that no session and
 	// no authorization request names, and that was last updated before
-	// updatedBefore, and returns how many. A connection that a login
-	// stores while the deletion runs stays.
+	// updatedBefore, and returns how many. Its access checks go with it. A
+	// connection that a login stores while the deletion runs stays.
 	DeleteUnusedConnections(ctx context.Context, updatedBefore time.Time) (int64, error)
 	// DeleteExpiredAuthRequests deletes every request without a code, pending
 	// or expired, that expired at or before now, and every request with a

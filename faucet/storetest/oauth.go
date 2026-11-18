@@ -41,6 +41,7 @@ func RunOAuth(t *testing.T, newStore func(t *testing.T) oauth.Store) {
 		})
 	}
 	runOAuthLogin(t, newStore)
+	runAccessChecks(t, newStore)
 }
 
 // accessTokenAt is a valid token that expires at expires. Postgres keeps

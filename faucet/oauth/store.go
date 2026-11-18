@@ -80,10 +80,12 @@ func (t AccessToken) Validate() error {
 	return nil
 }
 
-// Store keeps faucet's access tokens, its service clients and the browser
-// logins of its users. storetest.RunOAuth checks an implementation.
+// Store keeps faucet's access tokens, its service clients, the browser
+// logins of its users and the repositories that their GitHub tokens could
+// read. storetest.RunOAuth checks an implementation.
 type Store interface {
 	LoginStore
+	AccessCheckStore
 
 	// InsertAccessToken stores t. It fails when t is not valid, or when the
 	// store holds a token with the same hash.
