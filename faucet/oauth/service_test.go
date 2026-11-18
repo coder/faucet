@@ -46,11 +46,8 @@ func newServiceAccess(t *testing.T) (*fakeStore, oauth.ServiceAccess, faucet.Pri
 // coder owned under its old login, old-coder.
 func newServiceAccessWith(t *testing.T, grants ...string) (*fakeStore, oauth.ServiceAccess, faucet.Principal) {
 	t.Helper()
-	store := newFakeStore()
-	c, _, err := oauth.NewClient("ci-watcher", resource, bothScopes, grants, time.Now())
-	require.NoError(t, err)
-	require.NoError(t, store.InsertClient(context.Background(), c))
-	access, err := oauth.NewServiceAccess(store, fakeRepos{
+	ctx := context.Background()
+	repos := fakeRepos{
 		repos: map[string]faucet.Repository{
 			"coder/faucet":   {ID: 42, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/faucet"},
 			"coder/coder":    {ID: 43, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/coder"},
@@ -58,9 +55,16 @@ func newServiceAccessWith(t *testing.T, grants ...string) (*fakeStore, oauth.Ser
 			"octo/repo":      {ID: 45, OwnerID: 9, OwnerLogin: "octo", FullName: "octo/repo"},
 		},
 		owners: map[string]faucet.Owner{"coder": {ID: 7, Login: "coder"}, "octo": {ID: 9, Login: "octo"}},
-	})
+	}
+	bound, err := oauth.BindGrants(ctx, repos, grants)
 	require.NoError(t, err)
-	p, err := oauth.ServiceResolver(store)(context.Background(), "ci-watcher", bothScopes)
+	store := newFakeStore()
+	c, _, err := oauth.NewClient("ci-watcher", resource, bothScopes, bound, time.Now())
+	require.NoError(t, err)
+	require.NoError(t, store.InsertClient(ctx, c))
+	access, err := oauth.NewServiceAccess(store, repos)
+	require.NoError(t, err)
+	p, err := oauth.ServiceResolver(store)(ctx, "ci-watcher", bothScopes)
 	require.NoError(t, err)
 	return store, access, p
 }
@@ -187,7 +191,7 @@ func TestAFreshCheckReadsTheClientAgain(t *testing.T) {
 	require.Equal(t, int64(43), id)
 
 	store.mu.Lock()
-	store.clients[0].Grants = []string{"org:coder", "all"}
+	store.clients[0].Grants = []string{"org:coder#7", "all"}
 	store.mu.Unlock()
 	_, err = access.OwnerID(ctx, p, "coder")
 	require.ErrorIs(t, err, faucet.ErrNoAccess, "the cached check uses the grants of the principal")

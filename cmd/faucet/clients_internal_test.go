@@ -64,12 +64,13 @@ func TestTheClientsCommandMakesListsAndDisablesClients(t *testing.T) {
 	require.Equal(t, []faucet.Scope{faucet.ScopeEventsRead}, c.Scopes)
 	require.Equal(t, []string{"repo:coder/faucet", "repo:coder/coder"}, c.Grants)
 
+	require.NoError(t, store.RecordOwner(ctx, faucet.Owner{ID: 7, Login: "Coder"}))
 	_, _, err = clients(t, getenv, "create", "-resource", "https://faucet.example.com/github/mcp", "-grant", "org:coder", "-grant", "all", "triage")
 	require.NoError(t, err)
 	triage, err := store.Client(ctx, "triage")
 	require.NoError(t, err)
 	require.Equal(t, faucet.AllScopes(), triage.Scopes, "a client holds every scope by default")
-	require.Equal(t, []string{"org:coder", "all"}, triage.Grants, "a grant names an owner or every repository too")
+	require.Equal(t, []string{"org:Coder#7", "all"}, triage.Grants, "an org grant names the account that holds the login, under the login that faucet holds")
 
 	out, _, err = clients(t, getenv, "list")
 	require.NoError(t, err)
@@ -77,7 +78,7 @@ func TestTheClientsCommandMakesListsAndDisablesClients(t *testing.T) {
 	require.Len(t, lines, 3)
 	require.Regexp(t, `^CLIENT ID\s+RESOURCE\s+SCOPES\s+GRANTS\s+CREATED\s+DISABLED$`, lines[0])
 	require.Regexp(t, `^ci-watcher\s+https://faucet.example.com/github/mcp\s+events:read\s+repo:coder/faucet,repo:coder/coder\s+\S+Z\s+-$`, lines[1])
-	require.Regexp(t, `^triage\s+\S+\s+\S+\s+org:coder,all\s+\S+Z\s+-$`, lines[2])
+	require.Regexp(t, `^triage\s+\S+\s+\S+\s+org:Coder#7,all\s+\S+Z\s+-$`, lines[2])
 	require.NotContains(t, out, secret)
 
 	out, _, err = clients(t, getenv, "disable", "ci-watcher")
@@ -103,6 +104,7 @@ func TestTheClientsCommandRefusesAClientThatCannotWork(t *testing.T) {
 	getenv, store := newClientsDatabase(t)
 	const resource = "https://faucet.example.com/github/mcp"
 
+	require.NoError(t, store.RecordOwner(context.Background(), faucet.Owner{ID: 7, Login: "coder"}))
 	for name, args := range map[string][]string{
 		"no resource":                {"create", "-grant", "repo:coder/faucet", "ci"},
 		"a resource of no endpoint":  {"create", "-resource", "https://faucet.example.com/api", "-grant", "repo:coder/faucet", "ci"},
@@ -111,6 +113,8 @@ func TestTheClientsCommandRefusesAClientThatCannotWork(t *testing.T) {
 		"the old /mcp path":          {"create", "-resource", "https://faucet.example.com/mcp", "-grant", "repo:coder/faucet", "ci"},
 		"no grant":                   {"create", "-resource", resource, "ci"},
 		"an org grant of a repo":     {"create", "-resource", resource, "-grant", "org:coder/faucet", "ci"},
+		"an org grant of an account": {"create", "-resource", resource, "-grant", "org:coder#7", "ci"},
+		"an org grant of no account": {"create", "-resource", resource, "-grant", "org:nobody", "ci"},
 		"an unknown scope":           {"create", "-resource", resource, "-scope", "events:read,events:admin", "-grant", "repo:coder/faucet", "ci"},
 		"no client ID":               {"create", "-resource", resource, "-grant", "repo:coder/faucet"},
 		"a flag after the ID":        {"create", "-resource", resource, "ci", "-grant", "repo:coder/faucet"},
@@ -126,6 +130,17 @@ func TestTheClientsCommandRefusesAClientThatCannotWork(t *testing.T) {
 	all, err := store.Clients(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, all)
+}
+
+// An org grant names the account that holds its login when the client is
+// made, so faucet must have heard of the login from a delivery.
+func TestTheClientsCommandRefusesAnOrgGrantOfALoginThatFaucetHasNotSeen(t *testing.T) {
+	t.Parallel()
+	getenv, store := newClientsDatabase(t)
+	_, _, err := clients(t, getenv, "create", "-resource", "https://faucet.example.com/github/mcp", "-grant", "org:coder", "triage")
+	require.ErrorContains(t, err, "faucet has received no webhook delivery from coder or a repository of it, so it cannot tell which account org:coder names")
+	_, err = store.Client(context.Background(), "triage")
+	require.ErrorIs(t, err, oauth.ErrUnknownClient, "no client is made")
 }
 
 // With FAUCET_PUBLIC_URL set, as on the server, a client can be made only for

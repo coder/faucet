@@ -2,6 +2,15 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## To org grants bound to their account (migration `000016_org_grant_accounts`)
+
+This came in [#60](https://github.com/coder/faucet/pull/60). An `org:` grant now names the account that held its login when `faucet clients create` made it, so it follows the account through a rename, and neither a later holder of the login nor a delivery that a hook admin sends again by hand points it at another account (see [service-accounts.md](service-accounts.md#grants)).
+
+- **The migration binds the `org:` grants of existing clients** to the account that holds each login at the migration, which is the account that each grant reads at that moment, so it gives no client more than it had. A grant whose login no account holds then keeps its form, reads nothing from then on, and shows in `faucet clients list` without `#<account ID>`. Make a new client for it once a delivery has named the account. The down file turns each bound grant back into the login that it was bound under.
+- **`faucet clients create` refuses an `org:` grant of a login that no delivery has named.** Make the client after GitHub has sent a delivery from the account or one of its repositories.
+- **A rolling deploy:** until every instance runs this build, an instance of the build before reads a bound grant as no grant and refuses what only that grant allows.
+- **A host that embeds faucet:** `oauth.NewClient` takes an `org:` grant only as `org:<login>#<account ID>`. `oauth.BindGrants` turns the `org:<login>` that an operator writes into that form.
+
 ## To faucet's own document client
 
 This came in [#60](https://github.com/coder/faucet/pull/60). It matters to a host that embeds faucet. `oauth.BrowserLogin.Documents` is now a `faucet.HTTPClientOptions`, not an `*http.Client`: faucet builds the client that fetches client ID metadata documents itself, with `faucet.NewHTTPClient`, because the client of the login chooses their URL. Leave it at its zero value in production. Before, a host that passed a client of its own, such as `http.DefaultClient`, let anyone who opened `/oauth/authorize` make faucet fetch from the host's network and follow redirects. `AllowInsecureLoopback` exists for tests only.

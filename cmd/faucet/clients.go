@@ -25,8 +25,9 @@ const clientsUsage = `usage:
 
 The commands read DATABASE_URL and FAUCET_PUBLIC_URL, as the server does.
 -resource defaults to FAUCET_PUBLIC_URL and /github/mcp.
-A grant is repo:<owner>/<name> for one repository, org:<owner> for every
-repository of a user or organization, or all for every repository.`
+A grant is repo:<owner>/<name> for one repository, org:<login> for every
+repository of the user or organization that holds the login now, under any
+later login too, or all for every repository.`
 
 // clientEndpoint is the path of the endpoint that new clients are for. /mcp,
 // its old path, takes no new client, because a later release removes it.
@@ -62,10 +63,11 @@ func runClients(ctx context.Context, args []string, getenv func(string) string, 
 	return clientsCommand(ctx, args, pgstore.New(db), publicURL, time.Now(), stdout, stderr)
 }
 
-// clientStore holds the clients and the subscriptions that services make.
-// pgstore.Store is one.
+// clientStore holds the clients and the subscriptions that services make,
+// and the accounts that org grants name. pgstore.Store is one.
 type clientStore interface {
 	oauth.Store
+	oauth.Repositories
 	DeleteSubscriptionsOf(ctx context.Context, principal string) (int64, error)
 }
 
@@ -126,7 +128,7 @@ func (g *grantFlags) Set(v string) error {
 	return nil
 }
 
-func createClient(ctx context.Context, args []string, store oauth.Store, publicURL *url.URL, now time.Time, stdout, stderr io.Writer) error {
+func createClient(ctx context.Context, args []string, store clientStore, publicURL *url.URL, now time.Time, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("faucet clients create", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	defaultResource := ""
@@ -136,7 +138,7 @@ func createClient(ctx context.Context, args []string, store oauth.Store, publicU
 	resource := flags.String("resource", defaultResource, "the MCP endpoint that the client's tokens are for, such as https://faucet.example.com/github/mcp")
 	scopeList := flags.String("scope", strings.Join(scopeNames(faucet.AllScopes()), ","), "the scopes that the client's tokens can hold, comma separated")
 	var grants grantFlags
-	flags.Var(&grants, "grant", "what the client may read: repo:<owner>/<name>, org:<owner> or all; repeat it for more")
+	flags.Var(&grants, "grant", "what the client may read: repo:<owner>/<name>, org:<login> or all; repeat it for more")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -154,7 +156,11 @@ func createClient(ctx context.Context, args []string, store oauth.Store, publicU
 		}
 		scopes = append(scopes, scope)
 	}
-	c, secret, err := oauth.NewClient(flags.Arg(0), *resource, scopes, grants, now)
+	bound, err := oauth.BindGrants(ctx, store, grants)
+	if err != nil {
+		return err
+	}
+	c, secret, err := oauth.NewClient(flags.Arg(0), *resource, scopes, bound, now)
 	if err != nil {
 		return err
 	}
