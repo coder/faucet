@@ -480,6 +480,26 @@ func TestTheWorkloadTrustsMigrationGivesEachClientWithNoSecretAHashOfItsOwnOnThe
 	insertClient("workload-c", nil)
 }
 
+// The claims of a trust rule are an object of strings, as oauth.TrustRule
+// holds them. A lax path would unwrap an array and pass it.
+func TestATrustRuleHoldsClaimsOfStringsOnly(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	ctx := context.Background()
+	_, err := db.ExecContext(ctx, `INSERT INTO faucet_service_clients (client_id, secret_hash, resource, grants, scopes, created_at)
+		VALUES ('digest-bot', NULL, 'https://faucet.example.com/github/mcp', '{repo:coder/faucet}', '{events:read}', now())`)
+	require.NoError(t, err)
+	insert := func(claims string) error {
+		_, err := db.ExecContext(ctx, `INSERT INTO faucet_workload_trusts (client_id, issuer, claims, rule_hash, created_at)
+			VALUES ('digest-bot', 'https://k8s.wi-test.invalid', $1::text::jsonb, sha256(convert_to($1::text, 'UTF8')), now())`, claims)
+		return err
+	}
+	for _, claims := range []string{`{"sub":["x"]}`, `{"sub":[]}`, `{"sub":1}`, `{"sub":null}`, `{"sub":{"a":"x"}}`, `{}`, `["x"]`} {
+		require.Error(t, insert(claims), claims)
+	}
+	require.NoError(t, insert(`{"sub":"system:serviceaccount:apps:digest-bot","kubernetes.io/namespace":"apps"}`))
+}
+
 func TestTheClearMigrationMovesTheOldTopToTheClearAndBack(t *testing.T) {
 	t.Parallel()
 	db := newDatabase(t, testDatabaseURL(t))

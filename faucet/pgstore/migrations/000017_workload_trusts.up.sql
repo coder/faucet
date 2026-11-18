@@ -16,8 +16,9 @@ CREATE TABLE faucet_workload_trusts (
   id bigserial PRIMARY KEY,
   client_id text NOT NULL REFERENCES faucet_service_clients (client_id),
   issuer text NOT NULL CHECK (issuer <> ''),
+  -- A lax path would unwrap an array, and pass {"sub":["x"]}.
   claims jsonb NOT NULL CHECK (
-    jsonb_typeof(claims) = 'object' AND claims <> '{}' AND NOT jsonb_path_exists(claims, '$.* ? (@.type() != "string")')
+    jsonb_typeof(claims) = 'object' AND claims <> '{}' AND NOT jsonb_path_exists(claims, 'strict $.* ? (@.type() != "string")')
   ),
   jwks jsonb CHECK (jsonb_typeof(jwks) = 'object'),
   rule_hash bytea NOT NULL CHECK (octet_length(rule_hash) = 32),
