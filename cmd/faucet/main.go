@@ -266,11 +266,11 @@ func run() error {
 	clock := quartz.NewReal()
 	github := faucet.NewAccessCache(faucet.TokenAuthorizer{BaseURL: cfg.githubAPI, Client: &http.Client{Timeout: githubTimeout}}, clock)
 	store := pgstore.New(db)
-	tokens, login, authorizer, err := newLogin(cfg.publicURL, store, github, clock, logger)
+	tokens, login, checks, err := newLogin(cfg.publicURL, store, github, clock, logger)
 	if err != nil {
 		return err
 	}
-	svc, redeliverer, err := newServices(cfg, store, authorizer, clock, logger)
+	svc, redeliverer, err := newServices(cfg, store, checks, clock, logger)
 	if err != nil {
 		return err
 	}
@@ -291,24 +291,32 @@ type loginStore interface {
 	oauth.Repositories
 }
 
-// newLogin returns the bearer check, the login server and the Authorizer of
-// the server. Without a public URL there is no login server: every bearer
+// access is how the server checks what a caller may read.
+type access struct {
+	authorizer faucet.Authorizer
+	// grants checks the owner and all targets of services. It is nil without
+	// a login server, which makes no service.
+	grants faucet.ServiceGrants
+}
+
+// newLogin returns the bearer check, the login server and the access checks
+// of the server. Without a public URL there is no login server: every bearer
 // goes to GitHub, and GitHub answers for every repository. With one, faucet's
 // own tokens verify too, and a service is checked by its grants.
-func newLogin(publicURL *url.URL, store loginStore, github *faucet.AccessCache, clock quartz.Clock, logger slog.Logger) (bearers, *oauth.Server, faucet.Authorizer, error) {
+func newLogin(publicURL *url.URL, store loginStore, github *faucet.AccessCache, clock quartz.Clock, logger slog.Logger) (bearers, *oauth.Server, access, error) {
 	if publicURL == nil {
 		tokens, err := newBearers(github, nil, "")
-		return tokens, nil, github, err
+		return tokens, nil, access{authorizer: github}, err
 	}
 	verifier, err := oauth.NewVerifier(store, clock, map[oauth.SubjectKind]oauth.SubjectResolver{
 		oauth.SubjectService: oauth.ServiceResolver(store),
 	})
 	if err != nil {
-		return bearers{}, nil, nil, xerrors.Errorf("create the token verifier: %w", err)
+		return bearers{}, nil, access{}, xerrors.Errorf("create the token verifier: %w", err)
 	}
 	tokens, err := newBearers(github, verifier, publicURL.String())
 	if err != nil {
-		return bearers{}, nil, nil, err
+		return bearers{}, nil, access{}, err
 	}
 	resources := make([]string, len(mcpPaths))
 	for i, path := range mcpPaths {
@@ -316,13 +324,13 @@ func newLogin(publicURL *url.URL, store loginStore, github *faucet.AccessCache, 
 	}
 	login, err := oauth.NewServer(oauth.ServerDeps{Store: store, Clock: clock, Logger: logger, Issuer: publicURL.String(), Resources: resources})
 	if err != nil {
-		return bearers{}, nil, nil, xerrors.Errorf("create the login server: %w", err)
+		return bearers{}, nil, access{}, xerrors.Errorf("create the login server: %w", err)
 	}
 	services, err := oauth.NewServiceAccess(store, store)
 	if err != nil {
-		return bearers{}, nil, nil, err
+		return bearers{}, nil, access{}, err
 	}
-	return tokens, login, kindAuthorizer{github: github, service: services}, nil
+	return tokens, login, access{authorizer: kindAuthorizer{github: github, service: services}, grants: services}, nil
 }
 
 // kindAuthorizer sends the check of a service to the Authorizer of services,
@@ -351,19 +359,20 @@ func (a kindAuthorizer) RepoIDFresh(ctx context.Context, p faucet.Principal, rep
 // configured, the redelivery runner. Both use one store, which also holds
 // the raw events, and the runner asks the service which failed deliveries
 // a live raw interest wants.
-func newServices(cfg config, store *pgstore.Store, authorizer faucet.Authorizer, clock quartz.Clock, logger slog.Logger) (*faucet.Service, *redelivery.Runner, error) {
+func newServices(cfg config, store *pgstore.Store, checks access, clock quartz.Clock, logger slog.Logger) (*faucet.Service, *redelivery.Runner, error) {
 	svc, err := faucet.New(faucet.Deps{
 		Store:         store,
 		RawStore:      store,
 		RawEvents:     cfg.rawEvents,
 		Secret:        []byte(cfg.secret),
 		Logger:        logger,
-		Authorizer:    authorizer,
+		Authorizer:    checks.authorizer,
+		ServiceGrants: checks.grants,
 		PrincipalFrom: principalFrom,
 		Clock:         clock,
 		Webhook:       cfg.webhook,
-		// The grants of services name repositories, which the login server
-		// finds by the deliveries that named them.
+		// The grants of services name repositories and owners, which the
+		// login server finds by the deliveries that named them.
 		RecordRepositories: cfg.publicURL != nil,
 	})
 	if err != nil {

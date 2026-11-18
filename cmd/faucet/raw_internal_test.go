@@ -93,7 +93,7 @@ func newRawServer(t *testing.T) *rawServer {
 	cfg := config{secret: testSecret, cronSecret: testCronSecret, retention: 30 * 24 * time.Hour, hookAdmin: hooks, rawEvents: []string{"push"}}
 	clock := quartz.NewReal()
 	logger := slog.Make(sloghuman.Sink(&syncBuffer{}))
-	svc, redeliverer, err := newServices(cfg, pgstore.New(db), authz, clock, logger)
+	svc, redeliverer, err := newServices(cfg, pgstore.New(db), access{authorizer: authz}, clock, logger)
 	require.NoError(t, err)
 	cron := cronRoutes{secret: []byte(cfg.cronSecret), svc: svc, retention: cfg.retention, redeliverer: redeliverer, clock: clock, logger: logger}
 	srv := httptest.NewServer(newRouter(svc, bearers{github: authz}, nil, cron, logger))

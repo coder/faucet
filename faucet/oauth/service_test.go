@@ -12,10 +12,15 @@ import (
 	"github.com/coder/faucet/faucet/oauth"
 )
 
-type fakeRepos map[string]faucet.Repository
+// fakeRepos holds the repositories that deliveries named, by full name, and
+// the owner that the latest of them named by each login, in lower case.
+type fakeRepos struct {
+	repos  map[string]faucet.Repository
+	owners map[string]faucet.Owner
+}
 
 func (r fakeRepos) RepositoryByName(_ context.Context, fullName string) (faucet.Repository, error) {
-	for name, repo := range r {
+	for name, repo := range r.repos {
 		if strings.EqualFold(name, fullName) {
 			return repo, nil
 		}
@@ -23,15 +28,36 @@ func (r fakeRepos) RepositoryByName(_ context.Context, fullName string) (faucet.
 	return faucet.Repository{}, faucet.ErrUnknownRepository
 }
 
+func (r fakeRepos) OwnerByLogin(_ context.Context, login string) (faucet.Owner, error) {
+	o, ok := r.owners[strings.ToLower(login)]
+	if !ok {
+		return faucet.Owner{}, faucet.ErrUnknownOwner
+	}
+	return o, nil
+}
+
 func newServiceAccess(t *testing.T) (*fakeStore, oauth.ServiceAccess, faucet.Principal) {
 	t.Helper()
+	return newServiceAccessWith(t, "repo:coder/faucet", "repo:coder/new")
+}
+
+// newServiceAccessWith gives the client ci-watcher grants. Deliveries named
+// two repositories of coder, account 7, one of octo, account 9, and one that
+// coder owned under its old login, old-coder.
+func newServiceAccessWith(t *testing.T, grants ...string) (*fakeStore, oauth.ServiceAccess, faucet.Principal) {
+	t.Helper()
 	store := newFakeStore()
-	c, _, err := oauth.NewClient("ci-watcher", resource, bothScopes, []string{"repo:coder/faucet", "repo:coder/new"}, time.Now())
+	c, _, err := oauth.NewClient("ci-watcher", resource, bothScopes, grants, time.Now())
 	require.NoError(t, err)
 	require.NoError(t, store.InsertClient(context.Background(), c))
 	access, err := oauth.NewServiceAccess(store, fakeRepos{
-		"coder/faucet": {ID: 42, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/faucet"},
-		"coder/coder":  {ID: 43, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/coder"},
+		repos: map[string]faucet.Repository{
+			"coder/faucet":   {ID: 42, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/faucet"},
+			"coder/coder":    {ID: 43, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/coder"},
+			"old-coder/tool": {ID: 44, OwnerID: 7, OwnerLogin: "old-coder", FullName: "old-coder/tool"},
+			"octo/repo":      {ID: 45, OwnerID: 9, OwnerLogin: "octo", FullName: "octo/repo"},
+		},
+		owners: map[string]faucet.Owner{"coder": {ID: 7, Login: "coder"}, "octo": {ID: 9, Login: "octo"}},
 	})
 	require.NoError(t, err)
 	p, err := oauth.ServiceResolver(store)(context.Background(), "ci-watcher", bothScopes)
@@ -67,13 +93,77 @@ func TestAServiceReadsTheRepositoriesItsGrantsName(t *testing.T) {
 
 func TestOnlyAServiceIsCheckedByGrants(t *testing.T) {
 	t.Parallel()
-	_, access, _ := newServiceAccess(t)
+	_, access, _ := newServiceAccessWith(t, "all")
 	person, err := faucet.NewPrincipal("alice", "ghp_x")
 	require.NoError(t, err)
-	_, err = access.RepoID(context.Background(), person, "coder/faucet")
+	ctx := context.Background()
+	_, err = access.RepoID(ctx, person, "coder/faucet")
 	require.ErrorIs(t, err, faucet.ErrNoAccess)
-	_, err = access.RepoIDFresh(context.Background(), person, "coder/faucet")
+	_, err = access.RepoIDFresh(ctx, person, "coder/faucet")
 	require.ErrorIs(t, err, faucet.ErrNoAccess)
+	_, err = access.OwnerID(ctx, person, "coder")
+	require.ErrorIs(t, err, faucet.ErrNoAccess)
+	_, err = access.OwnerIDFresh(ctx, person, "coder")
+	require.ErrorIs(t, err, faucet.ErrNoAccess)
+	require.ErrorIs(t, access.CoversAll(ctx, person), faucet.ErrNoAccess)
+	require.ErrorIs(t, access.CoversAllFresh(ctx, person), faucet.ErrNoAccess)
+}
+
+// An org grant covers the owner, and each repository whose delivery named
+// the account that the grant's login names now, whatever the repository was
+// called then.
+func TestAnOrgGrantCoversTheRepositoriesOfTheOwnersAccount(t *testing.T) {
+	t.Parallel()
+	_, access, p := newServiceAccessWith(t, "org:Coder")
+	ctx := context.Background()
+
+	for _, check := range []func(context.Context, faucet.Principal, string) (int64, error){access.RepoID, access.RepoIDFresh} {
+		for repo, want := range map[string]int64{"coder/faucet": 42, "CODER/coder": 43, "old-coder/tool": 44} {
+			id, err := check(ctx, p, repo)
+			require.NoError(t, err, repo)
+			require.Equal(t, want, id, repo)
+		}
+		_, err := check(ctx, p, "octo/repo")
+		require.ErrorIs(t, err, faucet.ErrNoAccess)
+		require.ErrorContains(t, err, "no grant of this service names octo/repo")
+		_, err = check(ctx, p, "coder/new")
+		require.ErrorContains(t, err, "faucet has received no webhook delivery from coder/new yet")
+	}
+	for _, check := range []func(context.Context, faucet.Principal, string) (int64, error){access.OwnerID, access.OwnerIDFresh} {
+		id, err := check(ctx, p, "coder")
+		require.NoError(t, err)
+		require.Equal(t, int64(7), id, "a login matches as GitHub matches it, ignoring case")
+		_, err = check(ctx, p, "octo")
+		require.ErrorIs(t, err, faucet.ErrNoAccess)
+		require.EqualError(t, err, "no grant of this service names the owner octo: repository not found or not accessible")
+		_, err = check(ctx, p, "octo/repo")
+		require.EqualError(t, err, "owner must be a GitHub login")
+	}
+	for _, check := range []func(context.Context, faucet.Principal) error{access.CoversAll, access.CoversAllFresh} {
+		err := check(ctx, p)
+		require.ErrorIs(t, err, faucet.ErrNoAccess)
+		require.EqualError(t, err, "no grant of this service names every repository; that takes the grant all: repository not found or not accessible")
+	}
+}
+
+func TestTheAllGrantCoversEveryRepositoryAndOwnerThatADeliveryNamed(t *testing.T) {
+	t.Parallel()
+	_, access, p := newServiceAccessWith(t, "all")
+	ctx := context.Background()
+
+	id, err := access.RepoIDFresh(ctx, p, "octo/repo")
+	require.NoError(t, err)
+	require.Equal(t, int64(45), id)
+	id, err = access.OwnerID(ctx, p, "octo")
+	require.NoError(t, err)
+	require.Equal(t, int64(9), id)
+	require.NoError(t, access.CoversAll(ctx, p))
+	require.NoError(t, access.CoversAllFresh(ctx, p))
+
+	_, err = access.OwnerIDFresh(ctx, p, "new-org")
+	require.ErrorIs(t, err, faucet.ErrNoAccess)
+	require.EqualError(t, err, "faucet has received no webhook delivery from a repository of new-org yet, so it cannot tell which owner the grant names; "+
+		"it can once GitHub sends one: repository not found or not accessible")
 }
 
 // A renewal checks access again at the source (R3): for a service, the
@@ -94,10 +184,24 @@ func TestAFreshCheckReadsTheClientAgain(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(43), id)
 
+	store.mu.Lock()
+	store.clients[0].Grants = []string{"org:coder", "all"}
+	store.mu.Unlock()
+	_, err = access.OwnerID(ctx, p, "coder")
+	require.ErrorIs(t, err, faucet.ErrNoAccess, "the cached check uses the grants of the principal")
+	require.ErrorIs(t, access.CoversAll(ctx, p), faucet.ErrNoAccess)
+	id, err = access.OwnerIDFresh(ctx, p, "coder")
+	require.NoError(t, err)
+	require.Equal(t, int64(7), id)
+	require.NoError(t, access.CoversAllFresh(ctx, p))
+
 	_, err = store.DisableClient(ctx, "ci-watcher", time.Now())
 	require.NoError(t, err)
 	_, err = access.RepoIDFresh(ctx, p, "coder/coder")
 	require.ErrorIs(t, err, faucet.ErrInvalidToken, "a disabled client holds no access")
+	_, err = access.OwnerIDFresh(ctx, p, "coder")
+	require.ErrorIs(t, err, faucet.ErrInvalidToken)
+	require.ErrorIs(t, access.CoversAllFresh(ctx, p), faucet.ErrInvalidToken)
 }
 
 func TestTheServiceResolverFindsOnlyALiveClient(t *testing.T) {

@@ -177,11 +177,10 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err != nil {
 		return nil, waitOutput{}, err
 	}
-	repoID, err := s.authorizeRepo(ctx, logger, p, "wait", in.Repo)
+	req.query.Target, err = s.authorizeTarget(ctx, logger, p, "wait", in.targetArguments, false)
 	if err != nil {
 		return nil, waitOutput{}, err
 	}
-	req.query.Target = RepoTarget(repoID)
 
 	release, ok := s.waits.acquire(p.Login)
 	if !ok {
@@ -206,12 +205,12 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	return nil, out, nil
 }
 
-func (s *Service) authorize(ctx context.Context, logger slog.Logger, op string, scope Scope, repo string) (int64, error) {
+func (s *Service) authorize(ctx context.Context, logger slog.Logger, op string, scope Scope, a targetArguments) (Target, error) {
 	p, err := s.principal(ctx, logger, op, scope)
 	if err != nil {
-		return 0, err
+		return Target{}, err
 	}
-	return s.authorizeRepo(ctx, logger, p, op, repo)
+	return s.authorizeTarget(ctx, logger, p, op, a, false)
 }
 
 // principal returns the caller of this request when it holds scope, the
@@ -232,36 +231,79 @@ func (s *Service) principal(ctx context.Context, logger slog.Logger, op string, 
 	return p, nil
 }
 
-func (s *Service) authorizeRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo string) (int64, error) {
-	return checkRepo(ctx, logger, p, op, repo, s.authorizer.RepoID)
-}
+var (
+	errServiceTargets = xerrors.Errorf("owner and all targets are for service clients; name one repository with repo: %w", ErrNoAccess)
+	errNoGrants       = xerrors.Errorf("this server reads no owner or all target: %w", ErrNoAccess)
+)
 
-// authorizeFreshRepo is authorizeRepo that ignores what the Authorizer
-// remembers.
-func (s *Service) authorizeFreshRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo string) (int64, error) {
-	return checkRepo(ctx, logger, p, op, repo, s.authorizer.RepoIDFresh)
-}
-
-func checkRepo(ctx context.Context, logger slog.Logger, p Principal, op, repo string, lookup func(context.Context, Principal, string) (int64, error)) (int64, error) {
+// authorizeTarget returns the target that a names when p may read it. A
+// repository is the Authorizer's to answer, and an owner or every repository
+// is the ServiceGrants', for a service only. fresh asks the source of the
+// answer again, as every subscribe does, so a renewal checks access again.
+func (s *Service) authorizeTarget(ctx context.Context, logger slog.Logger, p Principal, op string, a targetArguments, fresh bool) (Target, error) {
 	logger = logger.With(slog.F("login", p.Login))
-	repoID, err := lookup(ctx, p, repo)
+	if a.Repo != "" {
+		lookup := s.authorizer.RepoID
+		if fresh {
+			lookup = s.authorizer.RepoIDFresh
+		}
+		repoID, err := lookup(ctx, p, a.Repo)
+		if err != nil {
+			return Target{}, denied(ctx, logger, op, err)
+		}
+		if repoID <= 0 {
+			logger.Error(ctx, "authorizer returned a repository without an ID")
+			return Target{}, errVerify
+		}
+		return RepoTarget(repoID), nil
+	}
+	if _, ok := p.ServiceClient(); !ok {
+		return Target{}, denied(ctx, logger, op, errServiceTargets)
+	}
+	if s.grants == nil {
+		return Target{}, denied(ctx, logger, op, errNoGrants)
+	}
+	if a.Owner != "" {
+		lookup := s.grants.OwnerID
+		if fresh {
+			lookup = s.grants.OwnerIDFresh
+		}
+		ownerID, err := lookup(ctx, p, a.Owner)
+		if err != nil {
+			return Target{}, denied(ctx, logger, op, err)
+		}
+		if ownerID <= 0 {
+			logger.Error(ctx, "service grants returned an owner without an ID")
+			return Target{}, errVerify
+		}
+		return OwnerTarget(ownerID), nil
+	}
+	covers := s.grants.CoversAll
+	if fresh {
+		covers = s.grants.CoversAllFresh
+	}
+	if err := covers(ctx, p); err != nil {
+		return Target{}, denied(ctx, logger, op, err)
+	}
+	return AllTarget(), nil
+}
+
+// denied logs why an access check failed and returns the error that the
+// caller gets.
+func denied(ctx context.Context, logger slog.Logger, op string, err error) error {
 	switch {
 	// A denial logs its reason as one line of text: slog.Error would add the
 	// error's stack frames to every routine denial.
 	case xerrors.Is(err, ErrNoAccess):
 		logger.Info(ctx, op+" denied", slog.F("reason", err.Error()))
-		return 0, err
+		return err
 	case xerrors.Is(err, ErrInvalidToken):
 		logger.Info(ctx, op+" denied, token rejected")
-		return 0, ErrInvalidToken
-	case err != nil:
+		return ErrInvalidToken
+	default:
 		logger.Warn(ctx, "could not verify repository access", slog.Error(err))
-		return 0, errVerify
-	case repoID <= 0:
-		logger.Error(ctx, "authorizer returned a repository without an ID")
-		return 0, errVerify
+		return errVerify
 	}
-	return repoID, nil
 }
 
 // startCursor picks where a wait begins. A given cursor wins. With a sha the

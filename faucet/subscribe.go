@@ -221,7 +221,7 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 		return nil, err
 	}
 	key := NewSubscriptionKeyHash(principal.Login, req.callbackURL, req.entry.name, req.canonical)
-	repoID, err := s.authorizeFreshRepo(ctx, logger, principal, "subscribe", req.arguments.Repo)
+	target, err := s.authorizeTarget(ctx, logger, principal, "subscribe", req.arguments.targetArguments, true)
 	if err != nil {
 		if xerrors.Is(err, ErrNoAccess) {
 			s.endRevokedSubscription(ctx, logger, wh, principal, key)
@@ -253,7 +253,7 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 		EventType:   req.entry.name,
 		EventTypes:  req.entry.types(req.arguments.Actions),
 		Arguments:   req.canonical,
-		Target:      RepoTarget(repoID),
+		Target:      target,
 		SecretEnc:   sealed,
 		Cursor:      start,
 		ExpiresAt:   expiresAt,

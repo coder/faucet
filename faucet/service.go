@@ -21,6 +21,9 @@ type Deps struct {
 	Logger slog.Logger
 	// Authorizer decides which repositories a caller may wait on.
 	Authorizer Authorizer
+	// ServiceGrants decides which owners, or whether every repository, a
+	// service may read. Nil refuses every owner and all target.
+	ServiceGrants ServiceGrants
 	// PrincipalFrom returns the caller the host application authenticated for
 	// this request. An error denies the request. It reads the context that
 	// go-sdk gives the handler. In stateful mode that is the context of the
@@ -85,6 +88,7 @@ type Service struct {
 	secret        []byte
 	logger        slog.Logger
 	authorizer    Authorizer
+	grants        ServiceGrants
 	principalFrom func(context.Context) (Principal, error)
 	clock         quartz.Clock
 	webhook       *webhookState
@@ -120,6 +124,7 @@ func New(d Deps) (*Service, error) {
 		secret:        bytes.Clone(d.Secret),
 		logger:        d.Logger,
 		authorizer:    d.Authorizer,
+		grants:        d.ServiceGrants,
 		principalFrom: d.PrincipalFrom,
 		clock:         d.Clock,
 		recordRepos:   d.RecordRepositories,

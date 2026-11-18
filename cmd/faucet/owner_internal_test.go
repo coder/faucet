@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 
@@ -175,4 +176,58 @@ func TestAServiceGrantedAnOwnerReadsARepositoryBeforeItsFirstDelivery(t *testing
 			require.Empty(t, paths, "a service never reaches GitHub")
 		})
 	}
+}
+
+// A person names one repository: GitHub answers for a person's access to a
+// repository, and has no answer for an owner or every repository.
+func TestAPersonIsToldThatOwnerAndAllTargetsAreForServices(t *testing.T) {
+	t.Parallel()
+	srv := newLoginServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	session := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, aliceToken)
+	const want = "owner and all targets are for service clients; name one repository with repo: repository not found or not accessible"
+
+	for _, target := range []map[string]any{{"owner": "o"}, {"all": true}} {
+		arguments := maps.Clone(target)
+		arguments["types"] = []string{"ci.run_completed"}
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "wait_for_github_events", Arguments: arguments})
+		require.NoError(t, err)
+		require.True(t, res.IsError)
+		require.Equal(t, want, toolText(t, res))
+
+		_, err = callEvents(ctx, session, "events/poll", &eventsParams{Name: "ci.run_completed", Arguments: target})
+		var denied *jsonrpc.Error
+		require.ErrorAs(t, err, &denied)
+		require.EqualValues(t, -32024, denied.Code)
+		require.Equal(t, want, denied.Message)
+	}
+	paths, _ := srv.github.seen()
+	require.NotContains(t, strings.Join(paths, " "), "/repos/", "no repository is looked up")
+}
+
+// An org grant covers each repository whose deliveries named the owner's
+// account, and no repository of another owner.
+func TestAnOrgGrantCoversTheRepositoriesOfItsOwner(t *testing.T) {
+	t.Parallel()
+	srv := newLoginServer(t)
+	secret := srv.client(t, "org-watcher", "/github/mcp", bothScopes, "org:Coder")
+	srv.deliverRunOf(t, "existing-1", coderExisting)
+	srv.deliver(t, "octo-1")
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	session, err := srv.connectService(ctx, t, "/github/mcp", "org-watcher", secret)
+	require.NoError(t, err)
+
+	repos, _ := waitFor(ctx, t, session, map[string]any{"repo": "coder/existing", "cursor": 0})
+	require.Equal(t, []int64{coderExisting.id}, repos)
+
+	res, err := call(ctx, session, "octo-org/octo-repo", map[string]any{"timeout_s": 1})
+	require.NoError(t, err)
+	require.True(t, res.IsError)
+	require.Contains(t, toolText(t, res), "no grant of this service names octo-org/octo-repo")
+	res, err = call(ctx, session, "coder/new-repo", map[string]any{"timeout_s": 1})
+	require.NoError(t, err)
+	require.True(t, res.IsError)
+	require.Contains(t, toolText(t, res), "faucet has received no webhook delivery from coder/new-repo yet")
 }

@@ -77,9 +77,9 @@ func newLoginServer(t *testing.T, configure ...func(*loginConfig)) *loginServer 
 	if cfg.logins != nil {
 		logins = cfg.logins(store)
 	}
-	tokens, login, authorizer, err := newLogin(publicURL, logins, cache, clock, logger)
+	tokens, login, checks, err := newLogin(publicURL, logins, cache, clock, logger)
 	require.NoError(t, err)
-	svc, _, err := newServices(config{secret: testSecret, publicURL: publicURL, webhook: cfg.webhook, rawEvents: []string{"push"}}, store, authorizer, clock, logger)
+	svc, _, err := newServices(config{secret: testSecret, publicURL: publicURL, webhook: cfg.webhook, rawEvents: []string{"push"}}, store, checks, clock, logger)
 	require.NoError(t, err)
 	cron := cronRoutes{secret: []byte(loginCronSecret), svc: svc, retention: 24 * time.Hour, login: login, clock: clock, logger: logger}
 	srv.Config.Handler = newRouter(svc, tokens, login, cron, logger)

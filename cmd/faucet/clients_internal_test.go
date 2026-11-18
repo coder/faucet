@@ -64,11 +64,12 @@ func TestTheClientsCommandMakesListsAndDisablesClients(t *testing.T) {
 	require.Equal(t, []faucet.Scope{faucet.ScopeEventsRead}, c.Scopes)
 	require.Equal(t, []string{"repo:coder/faucet", "repo:coder/coder"}, c.Grants)
 
-	_, _, err = clients(t, getenv, "create", "-resource", "https://faucet.example.com/github/mcp", "-grant", "repo:coder/faucet", "triage")
+	_, _, err = clients(t, getenv, "create", "-resource", "https://faucet.example.com/github/mcp", "-grant", "org:coder", "-grant", "all", "triage")
 	require.NoError(t, err)
 	triage, err := store.Client(ctx, "triage")
 	require.NoError(t, err)
 	require.Equal(t, faucet.AllScopes(), triage.Scopes, "a client holds every scope by default")
+	require.Equal(t, []string{"org:coder", "all"}, triage.Grants, "a grant names an owner or every repository too")
 
 	out, _, err = clients(t, getenv, "list")
 	require.NoError(t, err)
@@ -76,6 +77,7 @@ func TestTheClientsCommandMakesListsAndDisablesClients(t *testing.T) {
 	require.Len(t, lines, 3)
 	require.Regexp(t, `^CLIENT ID\s+RESOURCE\s+SCOPES\s+GRANTS\s+CREATED\s+DISABLED$`, lines[0])
 	require.Regexp(t, `^ci-watcher\s+https://faucet.example.com/github/mcp\s+events:read\s+repo:coder/faucet,repo:coder/coder\s+\S+Z\s+-$`, lines[1])
+	require.Regexp(t, `^triage\s+\S+\s+\S+\s+org:coder,all\s+\S+Z\s+-$`, lines[2])
 	require.NotContains(t, out, secret)
 
 	out, _, err = clients(t, getenv, "disable", "ci-watcher")
@@ -108,7 +110,7 @@ func TestTheClientsCommandRefusesAClientThatCannotWork(t *testing.T) {
 		"a resource of a bad origin": {"create", "-resource", "http://faucet.example.com/github/mcp", "-grant", "repo:coder/faucet", "ci"},
 		"the old /mcp path":          {"create", "-resource", "https://faucet.example.com/mcp", "-grant", "repo:coder/faucet", "ci"},
 		"no grant":                   {"create", "-resource", resource, "ci"},
-		"an org grant":               {"create", "-resource", resource, "-grant", "org:coder", "ci"},
+		"an org grant of a repo":     {"create", "-resource", resource, "-grant", "org:coder/faucet", "ci"},
 		"an unknown scope":           {"create", "-resource", resource, "-scope", "events:read,events:admin", "-grant", "repo:coder/faucet", "ci"},
 		"no client ID":               {"create", "-resource", resource, "-grant", "repo:coder/faucet"},
 		"a flag after the ID":        {"create", "-resource", resource, "ci", "-grant", "repo:coder/faucet"},

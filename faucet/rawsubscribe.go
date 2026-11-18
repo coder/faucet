@@ -101,7 +101,7 @@ func (s *Service) subscribeRaw(ctx context.Context, wh *webhookState, entry *raw
 	}
 	canonical := req.args.canonical()
 	key := NewSubscriptionKeyHash(principal.Login, req.callbackURL, entry.name, canonical)
-	repoID, err := s.authorizeFreshRepo(ctx, logger, principal, "subscribe", req.args.Repo)
+	target, err := s.authorizeTarget(ctx, logger, principal, "subscribe", req.args.targetArguments, true)
 	if err != nil {
 		if xerrors.Is(err, ErrNoAccess) {
 			s.endRevokedSubscription(ctx, logger, wh, principal, key)
@@ -134,7 +134,7 @@ func (s *Service) subscribeRaw(ctx context.Context, wh *webhookState, entry *raw
 		EventType:     entry.name,
 		EventTypes:    []string{entry.name},
 		Arguments:     canonical,
-		Target:        RepoTarget(repoID),
+		Target:        target,
 		SecretEnc:     sealSecret(wh.aead, wh.nonceKey, req.secret, key[:]),
 		Cursor:        math.MaxInt64,
 		ExpiresAt:     expiresAt,
