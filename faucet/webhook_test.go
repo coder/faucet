@@ -44,6 +44,10 @@ type fakeStore struct {
 	scanned       map[faucet.SubscriptionKeyHash]int64
 	deliveries    map[fakeDeliveryKey]*fakeDelivery
 	gaps          map[faucet.SubscriptionKeyHash]*fakeGap
+	repos         []fakeRepo
+	repoWrites    int
+	// repoErr fails UpsertRepository and RepositoryByName.
+	repoErr error
 }
 
 func (s *fakeStore) InsertEvent(_ context.Context, ev faucet.Event) (faucet.Event, bool, error) {

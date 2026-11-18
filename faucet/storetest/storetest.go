@@ -56,6 +56,7 @@ func Run(t *testing.T, newStore func(t *testing.T) faucet.Store) {
 		{"DeleteExpiredSubscriptionsDeletesOnlyExpiredRows", deleteExpiredSubscriptionsDeletesOnlyExpiredRows},
 	}
 	subtests = append(subtests, deliverySubtests...)
+	subtests = append(subtests, repositorySubtests...)
 	for _, st := range subtests {
 		t.Run(st.name, func(t *testing.T) {
 			t.Parallel()

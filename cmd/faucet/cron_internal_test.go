@@ -224,7 +224,7 @@ func newCronServer(t *testing.T, opts cronOptions) *cronServer {
 	}
 
 	cron := cronRoutes{secret: []byte(opts.secret), svc: svc, retention: retention, delivers: opts.webhook, redeliverer: redeliverer, clock: clock, logger: logger}
-	srv := httptest.NewServer(newRouter(svc, bearers{github: authorizer}, cron, logger))
+	srv := httptest.NewServer(newRouter(svc, bearers{github: authorizer}, nil, cron, logger))
 	t.Cleanup(srv.Close)
 	return &cronServer{Server: srv, store: store, redelivery: redeliveries, hooks: hooks, clock: clock, logs: logs}
 }

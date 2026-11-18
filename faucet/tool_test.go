@@ -829,3 +829,25 @@ func TestWaitRefusesAWaitBeyondTheLoginsLimitAndAdmitsOneAgainWhenOneEnds(t *tes
 	h.clock.Advance(time.Second).MustWait(h.ctx)
 	h.await(again).success(t)
 }
+
+// An Authorizer that says why it denies a repository, as the one for services
+// does for a repository that faucet has not seen yet, reaches the caller with
+// its reason. A plain ErrNoAccess still reads as before.
+func TestAnAccessDenialThatSaysWhyReachesTheCaller(t *testing.T) {
+	t.Parallel()
+
+	why := xerrors.Errorf("faucet has seen no delivery from %s yet: %w", testRepo, faucet.ErrNoAccess)
+	wait := newWaitHarness(t)
+	wait.authz.err = why
+	require.Equal(t, why.Error(), wait.call(args("repo", testRepo, "types", allTypes, "cursor", 0)).failure(t))
+
+	events := newEventsHarness(t)
+	events.authz.err = why
+	rpcErr := events.pollError(pollParams("ci.run_completed", repoArgs(), nil))
+	require.EqualValues(t, codeForbidden, rpcErr.Code)
+	require.Equal(t, why.Error(), rpcErr.Message)
+
+	plain := newWaitHarness(t)
+	plain.authz.err = faucet.ErrNoAccess
+	require.Equal(t, faucet.ErrNoAccess.Error(), plain.call(args("repo", testRepo, "types", allTypes, "cursor", 0)).failure(t))
+}

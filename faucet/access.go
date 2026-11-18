@@ -35,6 +35,9 @@ const (
 // knownScopes holds every scope, each at its bit in a scopeSet.
 var knownScopes = []Scope{ScopeEventsRead, ScopeEventsSubscribe}
 
+// AllScopes returns every scope that faucet knows, in a fixed order.
+func AllScopes() []Scope { return slices.Clone(knownScopes) }
+
 // ParseScope returns the scope named s, or an error when faucet knows no
 // such scope.
 func ParseScope(s string) (Scope, error) {
@@ -154,8 +157,13 @@ func NewOAuthUser(login string, session OAuthSession, scopes []Scope) (Principal
 	return Principal{Login: login, kind: kindOAuthUser, scopes: set, session: session}, nil
 }
 
-// NewService returns a service client. Its login is "svc:" and the client
-// ID. A GitHub login cannot hold a colon, so it never equals a person's.
+// ServiceLogin is the login of the service whose client ID is clientID:
+// "svc:" and the ID. A GitHub login cannot hold a colon, so it never equals a
+// person's.
+func ServiceLogin(clientID string) string { return "svc:" + clientID }
+
+// NewService returns a service client, whose login is ServiceLogin of its
+// client ID.
 func NewService(client ServiceClient, scopes []Scope) (Principal, error) {
 	if client.ClientID == "" {
 		return Principal{}, xerrors.New("a service needs a client ID")
@@ -170,7 +178,7 @@ func NewService(client ServiceClient, scopes []Scope) (Principal, error) {
 		return Principal{}, err
 	}
 	return Principal{
-		Login: "svc:" + client.ClientID, kind: kindService, scopes: set,
+		Login: ServiceLogin(client.ClientID), kind: kindService, scopes: set,
 		clientID: client.ClientID, grants: strings.Join(client.Grants, grantSeparator),
 	}, nil
 }
@@ -196,7 +204,7 @@ func (p Principal) Authenticated() bool {
 	case kindGitHubToken, kindOAuthUser:
 		return githubLogin(p.Login) == nil
 	case kindService:
-		return p.Login == "svc:"+p.clientID
+		return p.Login == ServiceLogin(p.clientID)
 	}
 	return false
 }
@@ -230,8 +238,9 @@ func (p Principal) Format(f fmt.State, _ rune) {
 // that sends each kind to another Authorizer must send both calls on.
 type Authorizer interface {
 	// RepoID returns the numeric ID of repo, written owner/name, when p can
-	// read it. It returns ErrNoAccess when p cannot. It may answer from what
-	// it remembers.
+	// read it. It returns ErrNoAccess when p cannot, or an error that wraps it
+	// and says why: the caller gets that error's text, so it holds nothing
+	// the caller may not read. It may answer from what it remembers.
 	RepoID(ctx context.Context, p Principal, repo string) (int64, error)
 	// RepoIDFresh is RepoID that never answers from what it remembers: it
 	// asks the source of the answer again. events/subscribe calls it, because

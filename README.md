@@ -41,7 +41,7 @@ An agent asks for events of one `repo` by name, optionally narrowed by `sha`, `p
 | `pr.review_threads` | `pull_request_review_thread` | none |
 <!-- END generated:events -->
 
-Every `/github/mcp` request carries `Authorization: Bearer <GitHub token>`. Faucet reads with the caller's token: it only returns events for repositories that the token can read. The one GitHub token it holds, for redelivery, is optional. See [docs/security.md](docs/security.md).
+Every `/github/mcp` request carries `Authorization: Bearer <GitHub token>`. Faucet reads with the caller's token: it only returns events for repositories that the token can read. The one GitHub token it holds, for redelivery, is optional. See [docs/security.md](docs/security.md). A service agent can log in with a client ID and secret instead, with no GitHub token (see [docs/service-accounts.md](docs/service-accounts.md)).
 
 Faucet also deletes events after a retention period, and it can ask GitHub to [redeliver webhooks that failed](docs/redelivery.md) while it was down.
 
@@ -83,11 +83,12 @@ Point any MCP client at `https://<your host>/github/mcp` with a GitHub token as 
 | `FAUCET_HOOK_ID` | for redelivery | Numeric ID of the GitHub webhook to watch for failed deliveries. |
 | `FAUCET_HOOK_ORG` | for an org hook | The organization that owns the hook. Set this or `FAUCET_HOOK_REPO`, not both. |
 | `FAUCET_HOOK_REPO` | for a repo hook | The repository that owns the hook, as `owner/name`. |
+| `FAUCET_PUBLIC_URL` | for service accounts | Faucet's public URL, such as `https://faucet.example.com`, with no path or trailing slash. Turns on faucet's login server for service clients (see [docs/service-accounts.md](docs/service-accounts.md)). |
 | `VERCEL` | set by Vercel | Marks a Vercel deployment. There the server never migrates without `VERCEL_ENV`. |
 | `VERCEL_ENV` | set by Vercel | When set, the server migrates only if it is `production`, and otherwise starts only on a current schema. |
 <!-- END generated:settings -->
 
-The server refuses to start on an invalid or incomplete feature configuration, and it names the variable but never the value. A feature whose variables are unset stays off, and its routes answer 503.
+The server refuses to start on an invalid or incomplete feature configuration, and it names the variable but never the value. A feature whose variables are unset stays off, and its routes answer 503, except the login server's, which do not exist without `FAUCET_PUBLIC_URL`.
 
 ## Scheduled routes
 
@@ -113,7 +114,7 @@ The packages:
 - [`faucet/redelivery`](faucet/redelivery): the failed-webhook sweep, built with `redelivery.New`.
 - [`faucet/pgstore`](faucet/pgstore): the Postgres store, with embedded migrations.
 - [`faucet/storetest`](faucet/storetest): the contract tests that every `Store` must pass.
-- [`faucet/oauth`](faucet/oauth): the access tokens that faucet mints. Nothing mints them yet.
+- [`faucet/oauth`](faucet/oauth): faucet's login server for service clients: the token endpoint and its metadata, the clients and their repo grants, and the access tokens that it mints.
 
 [`cmd/faucet`](cmd/faucet) is the reference host and wires all of it together. The host decides who may call `Service.Purge`, `Service.DeliverDue` and `Runner.Run`, and when.
 
@@ -124,6 +125,7 @@ The packages:
 - [docs/redelivery.md](docs/redelivery.md): how failed GitHub deliveries are recovered, with the sweep's guarantees, capacity and known limits.
 - [docs/security.md](docs/security.md): the access checks, the callback URL guard and secret handling.
 - [docs/deploy.md](docs/deploy.md): deploying and operating faucet, and what each scheduled route answers.
+- [docs/service-accounts.md](docs/service-accounts.md): service agents that log in with client credentials, how an operator makes their clients, and how grants match repositories.
 - [docs/upgrading.md](docs/upgrading.md): what to change on the GitHub hook and during a rolling deploy when you upgrade.
 
 ## Development

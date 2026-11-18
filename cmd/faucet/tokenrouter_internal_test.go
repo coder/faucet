@@ -37,6 +37,7 @@ func newFaucetToken(t *testing.T, prefix string) string {
 }
 
 type memTokens struct {
+	oauth.Store
 	mu     sync.Mutex
 	tokens map[oauth.TokenHash]oauth.AccessToken
 	err    error
@@ -144,7 +145,7 @@ func newTokenServer(t *testing.T, configure ...func(*tokenServerConfig)) *tokenS
 	b, err := newBearers(cfg.authn, verifier, testOrigin)
 	require.NoError(t, err)
 
-	srv := httptest.NewServer(newRouter(svc, b, cronRoutes{}, logger))
+	srv := httptest.NewServer(newRouter(svc, b, nil, cronRoutes{}, logger))
 	t.Cleanup(func() { closeServer(srv, cfg.clock) })
 	return &tokenServer{
 		testServer: &testServer{Server: srv, github: github, store: store, clock: cfg.clock, logs: logs, mcpPath: "/github/mcp"},

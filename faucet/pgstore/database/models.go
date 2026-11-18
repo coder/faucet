@@ -77,6 +77,24 @@ type FaucetRedeliveryScan struct {
 	ClearAt      sql.NullTime
 }
 
+type FaucetRepo struct {
+	RepoID     int64
+	OwnerID    int64
+	OwnerLogin string
+	FullName   string
+	SeenAt     time.Time
+}
+
+type FaucetServiceClient struct {
+	ClientID   string
+	SecretHash []byte
+	Resource   string
+	Grants     []string
+	Scopes     []string
+	CreatedAt  time.Time
+	DisabledAt sql.NullTime
+}
+
 type FaucetSubscription struct {
 	KeyHash             []byte
 	Principal           string

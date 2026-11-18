@@ -298,6 +298,17 @@ func (s *Store) DeleteLiveSubscription(ctx context.Context, principal string, ke
 	return deleted, true, nil
 }
 
+// DeleteSubscriptionsOf implements faucet.Store. A subscription's
+// deliveries go with it on the foreign key, and its gap lives on its row.
+func (s *Store) DeleteSubscriptionsOf(ctx context.Context, principal string) (_ int64, err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	deleted, err := s.q.DeleteSubscriptionsOf(ctx, principal)
+	if err != nil {
+		return 0, xerrors.Errorf("delete the subscriptions of a principal: %w", err)
+	}
+	return deleted, nil
+}
+
 func (s *Store) DeleteExpiredSubscriptions(ctx context.Context, now time.Time) (_ int64, err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	deleted, err := s.q.DeleteExpiredSubscriptions(ctx, now)
