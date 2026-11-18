@@ -80,6 +80,8 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/security.md", "Faucet keeps a denial only as a marker for %d minutes", []any{minutes(accessDenialRetention)}},
 		{"docs/service-accounts.md", "Its `exp` is at least a second away. It has an `iat` or an `nbf`, each at most a minute ahead of faucet's clock, and it lives at most %d hours", []any{hours(maxSubjectTokenLifetime)}},
 		{"docs/security.md", "Faucet takes no token that lives more than %d hours, from its `iat` or `nbf` to its `exp`.", []any{hours(maxSubjectTokenLifetime)}},
+		{"docs/service-accounts.md", "Faucet takes no subject token that lives more than %d hours", []any{hours(maxSubjectTokenLifetime)}},
+		{"docs/service-accounts.md", "--audience https://faucet.example.com --duration %dh`", []any{hours(maxSubjectTokenLifetime)}},
 		{"docs/service-accounts.md", "Faucet's token lasts %d minutes, or until the platform's token expires", []any{minutes(accessTokenLifetime)}},
 		{"docs/service-accounts.md", "works until it expires, %d minutes at most", []any{minutes(accessTokenLifetime)}},
 		{"docs/service-accounts.md", "`Retry-After` gives the seconds until faucet fetches again, %d at most.", []any{seconds(keyFetchInterval)}},

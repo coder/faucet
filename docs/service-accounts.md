@@ -150,7 +150,7 @@ The workload posts a form to `/oauth/token` with `grant_type=urn:ietf:params:oau
 > **A Vercel trust rule must name your team and your project by their IDs.** Vercel signs the tokens of every team with the same keys: on 2026-11-18 the key sets of a real team's issuer, of the issuer that every team shares and of a slug that no team holds were the same. So any Vercel team can get a token for faucet's audience whose signature faucet accepts, and only the claims tell the teams apart.
 >
 > - **Pin `owner_id` (`team_...`) and `project_id` (`prj_...`), never `owner` or `project`.** `iss`, `owner`, `project` and `sub` hold only names, and a renamed team frees its slug for another team. Faucet refuses a rule without both IDs.
-> - **Only production logs in.** Faucet refuses the issuer that every team shares and every environment but `production`: a preview deployment runs the code of any branch, and a development token sits on a laptop for 12 hours.
+> - **Only production logs in, and production is a deployment target, not a branch.** Faucet refuses the issuer that every team shares and every environment but `production`: a preview deployment runs the code of any branch, and a development token sits on a laptop for 12 hours. `environment=production` pins no code: whoever can make a production deployment of the project, such as with `vercel deploy --prod` from any checkout, can log in as the client.
 > - **A production build logs in too.** A token from a production build of the project holds the same `owner_id`, `project_id` and `environment` as a token of its production functions, and Vercel documents no claim that tells them apart. So code that runs while the project builds, such as an install script of a dependency, can log in as the client while its build token lasts, an hour. Grant the client only what a build of the project may read.
 
 1. Make the client and trust the project, with the IDs that the team's and the project's settings show:
@@ -162,7 +162,7 @@ The workload posts a form to `/oauth/token` with `grant_type=urn:ietf:params:oau
      -claim owner_id=team_... -claim project_id=prj_... -claim environment=production
    ```
 
-2. In the function, ask Vercel for a token with faucet's public URL as its audience. Vercel names the team's issuer in a token with a custom audience whatever the project's issuer mode. `getVercelOidcToken` reads the token of the request, so the login must happen while the function serves one. The TypeScript MCP SDK has no provider for the token exchange, so this one changes the SDK's provider of a static client assertion, and asks for a fresh token at each login:
+2. In the function, ask Vercel for a token with faucet's public URL as its audience. Vercel names the team's issuer in a token with a custom audience whatever the project's issuer mode. `getVercelOidcToken` reads the token of the request, so the login must happen while the function serves one, and `skipCache: true` (in `@vercel/oidc` 4) makes it ask Vercel for a fresh token rather than reuse one that may be in its last second. The TypeScript MCP SDK has no provider for the token exchange, so this one changes the SDK's provider of a static client assertion, and asks for a fresh token at each login:
 
    ```ts
    import { getVercelOidcToken } from '@vercel/oidc';
@@ -187,7 +187,7 @@ The workload posts a form to `/oauth/token` with `grant_type=urn:ietf:params:oau
    }
 
    const faucet = 'https://faucet.example.com';
-   const authProvider = tokenExchangeProvider('digest-bot', faucet, () => getVercelOidcToken({ audience: faucet }));
+   const authProvider = tokenExchangeProvider('digest-bot', faucet, () => getVercelOidcToken({ audience: faucet, skipCache: true }));
    const client = new Client({ name: 'digest-bot', version: '1' });
    await client.connect(new StreamableHTTPClientTransport(new URL(`${faucet}/github/mcp`), { authProvider }));
    ```
@@ -235,6 +235,6 @@ After the team is renamed, its tokens name a new issuer, and the rule matches no
      -claim sub=system:serviceaccount:apps:digest-bot -jwks-file cluster-jwks.json
    ```
 
-   Anyone who can run a pod as that service account in that namespace can log in as the client.
+   Anyone who can run a pod as that service account in that namespace can log in as the client, and so can anyone allowed to create `serviceaccounts/token` for it, with no pod: `kubectl create token digest-bot -n apps --audience https://faucet.example.com --duration 24h`. Faucet asks the cluster nothing about a token (no TokenReview), so such a token logs in until it expires, after its pod or its service account is gone. Faucet takes no subject token that lives more than 24 hours, and `faucet clients untrust` or `disable` cuts one off sooner.
 
 3. Log in with the provider of the Vercel example, with `() => readFile('/var/run/secrets/faucet/token', 'utf8')` from `node:fs/promises` as the token, or post the form with any other client.

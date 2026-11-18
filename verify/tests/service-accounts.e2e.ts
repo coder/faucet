@@ -140,23 +140,28 @@ describe('service accounts', () => {
       expect(untrusted.code, untrusted.stderr).toBe(0);
       const fresh = issuer.sign({ sub, aud: [started.baseUrl] });
       subjects.push(fresh);
-      const refused = await started.request('/oauth/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
-          client_id: 'pod-agent',
-          subject_token: fresh,
-          subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
-        }).toString(),
-      });
+      const exchange = (clientId: string) =>
+        started.request('/oauth/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+            client_id: clientId,
+            subject_token: fresh,
+            subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+          }).toString(),
+        });
+      const refused = await exchange('pod-agent');
       expect(refused.status, refused.body).toBe(400);
       expect(refused.headers.get('www-authenticate'), 'the client sends no Authorization header').toBeNull();
       expect(JSON.parse(refused.body), 'the answer tells the caller nothing about the client').toEqual({
         error: 'invalid_client',
         error_description: "the client takes no such subject token: check client_id and the token, and faucet's log for the reason",
       });
+      const unknown = await exchange('no-such-agent');
+      expect([unknown.status, unknown.body], 'an unknown client gets the same answer').toEqual([refused.status, refused.body]);
       expect(output()).toContain('the client trusts no workload issuer: add one with faucet clients trust');
+      expect(output()).toContain('no client has this ID');
 
       for (const secret of [...subjects, token]) expect(output()).not.toContain(secret);
       expect(started.leaksSecret(output())).toBe(false);
