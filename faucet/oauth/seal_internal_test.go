@@ -2,6 +2,8 @@ package oauth
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/base64"
 	"fmt"
 	"strings"
@@ -319,4 +321,30 @@ func TestASealedRequestOpensOnlyForItsRequestAndBrowser(t *testing.T) {
 		_, err := open()
 		require.ErrorIs(t, err, ErrUnreadableToken, name)
 	}
+}
+
+// The consent form is sealed under a key that is derived for it from the
+// token key, so a GitHub token and a form share no key.
+func TestAConsentFormIsSealedUnderAKeyOfItsOwn(t *testing.T) {
+	t.Parallel()
+	k := mustParseTokenKeys(t, keyEntry("k1", 0xa0))
+	now := time.Now().UTC()
+	r := AuthRequest{
+		ID: "req-1", State: AuthRequestPending, ClientID: "https://agent.example.com/client.json", RedirectURI: "http://127.0.0.1:1/cb",
+		Resource: "https://faucet.example.com/github/mcp", Scopes: []faucet.Scope{faucet.ScopeEventsRead}, CodeChallenge: "challenge",
+		BrowserHash: HashToken("browser"), CreatedAt: now, ExpiresAt: now.Add(authRequestLifetime),
+	}
+	sealed, err := k.sealRequest(r)
+	require.NoError(t, err)
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(sealed, "k1."))
+	require.NoError(t, err)
+
+	block, err := aes.NewCipher(keyBytes(0xa0))
+	require.NoError(t, err)
+	tokenKey, err := cipher.NewGCMWithRandomNonce(block)
+	require.NoError(t, err)
+	_, err = tokenKey.Open(nil, nil, raw[1:], requestAAD(r.ID, r.BrowserHash))
+	require.Error(t, err, "the key of the GitHub tokens does not open a form")
+	_, err = k.openRequest(sealed, r.ID, r.BrowserHash)
+	require.NoError(t, err)
 }
