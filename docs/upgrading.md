@@ -17,7 +17,8 @@ This came in [#55](https://github.com/coder/faucet/pull/55). A service can now r
   - It refuses the renewal, poll or wait of an owner or all target as invalid arguments, so a subscription whose renewals reach only such instances expires.
 - **Redelivery asks again for more.** An owner or all interest wants every failed delivery of its raw event, whatever the repository, because GitHub's list of deliveries names no owner.
 - **A host that embeds faucet** turns owner and all targets on for services with `Deps.ServiceGrants`, which `oauth.ServiceAccess` implements. Without it faucet refuses them. `Subscription`, `PollQuery`, `ScanTarget`, `DeliveryClaim` and the raw lease, read, claim and want types hold a `Target` in place of `RepoID`.
-- **A `Store` or `RawStore` of your own** must pass the new `storetest` subtests, `RecordOwner` and `OwnerByLogin` among them.
+- **A host that embeds faucet and sets `Deps.RecordRepositories`** must now also set `Deps.Redelivered`, or `New` refuses: pass `pgstore.Store.Redelivered`, or a func that answers false when the host runs no redelivery. A delivery that it reports moves no login. There is no default, because a func that always answered false would let the host's own redeliveries give renamed accounts their old logins back, and one that always answered true would keep every login as first seen.
+- **A `Store` or `RawStore` of your own** must pass the new `storetest` subtests. `Store` gains `RecordOwner`, `AddOwner`, `OwnerByID` and `OwnerByLogin`; `RecordRepository` and `RenameRepository` no longer record the owner's login, which the webhook records first; and `RenameRepository` also matches `from` under the login that the row's owner holds now.
 
 ## To the browser login (migration `000013_browser_login`)
 
