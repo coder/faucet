@@ -14,7 +14,7 @@ An agent that subscribes and then goes quiet through a purge learns that it miss
 
 ## Driving it with e2e
 
-`tests/envelopes.e2e.ts`, on a faucet that the test starts with `withDeliveryFaucet`, so that the purge mark is its own. A gap test subscribes, stores two events and ages them with `faucet.backdate(deliveryId, 40)`, runs `cronJob('purge')`, stores a fresh event, then runs `cronJob('deliver')`. A terminated test calls `receiver.revoke(repoId)` and renews with the same params. `envelopeRequests(receiver, at, type)` returns the envelopes of one type, and `expectSignedEnvelope` checks what each owes the receiver.
+`tests/envelopes.e2e.ts`, on a faucet that the test starts with `withDeliveryFaucet`, so that the purge mark is its own. A gap test subscribes, stores two events and ages them with `faucet.backdate(deliveryId, 40)`, runs `cronJob('purge')`, stores a fresh event, then runs `cronJob('deliver')`. A terminated test runs on a delivery faucet with the browser login and subscribes as the person (`started.as('person')`), whose access the stub decides, then calls `receiver.revoke(repoId)` and renews with the same params. `envelopeRequests(receiver, at, type)` returns the envelopes of one type, and `expectSignedEnvelope` checks what each owes the receiver.
 
 ## Proof
 

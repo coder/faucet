@@ -180,11 +180,11 @@ func UserResolver(store Store) SubjectResolver {
 }
 
 // RepoChecker asks GitHub whether the principal's own token can read a
-// repository. Every faucet.Authorizer is one, faucet.TokenAuthorizer and
-// *faucet.AccessCache among them. The access check calls only RepoIDFresh,
-// which must ask GitHub at that call: an access check counts from the start
-// of its lookup, and an answer that GitHub gave before that start could
-// count for a session that refreshed after GitHub last answered.
+// repository. Every faucet.Authorizer is one, faucet.TokenAuthorizer among
+// them. The access check calls only RepoIDFresh, which must ask GitHub at
+// that call: an access check counts from the start of its lookup, and an
+// answer that GitHub gave before that start could count for a session that
+// refreshed after GitHub last answered.
 type RepoChecker interface {
 	RepoIDFresh(ctx context.Context, p faucet.Principal, repo string) (int64, error)
 }

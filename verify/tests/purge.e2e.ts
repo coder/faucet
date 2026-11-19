@@ -16,6 +16,11 @@ interface PurgeReply {
   raw_events_deleted: number;
   expired_leases: number;
   raw_failures: number;
+  expired_access_tokens: number;
+  expired_auth_requests: number;
+  ended_sessions: number;
+  unused_connections: number;
+  unused_access_checks: number;
 }
 
 interface PollResult {
@@ -64,6 +69,10 @@ async function retentionOracle(faucet: Faucet): Promise<PurgeReply> {
   // No test stores a raw event or opens a poll lease on this faucet, so a purge finds none. tests/raw-events.e2e.ts
   // covers what a purge does to them, on a faucet of its own.
   expect(await faucet.sql('select (select count(*) from faucet_raw_events) + (select count(*) from faucet_raw_leases)')).toBe('0');
+  // This faucet has no browser login, so it holds no login request, session, connection or access check.
+  expect(await faucet.sql(`select (select count(*) from faucet_auth_requests) + (select count(*) from faucet_user_sessions)
+    + (select count(*) from faucet_connections) + (select count(*) from faucet_access_checks)`)).toBe('0');
+  const expiredTokens = Number(await faucet.sql('select count(*) from faucet_access_tokens where expires_at <= now()'));
   return {
     deleted,
     purged_through: Math.max(highest, await faucet.purgeMark()),
@@ -73,6 +82,11 @@ async function retentionOracle(faucet: Faucet): Promise<PurgeReply> {
     raw_events_deleted: 0,
     expired_leases: 0,
     raw_failures: 0,
+    expired_access_tokens: expiredTokens,
+    expired_auth_requests: 0,
+    ended_sessions: 0,
+    unused_connections: 0,
+    unused_access_checks: 0,
   };
 }
 
@@ -108,6 +122,11 @@ describe('purge', () => {
       raw_events_deleted: 0,
       expired_leases: 0,
       raw_failures: 0,
+      expired_access_tokens: 0,
+      expired_auth_requests: 0,
+      ended_sessions: 0,
+      unused_connections: 0,
+      unused_access_checks: 0,
     });
   });
 

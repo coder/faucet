@@ -9,7 +9,8 @@ import (
 // On Vercel production, faucet's public URL defaults to the production URL
 // that Vercel gives. A preview or a development deployment never takes it,
 // because Vercel sets the variable there too, nor a process without VERCEL,
-// and an explicit FAUCET_PUBLIC_URL always wins.
+// so the server refuses to start there without FAUCET_PUBLIC_URL. An
+// explicit FAUCET_PUBLIC_URL always wins.
 func TestOnVercelProductionThePublicURLDefaultsToTheProductionURL(t *testing.T) {
 	t.Parallel()
 	const production = "faucet.example.com"
@@ -34,13 +35,12 @@ func TestOnVercelProductionThePublicURLDefaultsToTheProductionURL(t *testing.T) 
 		},
 	} {
 		cfg, err := loadWith(c.env)
-		require.NoError(t, err, name)
 		if c.want == "" {
-			require.Nil(t, cfg.publicURL, name)
-		} else {
-			require.NotNil(t, cfg.publicURL, name)
-			require.Equal(t, c.want, cfg.publicURL.String(), name)
+			require.ErrorContains(t, err, envPublicURL+" is required", name)
+			continue
 		}
+		require.NoError(t, err, name)
+		require.Equal(t, c.want, cfg.publicURL.String(), name)
 		require.Equal(t, c.derived, cfg.publicURLDerived, name)
 	}
 

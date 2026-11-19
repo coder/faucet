@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -22,16 +25,22 @@ import (
 	"cdr.dev/slog/v3"
 	"cdr.dev/slog/v3/sloggers/sloghuman"
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/oauth"
 	"github.com/coder/quartz"
 )
 
 const (
 	testSecret  = "whsec-test-0123456789abcdef"
-	aliceToken  = "ghp_alice0123456789abcdefghijklmnopqrstu"
-	bobToken    = "ghp_bobby0123456789abcdefghijklmnopqrstu"
-	staleToken  = "ghp_stale0123456789abcdefghijklmnopqrstu"
 	testTimeout = 30 * time.Second
+	testOrigin  = "https://faucet.example.com"
+	// aliceClient and bobClient are services that newTestServer knows. Alice
+	// can read o/r, bob reads nothing, and nobody can read o/hidden.
+	aliceClient = "alice"
+	bobClient   = "bob"
 )
+
+// testGrants are the grants of the services that newTestServer knows.
+var testGrants = map[string][]string{aliceClient: {"repo:o/r"}, "ci-bot": {"repo:o/r"}}
 
 type syncBuffer struct {
 	mu  sync.Mutex
@@ -48,57 +57,6 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
-}
-
-type githubStub struct {
-	*httptest.Server
-	mu         sync.Mutex
-	requests   []string
-	auth       []string
-	userErr    int
-	userHeader http.Header
-	// revoked makes GitHub deny alice o/r.
-	revoked bool
-}
-
-// newGitHubStub knows alice and bob. Alice can read o/r and nobody can see
-// o/hidden.
-func newGitHubStub(t *testing.T) *githubStub {
-	t.Helper()
-	stub := &githubStub{}
-	stub.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		stub.mu.Lock()
-		stub.requests = append(stub.requests, r.URL.Path)
-		stub.auth = append(stub.auth, r.Header.Get("Authorization"))
-		userErr, userHeader, revoked := stub.userErr, stub.userHeader, stub.revoked
-		stub.mu.Unlock()
-
-		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		login := map[string]string{aliceToken: "alice", bobToken: "bob"}[token]
-		switch {
-		case r.URL.Path == "/user" && userErr != 0:
-			for name, values := range userHeader {
-				w.Header()[name] = values
-			}
-			w.WriteHeader(userErr)
-		case login == "":
-			w.WriteHeader(http.StatusUnauthorized)
-		case r.URL.Path == "/user":
-			_, _ = fmt.Fprintf(w, `{"login": %q}`, login)
-		case r.URL.Path == "/repos/o/r" && login == "alice" && !revoked:
-			_, _ = fmt.Fprint(w, `{"id": 42}`)
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	t.Cleanup(stub.Close)
-	return stub
-}
-
-func (s *githubStub) seen() (paths, auth []string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.requests...), append([]string(nil), s.auth...)
 }
 
 type stubStore struct {
@@ -127,42 +85,184 @@ func (s *stubStore) pollCount() int {
 	return s.polls
 }
 
+// memTokens is the store of faucet's login server, in memory: it holds the
+// access tokens that a test issues and purges nothing.
+type memTokens struct {
+	oauth.Store
+	mu     sync.Mutex
+	tokens map[oauth.TokenHash]oauth.AccessToken
+	err    error
+}
+
+func newMemTokens() *memTokens { return &memTokens{tokens: map[oauth.TokenHash]oauth.AccessToken{}} }
+
+func (m *memTokens) InsertAccessToken(_ context.Context, t oauth.AccessToken) error {
+	if err := t.Validate(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tokens[t.Hash] = t
+	return nil
+}
+
+func (m *memTokens) AccessToken(_ context.Context, hash oauth.TokenHash) (oauth.AccessToken, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return oauth.AccessToken{}, m.err
+	}
+	t, ok := m.tokens[hash]
+	if !ok {
+		return oauth.AccessToken{}, oauth.ErrUnknownToken
+	}
+	return t, nil
+}
+
+func (*memTokens) DeleteExpiredAccessTokens(context.Context, time.Time) (int64, error) { return 0, nil }
+
+func (*memTokens) DeleteExpiredAuthRequests(context.Context, time.Time, time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (*memTokens) DeleteEndedSessions(context.Context, time.Time, time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (*memTokens) DeleteUnusedAccessChecks(context.Context, time.Time, time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (*memTokens) DeleteUnusedConnections(context.Context, time.Time) (int64, error) { return 0, nil }
+
+// newMemLogin is faucet's login server for testOrigin over tokens, with no
+// browser login, and the bearer check of its endpoints.
+func newMemLogin(t *testing.T, tokens *memTokens, clock quartz.Clock, subjects map[oauth.SubjectKind]oauth.SubjectResolver, logger slog.Logger) (bearers, *oauth.Server) {
+	t.Helper()
+	verifier, err := oauth.NewVerifier(tokens, clock, subjects)
+	require.NoError(t, err)
+	b, err := newBearers(verifier, testOrigin)
+	require.NoError(t, err)
+	login, err := oauth.NewServer(oauth.ServerDeps{
+		Store: tokens, Clock: clock, Logger: logger, Issuer: testOrigin, Resources: []string{b.resource("/github/mcp"), b.resource("/mcp")},
+	})
+	require.NoError(t, err)
+	return b, login
+}
+
+// grantChecks answers for a service from its grants, with no GitHub call: a
+// grant repo:o/r reads o/r, whose ID is 42. It denies every other principal.
+type grantChecks struct{}
+
+func (grantChecks) RepoID(_ context.Context, p faucet.Principal, repo string) (int64, error) {
+	if client, ok := p.ServiceClient(); ok && slices.Contains(client.Grants, "repo:"+repo) {
+		return 42, nil
+	}
+	return 0, faucet.ErrNoAccess
+}
+
+func (g grantChecks) RepoIDFresh(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
+	return g.RepoID(ctx, p, repo)
+}
+
 type testServer struct {
 	*httptest.Server
-	github *githubStub
 	store  *stubStore
+	tokens *memTokens
 	clock  *quartz.Mock
 	logs   *syncBuffer
 	// mcpPath is the MCP endpoint that the test's clients call.
 	mcpPath string
 }
 
-func newTestServer(t *testing.T, configure ...func(*httptest.Server)) *testServer {
+// testServerConfig is what newTestServer builds the server from. A test
+// changes it before the server starts.
+type testServerConfig struct {
+	clock    *quartz.Mock
+	authz    faucet.Authorizer
+	subjects map[oauth.SubjectKind]oauth.SubjectResolver
+	webhook  *faucet.WebhookDeps
+	// writeTimeout, when set, replaces the server's write deadline.
+	writeTimeout time.Duration
+}
+
+// newTestServer serves faucet with its login server for testOrigin, over a
+// store of one event of o/r and access tokens in memory. By default a token's
+// subject is a service with the grants that testGrants gives it, checked by
+// grantChecks.
+func newTestServer(t *testing.T, configure ...func(*testServerConfig)) *testServer {
 	t.Helper()
-	github := newGitHubStub(t)
 	store := &stubStore{events: []faucet.Event{{
 		ID: 8, Source: "github", DeliveryID: "d", Type: "ci.run_completed", RepoID: 42,
 		PRs: []int32{3}, HeadSHA: strings.Repeat("a", 40), Data: json.RawMessage(`{"conclusion":"success"}`),
 		ReceivedAt: time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC),
 	}}}
-	clock := quartz.NewMock(t)
 	logs := &syncBuffer{}
 	logger := slog.Make(sloghuman.Sink(logs)).Leveled(slog.LevelDebug)
 
-	authz := faucet.TokenAuthorizer{BaseURL: github.URL, Client: github.Client()}
+	cfg := testServerConfig{
+		clock: quartz.NewMock(t),
+		authz: grantChecks{},
+		subjects: map[oauth.SubjectKind]oauth.SubjectResolver{
+			oauth.SubjectService: func(_ context.Context, id string, scopes []faucet.Scope) (faucet.Principal, error) {
+				return faucet.NewService(faucet.ServiceClient{ClientID: id, Grants: testGrants[id]}, scopes)
+			},
+		},
+	}
+	for _, c := range configure {
+		c(&cfg)
+	}
 	svc, err := faucet.New(faucet.Deps{
 		Store: store, Secret: []byte(testSecret), Logger: logger,
-		Authorizer: authz, PrincipalFrom: principalFrom, Clock: clock,
+		Authorizer: cfg.authz, PrincipalFrom: principalFrom, Clock: cfg.clock, Webhook: cfg.webhook,
 	})
 	require.NoError(t, err)
+	tokens := newMemTokens()
+	b, login := newMemLogin(t, tokens, cfg.clock, cfg.subjects, logger)
 
-	srv := httptest.NewUnstartedServer(newRouter(svc, bearers{github: authz}, nil, cronRoutes{}, logger))
-	for _, c := range configure {
-		c(srv)
+	srv := httptest.NewUnstartedServer(newRouter(svc, b, login, cronRoutes{}, logger))
+	if cfg.writeTimeout != 0 {
+		srv.Config.WriteTimeout = cfg.writeTimeout
 	}
 	srv.Start()
-	t.Cleanup(func() { closeServer(srv, clock) })
-	return &testServer{Server: srv, github: github, store: store, clock: clock, logs: logs, mcpPath: "/github/mcp"}
+	t.Cleanup(func() { closeServer(srv, cfg.clock) })
+	return &testServer{Server: srv, store: store, tokens: tokens, clock: cfg.clock, logs: logs, mcpPath: "/github/mcp"}
+}
+
+// issue stores an access token of the service ci-bot for the endpoint at
+// s.mcpPath that expires in 15 minutes.
+func (s *testServer) issue(t *testing.T, scopes []faucet.Scope, mutate ...func(*oauth.AccessToken)) string {
+	t.Helper()
+	token := newFaucetToken(t, "fct_")
+	at := oauth.AccessToken{
+		Hash: oauth.HashToken(token), ExpiresAt: s.clock.Now().Add(15 * time.Minute), Scopes: scopes,
+		Resource: testOrigin + s.mcpPath, SubjectKind: oauth.SubjectService, Subject: "ci-bot",
+	}
+	for _, m := range mutate {
+		m(&at)
+	}
+	require.NoError(t, s.tokens.InsertAccessToken(context.Background(), at))
+	return token
+}
+
+// token issues an access token of the service client, with both scopes, for
+// the endpoint at s.mcpPath.
+func (s *testServer) token(t *testing.T, client string) string {
+	t.Helper()
+	return s.issue(t, bothScopes, func(at *oauth.AccessToken) { at.Subject = client })
+}
+
+func newFaucetToken(t *testing.T, prefix string) string {
+	t.Helper()
+	b := make([]byte, 32)
+	_, err := rand.Read(b)
+	require.NoError(t, err)
+	return prefix + base64.RawURLEncoding.EncodeToString(b)
+}
+
+// challenge is the WWW-Authenticate of a 401 from the endpoint at s.mcpPath.
+func (s *testServer) challenge() string {
+	return `Bearer resource_metadata="` + testOrigin + `/.well-known/oauth-protected-resource` + s.mcpPath + `", scope="events:read events:subscribe"`
 }
 
 // closeServer closes srv and fires the pending timers of clock one at a time
@@ -184,15 +284,6 @@ func closeServer(srv *httptest.Server, clock *quartz.Mock) {
 				_, advanced := clock.AdvanceNext()
 				<-advanced.Done()
 			}
-		}
-	}
-}
-
-func (s *testServer) requireNoToken(t *testing.T, what string, texts ...string) {
-	t.Helper()
-	for _, token := range []string{aliceToken, bobToken, staleToken} {
-		for _, text := range append(texts, s.logs.String()) {
-			require.Zero(t, strings.Count(text, token), "a token appears in %s", what)
 		}
 	}
 }
@@ -267,75 +358,18 @@ func TestMCPRejectsRequestsWithoutAGoodBearerToken(t *testing.T) {
 
 			srv := newTestServer(t)
 			srv.mcpPath = path
-			malformed := []string{
-				"", "Basic YWxpY2U6c2VjcmV0", "Bearer", "Bearer ", "Bearer two tokens", "Token " + aliceToken,
-				"Bearer " + strings.Repeat("a", 1025),
+			refused := []string{
+				"", "Basic YWxpY2U6c2VjcmV0", "Bearer", "Bearer ", "Bearer two tokens", "Token " + srv.token(t, aliceClient),
+				"Bearer " + strings.Repeat("a", 1025), "Bearer ghp_alice0123456789abcdefghijklmnopqrstu", "Bearer " + newFaucetToken(t, "fct_"),
 			}
-			for _, header := range malformed {
+			for _, header := range refused {
 				status, challenge, body := rawPost(t, srv, header)
-				require.Equal(t, http.StatusUnauthorized, status, "%q", header)
-				require.Equal(t, "Bearer", challenge)
-				require.Equal(t, "unauthorized\n", body)
+				require.Equal(t, http.StatusUnauthorized, status, "%.12q", header)
+				require.Equal(t, srv.challenge(), challenge, "%.12q", header)
+				require.Equal(t, "unauthorized\n", body, "a token that does not verify reads like a malformed header")
 			}
-			paths, _ := srv.github.seen()
-			require.Empty(t, paths, "a malformed header must not reach GitHub")
-
-			status, _, body := rawPost(t, srv, "Bearer "+staleToken)
-			require.Equal(t, http.StatusUnauthorized, status)
-			require.Equal(t, "unauthorized\n", body, "GitHub's refusal looks like a malformed header")
-			paths, _ = srv.github.seen()
-			require.Equal(t, []string{"/user"}, paths)
-			srv.requireNoToken(t, "a response", body)
 		})
 	}
-}
-
-func TestMCPGitHubFailureIsABadGateway(t *testing.T) {
-	t.Parallel()
-
-	srv := newTestServer(t)
-	srv.github.mu.Lock()
-	srv.github.userErr = http.StatusInternalServerError
-	srv.github.mu.Unlock()
-
-	status, _, body := rawPost(t, srv, "Bearer "+aliceToken)
-	require.Equal(t, http.StatusBadGateway, status)
-	require.NotContains(t, body, "500")
-	srv.requireNoToken(t, "a response or the log", body)
-	require.Contains(t, srv.logs.String(), "could not check the GitHub token")
-}
-
-func TestMCPRateLimitedUserLookupIsABadGatewayNotAnInvalidToken(t *testing.T) {
-	t.Parallel()
-
-	for name, limited := range map[string]struct {
-		status int
-		header http.Header
-	}{
-		"429":                  {http.StatusTooManyRequests, nil},
-		"403 with no quota":    {http.StatusForbidden, http.Header{"X-Ratelimit-Remaining": {"0"}}},
-		"403 with Retry-After": {http.StatusForbidden, http.Header{"Retry-After": {"60"}}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			srv := newTestServer(t)
-			srv.github.mu.Lock()
-			srv.github.userErr, srv.github.userHeader = limited.status, limited.header
-			srv.github.mu.Unlock()
-
-			status, challenge, body := rawPost(t, srv, "Bearer "+aliceToken)
-			require.Equal(t, http.StatusBadGateway, status, "a token that GitHub could not check is not a rejected token")
-			require.Empty(t, challenge)
-			require.NotContains(t, body, "unauthorized")
-		})
-	}
-
-	srv := newTestServer(t)
-	srv.github.mu.Lock()
-	srv.github.userErr = http.StatusForbidden
-	srv.github.mu.Unlock()
-	status, _, _ := rawPost(t, srv, "Bearer "+aliceToken)
-	require.Equal(t, http.StatusUnauthorized, status, "a plain 403 is a refusal, so the same lookup without a rate limit sign stays a 401")
 }
 
 // TestMCPServesAPublicHostOnALoopbackListener models Vercel, whose runtime
@@ -348,7 +382,7 @@ func TestMCPServesAPublicHostOnALoopbackListener(t *testing.T) {
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+srv.mcpPath, strings.NewReader(body))
 	require.NoError(t, err)
 	req.Host = "faucet.example.com"
-	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	req.Header.Set("Authorization", "Bearer "+srv.token(t, aliceClient))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	resp, err := srv.Client().Do(req)
@@ -371,7 +405,8 @@ func TestMCPToolWaitsForAllowedRepoOverHTTP(t *testing.T) {
 			defer cancel()
 			srv := newTestServer(t)
 			srv.mcpPath = path
-			session := srv.connect(ctx, t, aliceToken)
+			token := srv.token(t, aliceClient)
+			session := srv.connect(ctx, t, token)
 
 			tools, err := session.ListTools(ctx, nil)
 			require.NoError(t, err)
@@ -385,14 +420,7 @@ func TestMCPToolWaitsForAllowedRepoOverHTTP(t *testing.T) {
 			require.Contains(t, text, `"type":"ci.run_completed"`)
 			require.Contains(t, text, `"repo_id":42`)
 			require.Contains(t, text, `"cursor":8`)
-
-			paths, auth := srv.github.seen()
-			require.Contains(t, paths, "/user")
-			require.Contains(t, paths, "/repos/o/r")
-			for _, a := range auth {
-				require.Equal(t, "Bearer "+aliceToken, a, "GitHub got the caller's own token")
-			}
-			srv.requireNoToken(t, "a result", text)
+			requireNoTokenPiece(t, text+srv.logs.String(), []string{token})
 		})
 	}
 }
@@ -404,7 +432,8 @@ func TestMCPToolDeniesARepoTheCallerCannotSee(t *testing.T) {
 	defer cancel()
 	srv := newTestServer(t)
 
-	bob := srv.connect(ctx, t, bobToken)
+	tokens := []string{srv.token(t, bobClient), srv.token(t, aliceClient)}
+	bob := srv.connect(ctx, t, tokens[0])
 	res, err := call(ctx, bob, "o/r", nil)
 	require.NoError(t, err)
 	require.True(t, res.IsError)
@@ -412,14 +441,14 @@ func TestMCPToolDeniesARepoTheCallerCannotSee(t *testing.T) {
 	require.Contains(t, denied, "not found or not accessible")
 	require.Nil(t, res.StructuredContent)
 
-	alice := srv.connect(ctx, t, aliceToken)
+	alice := srv.connect(ctx, t, tokens[1])
 	res, err = call(ctx, alice, "o/hidden", nil)
 	require.NoError(t, err)
 	require.True(t, res.IsError)
 	require.Equal(t, denied, toolText(t, res), "a repository alice cannot see reads like one that does not exist")
 
 	require.Zero(t, srv.store.pollCount(), "no events were read for a denied call")
-	srv.requireNoToken(t, "a denial", denied)
+	requireNoTokenPiece(t, denied+srv.logs.String(), tokens)
 }
 
 func TestMCPEachRequestUsesItsOwnPrincipal(t *testing.T) {
@@ -428,8 +457,8 @@ func TestMCPEachRequestUsesItsOwnPrincipal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	srv := newTestServer(t)
-	alice := srv.connect(ctx, t, aliceToken)
-	bob := srv.connect(ctx, t, bobToken)
+	alice := srv.connect(ctx, t, srv.token(t, aliceClient))
+	bob := srv.connect(ctx, t, srv.token(t, bobClient))
 
 	for range 3 {
 		res, err := call(ctx, alice, "o/r", nil)
@@ -448,7 +477,7 @@ func TestMCPWaitStopsWhenTheClientDisconnects(t *testing.T) {
 	defer cancel()
 	srv := newTestServer(t)
 	srv.store.events = nil
-	session := srv.connect(ctx, t, aliceToken)
+	session := srv.connect(ctx, t, srv.token(t, aliceClient))
 
 	timers := srv.clock.Trap().NewTimer()
 	defer timers.Close()
@@ -483,10 +512,10 @@ func TestMCPWaitOutlastsTheServerWriteTimeout(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 			defer cancel()
 			const serverWriteTimeout = 300 * time.Millisecond
-			srv := newTestServer(t, func(s *httptest.Server) { s.Config.WriteTimeout = serverWriteTimeout })
+			srv := newTestServer(t, func(c *testServerConfig) { c.writeTimeout = serverWriteTimeout })
 			srv.mcpPath = path
 			srv.store.events = nil
-			session := srv.connect(ctx, t, aliceToken)
+			session := srv.connect(ctx, t, srv.token(t, aliceClient))
 
 			timers := srv.clock.Trap().NewTimer()
 			defer timers.Close()
@@ -534,9 +563,6 @@ func TestHealthAndWebhookDoNotNeedABearerToken(t *testing.T) {
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	paths, _ := srv.github.seen()
-	require.Empty(t, paths)
 }
 
 func TestBearerToken(t *testing.T) {
@@ -566,6 +592,7 @@ func TestLoadConfigGitHubAPIURL(t *testing.T) {
 			return map[string]string{
 				envDatabaseURL: "postgres://localhost/faucet",
 				envSecret:      testSecret,
+				envPublicURL:   testOrigin,
 				envAPIURL:      url,
 			}[name]
 		}
@@ -606,6 +633,7 @@ func TestLoadConfigServesOverTheDatabaseURLAndMigratesOverTheDirectOne(t *testin
 				envDatabaseURL:         pooled,
 				envDatabaseURLUnpooled: unpooled,
 				envSecret:              testSecret,
+				envPublicURL:           testOrigin,
 			}[name]
 		})
 	}

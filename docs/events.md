@@ -40,7 +40,7 @@ The arguments of the wait tool, `events/poll`, `events/subscribe` and `events/un
 - `owner`, a GitHub login: every repository of that user or organization, also one it makes later.
 - `all: true`: every repository that faucet receives deliveries from.
 
-**`owner` and `all` are for [service clients](service-accounts.md#grants) only.** Any other caller, one with a GitHub token or an OAuth user, gets `Forbidden` (-32024) from `events/poll` and `events/subscribe`, and an error result from the wait tool, which tells it to name one repository with `repo`. A service needs a grant that covers the target.
+**`owner` and `all` are for [service clients](service-accounts.md#grants) only.** Any other caller, a user of the [browser login](browser-login.md), gets `Forbidden` (-32024) from `events/poll` and `events/subscribe`, and an error result from the wait tool, which tells it to name one repository with `repo`. A service needs a grant that covers the target.
 
 With `owner` or `all`, `repos` (a list of `owner/name`) keeps the events of those repositories only. It matches the full name that each delivery carried, ignoring case, and with `owner` each entry must be a repository of that owner.
 

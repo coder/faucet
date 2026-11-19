@@ -298,19 +298,15 @@ describe('browser login', () => {
   });
 
   test('without the browser login there is no GitHub callback, and the metadata offers no authorization code', async ({ faucet }) => {
-    const main = await faucet.request('/oauth/github/callback?state=s&code=c');
-    const publicOnly = await faucet.withFaucet({}, async (started) => ({
-      callback: (await started.request('/oauth/github/callback?state=s&code=c')).status,
-      metadata: JSON.parse((await started.request('/.well-known/oauth-authorization-server')).body) as Record<string, unknown>,
-    }), { publicUrl: true });
+    const callback = await faucet.request('/oauth/github/callback?state=s&code=c');
+    const metadata = JSON.parse((await faucet.request('/.well-known/oauth-authorization-server')).body) as Record<string, unknown>;
     const withLogin = await faucet.withFaucet({}, async (started) => (
       JSON.parse((await started.request('/.well-known/oauth-authorization-server')).body) as Record<string, unknown>
     ), { browserLogin: true });
 
-    expect(main.status).toBe(404);
-    expect(publicOnly.callback).toBe(404);
-    expect(publicOnly.metadata.grant_types_supported).toEqual(['client_credentials', 'urn:ietf:params:oauth:grant-type:token-exchange']);
-    expect(publicOnly.metadata).not.toHaveProperty('client_id_metadata_document_supported');
+    expect(callback.status).toBe(404);
+    expect(metadata.grant_types_supported).toEqual(['client_credentials', 'urn:ietf:params:oauth:grant-type:token-exchange']);
+    expect(metadata).not.toHaveProperty('client_id_metadata_document_supported');
     expect(withLogin).toMatchObject({
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code', 'client_credentials', 'refresh_token', 'urn:ietf:params:oauth:grant-type:token-exchange'],

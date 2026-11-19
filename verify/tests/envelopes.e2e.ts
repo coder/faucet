@@ -114,19 +114,21 @@ describe('control envelopes', () => {
     });
   });
 
+  // GitHub decides what the person reads, so the person loses access to a repository when the stub stops answering for it.
   test('a renewal that lost access sends one signed terminated envelope and ends the subscription, and one that kept access sends none', async ({ faucet, receiver }) => {
     await withDeliveryFaucet(faucet, async (started, output) => {
+      const person = started.as('person');
       const repoId = newRepoId();
       const at = await endpoint(receiver, 'ok');
       const params = paramsFor(repoId, at);
-      const subscription = await subscribed(started, params);
+      const subscription = await subscribed(person, params);
 
-      await subscribed(started, params);
+      await subscribed(person, params);
       expect(await envelopeRequests(receiver, at, 'terminated'), 'a renewal with access sends nothing').toEqual([]);
       expect(await started.subscriptions(at.id)).toHaveLength(1);
 
       await receiver.revoke(repoId);
-      const refused = await subscribe(started, params);
+      const refused = await subscribe(person, params);
       expect(refused.error?.code, 'the renewal gets the Forbidden of a denied subscribe').toBe(-32024);
 
       const envelopes = await envelopeRequests(receiver, at, 'terminated');
@@ -135,35 +137,36 @@ describe('control envelopes', () => {
       expect(JSON.parse(envelopes[0]!.body)).toEqual(TERMINATED);
       expect(await started.subscriptions(at.id), 'the subscription is gone').toEqual([]);
 
-      expect((await subscribe(started, params)).error?.code).toBe(-32024);
+      expect((await subscribe(person, params)).error?.code).toBe(-32024);
       expect(await envelopeRequests(receiver, at, 'terminated'), 'a second renewal finds nothing to end').toHaveLength(1);
       expect(await deliverDue(started), 'nothing is left to deliver').toEqual(counts());
       expect(occurrences(output(), 'the terminated envelope was sent')).toBe(1);
       expect(started.leaksSecret(output())).toBe(false);
       expect(output()).not.toContain(at.token);
-    });
+    }, { browserLogin: true });
   });
 
-  test('a first subscribe to a repository the token cannot read sends nothing, and a terminated envelope that is refused is not retried', async ({ faucet, receiver }) => {
+  test('a first subscribe to a repository the person cannot read sends nothing, and a terminated envelope that is refused is not retried', async ({ faucet, receiver }) => {
     await withDeliveryFaucet(faucet, async (started, output) => {
+      const person = started.as('person');
       const repoId = newRepoId();
       const at = await endpoint(receiver, 'ok');
       await receiver.revoke(repoId);
-      expect((await subscribe(started, paramsFor(repoId, at))).error?.code).toBe(-32024);
+      expect((await subscribe(person, paramsFor(repoId, at))).error?.code).toBe(-32024);
       expect(await envelopeRequests(receiver, at, 'terminated'), 'there was no subscription to end').toEqual([]);
 
       const failing = await endpoint(receiver, 'fail500');
       const otherRepoId = newRepoId();
       const params = paramsFor(otherRepoId, failing);
-      await subscribed(started, params);
+      await subscribed(person, params);
       await receiver.revoke(otherRepoId);
-      expect((await subscribe(started, params)).error?.code).toBe(-32024);
-      expect((await subscribe(started, params)).error?.code).toBe(-32024);
+      expect((await subscribe(person, params)).error?.code).toBe(-32024);
+      expect((await subscribe(person, params)).error?.code).toBe(-32024);
 
       expect(await envelopeRequests(receiver, failing, 'terminated'), 'one attempt').toHaveLength(1);
       expect(await started.subscriptions(failing.id), 'the subscription is gone although the envelope was refused').toEqual([]);
       expect(output().match(/terminated envelope was not delivered.*reason=http_5xx/g)).toHaveLength(1);
       expect(started.leaksSecret(output())).toBe(false);
-    });
+    }, { browserLogin: true });
   });
 });

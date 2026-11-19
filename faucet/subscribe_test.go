@@ -1202,32 +1202,53 @@ func TestSubscribeChecksRepositoryAccessAgainOnEveryRenewal(t *testing.T) {
 	require.Greater(t, d.rows()[0].ExpiresAt, granted[0].ExpiresAt, "with access back, the subscribe is granted again")
 }
 
-// authenticating gives an Authorizer the step of resolving a token that
-// AccessCache wraps.
-type authenticating struct{ faucet.Authorizer }
-
-func (authenticating) Authenticate(_ context.Context, token string) (faucet.Principal, error) {
-	return faucet.NewPrincipal("octocat", token)
+// remembering answers RepoID with the first grant that its Authorizer gave
+// for a repository, as an Authorizer that remembers answers does, and asks
+// its Authorizer at every RepoIDFresh.
+type remembering struct {
+	faucet.Authorizer
+	mu      sync.Mutex
+	granted map[string]int64
 }
 
-func TestSubscribeRenewalChecksAccessAgainWhateverTheAccessCacheRemembers(t *testing.T) {
+func newRemembering(a faucet.Authorizer) *remembering {
+	return &remembering{Authorizer: a, granted: map[string]int64{}}
+}
+
+func (r *remembering) RepoID(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
+	r.mu.Lock()
+	id, ok := r.granted[repo]
+	r.mu.Unlock()
+	if ok {
+		return id, nil
+	}
+	id, err := r.Authorizer.RepoID(ctx, p, repo)
+	if err == nil {
+		r.mu.Lock()
+		r.granted[repo] = id
+		r.mu.Unlock()
+	}
+	return id, err
+}
+
+func TestSubscribeRenewalChecksAccessAgainWhateverTheAuthorizerRemembers(t *testing.T) {
 	t.Parallel()
 
 	d := newDeliverHarness(t, func(deps *faucet.Deps) {
-		deps.Authorizer = faucet.NewAccessCache(authenticating{deps.Authorizer}, deps.Clock)
+		deps.Authorizer = newRemembering(deps.Authorizer)
 	})
 	ep := d.endpoint("/hook")
 	d.subscribeEndpoint(ep)
 
 	d.revoke()
 	rpcErr := d.subscribeError(d.renewalParams(ep, newSecret(t, 32)))
-	require.EqualValues(t, codeForbidden, rpcErr.Code, "the cache holds the first grant for a minute, and a renewal asks GitHub anyway")
+	require.EqualValues(t, codeForbidden, rpcErr.Code, "the Authorizer holds the first grant, and a renewal asks again anyway")
 	require.Empty(t, d.rows())
 }
 
 // perKind sends each principal to the Authorizer of its kind, as a host that
-// takes several kinds of callers composes them. Every principal here sent a
-// GitHub token.
+// takes several kinds of callers composes them. Every principal here is of
+// one kind.
 type perKind struct{ token faucet.Authorizer }
 
 func (k perKind) RepoID(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
@@ -1242,14 +1263,14 @@ func TestSubscribeRenewalChecksAccessAgainBehindAnAuthorizerPerKind(t *testing.T
 	t.Parallel()
 
 	d := newDeliverHarness(t, func(deps *faucet.Deps) {
-		deps.Authorizer = perKind{token: faucet.NewAccessCache(authenticating{deps.Authorizer}, deps.Clock)}
+		deps.Authorizer = perKind{token: newRemembering(deps.Authorizer)}
 	})
 	ep := d.endpoint("/hook")
 	d.subscribeEndpoint(ep)
 
 	d.revoke()
 	rpcErr := d.subscribeError(d.renewalParams(ep, newSecret(t, 32)))
-	require.EqualValues(t, codeForbidden, rpcErr.Code, "the cache behind the composed Authorizer holds the first grant, and a renewal asks GitHub anyway")
+	require.EqualValues(t, codeForbidden, rpcErr.Code, "the Authorizer behind the composed one holds the first grant, and a renewal asks again anyway")
 	require.Empty(t, d.rows())
 }
 

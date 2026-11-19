@@ -4,7 +4,7 @@ An agent finds out which events faucet offers through `server/discover` and `eve
 
 ## Sub-features
 
-- A bearer token that GitHub accepts is required. No header, a malformed header, or a token GitHub refuses is 401 with the body `unauthorized` and `WWW-Authenticate: Bearer`. The reply does not depend on which repositories the token can read.
+- A token that faucet minted for `/github/mcp` is required. No header, a malformed header, a token that faucet did not mint, or a GitHub token is 401 with the body `unauthorized` and the challenge `Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource/github/mcp", scope="events:read events:subscribe"`. The reply does not depend on which repositories the principal can read.
 - `server/discover` advertises the extension: `capabilities.extensions["io.modelcontextprotocol/events"]` is `{"listChanged": false}`.
 - `events/list` returns `resultType` `complete` and `events`: fifteen typed descriptors, then the raw names that `FAUCET_RAW_EVENTS` lists (see [Raw events](raw-events.md)) in rising order, and none while it is unset. The typed ones are the families `ci.runs`, `ci.jobs`, `ci.checks`, `ci.suites`, `ci.statuses`, `pr.activity`, `pr.reviews`, `pr.comments`, `pr.review_comments` and `pr.review_threads`, then the exact types `ci.check_completed`, `ci.run_completed`, `pr.closed`, `pr.comment_created` and `pr.review_submitted`. See **Event names** in the README.
 - A descriptor has `name`, `description`, `delivery` (the same list for every descriptor: `["poll", "webhook"]` when webhook mode is on, which the main faucet has, and `["poll"]` when it is off), `inputSchema` and `payloadSchema`. Both schemas are JSON Schema objects. `inputSchema` says what the `arguments` of `events/poll` take: a target (`repo`, `owner`, `all` and `repos`, with no required field, since a caller names exactly one of the first three), `sha` and `pr`, and for a family `actions` (a non-empty list from the enum of its GitHub actions) and the [field filters](field-filters.md) whose field its data has, except that `pr.comments` and `pr.comment_created` have no `sha`, and `ci.jobs` and `ci.statuses` have no `pr`. `payloadSchema` says what the `data` of an event holds: `prs`, `head_sha` (not for `pr.comments` and `pr.comment_created`, which have none), `event` (the exact type), `action` and the fields of that type. A family requires `prs`, `event` and `action` only, and an exact type requires the fields it required before families, with `event` and `action` optional.
@@ -14,7 +14,7 @@ An agent finds out which events faucet offers through `server/discover` and `eve
 
 ## How to get to it (user POV)
 
-An agent's MCP client sends `server/discover`, then `events/list`, to `/github/mcp` with `Authorization: Bearer <GitHub token>`. Both are stateless 2026-07-28 requests: the header `MCP-Protocol-Version: 2026-07-28`, an `Mcp-Method` header and the `_meta` triple in `params`. The stub plays GitHub: it knows one token. The test plays the agent through `faucet.mcp`.
+An agent's MCP client sends `server/discover`, then `events/list`, to `/github/mcp` with `Authorization: Bearer <faucet token>`. Both are stateless 2026-07-28 requests: the header `MCP-Protocol-Version: 2026-07-28`, an `Mcp-Method` header and the `_meta` triple in `params`. The test plays the agent through `faucet.mcp`, as the faucet's service.
 
 ## Driving it with e2e
 

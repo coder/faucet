@@ -58,8 +58,7 @@ func newK8sServer(t *testing.T) *k8sServer {
 
 	publicURL, err := parseOrigin("https://faucet.example.com")
 	require.NoError(t, err)
-	github := faucet.TokenAuthorizer{BaseURL: "https://api.github.example.invalid"}
-	tokens, login, checks, err := newLogin(publicURL, nil, store, faucet.NewAccessCache(github, clock), github, clock, logger)
+	tokens, login, checks, err := newLogin(publicURL, nil, store, nil, clock, logger)
 	require.NoError(t, err)
 	svc, err := faucet.New(faucet.Deps{
 		Store: store, Secret: []byte(testSecret), Logger: logger, Authorizer: checks.authorizer, ServiceGrants: checks.grants,

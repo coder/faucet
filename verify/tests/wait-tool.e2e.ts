@@ -127,22 +127,26 @@ describe('wait tool', () => {
     expect(await ids({ types: allTypes, pr: PR })).toEqual([runRow?.id, closedRow?.id]);
   });
 
-  test('a repository the token cannot see is denied the same way as one that does not exist', async ({ faucet }) => {
-    const repoId = newRepoId();
-    await deliverRun(faucet, repoId);
+  // GitHub decides what the person reads, and answers 404 for a repository the person cannot see, as for one that does not exist.
+  test('a repository the person cannot see is denied the same way as one that does not exist', async ({ faucet }) => {
+    await faucet.withFaucet({}, async (started) => {
+      const person = started.as('person');
+      const repoId = newRepoId();
+      await deliverRun(started, repoId);
 
-    const hidden = await faucet.waitForEvents({ repo: 'verify/hidden', types: allTypes, cursor: 0 });
-    const missing = await faucet.waitForEvents({ repo: 'verify/never-existed', types: allTypes, cursor: 0 });
+      const hidden = await person.waitForEvents({ repo: 'verify/hidden', types: allTypes, cursor: 0 });
+      const missing = await person.waitForEvents({ repo: 'verify/never-existed', types: allTypes, cursor: 0 });
 
-    for (const outcome of [hidden, missing]) {
-      expect(outcome.status).toBe(200);
-      expect(outcome.isError).toBe(true);
-      expect(outcome.events).toBeNull();
-      expect(outcome.text).toBe('repository not found or not accessible');
-    }
+      for (const outcome of [hidden, missing]) {
+        expect(outcome.status).toBe(200);
+        expect(outcome.isError).toBe(true);
+        expect(outcome.events).toBeNull();
+        expect(outcome.text).toBe('repository not found or not accessible');
+      }
+    }, { browserLogin: true });
   });
 
-  test('a request without a valid GitHub token is 401', async ({ faucet }) => {
+  test('a request without a faucet token is 401 with the challenge', async ({ faucet }) => {
     const args = { repo: repoOf(newRepoId()), types: allTypes };
     const none = await faucet.waitForEvents(args, null);
     const wrong = await faucet.waitForEvents(args, `ghp_${'0'.repeat(40)}`);
@@ -150,23 +154,20 @@ describe('wait tool', () => {
     for (const reply of [none, wrong]) {
       expect(reply.status).toBe(401);
       expect(reply.body).toBe('unauthorized\n');
-      expect(reply.headers.get('www-authenticate')).toBe('Bearer');
+      expect(reply.headers.get('www-authenticate')).toBe(faucet.challenge());
     }
   });
 
-  test('a bearer with a faucet prefix is 401 and never reaches GitHub', async ({ faucet, hooks }) => {
+  test('a bearer with a faucet prefix that faucet did not mint, or a GitHub token, is 401 and never reaches GitHub', async ({ faucet, hooks }) => {
     const args = { repo: repoOf(newRepoId()), types: allTypes, timeout_s: 1 };
     await hooks.arm(faucet, []);
-    for (const prefix of ['fct_', 'fcr_', 'fcs_']) {
-      const reply = await faucet.waitForEvents(args, prefix + randomBytes(32).toString('base64url'));
-      expect(reply.status, prefix).toBe(401);
+    for (const token of [...['fct_', 'fcr_', 'fcs_'].map((prefix) => prefix + randomBytes(32).toString('base64url')), `ghp_${randomBytes(20).toString('hex')}`]) {
+      const reply = await faucet.waitForEvents(args, token);
+      expect(reply.status, token.slice(0, 4)).toBe(401);
       expect(reply.body).toBe('unauthorized\n');
-      expect(reply.headers.get('www-authenticate')).toBe('Bearer');
+      expect(reply.headers.get('www-authenticate')).toBe(faucet.challenge());
     }
-    expect(await hooks.requests(), 'faucet judges its own tokens and sends none to GitHub').toEqual([]);
-
-    await faucet.waitForEvents(args, `ghp_${'0'.repeat(40)}`);
-    expect((await hooks.requests()).map((r) => r.path), 'a GitHub token goes to GitHub').toEqual(['/user']);
+    expect(await hooks.requests(), 'faucet judges every bearer itself and sends none to GitHub').toEqual([]);
   });
 
   test('invalid input is a tool error that names the problem', async ({ faucet }) => {
@@ -185,10 +186,11 @@ describe('wait tool', () => {
     }
   });
 
-  test('the app log never holds the GitHub token or the webhook secret', async ({ faucet }) => {
-    const log = appLog();
+  test('the app log never holds a token or the webhook secret', async ({ faucet }) => {
+    const denied = `other/denied-${newRepoId()}`;
+    expect((await faucet.waitForEvents({ repo: denied, types: allTypes, cursor: 0 })).isError).toBe(true);
 
-    expect(log).toContain('wait denied');
-    expect(faucet.leaksSecret(log)).toBe(false);
+    await expect.poll(() => new RegExp(`wait denied\\s+repo=${denied}\\s`).test(appLog())).toBe(true);
+    expect(faucet.leaksSecret(appLog())).toBe(false);
   });
 });

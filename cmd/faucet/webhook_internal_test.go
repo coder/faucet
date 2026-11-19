@@ -16,7 +16,7 @@ func TestLoadConfigWebhook(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xA5}, 32))
 	const origins = "https://coder.example.test, https://hooks.example.test:8443"
 	load := func(extra map[string]string) (config, error) {
-		env := map[string]string{envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret}
+		env := map[string]string{envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret, envPublicURL: testOrigin}
 		for k, v := range extra {
 			env[k] = v
 		}
@@ -76,7 +76,7 @@ func TestLoadConfigWebhook(t *testing.T) {
 
 func loadHandshakeConfig(t *testing.T, extra map[string]string) (config, error) {
 	t.Helper()
-	env := map[string]string{envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret}
+	env := map[string]string{envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret, envPublicURL: testOrigin}
 	for k, v := range extra {
 		env[k] = v
 	}

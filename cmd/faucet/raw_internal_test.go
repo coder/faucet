@@ -25,6 +25,7 @@ import (
 	"cdr.dev/slog/v3"
 	"cdr.dev/slog/v3/sloggers/sloghuman"
 	"github.com/coder/faucet/faucet"
+	"github.com/coder/faucet/faucet/oauth"
 	"github.com/coder/faucet/faucet/pgstore"
 	"github.com/coder/faucet/faucet/redelivery"
 	"github.com/coder/quartz"
@@ -87,19 +88,25 @@ func newRawServer(t *testing.T) *rawServer {
 	db := newScratchDatabase(t, adminURL)
 	require.NoError(t, pgstore.Migrate(context.Background(), db))
 
-	github := newGitHubStub(t)
-	authz := faucet.TokenAuthorizer{BaseURL: github.URL, Client: github.Client()}
 	hooks := newRawHooks()
 	cfg := config{secret: testSecret, cronSecret: testCronSecret, retention: 30 * 24 * time.Hour, hookAdmin: hooks, rawEvents: []string{"push"}}
 	clock := quartz.NewReal()
 	logger := slog.Make(sloghuman.Sink(&syncBuffer{}))
-	svc, redeliverer, err := newServices(cfg, pgstore.New(db), access{authorizer: authz}, clock, logger)
+	svc, redeliverer, err := newServices(cfg, pgstore.New(db), access{authorizer: grantChecks{}}, clock, logger)
 	require.NoError(t, err)
-	cron := cronRoutes{secret: []byte(cfg.cronSecret), svc: svc, retention: cfg.retention, redeliverer: redeliverer, clock: clock, logger: logger}
-	srv := httptest.NewServer(newRouter(svc, bearers{github: authz}, nil, cron, logger))
+	// The tokens of the test live in memory and expire by a clock of their
+	// own, which the test never moves.
+	tokens, tokenClock := newMemTokens(), quartz.NewMock(t)
+	b, login := newMemLogin(t, tokens, tokenClock, map[oauth.SubjectKind]oauth.SubjectResolver{
+		oauth.SubjectService: func(_ context.Context, id string, scopes []faucet.Scope) (faucet.Principal, error) {
+			return faucet.NewService(faucet.ServiceClient{ClientID: id, Grants: testGrants[id]}, scopes)
+		},
+	}, logger)
+	cron := cronRoutes{secret: []byte(cfg.cronSecret), svc: svc, retention: cfg.retention, redeliverer: redeliverer, login: login, clock: clock, logger: logger}
+	srv := httptest.NewServer(newRouter(svc, b, login, cron, logger))
 	t.Cleanup(srv.Close)
 	return &rawServer{
-		testServer:  &testServer{Server: srv, github: github, mcpPath: "/github/mcp"},
+		testServer:  &testServer{Server: srv, tokens: tokens, clock: tokenClock, mcpPath: "/github/mcp"},
 		db:          db,
 		redeliverer: redeliverer,
 		hooks:       hooks,
@@ -178,7 +185,7 @@ func TestTheServerStoresARawEventOnlyWhileAPollerWantsIt(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, status, body)
 	require.Zero(t, srv.rawEvents(ctx, t), "a push that no interest wants is not stored")
 
-	session := srv.connectEvents(ctx, t, aliceToken)
+	session := srv.connectEvents(ctx, t, srv.token(t, aliceClient))
 	list, err := callEvents(ctx, session, "events/list", nil)
 	require.NoError(t, err)
 	var events []struct {
@@ -218,6 +225,7 @@ func TestTheServerStoresARawEventOnlyWhileAPollerWantsIt(t *testing.T) {
 	require.Equal(t, map[string]int64{
 		"deleted": 0, "purged_through": 0, "expired_subscriptions": 0, "ended_deliveries": 0,
 		"raw_events_cleared": 1, "raw_events_deleted": 0, "expired_leases": 0, "raw_failures": 0,
+		"expired_access_tokens": 0, "expired_auth_requests": 0, "ended_sessions": 0, "unused_connections": 0, "unused_access_checks": 0,
 	}, reply)
 	var held int
 	require.NoError(t, srv.db.QueryRowContext(ctx, `SELECT count(*) FROM faucet_raw_events WHERE body IS NOT NULL`).Scan(&held))
@@ -238,7 +246,7 @@ func TestTheServerAsksAgainForAFailedDeliveryOnlyWhileAnInterestWantsIt(t *testi
 	require.Empty(t, unwanted.hooks.askedFor())
 
 	wanted := newRawServer(t)
-	pollRawPush(ctx, t, wanted.connectEvents(ctx, t, aliceToken), nil)
+	pollRawPush(ctx, t, wanted.connectEvents(ctx, t, wanted.token(t, aliceClient)), nil)
 	res, err = wanted.redeliverer.Run(ctx)
 	require.NoError(t, err)
 	require.Equal(t, 1, res.Tracked, "a poll lease wants the pushes of the repository")
@@ -305,8 +313,6 @@ func TestAServiceReadsRawEventsOnceAnIgnoredDeliveryNamedTheRepository(t *testin
 	require.JSONEq(t, rawPush, string(page.Events[0].Data))
 	require.False(t, page.Truncated)
 
-	paths, _ := srv.github.seen()
-	require.Empty(t, paths, "a service never reaches GitHub")
 	requireNoTokenPiece(t, srv.logs.String(), []string{secret})
 }
 
@@ -315,7 +321,7 @@ func TestLoadConfigRawEvents(t *testing.T) {
 
 	load := func(events string) (config, error) {
 		return loadConfig(func(name string) string {
-			return map[string]string{envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret, envRawEvents: events}[name]
+			return map[string]string{envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret, envPublicURL: testOrigin, envRawEvents: events}[name]
 		})
 	}
 	cfg, err := load("")

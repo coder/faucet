@@ -31,10 +31,9 @@ type cronRoutes struct {
 	delivers bool
 	// redeliverer is nil when redelivery is off.
 	redeliverer *redelivery.Runner
-	// login is nil when faucet's login server is off.
-	login  *oauth.Server
-	clock  quartz.Clock
-	logger slog.Logger
+	login       *oauth.Server
+	clock       quartz.Clock
+	logger      slog.Logger
 }
 
 func (c cronRoutes) mount(r chi.Router) {
@@ -73,13 +72,11 @@ func (c cronRoutes) purge(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "purge failed", http.StatusInternalServerError)
 		return
 	}
-	var tokens oauth.PurgeResult
-	if c.login != nil {
-		if tokens, err = c.login.Purge(r.Context()); err != nil {
-			c.logger.Error(r.Context(), "cron purge of the login server failed", slog.Error(err))
-			http.Error(w, "purge failed", http.StatusInternalServerError)
-			return
-		}
+	tokens, err := c.login.Purge(r.Context())
+	if err != nil {
+		c.logger.Error(r.Context(), "cron purge of the login server failed", slog.Error(err))
+		http.Error(w, "purge failed", http.StatusInternalServerError)
+		return
 	}
 	writeJSON(w, struct {
 		Deleted              int64 `json:"deleted"`
@@ -90,29 +87,16 @@ func (c cronRoutes) purge(w http.ResponseWriter, r *http.Request) {
 		RawEventsDeleted     int64 `json:"raw_events_deleted"`
 		ExpiredLeases        int64 `json:"expired_leases"`
 		RawFailures          int64 `json:"raw_failures"`
-		// The counts of the login server are left out without it, since
-		// it keeps none of these.
-		ExpiredAccessTokens *int64 `json:"expired_access_tokens,omitempty"`
-		ExpiredAuthRequests *int64 `json:"expired_auth_requests,omitempty"`
-		EndedSessions       *int64 `json:"ended_sessions,omitempty"`
-		UnusedConnections   *int64 `json:"unused_connections,omitempty"`
-		UnusedAccessChecks  *int64 `json:"unused_access_checks,omitempty"`
+		ExpiredAccessTokens  int64 `json:"expired_access_tokens"`
+		ExpiredAuthRequests  int64 `json:"expired_auth_requests"`
+		EndedSessions        int64 `json:"ended_sessions"`
+		UnusedConnections    int64 `json:"unused_connections"`
+		UnusedAccessChecks   int64 `json:"unused_access_checks"`
 	}{
 		res.Deleted, res.PurgedThrough, res.ExpiredSubscriptions, res.EndedDeliveries,
 		res.Raw.Cleared, res.Raw.Deleted, res.Raw.ExpiredLeases, res.RawFailures,
-		c.loginCount(tokens.ExpiredAccessTokens), c.loginCount(tokens.ExpiredAuthRequests),
-		c.loginCount(tokens.EndedSessions), c.loginCount(tokens.UnusedConnections),
-		c.loginCount(tokens.UnusedAccessChecks),
+		tokens.ExpiredAccessTokens, tokens.ExpiredAuthRequests, tokens.EndedSessions, tokens.UnusedConnections, tokens.UnusedAccessChecks,
 	})
-}
-
-// loginCount is n when the login server is on, and nil, which omitempty
-// leaves out of a reply, when it is off.
-func (c cronRoutes) loginCount(n int64) *int64 {
-	if c.login == nil {
-		return nil
-	}
-	return &n
 }
 
 func (c cronRoutes) deliver(w http.ResponseWriter, r *http.Request) {

@@ -32,4 +32,4 @@ No charter. Every check needs the cron secret or a backdated row, and a browser 
 ## Gotchas
 
 - The 503 for missing webhook mode comes after the secret check, so a caller without the secret gets 401 and learns nothing about the configuration.
-- The routes are mounted outside the bearer middleware of `/github/mcp`. A GitHub token is not a cron secret, and the cron secret is not a GitHub token.
+- The routes are mounted outside the bearer middleware of `/github/mcp`. A faucet token is not a cron secret, and the cron secret is not a faucet token.

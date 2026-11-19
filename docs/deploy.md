@@ -20,6 +20,8 @@ A preview runs any branch's code, and the Neon integration gives previews the pr
 - On Vercel, the server migrates only when `VERCEL_ENV` is `production`. Anywhere else on Vercel it only checks the schema, and exits unless the database is already at the newest migration. Vercel sets `VERCEL_ENV` only when **Automatically expose System Environment Variables** is on, so turn it on, or the server never migrates.
 - Database variables and secrets are set for Production only, as sensitive (below).
 
+A preview that starts anyway also needs a public URL: it never derives one (see [the public URL](#the-public-url)), so without `FAUCET_PUBLIC_URL` set for Preview it exits at start.
+
 ### Setup
 
 1. **Create the project and database.** Create a Vercel project from this repository and attach a Neon Postgres database with the Vercel integration. It sets `DATABASE_URL` (pooled), `DATABASE_URL_UNPOOLED` (direct) and the `POSTGRES_*` and `PG*` variables, by default for Preview and Development too. Open the database (**Integrations**, **Manage**, the resource, **Settings**), set **Allowed Environments** to **Production only**, then [rotate the credentials](#rotate-the-database-credentials), because the old values were readable.
@@ -44,7 +46,7 @@ A preview runs any branch's code, and the Neon integration gives previews the pr
 
 ### The public URL
 
-Service accounts and the browser login live at faucet's public URL. With `FAUCET_PUBLIC_URL` unset, a production deployment takes `https://` and `VERCEL_PROJECT_PRODUCTION_URL`, which Vercel sets to the shortest custom domain of the project's production deployment, or its `vercel.app` domain, and logs the URL once at start. So a production deployment on Vercel serves the login server's discovery routes, its metadata documents, and its token endpoint even before you set `FAUCET_PUBLIC_URL`. A preview or a development deployment never derives the URL, so it runs without the login server, and neither does a process without `VERCEL`. **Set `FAUCET_PUBLIC_URL` to pin the URL.** Without it, adding a custom domain shorter than the current one changes the URL at the next deploy. Faucet's issuer and its endpoint's URL change with it, so every browser session and access token ends, and every service client made for the old URL gets `invalid_client` until an operator makes a new one.
+Every caller logs in at faucet's public URL, so the server refuses to start without one. With `FAUCET_PUBLIC_URL` unset, a production deployment takes `https://` and `VERCEL_PROJECT_PRODUCTION_URL`, which Vercel sets to the shortest custom domain of the project's production deployment, or its `vercel.app` domain, and logs the URL once at start. A preview or a development deployment never derives the URL, because a preview must not take the issuer of production, so it exits at start without `FAUCET_PUBLIC_URL`, and so does a process without `VERCEL`. **Set `FAUCET_PUBLIC_URL` to pin the URL.** Without it, adding a custom domain shorter than the current one changes the URL at the next deploy. Faucet's issuer and its endpoint's URL change with it, so every browser session and access token ends, and every service client made for the old URL gets `invalid_client` until an operator makes a new one.
 
 ## Scheduled routes
 

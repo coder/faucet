@@ -162,8 +162,6 @@ func TestTokenAuthorizerNeedsAToken(t *testing.T) {
 	require.ErrorIs(t, err, faucet.ErrNoAccess)
 	_, err = authz.RepoID(context.Background(), faucet.Principal{}, "o/r")
 	require.ErrorIs(t, err, faucet.ErrNoAccess)
-	_, err = authz.Authenticate(context.Background(), "")
-	require.Error(t, err)
 	require.Zero(t, stub.requests.Load(), "an unauthenticated request would be answered for public repositories")
 }
 
@@ -303,70 +301,6 @@ func TestTokenAuthorizerBaseURLPathIsKept(t *testing.T) {
 	id, err := authz.RepoID(context.Background(), principal(t), "o/r")
 	require.NoError(t, err)
 	require.EqualValues(t, 5, id)
-}
-
-func TestTokenAuthorizerAuthenticate(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		status  int
-		body    string
-		want    string
-		wantErr error
-		anyErr  bool
-	}{
-		{name: "OK", status: http.StatusOK, body: `{"login": "octocat"}`, want: "octocat"},
-		{name: "Unauthorized", status: http.StatusUnauthorized, body: `{}`, wantErr: faucet.ErrInvalidToken},
-		{name: "Forbidden", status: http.StatusForbidden, body: `{}`, wantErr: faucet.ErrInvalidToken},
-		{name: "ServerError", status: http.StatusInternalServerError, body: `x`, anyErr: true},
-		{name: "OKWithoutLogin", status: http.StatusOK, body: `{}`, anyErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			stub := newGitHubStub(t, func(w http.ResponseWriter, r *http.Request) {
-				require.Equal(t, "/user", r.URL.Path)
-				reply(tt.status, tt.body)(w, r)
-			})
-			authz := faucet.TokenAuthorizer{BaseURL: stub.URL, Client: stub.Client()}
-
-			p, err := authz.Authenticate(context.Background(), testToken)
-			if tt.want != "" {
-				require.NoError(t, err)
-				require.Equal(t, tt.want, p.Login)
-				return
-			}
-			require.Error(t, err)
-			if tt.wantErr != nil {
-				require.ErrorIs(t, err, tt.wantErr)
-			}
-			require.Empty(t, p.Login)
-			requireNoToken(t, "error", err.Error())
-		})
-	}
-}
-
-func TestAuthenticatedPrincipalCarriesTheTokenToRepoID(t *testing.T) {
-	t.Parallel()
-
-	stub := newGitHubStub(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/user" {
-			reply(http.StatusOK, `{"login": "octocat"}`)(w, r)
-			return
-		}
-		reply(http.StatusOK, `{"id": 7}`)(w, r)
-	})
-	authz := faucet.TokenAuthorizer{BaseURL: stub.URL, Client: stub.Client()}
-
-	p, err := authz.Authenticate(context.Background(), testToken)
-	require.NoError(t, err)
-	id, err := authz.RepoID(context.Background(), p, "o/r")
-	require.NoError(t, err)
-	require.EqualValues(t, 7, id)
-	require.Equal(t, "Bearer "+testToken, <-stub.tokens)
-	require.Equal(t, "Bearer "+testToken, <-stub.tokens)
 }
 
 func TestPrincipalNeverPrintsItsToken(t *testing.T) {

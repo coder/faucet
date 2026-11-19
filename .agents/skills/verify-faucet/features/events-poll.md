@@ -4,11 +4,11 @@ An agent reads the events of one repository through `events/poll` on `POST /gith
 
 ## Sub-features
 
-- A bearer token that GitHub accepts is required. No header, a malformed header, or a token GitHub refuses is 401 with the body `unauthorized` and `WWW-Authenticate: Bearer`. This comes before every other check, the `Mcp-Name` check included.
+- A token that faucet minted for `/github/mcp` is required. No header, a malformed header, a token that faucet did not mint, or a GitHub token is 401 with the body `unauthorized` and the challenge `Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource/github/mcp", scope="events:read events:subscribe"`. This comes before every other check, the `Mcp-Name` check included.
 - The request must carry `Mcp-Name: <params.name>`, plain or in the `=?base64?<base64>?=` form. A missing or different value is HTTP 400 with the JSON-RPC error -32020 (HeaderMismatch) and the request id echoed. faucet checks the header itself, because the SDK does not check it for `events/*`.
 - `name` is one of the fifteen typed event names. A raw name such as `github.push` is served from a poll lease, see [Raw events](raw-events.md). An unknown name is the error -32023 with `data` `{"kind": "event"}` and a message that lists the types. The HTTP status is 200.
 - `arguments` take one target, `repo` (`owner/name`) or, for a service, `owner` or `all` (see [Owner targets](owner-targets.md)), and `sha` (40 hex characters, either case) and `pr` (1 to 2147483647). Anything else is the error -32602 with HTTP 400, and the message names the problem. That covers an unknown argument, a bad repo, a short sha, a pr below 1, a cursor the server did not return, and a `maxEvents` or `maxAgeMs` below 1.
-- The token must be able to read the repository. A repository it cannot see and one that does not exist give the same reply: HTTP 200, the error -32024, the message `repository not found or not accessible`, no `data` and no events.
+- The principal must be able to read the repository. For the person of the browser login, GitHub decides: a repository the person cannot see and one that does not exist give the same reply: HTTP 200, the error -32024, the message `repository not found or not accessible`, no `data` and no events. A service reads a repository that a grant covers and a delivery named, and any other is the error -32024 with a message that says why.
 - A poll without `cursor`, or with `cursor` null, starts from now. It returns no events and a cursor at the present, so an event delivered earlier is not replayed. A given `cursor` returns the events after it, oldest first.
 - `cursor` is an opaque string and is always in the result, also when `events` is empty. It is a position among the events of all repositories, so it is not tied to a repository or an event name. A cursor taken for one repository works for another.
 - The event name picks the types: an exact type itself, a family every type of its GitHub event, and a family with `actions` the types of those actions. An action outside the family's enum, an empty `actions` and `actions` for an exact type are `InvalidParams`. A family also takes the [field filters](field-filters.md) that it offers. `sha` keeps the events with that head SHA. `pr.comments` and `pr.comment_created` take no `sha`, because GitHub names no head commit in a comment, and a `sha` for it is `InvalidParams`. `pr` keeps the events whose `prs` hold that number. `ci.jobs` and `ci.statuses` take no `pr`, because GitHub names no pull request in a workflow job or a status, and a `pr` for them is `InvalidParams`.
@@ -19,7 +19,7 @@ An agent reads the events of one repository through `events/poll` on `POST /gith
 
 ## How to get to it (user POV)
 
-An agent's MCP client sends `events/poll` to `/github/mcp` with `Authorization: Bearer <GitHub token>` and `Mcp-Name: <event name>`. The request is a stateless 2026-07-28 request: `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method: events/poll` and the `_meta` triple in `params`. The stub plays GitHub: it knows one token and the repositories named `verify/r<id>`. The test plays GitHub's webhooks through `faucet.deliver` and the agent through `faucet.mcp`.
+An agent's MCP client sends `events/poll` to `/github/mcp` with `Authorization: Bearer <faucet token>` and `Mcp-Name: <event name>`. The request is a stateless 2026-07-28 request: `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method: events/poll` and the `_meta` triple in `params`. The test plays GitHub's webhooks through `faucet.deliver` and the agent through `faucet.mcp`, as the faucet's service, or as the person on a faucet with the browser login, where the stub plays GitHub and knows the repositories named `verify/r<id>`.
 
 ## Driving it with e2e
 
@@ -35,7 +35,7 @@ Response: 200 with the result or with the error -32023 or -32024, 400 with the e
 poll-filters|http|skeptic|Deliver events of every type with different head SHAs and pull requests, then poll each event name with sha and pr alone and combined, and check every returned eventId and data against the rows in Postgres
 poll-cursor|http|fuzzer|Chain polls with the cursor of the one before while webhooks arrive for two repositories, with and without maxEvents, and report any event that is returned twice or never
 poll-input|http|fuzzer|Send name, arguments, cursor, maxEvents and maxAgeMs values that are odd, huge, empty, null, wrongly typed or oddly encoded, with and without the Mcp-Name header, and report anything that is not a normal result or a clear JSON-RPC error
-poll-access|http|skeptic|Poll repositories the token cannot read, that do not exist, or that are spelled with odd case, slashes or encoding, and report any reply that tells the cases apart, returns an event, or leaks the token or the secret
+poll-access|http|skeptic|Poll repositories the principal cannot read, that do not exist, or that are spelled with odd case, slashes or encoding, and report any reply that tells the cases apart, returns an event, or leaks the token or the secret
 ```
 
 ## Gotchas

@@ -33,13 +33,9 @@ func browserLoginEnv() map[string]string {
 
 func TestLoadConfigTurnsTheBrowserLoginOnOnlyWithEveryPart(t *testing.T) {
 	t.Parallel()
-	cfg, err := loadWith(nil)
+	cfg, err := loadWith(map[string]string{envPublicURL: "https://faucet.example.com"})
 	require.NoError(t, err)
-	require.Nil(t, cfg.browserLogin, "off with nothing set")
-
-	cfg, err = loadWith(map[string]string{envPublicURL: "https://faucet.example.com"})
-	require.NoError(t, err)
-	require.Nil(t, cfg.browserLogin, "the public URL alone is the login server for services")
+	require.Nil(t, cfg.browserLogin, "off with nothing of it set: the login server is for services alone")
 
 	cfg, err = loadWith(browserLoginEnv())
 	require.NoError(t, err)

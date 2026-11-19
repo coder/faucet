@@ -93,7 +93,7 @@ func TestMCPDiscoveryAdvertisesEvents(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	srv := newTestServer(t)
-	session := srv.connectEvents(ctx, t, aliceToken)
+	session := srv.connectEvents(ctx, t, srv.token(t, aliceClient))
 
 	init := session.InitializeResult()
 	require.GreaterOrEqual(t, init.ProtocolVersion, "2026-07-28", "the client reached the server through server/discover")
@@ -112,7 +112,7 @@ func TestMCPEventsListAndPollOverHTTP(t *testing.T) {
 			defer cancel()
 			srv := newTestServer(t)
 			srv.mcpPath = path
-			session := srv.connectEvents(ctx, t, aliceToken)
+			session := srv.connectEvents(ctx, t, srv.token(t, aliceClient))
 
 			list, err := callEvents(ctx, session, "events/list", nil)
 			require.NoError(t, err)
@@ -144,12 +144,6 @@ func TestMCPEventsListAndPollOverHTTP(t *testing.T) {
 			require.Equal(t, "ci.run_completed", polled[0].Name)
 			require.Equal(t, "success", polled[0].Data["conclusion"])
 			require.Equal(t, []any{float64(3)}, polled[0].Data["prs"])
-
-			paths, auth := srv.github.seen()
-			require.Contains(t, paths, "/repos/o/r")
-			for _, a := range auth {
-				require.Equal(t, "Bearer "+aliceToken, a, "GitHub got the caller's own token")
-			}
 		})
 	}
 }
@@ -161,13 +155,13 @@ func TestMCPEventsPollDeniesARepoTheCallerCannotSee(t *testing.T) {
 	defer cancel()
 	srv := newTestServer(t)
 
-	bob := srv.connectEvents(ctx, t, bobToken)
+	bob := srv.connectEvents(ctx, t, srv.token(t, bobClient))
 	_, err := callEvents(ctx, bob, "events/poll", pollParams("o/r", nil))
 	var denied *jsonrpc.Error
 	require.ErrorAs(t, err, &denied)
 	require.EqualValues(t, -32024, denied.Code)
 
-	alice := srv.connectEvents(ctx, t, aliceToken)
+	alice := srv.connectEvents(ctx, t, srv.token(t, aliceClient))
 	_, err = callEvents(ctx, alice, "events/poll", pollParams("o/hidden", nil))
 	var hidden *jsonrpc.Error
 	require.ErrorAs(t, err, &hidden)
@@ -175,7 +169,6 @@ func TestMCPEventsPollDeniesARepoTheCallerCannotSee(t *testing.T) {
 	require.Equal(t, denied.Message, hidden.Message, "a repository alice cannot see reads like one that does not exist")
 
 	require.Zero(t, srv.store.pollCount(), "no events were read for a denied poll")
-	srv.requireNoToken(t, "a denial", denied.Message)
 }
 
 // TestMCPTakesOneMessagePerRequest uses 2025-03-26, the last protocol version
@@ -191,7 +184,7 @@ func TestMCPTakesOneMessagePerRequest(t *testing.T) {
 	require.NoError(t, mcp.AddSendingCustomMethod[*eventsParams, *eventsResult](client, "events/poll"))
 	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
 		Endpoint:             srv.URL + srv.mcpPath,
-		HTTPClient:           &http.Client{Transport: eventNameTransport{next: bearerTransport{aliceToken, srv.Client().Transport}}},
+		HTTPClient:           &http.Client{Transport: eventNameTransport{next: bearerTransport{srv.token(t, aliceClient), srv.Client().Transport}}},
 		DisableStandaloneSSE: true,
 	}, &mcp.ClientSessionOptions{ProtocolVersion: "2025-03-26"})
 	require.NoError(t, err)
@@ -221,7 +214,7 @@ func TestMCPTakesOneMessagePerRequest(t *testing.T) {
 		require.NoError(t, err)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/event-stream")
-		req.Header.Set("Authorization", "Bearer "+aliceToken)
+		req.Header.Set("Authorization", "Bearer "+srv.token(t, aliceClient))
 		req.Header.Set("Mcp-Name", "ci.run_completed")
 		if version != "" {
 			req.Header.Set("Mcp-Protocol-Version", version)
@@ -244,7 +237,7 @@ func TestMCPEventsListIsSafeForConcurrentRequests(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	srv := newTestServer(t)
-	session := srv.connectEvents(ctx, t, aliceToken)
+	session := srv.connectEvents(ctx, t, srv.token(t, aliceClient))
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 16)
@@ -306,12 +299,12 @@ func TestMCPEventsPollNeedsTheNameHeader(t *testing.T) {
 			srv := newTestServer(t)
 			srv.mcpPath = path
 
-			status, body := eventsPollRequest(t, srv, aliceToken, "ci.run_completed")
+			status, body := eventsPollRequest(t, srv, srv.token(t, aliceClient), "ci.run_completed")
 			require.Equal(t, http.StatusOK, status, body)
 			require.Contains(t, body, `"cursor"`)
 
 			for _, name := range []string{"", "pr.closed"} {
-				status, body = eventsPollRequest(t, srv, aliceToken, name)
+				status, body = eventsPollRequest(t, srv, srv.token(t, aliceClient), name)
 				require.Equal(t, http.StatusBadRequest, status, body)
 				require.Contains(t, body, `"code":-32020`)
 				require.Contains(t, body, `"id":7`)
@@ -340,7 +333,7 @@ func TestMCPEventsPollNameHeaderAgreesWithTheEventTheSDKServes(t *testing.T) {
 		{"a name in another case is a different field", `{"name":"zzz.sdk","Name":"ci.run_completed","arguments":{"repo":"o/r"},` + metaTriple + `}`, "ci.run_completed", http.StatusBadRequest, ""},
 	}
 	for _, tt := range tests {
-		status, body := postEventsPoll(t, srv, aliceToken, tt.header, tt.params)
+		status, body := postEventsPoll(t, srv, srv.token(t, aliceClient), tt.header, tt.params)
 		require.Equal(t, tt.wantStatus, status, "%s: %s", tt.name, body)
 		if tt.wantServed != "" {
 			require.Contains(t, body, `unknown event type \"`+tt.wantServed+`\"`, tt.name)

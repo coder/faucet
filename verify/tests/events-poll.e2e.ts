@@ -311,17 +311,21 @@ describe('events poll', () => {
     expect(ids(forThem)).toEqual([theirs]);
   });
 
-  test('a repository the token cannot read gets the same -32024 reply as one that does not exist', async ({ faucet }) => {
-    const hidden = await poll(faucet, RUN, { repo: 'other/repo' });
-    const missing = await poll(faucet, RUN, { repo: 'verify/never-existed' });
+  // GitHub decides what the person reads, and answers 404 for a repository the person cannot see, as for one that does not exist.
+  test('a repository the person cannot read gets the same -32024 reply as one that does not exist', async ({ faucet }) => {
+    await faucet.withFaucet({}, async (started) => {
+      const person = started.as('person');
+      const hidden = await poll(person, RUN, { repo: 'other/repo' });
+      const missing = await poll(person, RUN, { repo: 'verify/never-existed' });
 
-    for (const reply of [hidden, missing]) {
-      expect(reply.status).toBe(200);
-      expect(reply.result).toBeNull();
-      expect(reply.error).toEqual({ code: -32024, message: REPO_DENIED });
-      expect(reply.body).not.toContain('eventId');
-    }
-    expect(hidden.body).toBe(missing.body);
+      for (const reply of [hidden, missing]) {
+        expect(reply.status).toBe(200);
+        expect(reply.result).toBeNull();
+        expect(reply.error).toEqual({ code: -32024, message: REPO_DENIED });
+        expect(reply.body).not.toContain('eventId');
+      }
+      expect(hidden.body).toBe(missing.body);
+    }, { browserLogin: true });
   });
 
   test('invalid arguments are -32602 errors that name the problem', async ({ faucet }) => {
@@ -383,7 +387,7 @@ describe('events poll', () => {
     }
   });
 
-  test('a request without a valid GitHub token is 401, before the Mcp-Name check', async ({ faucet }) => {
+  test('a request without a faucet token is 401 with the challenge, before the Mcp-Name check', async ({ faucet }) => {
     const args = { repo: repoOf(newRepoId()) };
     const none = await poll(faucet, RUN, args, {}, { token: null, name: null });
     const wrong = await poll(faucet, RUN, args, {}, { token: `ghp_${'0'.repeat(40)}`, name: 'pr.closed' });
@@ -391,7 +395,7 @@ describe('events poll', () => {
     for (const reply of [none, wrong]) {
       expect(reply.status).toBe(401);
       expect(reply.body).toBe('unauthorized\n');
-      expect(reply.headers.get('www-authenticate')).toBe('Bearer');
+      expect(reply.headers.get('www-authenticate')).toBe(faucet.challenge());
     }
   });
 
@@ -450,7 +454,7 @@ describe('events poll', () => {
     expect(bounded.truncated).toBe(true);
   });
 
-  test('replies and the app log never hold the GitHub token or the webhook secret', async ({ faucet }) => {
+  test('replies and the app log never hold a token or the webhook secret', async ({ faucet }) => {
     const repoId = newRepoId();
     const denied = `other/denied-${repoId}`;
     const replies: McpReply<unknown>[] = [

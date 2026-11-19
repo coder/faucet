@@ -71,8 +71,10 @@ func newScopeSet(scopes []Scope) (scopeSet, error) {
 type principalKind int
 
 const (
-	// kindGitHubToken sent a GitHub token, such as a pasted personal access
-	// token. GitHub answers for its access.
+	// kindGitHubToken holds a GitHub user's GitHub token, with which
+	// TokenAuthorizer asks GitHub for its access. Faucet takes no GitHub
+	// token from a caller: the browser login builds such a principal from
+	// the token that faucet keeps for a user.
 	kindGitHubToken principalKind = iota + 1
 	// kindOAuthUser logged in through faucet's OAuth server.
 	kindOAuthUser
@@ -108,7 +110,7 @@ type Principal struct {
 	Login  string
 	kind   principalKind
 	scopes scopeSet
-	// token is the GitHub token of a kindGitHubToken caller.
+	// token is the GitHub token of a kindGitHubToken principal.
 	token   string
 	session OAuthSession
 	// clientID and grants are those of a kindService caller, the grants
@@ -129,10 +131,9 @@ func githubLogin(login string) error {
 	return nil
 }
 
-// NewPrincipal returns a caller who sent a GitHub token, such as a pasted
-// personal access token. It holds every scope. The token is what
-// TokenAuthorizer sends to GitHub. An Authorizer that does not call GitHub
-// can take an empty token.
+// NewPrincipal returns the GitHub user whose GitHub token is token, for
+// TokenAuthorizer, which sends the token to GitHub. It holds every scope. An
+// Authorizer that does not call GitHub can take an empty token.
 func NewPrincipal(login, token string) (Principal, error) {
 	if err := githubLogin(login); err != nil {
 		return Principal{}, err
@@ -267,8 +268,8 @@ type ServiceGrants interface {
 	CoversAllFresh(ctx context.Context, p Principal) error
 }
 
-// TokenAuthorizer asks the GitHub API whether the principal's own token can
-// read a repository. It sends the token only to BaseURL.
+// TokenAuthorizer asks the GitHub API whether the principal's own GitHub
+// token can read a repository. It sends the token only to BaseURL.
 type TokenAuthorizer struct {
 	// BaseURL is the GitHub API root, for example https://api.github.com.
 	// Plain http is accepted for loopback hosts only.
@@ -321,26 +322,6 @@ func (a TokenAuthorizer) RepoID(ctx context.Context, p Principal, repo string) (
 		return 0, ErrInvalidToken
 	default:
 		return 0, xerrors.Errorf("GitHub answered the repository lookup with status %d", status)
-	}
-}
-
-// Authenticate resolves token to its owner with GET {BaseURL}/user.
-// It returns ErrInvalidToken when GitHub rejects the token.
-func (a TokenAuthorizer) Authenticate(ctx context.Context, token string) (Principal, error) {
-	var body struct {
-		Login string `json:"login"`
-	}
-	status, err := a.get(ctx, token, "/user", &body)
-	if err != nil {
-		return Principal{}, err
-	}
-	switch status {
-	case http.StatusOK:
-		return NewPrincipal(body.Login, token)
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return Principal{}, ErrInvalidToken
-	default:
-		return Principal{}, xerrors.Errorf("GitHub answered the user lookup with status %d", status)
 	}
 }
 

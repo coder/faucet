@@ -53,8 +53,9 @@ const (
 	envHookOrg       = "FAUCET_HOOK_ORG"
 	envHookRepo      = "FAUCET_HOOK_REPO"
 	envHookID        = "FAUCET_HOOK_ID"
-	// envPublicURL is faucet's public URL. Set, it turns on faucet's own
-	// login server and the discovery documents that lead clients to it.
+	// envPublicURL is faucet's public URL, where faucet's own login server
+	// and the discovery documents that lead clients to it live. The server
+	// needs it, because every caller logs in there.
 	envPublicURL = "FAUCET_PUBLIC_URL"
 	// envVercelProductionURL is the host of a project's production
 	// deployment: its shortest custom domain, or its vercel.app domain.
@@ -110,7 +111,7 @@ type config struct {
 	// hookAdmin is nil when redelivery is off.
 	hookAdmin redelivery.HookAdmin
 	webhook   *faucet.WebhookDeps
-	// publicURL is nil when faucet's login server is off.
+	// publicURL is where faucet's login server lives.
 	publicURL *url.URL
 	// publicURLDerived is true when publicURL came from
 	// VERCEL_PROJECT_PRODUCTION_URL, not FAUCET_PUBLIC_URL.
@@ -159,8 +160,11 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 	publicURL, derived, err := loadPublicURL(getenv, cfg.deployment)
-	if err != nil {
+	switch {
+	case err != nil:
 		return config{}, err
+	case publicURL == nil:
+		return config{}, xerrors.Errorf("%s is required: it is faucet's public URL, such as https://faucet.example.com or http://localhost:8080, where every caller logs in", envPublicURL)
 	}
 	cfg.publicURL, cfg.publicURLDerived = publicURL, derived
 	if err := loadBrowserLoginConfig(getenv, &cfg); err != nil {
@@ -309,9 +313,8 @@ func run() error {
 
 	clock := quartz.NewReal()
 	githubAPI := faucet.TokenAuthorizer{BaseURL: cfg.githubAPI, Client: &http.Client{Timeout: githubTimeout}}
-	github := faucet.NewAccessCache(githubAPI, clock)
 	store := pgstore.New(db)
-	tokens, login, checks, err := newLogin(cfg.publicURL, cfg.browserLogin, store, github, githubAPI, clock, logger)
+	tokens, login, checks, err := newLogin(cfg.publicURL, cfg.browserLogin, store, githubAPI, clock, logger)
 	if err != nil {
 		return err
 	}
@@ -339,39 +342,37 @@ type loginStore interface {
 // access is how the server checks what a caller may read.
 type access struct {
 	authorizer faucet.Authorizer
-	// grants checks the owner and all targets of services. It is nil without
-	// a login server, which makes no service.
+	// grants checks the owner and all targets of services.
 	grants faucet.ServiceGrants
 }
 
 // newLogin returns the bearer check, the login server and the access checks
-// of the server. Without a public URL there is no login server: every bearer
-// goes to GitHub, and GitHub answers for every repository. With one, faucet's
-// own tokens verify too, and a service is checked by its grants. With a
-// browser login, a user who logged in through it is checked by GitHub with
-// the GitHub token that faucet keeps for them: repos asks GitHub at every
-// call, never through the cache github, and the repositories that it let
-// the user read stand until the user's session refreshes, which asks repos
-// about them again.
-func newLogin(publicURL *url.URL, browser *oauth.BrowserLogin, store loginStore, github *faucet.AccessCache, repos oauth.RepoChecker, clock quartz.Clock, logger slog.Logger) (bearers, *oauth.Server, access, error) {
-	if publicURL == nil {
-		tokens, err := newBearers(github, nil, "")
-		return tokens, nil, access{authorizer: github}, err
+// of the server. A caller sends a token that faucet minted: a service is
+// checked by its grants. With a browser login, a user who logged in through
+// it is checked by GitHub with the GitHub token that faucet keeps for them:
+// repos asks GitHub at every call, and the repositories that it let the user
+// read stand until the user's session refreshes, which asks repos about them
+// again.
+func newLogin(publicURL *url.URL, browser *oauth.BrowserLogin, store loginStore, repos oauth.RepoChecker, clock quartz.Clock, logger slog.Logger) (bearers, *oauth.Server, access, error) {
+	services, err := oauth.NewServiceAccess(store, store)
+	if err != nil {
+		return bearers{}, nil, access{}, err
 	}
 	subjects := map[oauth.SubjectKind]oauth.SubjectResolver{oauth.SubjectService: oauth.ServiceResolver(store)}
-	authorizer := kindAuthorizer{github: github}
+	var authorizer faucet.Authorizer = services
 	if browser != nil {
 		users, err := oauth.NewUserAccess(oauth.UserAccessDeps{Store: store, Clock: clock, Logger: logger, Login: *browser, Repos: repos})
 		if err != nil {
 			return bearers{}, nil, access{}, xerrors.Errorf("create the access check of the browser login: %w", err)
 		}
-		subjects[oauth.SubjectUser], authorizer.user = oauth.UserResolver(store), users
+		subjects[oauth.SubjectUser] = oauth.UserResolver(store)
+		authorizer = kindAuthorizer{service: services, user: users}
 	}
 	verifier, err := oauth.NewVerifier(store, clock, subjects)
 	if err != nil {
 		return bearers{}, nil, access{}, xerrors.Errorf("create the token verifier: %w", err)
 	}
-	tokens, err := newBearers(github, verifier, publicURL.String())
+	tokens, err := newBearers(verifier, publicURL.String())
 	if err != nil {
 		return bearers{}, nil, access{}, err
 	}
@@ -386,33 +387,22 @@ func newLogin(publicURL *url.URL, browser *oauth.BrowserLogin, store loginStore,
 	if err != nil {
 		return bearers{}, nil, access{}, xerrors.Errorf("create the login server: %w", err)
 	}
-	services, err := oauth.NewServiceAccess(store, store)
-	if err != nil {
-		return bearers{}, nil, access{}, err
-	}
-	authorizer.service = services
 	return tokens, login, access{authorizer: authorizer, grants: services}, nil
 }
 
 // kindAuthorizer sends the check of a service to the Authorizer of services,
-// that of a user who logged in through a browser to the Authorizer of such
-// users, and every other principal's to GitHub's.
+// and every other principal's to that of users who logged in through a
+// browser, which denies a principal that is no such user.
 type kindAuthorizer struct {
-	github  faucet.Authorizer
 	service faucet.Authorizer
-	// user is nil when the browser login is off. No token verifies as such
-	// a user then.
-	user faucet.Authorizer
+	user    faucet.Authorizer
 }
 
 func (a kindAuthorizer) of(p faucet.Principal) faucet.Authorizer {
 	if _, ok := p.ServiceClient(); ok {
 		return a.service
 	}
-	if _, ok := p.OAuthSession(); ok && a.user != nil {
-		return a.user
-	}
-	return a.github
+	return a.user
 }
 
 func (a kindAuthorizer) RepoID(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
@@ -441,7 +431,7 @@ func newServices(cfg config, store *pgstore.Store, checks access, clock quartz.C
 		Webhook:       cfg.webhook,
 		// The grants of services name repositories and owners, which the
 		// login server finds by the deliveries that named them.
-		RecordRepositories: cfg.publicURL != nil,
+		RecordRepositories: true,
 		Redelivered:        store.Redelivered,
 	})
 	if err != nil {
@@ -531,10 +521,9 @@ func prepareSchema(ctx context.Context, db, migrateDB *sql.DB, dep deployment) e
 // /mcp, its old path, kept for one release. Each is its own resource.
 var mcpPaths = []string{"/github/mcp", "/mcp"}
 
-// newRouter serves faucet. login is faucet's own authorization server, nil
-// when it is off. With it on, tokens has faucet's origin, and each MCP path
-// serves its protected resource metadata and names it in every 401. With it
-// off, a 401 carries the bare Bearer challenge.
+// newRouter serves faucet. login is faucet's own authorization server, and
+// tokens has faucet's origin. Each MCP path serves its protected resource
+// metadata and names it in every 401.
 func newRouter(svc *faucet.Service, tokens bearers, login *oauth.Server, cron cronRoutes, logger slog.Logger) http.Handler {
 	r := chi.NewRouter()
 	cron.mount(r)
@@ -543,23 +532,17 @@ func newRouter(svc *faucet.Service, tokens bearers, login *oauth.Server, cron cr
 	// A faucet token is valid only on the resource it was issued for, so
 	// each path checks tokens for its own.
 	mcpEndpoint := func(path string) http.Handler {
-		challenge := "Bearer"
-		if login != nil {
-			challenge = tokens.challenge(path)
-		}
-		return longResponse(requireBearer(tokens, path, challenge, logger, githubMCP))
+		return longResponse(requireBearer(tokens, path, logger, githubMCP))
 	}
 	r.Handle("/github/mcp", mcpEndpoint("/github/mcp"))
 	r.Handle("/mcp", mcpEndpoint("/mcp"))
-	if login != nil {
-		r.Handle("/.well-known/oauth-protected-resource/github/mcp", protectedResource(tokens, "/github/mcp"))
-		r.Handle("/.well-known/oauth-protected-resource/mcp", protectedResource(tokens, "/mcp"))
-		r.Handle("/.well-known/oauth-authorization-server", login.MetadataHandler())
-		r.Handle("/oauth/authorize", login.AuthorizeHandler())
-		r.Handle("/oauth/github/callback", login.GitHubCallbackHandler())
-		r.Handle("/oauth/token", within(tokenTimeout, login.TokenHandler()))
-		r.Handle("/oauth/revoke", login.RevokeHandler())
-	}
+	r.Handle("/.well-known/oauth-protected-resource/github/mcp", protectedResource(tokens, "/github/mcp"))
+	r.Handle("/.well-known/oauth-protected-resource/mcp", protectedResource(tokens, "/mcp"))
+	r.Handle("/.well-known/oauth-authorization-server", login.MetadataHandler())
+	r.Handle("/oauth/authorize", login.AuthorizeHandler())
+	r.Handle("/oauth/github/callback", login.GitHubCallbackHandler())
+	r.Handle("/oauth/token", within(tokenTimeout, login.TokenHandler()))
+	r.Handle("/oauth/revoke", login.RevokeHandler())
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok\n")
 	})

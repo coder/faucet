@@ -22,6 +22,8 @@ const KEY_ZERO = Buffer.alloc(32).toString('base64');
 const VERIFY_UNKNOWN = 'dns-7c1f4e';
 const ORIGIN = `https://${ORIGIN_TOKEN}.verify.test`;
 const WELL_FORMED_URL = `postgres://app:${FAKE_DB_PASSWORD}@127.0.0.1:1/faucet?sslmode=disable`;
+// faucet checks its public URL before it reads the database URL, so a case that reaches a later check sets one.
+const PUBLIC_URL = 'http://localhost:8080';
 const MALFORMED_URLS: Record<string, string> = {
   'a port that is not a number': `postgres://app:${FAKE_DB_PASSWORD}@db.example.com:notaport/faucet`,
   'a bad escape after the password': `postgres://app:${FAKE_DB_PASSWORD}%zz@db.example.com/faucet`,
@@ -58,7 +60,7 @@ function occurrences(text: string, needle: string): number {
 describe('startup rejects a bad DATABASE_URL without printing its password', () => {
   for (const [name, url] of Object.entries(MALFORMED_URLS)) {
     test(`${name} exits 1 and names only the variable`, async ({ faucet }) => {
-      const result = await startFaucet(faucet, { DATABASE_URL: url, GITHUB_WEBHOOK_SECRET: FAKE_SECRET });
+      const result = await startFaucet(faucet, { DATABASE_URL: url, GITHUB_WEBHOOK_SECRET: FAKE_SECRET, FAUCET_PUBLIC_URL: PUBLIC_URL });
 
       expect(result.code).toBe(1);
       expect(result.output).toContain('DATABASE_URL: not a valid Postgres connection string');
@@ -74,6 +76,7 @@ describe('startup rejects a bad DATABASE_URL_UNPOOLED without printing its passw
       DATABASE_URL: WELL_FORMED_URL,
       DATABASE_URL_UNPOOLED: MALFORMED_URLS['a space in the host'],
       GITHUB_WEBHOOK_SECRET: FAKE_SECRET,
+      FAUCET_PUBLIC_URL: PUBLIC_URL,
     });
 
     expect(result.code).toBe(1);
@@ -84,7 +87,7 @@ describe('startup rejects a bad DATABASE_URL_UNPOOLED without printing its passw
 });
 
 describe('startup configuration', () => {
-  const valid = { DATABASE_URL: WELL_FORMED_URL, GITHUB_WEBHOOK_SECRET: FAKE_SECRET };
+  const valid = { DATABASE_URL: WELL_FORMED_URL, GITHUB_WEBHOOK_SECRET: FAKE_SECRET, FAUCET_PUBLIC_URL: PUBLIC_URL };
   const webhook = { FAUCET_WEBHOOK_KEY: KEY_32, FAUCET_WEBHOOK_ALLOWED_ORIGINS: ORIGIN };
   const KEY_RULE = 'FAUCET_WEBHOOK_KEY must be the standard base64 of exactly 32 bytes';
   const ORIGIN_RULE = 'FAUCET_WEBHOOK_ALLOWED_ORIGINS must be comma-separated https origins written scheme://host[:port]: ';
@@ -124,7 +127,7 @@ describe('startup configuration', () => {
     },
     {
       name: 'a GITHUB_WEBHOOK_SECRET shorter than 16 bytes',
-      env: { DATABASE_URL: WELL_FORMED_URL, GITHUB_WEBHOOK_SECRET: SHORT_SECRET },
+      env: { DATABASE_URL: WELL_FORMED_URL, GITHUB_WEBHOOK_SECRET: SHORT_SECRET, FAUCET_PUBLIC_URL: PUBLIC_URL },
       message: 'secret must be at least 16 bytes\n',
     },
     ...[
@@ -184,6 +187,11 @@ describe('startup configuration', () => {
       message: 'FAUCET_RETENTION_DAYS must be a whole number of days from 1 to 3650\n',
     })),
     ...webhookCases.map(([name, settings, message]) => ({ name, env: { ...valid, ...settings }, message })),
+    {
+      name: 'a missing FAUCET_PUBLIC_URL',
+      env: { DATABASE_URL: WELL_FORMED_URL, GITHUB_WEBHOOK_SECRET: FAKE_SECRET },
+      message: "FAUCET_PUBLIC_URL is required: it is faucet's public URL, such as https://faucet.example.com or http://localhost:8080, where every caller logs in\n",
+    },
     ...[
       ['repository_advisory', 'repository_advisory'],
       ['push,secret_scanning_alert', 'secret_scanning_alert'],
@@ -249,7 +257,7 @@ describe('the public URL on Vercel', () => {
   }
 
   test('production without FAUCET_PUBLIC_URL takes https and the production URL, and logs it once', async ({ faucet }) => {
-    await faucet.withFaucet(vercel, async (started, output) => {
+    await faucet.withFaucet({ ...vercel, FAUCET_PUBLIC_URL: '' }, async (started, output) => {
       expect(await issuerOf(started), 'the login server is on at the production URL').toBe('https://faucet-prod.verify.test');
       expect(output()).toMatch(derived);
       expect(occurrences(output(), 'public URL taken from'), 'one line at startup').toBe(1);

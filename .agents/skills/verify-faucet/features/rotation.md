@@ -19,7 +19,7 @@ An agent rotates its secret by giving its receiver the new secret and then sendi
 
 ## Driving it with e2e
 
-`tests/rotation.e2e.ts`, on a faucet that the test starts with `withDeliveryFaucet`. `endpoint(receiver, 'ok')` registers a receiver with the old secret. A refresh with `{ ...params, delivery: { url, secret: next } }` rotates. `receiver.register(at.id, next)` plays a receiver that holds only the new secret. `started.subscriptions(at.id)` returns `previous_secret_enc` (hex) and `previous_secret_until` (epoch milliseconds), `started.openSecret(row)` and `started.openPreviousSecret(row)` open them, and `started.endRotationWindows(at.id)` moves the end of the window into the past, since a window lasts up to 10 minutes. `started.secretCopies(secret)` also looks in `previous_secret_enc`.
+`tests/rotation.e2e.ts`, on a faucet that the test starts with `withDeliveryFaucet`. The terminated test turns on its browser login and subscribes as the person, whose access `receiver.revoke(repoId)` takes away. `endpoint(receiver, 'ok')` registers a receiver with the old secret. A refresh with `{ ...params, delivery: { url, secret: next } }` rotates. `receiver.register(at.id, next)` plays a receiver that holds only the new secret. `started.subscriptions(at.id)` returns `previous_secret_enc` (hex) and `previous_secret_until` (epoch milliseconds), `started.openSecret(row)` and `started.openPreviousSecret(row)` open them, and `started.endRotationWindows(at.id)` moves the end of the window into the past, since a window lasts up to 10 minutes. `started.secretCopies(secret)` also looks in `previous_secret_enc`.
 
 ## Proof
 

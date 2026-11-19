@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { createDecipheriv, createHmac, generateKeyPairSync, randomBytes, randomInt, randomUUID, sign, type KeyObject } from 'node:crypto';
+import { createDecipheriv, createHash, createHmac, generateKeyPairSync, randomBytes, randomInt, randomUUID, sign, type KeyObject } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
@@ -47,8 +47,6 @@ interface RunState {
   dbPort: number;
   psql: string;
   secret: string;
-  githubToken: string;
-  otherToken: string;
   webhookKey: string;
   binary: string;
   e2eBinary: string;
@@ -87,7 +85,7 @@ export interface StubRequest {
   path: string;
   query: string;
   // person is an access token that the stub issued to the person of the browser login.
-  auth: 'hook' | 'user' | 'person' | 'other' | 'none';
+  auth: 'hook' | 'person' | 'other' | 'none';
 }
 
 // StubExchange is a request to the token endpoint of the stub's GitHub App: the grant, and issued or GitHub's error code.
@@ -174,12 +172,16 @@ export type McpPath = '/github/mcp' | '/mcp';
 export interface McpOptions {
   // path defaults to /github/mcp.
   path?: McpPath;
+  // token replaces the bearer of the faucet's principal, and null sends no Authorization header.
   token?: string | null;
-  // as 'other' sends the second principal's token, the one the stub answers as verify-other. token must then be unset.
-  as?: 'other';
   name?: string | null;
   id?: number | string;
 }
+
+// Principal is a caller that the harness logs in for the tests, with a token that faucet minted. service and other are two
+// service clients, each with the grant all and both scopes. person is the person of the browser login, whose access GitHub
+// decides, so only a faucet with the browser login has one.
+export type Principal = 'service' | 'other' | 'person';
 
 // SubscriptionRow is a faucet_subscriptions row as Postgres holds it. Times are epoch milliseconds, key_hash and secret_enc are hex.
 export interface SubscriptionRow {
@@ -262,15 +264,13 @@ function readState(baseUrl: string): RunState {
   const port = Number(new URL(baseUrl).port);
   const state: unknown = JSON.parse(readFileSync(stateFile(port), 'utf8'));
   const {
-    dbHost, dbPort, psql, secret, githubToken, otherToken, webhookKey, binary, e2eBinary, agentBinary, loginAgentBinary, tls, githubApp, cron, receiver,
+    dbHost, dbPort, psql, secret, webhookKey, binary, e2eBinary, agentBinary, loginAgentBinary, tls, githubApp, cron, receiver,
   } = state as Partial<RunState>;
   if (
     typeof dbHost !== 'string' ||
     typeof dbPort !== 'number' ||
     typeof psql !== 'string' ||
     !isSecret(secret) ||
-    !isSecret(githubToken) ||
-    !isSecret(otherToken) ||
     !isSecret(webhookKey) ||
     typeof binary !== 'string' ||
     typeof e2eBinary !== 'string' ||
@@ -280,7 +280,7 @@ function readState(baseUrl: string): RunState {
     throw new Error('the run state written by app.mjs is malformed');
   }
   return {
-    dbHost, dbPort, psql, secret, githubToken, otherToken, webhookKey, binary, e2eBinary, agentBinary, loginAgentBinary,
+    dbHost, dbPort, psql, secret, webhookKey, binary, e2eBinary, agentBinary, loginAgentBinary,
     tls: readTlsState(tls), githubApp: readGitHubAppState(githubApp), cron: readCronState(cron), receiver: readReceiverState(receiver),
   };
 }
@@ -296,17 +296,201 @@ export function freePort(): Promise<number> {
   });
 }
 
+// RUN_ID tells the service clients of this test process apart from those of a process that ran before it, so a process that
+// the runner starts again after a failed test makes its own on the main faucet.
+const RUN_ID = randomBytes(4).toString('hex');
+const SERVICE_CLIENTS = { service: `verify-${RUN_ID}`, other: `verify-other-${RUN_ID}` } as const;
+const SERVICE_SCOPES = 'events:read,events:subscribe';
+const CLIENT_SECRET = /^client_id: [a-z0-9-]+\nclient_secret: (?<secret>fcs_[A-Za-z0-9_-]{43})\n$/;
+// PERSON_REDIRECT is the redirect URI of the harness's client of the browser login. Nothing serves it: the harness reads the
+// code from the redirect that faucet answers.
+const PERSON_REDIRECT = 'http://127.0.0.1/callback';
+// A token is minted again when it has less than this left of its 15 minutes.
+const RENEW_MS = 60_000;
+
+interface Minted {
+  token: string;
+  expiresAt: number;
+}
+
+// The harness keeps what it minted for the life of the test process, by faucet (its database and URL): one token per
+// principal and path, the secret of each service client, and the repositories that faucet has heard of. issued holds every
+// secret and token that it minted, for leaksSecret.
+const minted = new Map<string, Promise<Minted>>();
+const clientSecrets = new Map<string, Promise<string>>();
+const introduced = new Set<string>();
+const issued = new Set<string>();
+let personDocuments: Promise<string> | undefined;
+
+// personClient serves the client ID metadata document of the harness's client of the browser login and returns its client
+// ID. The server lives as long as the test process and does not keep it alive.
+function personClient(tls: TlsState): Promise<string> {
+  personDocuments ??= (async () => {
+    const documents = await Documents.start(tls);
+    documents.unref();
+    return documents.add('verify-harness', { client_name: 'faucet-verify', redirect_uris: [PERSON_REDIRECT] });
+  })();
+  return personDocuments;
+}
+
+// Cookies is the cookie jar of the person's browser: it keeps the name and value of each cookie that a reply sets.
+class Cookies {
+  readonly #values = new Map<string, string>();
+
+  keep(response: Response): void {
+    for (const line of response.headers.getSetCookie()) {
+      const [pair = ''] = line.split(';');
+      const at = pair.indexOf('=');
+      if (at > 0) this.#values.set(pair.slice(0, at).trim(), pair.slice(at + 1).trim());
+    }
+  }
+
+  get header(): string {
+    return [...this.#values].map(([name, value]) => `${name}=${value}`).join('; ');
+  }
+}
+
+// location returns where a redirect of the login sends the browser, and throws when the reply is no redirect.
+async function location(response: Response, step: string): Promise<string> {
+  const to = response.headers.get('location');
+  if (response.status < 300 || response.status > 399 || to === null) throw new Error(`the login stopped at ${step}: ${response.status} ${await response.text()}`);
+  return to;
+}
+
 export class Faucet {
   readonly baseUrl: string;
   readonly #state: RunState;
   readonly #target: Target;
   readonly #cronSecret: string;
+  readonly #principal: Principal;
 
-  private constructor(state: RunState, target: Target, cronSecret: string) {
+  private constructor(state: RunState, target: Target, cronSecret: string, principal: Principal = 'service') {
     this.baseUrl = target.baseUrl;
     this.#state = state;
     this.#target = target;
     this.#cronSecret = cronSecret;
+    this.#principal = principal;
+  }
+
+  // as returns this faucet with principal as the caller of mcp and waitForEvents.
+  as(principal: Principal): Faucet {
+    return new Faucet(this.#state, this.#target, this.#cronSecret, principal);
+  }
+
+  // login is the principal's login as faucet names it in its rows and its log: svc:<client ID> for a service.
+  get login(): string {
+    return this.#principal === 'person' ? 'verify-person' : `svc:${SERVICE_CLIENTS[this.#principal]}`;
+  }
+
+  // challenge is the WWW-Authenticate header of a 401 on the MCP endpoint at path.
+  challenge(path: McpPath = '/github/mcp'): string {
+    return `Bearer resource_metadata="${this.baseUrl}/.well-known/oauth-protected-resource${path}", scope="events:read events:subscribe"`;
+  }
+
+  // #key names this faucet process in the harness's caches. A port can serve another faucet later, a database never.
+  get #key(): string {
+    return `${this.#target.database}@${this.baseUrl}`;
+  }
+
+  // #bearer returns the principal's token for the endpoint at path. It mints one the first time, and again when the last one
+  // is about to expire.
+  async #bearer(path: McpPath = '/github/mcp'): Promise<string> {
+    const key = `${this.#key} ${this.#principal} ${path}`;
+    const mint = (): Promise<Minted> => (this.#principal === 'person' ? this.#loginPerson(path) : this.#loginService(path));
+    let pending = minted.get(key);
+    if (pending === undefined) {
+      pending = mint();
+      minted.set(key, pending);
+    }
+    const held = await pending.catch(() => undefined);
+    if (held !== undefined && held.expiresAt - Date.now() > RENEW_MS) return held.token;
+    if (minted.get(key) === pending) minted.set(key, mint());
+    return (await minted.get(key)!).token;
+  }
+
+  async #loginService(path: McpPath): Promise<Minted> {
+    if (path !== '/github/mcp') throw new Error(`a service has tokens for /github/mcp only, because ${path} takes no new client: call as('person')`);
+    const id = SERVICE_CLIENTS[this.#principal as 'service' | 'other'];
+    const secret = await this.#clientSecret(id);
+    const reply = await this.request('/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Authorization: `Basic ${Buffer.from(`${id}:${secret}`).toString('base64')}` },
+      body: 'grant_type=client_credentials',
+    });
+    return this.#minted(reply, 'the client credentials grant');
+  }
+
+  // #clientSecret makes the service client id on this faucet, as an operator does, the first time a test needs it.
+  #clientSecret(id: string): Promise<string> {
+    const key = `${this.#key} ${id}`;
+    let secret = clientSecrets.get(key);
+    if (secret === undefined) {
+      secret = (async () => {
+        const made = await this.clients(['create', '-resource', `${this.baseUrl}/github/mcp`, '-scope', SERVICE_SCOPES, '-grant', 'all', id]);
+        const found = CLIENT_SECRET.exec(made.stdout)?.groups?.secret;
+        if (made.code !== 0 || found === undefined) throw new Error(`faucet clients create ${id} failed: ${made.stderr}`);
+        issued.add(found);
+        return found;
+      })();
+      clientSecrets.set(key, secret);
+    }
+    return secret;
+  }
+
+  // #loginPerson goes through the browser login as the person's browser and the harness's client do: the consent page, a
+  // press of Continue, GitHub, faucet's callback, then the code for a token for the endpoint at path.
+  async #loginPerson(path: McpPath): Promise<Minted> {
+    if (this.#target.tokenKey === null) throw new Error('the person logs in only to a faucet started with { browserLogin: true }');
+    const clientId = await personClient(this.#state.tls);
+    const verifier = randomBytes(32).toString('base64url');
+    const authorize = `${this.baseUrl}/oauth/authorize?${new URLSearchParams({
+      response_type: 'code', client_id: clientId, redirect_uri: PERSON_REDIRECT, state: randomBytes(16).toString('hex'),
+      code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256', resource: `${this.baseUrl}${path}`,
+    })}`;
+    const cookies = new Cookies();
+    const page = await fetch(authorize, { redirect: 'manual' });
+    cookies.keep(page);
+    const html = await page.text();
+    const form = new URLSearchParams([...html.matchAll(/<input type="hidden" name="(request|login|token)" value="([^"]+)">/g)].map((m) => [m[1]!, m[2]!]));
+    if (page.status !== 200 || [...form.keys()].length !== 3) throw new Error(`the consent page answered ${page.status}`);
+    const pressed = await fetch(`${this.baseUrl}/oauth/authorize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Origin: this.baseUrl, Cookie: cookies.header },
+      body: form.toString(),
+      redirect: 'manual',
+    });
+    cookies.keep(pressed);
+    const github = await fetch(await location(pressed, 'the consent'), { redirect: 'manual' });
+    const callback = await fetch(await location(github, 'GitHub'), { headers: { Cookie: cookies.header }, redirect: 'manual' });
+    const code = new URL(await location(callback, "faucet's callback")).searchParams.get('code') ?? '';
+    const reply = await this.request('/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'authorization_code', client_id: clientId, code, code_verifier: verifier, redirect_uri: PERSON_REDIRECT }).toString(),
+    });
+    return this.#minted(reply, 'the authorization code grant');
+  }
+
+  #minted(reply: Reply, grant: string): Minted {
+    if (reply.status !== 200) throw new Error(`${grant} answered ${reply.status}: ${reply.body}`);
+    const { access_token: token, refresh_token: refresh, expires_in: seconds } = JSON.parse(reply.body) as { access_token: string; refresh_token?: string; expires_in: number };
+    issued.add(token);
+    if (refresh !== undefined) issued.add(refresh);
+    return { token, expiresAt: Date.now() + seconds * 1000 };
+  }
+
+  // #introduce tells faucet of the repository verify/r<repoId> that repo names, with a signed ping that names it and its
+  // owner verify, as GitHub's first delivery from a repository does. A service reads only a repository that a delivery named.
+  // The person needs none: GitHub answers for the person.
+  async #introduce(repo: unknown): Promise<void> {
+    if (this.#principal === 'person' || typeof repo !== 'string') return;
+    const repoId = /^verify\/r(\d+)$/.exec(repo)?.[1];
+    const key = `${this.#key} ${repo}`;
+    if (repoId === undefined || introduced.has(key)) return;
+    const body = { zen: 'Keep it logically awesome.', hook_id: 7, repository: { id: Number(repoId), full_name: repo, owner: { id: 1, login: 'verify' } } };
+    const reply = await this.deliver({ event: 'ping', delivery: randomUUID(), body: JSON.stringify(body) });
+    if (reply.status !== 200) throw new Error(`the ping that names ${repo} answered ${reply.status}: ${reply.body}`);
+    introduced.add(key);
   }
 
   // main is the server that has no CRON_SECRET. It has webhook mode on, with the key in the run state.
@@ -345,16 +529,16 @@ export class Faucet {
   }
 
   // withFaucet starts one more faucet on its own database, runs fn against it and stops it. The new faucet has a random
-  // CRON_SECRET, webhook mode off and the raw events of RAW_EVENTS. env adds the rest, and FAUCET_RAW_EVENTS: '' offers none. fn gets the faucet and a function that returns its
-  // output so far. opts.e2eBuild runs the binary that was built with -tags faucet_e2e, whose callback client, document client
-  // and client for the keys of workload issuers reach loopback, over http too, and which trusts the certificate that Documents
-  // and Issuer serve. opts.publicUrl sets FAUCET_PUBLIC_URL to the new faucet's own URL, which turns on its login server.
-  // opts.browserLogin also turns on its browser login, with the stub as GitHub and its GitHub App, and a random token key, and
-  // runs the e2e build.
+  // CRON_SECRET, webhook mode off, its own URL as FAUCET_PUBLIC_URL and the raw events of RAW_EVENTS. env adds the rest,
+  // FAUCET_RAW_EVENTS: '' offers none and FAUCET_PUBLIC_URL: '' sets no public URL. fn gets the faucet and a function that
+  // returns its output so far. opts.e2eBuild runs the binary that was built with -tags faucet_e2e, whose callback client,
+  // document client and client for the keys of workload issuers reach loopback, over http too, and which trusts the
+  // certificate that Documents and Issuer serve. opts.browserLogin also turns on its browser login, with the stub as GitHub
+  // and its GitHub App, and a random token key, and runs the e2e build.
   async withFaucet<T>(
     env: Record<string, string>,
     fn: (started: Faucet, output: () => string) => Promise<T>,
-    opts: { e2eBuild?: boolean; publicUrl?: boolean; browserLogin?: boolean } = {},
+    opts: { e2eBuild?: boolean; browserLogin?: boolean } = {},
   ): Promise<T> {
     const database = `faucet_${randomBytes(6).toString('hex')}`;
     const port = await freePort();
@@ -376,7 +560,7 @@ export class Faucet {
         FAUCET_GITHUB_API_URL: cron.stubUrl,
         CRON_SECRET: cronSecret,
         FAUCET_RAW_EVENTS: RAW_EVENTS,
-        ...(opts.publicUrl === true || login ? { FAUCET_PUBLIC_URL: `http://127.0.0.1:${port}` } : {}),
+        FAUCET_PUBLIC_URL: `http://127.0.0.1:${port}`,
         // Go reads its roots from SSL_CERT_FILE in place of the system's.
         ...(e2eBuild ? { SSL_CERT_FILE: tls.cert } : {}),
         ...(tokenKey !== null
@@ -438,10 +622,11 @@ export class Faucet {
     return this.request(`/cron/${job}${query === undefined ? '' : `?${query}`}`, { method: opts.method ?? 'GET', headers, body });
   }
 
-  // waitForEvents calls the wait_for_github_events tool on /github/mcp the way a
-  // stateless 2026-07-28 client does. A string token replaces the run's valid
-  // GitHub token and null sends no Authorization header.
-  async waitForEvents(args: Record<string, unknown>, token: string | null = this.#state.githubToken): Promise<WaitOutcome> {
+  // waitForEvents calls the wait_for_github_events tool on /github/mcp the way a stateless 2026-07-28 client does, as the
+  // principal. A string token replaces the principal's token and null sends no Authorization header.
+  async waitForEvents(args: Record<string, unknown>, token?: string | null): Promise<WaitOutcome> {
+    if (token === undefined) await this.#introduce(args.repo);
+    const bearer = token === undefined ? await this.#bearer() : token;
     const protocolVersion = '2026-07-28';
     const headers = new Headers({
       'Content-Type': 'application/json',
@@ -450,7 +635,7 @@ export class Faucet {
       'Mcp-Method': 'tools/call',
       'Mcp-Name': 'wait_for_github_events',
     });
-    if (token !== null) headers.set('Authorization', `Bearer ${token}`);
+    if (bearer !== null) headers.set('Authorization', `Bearer ${bearer}`);
     const body = JSON.stringify({
       jsonrpc: '2.0',
       id: 1,
@@ -490,8 +675,8 @@ export class Faucet {
     opts: McpOptions = {},
   ): Promise<McpReply<R>> {
     const protocolVersion = '2026-07-28';
-    if (opts.as !== undefined && opts.token !== undefined) throw new Error('set opts.as or opts.token, not both');
-    const token = opts.as === 'other' ? this.#state.otherToken : opts.token === undefined ? this.#state.githubToken : opts.token;
+    if (opts.token === undefined) await this.#introduce((params.arguments as { repo?: unknown } | undefined)?.repo);
+    const token = opts.token === undefined ? await this.#bearer(opts.path) : opts.token;
     const name = opts.name === undefined ? (typeof params.name === 'string' ? params.name : null) : opts.name;
     const headers = new Headers({
       'Content-Type': 'application/json',
@@ -734,10 +919,9 @@ export class Faucet {
   }
 
   leaksSecret(text: string): boolean {
-    const { secret, githubToken, otherToken, webhookKey, cron, receiver, githubApp } = this.#state;
+    const { secret, webhookKey, cron, receiver, githubApp } = this.#state;
     const secrets = [
-      secret, githubToken, otherToken, webhookKey, cron.webhookSecret, cron.cronSecret, cron.hookToken, cron.stubControl, receiver.control,
-      githubApp.clientSecret,
+      secret, webhookKey, cron.webhookSecret, cron.cronSecret, cron.hookToken, cron.stubControl, receiver.control, githubApp.clientSecret, ...issued,
     ];
     const { webhookKey: ownWebhookKey, tokenKey } = this.#target;
     const own = [
@@ -874,8 +1058,8 @@ export class Documents {
     this.#documents = documents;
   }
 
-  static async start(appUrl: string): Promise<Documents> {
-    const { tls } = readState(appUrl);
+  static async start(appUrl: string | TlsState): Promise<Documents> {
+    const { tls } = typeof appUrl === 'string' ? readState(appUrl) : { tls: appUrl };
     const documents = new Map<string, object>();
     const server = createHttpsServer({ cert: readFileSync(tls.cert), key: readFileSync(tls.key) }, (req, res) => {
       const document = documents.get(req.url ?? '');
@@ -894,6 +1078,11 @@ export class Documents {
       ...document,
     });
     return clientId;
+  }
+
+  // unref lets the test process exit while the server still listens.
+  unref(): void {
+    this.#server.unref();
   }
 
   async close(): Promise<void> {
