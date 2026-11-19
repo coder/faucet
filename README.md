@@ -43,12 +43,13 @@ An agent asks for events by name, of one `repo` (a service also of an `owner` or
 
 The operator can also offer other GitHub events of a repository, such as `push`, `release` and `issues`, raw as `github.<event>`, by listing them in `FAUCET_RAW_EVENTS`. Faucet stores one only while a subscription or a poller wants it (see [raw events](docs/events.md#raw-events)).
 
-A caller of `/github/mcp` proves who it is in one of four ways, and faucet returns events only for repositories that the caller may read (see [docs/security.md](docs/security.md)):
+A caller of `/github/mcp` proves who it is in one of three ways, each of which gets it a token that faucet mints, and faucet returns events only for repositories that the caller may read (see [docs/security.md](docs/security.md)):
 
-- **A GitHub token** as `Authorization: Bearer <GitHub token>`. Faucet asks GitHub with it and keeps it for that request only.
 - **A browser login.** A coding agent connects with no token, and its user logs in to GitHub through faucet in a browser. Faucet keeps the user's GitHub App token, sealed, and gives the agent only faucet's own tokens (see [docs/browser-login.md](docs/browser-login.md)).
 - **A client ID and secret** that an operator made for a service agent, which holds no GitHub token (see [docs/service-accounts.md](docs/service-accounts.md)).
 - **A workload's own token.** A Vercel function or a Kubernetes pod trades the token that its platform signs for it for a token of a service client, with no stored secret (see [docs/service-accounts.md](docs/service-accounts.md#log-in-with-a-workload-identity)).
+
+Faucet takes no GitHub token as a bearer token. It answers one as it answers a request with no token, with a 401 whose challenge leads the client to faucet's login server, and never sends it to GitHub (see [docs/upgrading.md](docs/upgrading.md#github-tokens-are-refused)).
 
 The one GitHub token that faucet holds for itself, for redelivery, is optional.
 
@@ -61,17 +62,18 @@ You need Go and Postgres 13 or newer.
 ```sh
 DATABASE_URL='postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable' \
 GITHUB_WEBHOOK_SECRET="$(openssl rand -hex 32)" \
+FAUCET_PUBLIC_URL='http://localhost:8080' \
 go run ./cmd/faucet
 ```
 
-The server listens on `PORT` (default 8080) and applies migrations at startup. Then add a webhook to your GitHub org or repository:
+The server listens on `PORT` (default 8080) and applies migrations at startup. `FAUCET_PUBLIC_URL` is the URL that clients call, where faucet's login server lives. Set it to your host's URL, such as `https://faucet.example.com`, once clients call faucet from elsewhere. Then add a webhook to your GitHub org or repository:
 
 - **Payload URL:** `https://<your host>/webhook/github`
 - **Content type:** `application/json`
 - **Secret:** the value of `GITHUB_WEBHOOK_SECRET`
 - **Events:** "Let me select individual events", then Pull requests, Pull request reviews, Pull request review comments, Pull request review threads, Issue comments, Workflow runs, Workflow jobs, Check runs, Check suites and Statuses (see [docs/events.md](docs/events.md#the-github-webhook))
 
-Point any MCP client at `https://<your host>/github/mcp` with a GitHub token as the bearer token, or with no token once the [browser login](docs/browser-login.md) is on. `/mcp` serves the same endpoint as an alias for one release (see [docs/upgrading.md](docs/upgrading.md#to-githubmcp)).
+Point an MCP client at `https://<your host>/github/mcp`. A coding agent connects with no token and logs its user in through a browser once the [browser login](docs/browser-login.md) is on. A service agent logs in as a client that an operator made (see [docs/service-accounts.md](docs/service-accounts.md)). `/mcp` serves the same endpoint as an alias for one release (see [docs/upgrading.md](docs/upgrading.md#to-githubmcp)).
 
 ## Configuration
 
@@ -92,8 +94,8 @@ Point any MCP client at `https://<your host>/github/mcp` with a GitHub token as 
 | `FAUCET_HOOK_ID` | for redelivery | Numeric ID of the GitHub webhook to watch for failed deliveries. |
 | `FAUCET_HOOK_ORG` | for an org hook | The organization that owns the hook. Set this or `FAUCET_HOOK_REPO`, not both. |
 | `FAUCET_HOOK_REPO` | for a repo hook | The repository that owns the hook, as `owner/name`. |
-| `FAUCET_PUBLIC_URL` | for service accounts and the browser login | Faucet's public URL, such as `https://faucet.example.com`, with no path or trailing slash. Turns on faucet's login server, which service clients use (see [docs/service-accounts.md](docs/service-accounts.md)) and which the browser login needs. Unset on Vercel production, it is `https://` and `VERCEL_PROJECT_PRODUCTION_URL`. Set it there anyway to pin it: a shorter custom domain added later changes that URL, which ends every browser session and access token (see [docs/deploy.md](docs/deploy.md#the-public-url)). |
-| `FAUCET_GITHUB_APP_CLIENT_ID` | for the browser login | The client ID of faucet's GitHub App. With the secret and the token key it turns on the browser login of coding agents (see [docs/browser-login.md](docs/browser-login.md)), and needs `FAUCET_PUBLIC_URL`. |
+| `FAUCET_PUBLIC_URL` | yes | Faucet's public URL, such as `https://faucet.example.com`, or `http` on a loopback host such as `http://localhost:8080`, with no path or trailing slash. Faucet's login server lives there, and every caller logs in there: service clients (see [docs/service-accounts.md](docs/service-accounts.md)) and the browser login. The server refuses to start without it, except on Vercel production, where an unset one is `https://` and `VERCEL_PROJECT_PRODUCTION_URL`. Set it there anyway to pin it: a shorter custom domain added later changes that URL, which ends every browser session and access token (see [docs/deploy.md](docs/deploy.md#the-public-url)). |
+| `FAUCET_GITHUB_APP_CLIENT_ID` | for the browser login | The client ID of faucet's GitHub App. With the secret and the token key it turns on the browser login of coding agents (see [docs/browser-login.md](docs/browser-login.md)). |
 | `FAUCET_GITHUB_APP_CLIENT_SECRET` | for the browser login | A client secret of faucet's GitHub App. |
 | `FAUCET_TOKEN_KEY` | for the browser login | The keys that seal the GitHub tokens of users at rest: one or more `<key_id>:<32 random bytes, base64>`, comma-separated. The first seals, every one opens (see [rotating the key](docs/browser-login.md#rotate-the-token-key)). |
 | `FAUCET_GITHUB_URL` | no | GitHub's web host, which serves the App's login page. Default `https://github.com`. |
@@ -103,7 +105,7 @@ Point any MCP client at `https://<your host>/github/mcp` with a GitHub token as 
 | `VERCEL_PROJECT_PRODUCTION_URL` | set by Vercel | The host of the project's production deployment: its shortest custom domain, or its `vercel.app` domain. Vercel sets it in every environment, and only in production does faucet take it for an unset `FAUCET_PUBLIC_URL`. |
 <!-- END generated:settings -->
 
-The server refuses to start on an invalid or incomplete feature configuration, and it names the variable but never the value. A feature whose variables are unset stays off, and its routes answer 503, except the login server's, which do not exist without `FAUCET_PUBLIC_URL`.
+The server refuses to start on an invalid or incomplete feature configuration, and it names the variable but never the value. A feature whose variables are unset stays off, and its routes answer 503.
 
 ## Scheduled routes
 
@@ -125,7 +127,7 @@ Faucet runs anywhere that runs a Go binary next to Postgres. This repository dep
 
 The packages:
 
-- [`faucet`](faucet): the core. `faucet.New` builds a `Service`. Mount `Service.WebhookHandler()` on your router. Build your `*mcp.Server` with `mcp.ServerOptions{Capabilities: faucet.ServerCapabilities()}`, call `Service.Register` on it, and wrap its HTTP handler in `faucet.RequireEventName`, which checks the `Mcp-Name` header and refuses JSON-RPC batches. Bring your own `Authorizer` and principal lookup, or use `TokenAuthorizer` (see [docs/security.md](docs/security.md#principals-and-scopes) for the principal kinds and the scopes).
+- [`faucet`](faucet): the core. `faucet.New` builds a `Service`. Mount `Service.WebhookHandler()` on your router. Build your `*mcp.Server` with `mcp.ServerOptions{Capabilities: faucet.ServerCapabilities()}`, call `Service.Register` on it, and wrap its HTTP handler in `faucet.RequireEventName`, which checks the `Mcp-Name` header and refuses JSON-RPC batches. Bring your own `Authorizer` and principal lookup, or use `TokenAuthorizer`, which asks GitHub with a principal's own GitHub token, as faucet's browser login does (see [docs/security.md](docs/security.md#principals-and-scopes) for the principal kinds and the scopes).
 - [`faucet/redelivery`](faucet/redelivery): the failed-webhook sweep, built with `redelivery.New`.
 - [`faucet/pgstore`](faucet/pgstore): the Postgres store, with embedded migrations.
 - [`faucet/storetest`](faucet/storetest): the contract tests that every `Store` must pass.

@@ -2,6 +2,17 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## GitHub tokens are refused
+
+This came in [#PR](https://github.com/coder/faucet/pull/PR). It needs no migration. **Turn on the [browser login](browser-login.md) in production before you deploy it**: from this release a person has no other way in, and a caller that sends a GitHub token gets 401.
+
+- **A GitHub token as the bearer token is refused.** `/github/mcp` and `/mcp` answer it as they answer a request with no token: 401, with the `WWW-Authenticate` challenge that names the endpoint's metadata. Faucet sends it nowhere. GitHub's `GET /repos/{owner}/{name}` answers a fine-grained token that holds only the `Metadata` permission, or a user token of another GitHub App, for a private repository whose pull requests and checks that token cannot read, and no GitHub API says what a fine-grained token may read (see [security.md](security.md#access-to-events)).
+- **What a caller does instead.** A person's coding agent drops its token and connects with none, and its user logs in through a browser (see [browser-login.md](browser-login.md#what-the-user-sees)). A service agent logs in as a client that an operator makes, with its secret or with its workload's own token (see [service-accounts.md](service-accounts.md)).
+- **The server needs a public URL.** It refuses to start without `FAUCET_PUBLIC_URL`, and the error names it. On Vercel production an unset one is still `https://` and `VERCEL_PROJECT_PRODUCTION_URL`. A preview or development deployment never takes that URL, so it exits at start unless `FAUCET_PUBLIC_URL` is set for it (see [deploy.md](deploy.md#the-public-url)). For a local run, `http://localhost:8080` will do.
+- **`/cron/purge`** always answers `expired_access_tokens`, `expired_auth_requests`, `ended_sessions`, `unused_connections` and `unused_access_checks`. Before, it left them out without `FAUCET_PUBLIC_URL`.
+- **A rolling deploy:** until every instance runs this build, an instance of the build before still takes a GitHub token.
+- **A host that embeds faucet:** `TokenAuthorizer.Authenticate` and `AccessCache` are gone. `TokenAuthorizer` still answers `RepoID` and `RepoIDFresh` for a principal from `NewPrincipal`, for a GitHub token that the host got itself, as the browser login of `faucet/oauth` does (see [security.md](security.md#principals-and-scopes)).
+
 ## To clients updated in place
 
 This came in [#74](https://github.com/coder/faucet/pull/74). It needs no migration.
@@ -66,7 +77,7 @@ This came in [#55](https://github.com/coder/faucet/pull/55). A service can now r
 This came in [#54](https://github.com/coder/faucet/pull/54). Nothing that a client sees changes until you set `FAUCET_GITHUB_APP_CLIENT_ID`, `FAUCET_GITHUB_APP_CLIENT_SECRET` and `FAUCET_TOKEN_KEY` next to `FAUCET_PUBLIC_URL` (see [browser-login.md](browser-login.md)). With only some of them set, the server refuses to start and names the missing ones. Then:
 
 - `/oauth/authorize` shows the consent page and takes its form, the new route `/oauth/github/callback` takes GitHub's answer, `/oauth/token` also takes the `authorization_code` and `refresh_token` grants, and the new route `/oauth/revoke` revokes a client's own tokens (RFC 7009), service clients' included. The authorization server metadata lists the new grants and the revocation endpoint, and says that faucet takes client ID metadata documents.
-- Faucet keeps the GitHub App tokens of the users who log in, sealed under `FAUCET_TOKEN_KEY` (see [security.md](security.md#four-kinds-of-caller)).
+- Faucet keeps the GitHub App tokens of the users who log in, sealed under `FAUCET_TOKEN_KEY` (see [security.md](security.md#three-kinds-of-caller)).
 
 Whether or not you set them:
 

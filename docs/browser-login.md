@@ -2,7 +2,7 @@
 
 A coding agent can connect to `https://<your host>/github/mcp` with no token. Faucet answers 401, the agent opens a browser, and its user logs in to GitHub through faucet. Nobody makes a GitHub token by hand.
 
-For this way in, faucet keeps the user's GitHub App token. It seals the token under `FAUCET_TOKEN_KEY` and gives the agent only faucet's own tokens, an access token for 15 minutes and a refresh token. The [security model](security.md#four-kinds-of-caller) compares this with a pasted token, a service and a workload.
+For this way in, faucet keeps the user's GitHub App token. It seals the token under `FAUCET_TOKEN_KEY` and gives the agent only faucet's own tokens, an access token for 15 minutes and a refresh token. The [security model](security.md#three-kinds-of-caller) compares this with a service and a workload. It is the only way in for a person: faucet refuses a GitHub token that a caller sends as its bearer token (see [upgrading.md](upgrading.md#github-tokens-are-refused)).
 
 ## Turn it on
 
@@ -22,7 +22,7 @@ For this way in, faucet keeps the user's GitHub App token. It seals the token un
    FAUCET_TOKEN_KEY="k1:$(openssl rand -base64 32)"
    ```
 
-   When one of the last three is set without the others, or without `FAUCET_PUBLIC_URL`, the server refuses to start and names the missing variables. On Vercel, set them for Production only, and the client secret and the key as sensitive. Keep a copy of `FAUCET_TOKEN_KEY` outside Vercel. Vercel does not show a sensitive value again, and a [rotation](#rotate-the-token-key) needs the old key.
+   When one of the last three is set without the others, the server refuses to start and names the missing variables. It refuses to start without `FAUCET_PUBLIC_URL` too. On Vercel, set them for Production only, and the client secret and the key as sensitive. Keep a copy of `FAUCET_TOKEN_KEY` outside Vercel. Vercel does not show a sensitive value again, and a [rotation](#rotate-the-token-key) needs the old key.
 
 5. Rate limit `POST /oauth/authorize` per IP at the edge, such as with a Vercel Firewall rule (see [deploy.md](deploy.md#setup)). Faucet stores a row for each consent that a script posts, and relies on that limit to bound them.
 
