@@ -2,9 +2,9 @@
 
 A service agent, such as one that analyzes GitHub events, logs in to faucet with a client ID and secret that an operator made ahead of time, or, when it runs as a Vercel function or a Kubernetes pod, with the token that its platform signs for it (see [Log in with a workload identity](#log-in-with-a-workload-identity)). It holds no GitHub token: faucet checks its access against the repositories that the operator granted it, and never asks GitHub about them.
 
-## Turn it on
+## Set it up
 
-Set `FAUCET_PUBLIC_URL` to the URL that clients call, such as `https://faucet.example.com`. A client compares the URLs that it computes from it byte for byte, so the server refuses to start unless it is `https` (`http` only on a loopback host) with a lower-case host, no default port and no path, not even a trailing slash. On Vercel, set it for Production only. Unset, none of the routes on this page exist, except on Vercel production, where faucet takes `https://` and `VERCEL_PROJECT_PRODUCTION_URL` instead (see [deploy.md](deploy.md#the-public-url)).
+Set `FAUCET_PUBLIC_URL` to the URL that clients call, such as `https://faucet.example.com`. A client compares the URLs that it computes from it byte for byte, so the server refuses to start unless it is `https` (`http` only on a loopback host) with a lower-case host, no default port and no path, not even a trailing slash. On Vercel, set it for Production only. Unset, the server refuses to start, except on Vercel production, where faucet takes `https://` and `VERCEL_PROJECT_PRODUCTION_URL` instead (see [deploy.md](deploy.md#the-public-url)).
 
 Tick **Repositories** in the GitHub webhook's events as well (see [Grants](#grants)).
 

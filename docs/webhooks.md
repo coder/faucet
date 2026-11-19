@@ -117,7 +117,7 @@ A delivery can also end with its subscription and no reason: `events/unsubscribe
 
 A subscription that holds 100 unsent deliveries reads no new events until some of them end.
 
-Faucet keeps no subscriber's token, so it only sees revoked access **when the subscriber renews**. A subscription that is never renewed simply expires.
+Faucet checks access only when the subscriber renews, so it sees revoked access **only at a renewal**. A subscription that is never renewed simply expires.
 
 ## Control messages
 

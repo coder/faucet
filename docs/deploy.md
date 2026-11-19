@@ -37,7 +37,7 @@ A preview that starts anyway also needs a public URL: it never derives one (see 
    | `FAUCET_WEBHOOK_KEY` | `openssl rand -base64 32` |
    | `FAUCET_WEBHOOK_CALLBACK_VERIFICATION` | `handshake`, or unset it and set `FAUCET_WEBHOOK_ALLOWED_ORIGINS` instead. |
 
-   To turn on [redelivery](redelivery.md), also set `FAUCET_HOOK_TOKEN`, `FAUCET_HOOK_ID` and `FAUCET_HOOK_ORG` or `FAUCET_HOOK_REPO` once the GitHub webhook exists. To turn on the [browser login](browser-login.md), also set `FAUCET_GITHUB_APP_CLIENT_ID`, `FAUCET_GITHUB_APP_CLIENT_SECRET` and `FAUCET_TOKEN_KEY`, and keep a copy of the key outside Vercel, because a rotation needs it. Set `FAUCET_PUBLIC_URL` too (see [the public URL](#the-public-url)).
+   To turn on [redelivery](redelivery.md), also set `FAUCET_HOOK_TOKEN`, `FAUCET_HOOK_ID` and `FAUCET_HOOK_ORG` or `FAUCET_HOOK_REPO` once the GitHub webhook exists. To turn on the [browser login](browser-login.md), also set `FAUCET_GITHUB_APP_CLIENT_ID`, `FAUCET_GITHUB_APP_CLIENT_SECRET` and `FAUCET_TOKEN_KEY`, and keep a copy of the key outside Vercel, because a rotation needs it. Set `FAUCET_PUBLIC_URL` to the production URL as well: every caller logs in there (see [the public URL](#the-public-url)).
 
 3. **Deploy by pushing to `main`.** A variable change only applies to deployments built after it. Don't run `vercel deploy` by hand: on a project with no production deployment, it created one.
 

@@ -279,7 +279,7 @@ func aLaterPassReplacesAnOlderDenial(t *testing.T, s oauth.Store) {
 // A denial whose lookup started before a pass's, and which GitHub answered
 // after it, leaves the pass.
 // A pass and a denial whose lookups started at the same time end as the
-// denial, in either order, as in faucet.AccessCache.
+// denial, in either order.
 func aDenialWinsATieWithAPass(t *testing.T, s oauth.Store) {
 	now := loginNow()
 	c := connectionAt(1, now)

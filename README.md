@@ -140,7 +140,7 @@ The packages:
 - [docs/events.md](docs/events.md): the event names, their actions and filters, and the GitHub webhook to set up.
 - [docs/webhooks.md](docs/webhooks.md): the contract for a callback receiver (signatures, retries, cursors, control messages, secret rotation).
 - [docs/redelivery.md](docs/redelivery.md): how failed GitHub deliveries are recovered, with the sweep's guarantees, capacity and known limits.
-- [docs/security.md](docs/security.md): the four kinds of caller, the access checks, what protects the browser login and workload logins, the callback URL guard and secret handling.
+- [docs/security.md](docs/security.md): the three kinds of caller, the access checks, what protects the browser login and workload logins, the callback URL guard and secret handling.
 - [docs/deploy.md](docs/deploy.md): deploying and operating faucet, and what each scheduled route answers.
 - [docs/service-accounts.md](docs/service-accounts.md): service agents that log in with client credentials or with their platform's token, how an operator makes their clients and trust rules, and how grants match repositories.
 - [docs/browser-login.md](docs/browser-login.md): the browser login of coding agents, the GitHub App that an operator makes for it, what faucet keeps, and how to rotate `FAUCET_TOKEN_KEY`.

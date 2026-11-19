@@ -530,7 +530,7 @@ export class Faucet {
 
   // withFaucet starts one more faucet on its own database, runs fn against it and stops it. The new faucet has a random
   // CRON_SECRET, webhook mode off, its own URL as FAUCET_PUBLIC_URL and the raw events of RAW_EVENTS. env adds the rest,
-  // FAUCET_RAW_EVENTS: '' offers none and FAUCET_PUBLIC_URL: '' sets no public URL. fn gets the faucet and a function that
+  // FAUCET_RAW_EVENTS: '' offers none and FAUCET_PUBLIC_URL: '' leaves it unset, which starts only with the Vercel production variables. fn gets the faucet and a function that
   // returns its output so far. opts.e2eBuild runs the binary that was built with -tags faucet_e2e, whose callback client,
   // document client and client for the keys of workload issuers reach loopback, over http too, and which trusts the
   // certificate that Documents and Issuer serve. opts.browserLogin also turns on its browser login, with the stub as GitHub

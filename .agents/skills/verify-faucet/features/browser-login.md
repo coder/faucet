@@ -12,7 +12,7 @@ A person's coding agent connects to `/github/mcp` with no token, gets a 401, and
 - A person's token waits on any repository that GitHub lets their GitHub login read: faucet asks GitHub with the token that it keeps. Any other repository is refused.
 - Faucet stores each check that passed in `faucet_access_checks`, one row per person and repository, and never a denial. A call after the session's last refresh takes a stored check made since then without asking GitHub. Each refresh asks GitHub again about the 50 repositories used last, among those used in the last 15 minutes.
 - `POST /oauth/revoke` (RFC 7009) with the agent's refresh token ends its session, so the agent logs out. `/cron/purge` then deletes ended sessions with their refresh tokens, and a day later the connection with the sealed GitHub tokens.
-- Without the three settings, `/oauth/github/callback` is 404 and the metadata lists `client_credentials` alone.
+- Without the three settings, `/oauth/github/callback` is 404 and the metadata lists `client_credentials` and the token exchange alone.
 
 ## How to get to it (user POV)
 
