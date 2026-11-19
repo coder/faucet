@@ -113,6 +113,20 @@ func NewSecretlessClient(id, resource string, scopes []faucet.Scope, grants []st
 	return c, nil
 }
 
+// WithAccess returns c with these grants and scopes in place of its own, for
+// Store.UpdateClient. As at creation, it needs at least one grant, and it
+// takes grants as BindGrants returns them.
+func (c Client) WithAccess(grants []string, scopes []faucet.Scope) (Client, error) {
+	if len(grants) == 0 {
+		return Client{}, xerrors.New("a client needs at least one grant, or it can read nothing")
+	}
+	c.Grants, c.Scopes = slices.Clone(grants), slices.Clone(scopes)
+	if err := c.Validate(); err != nil {
+		return Client{}, err
+	}
+	return c, nil
+}
+
 // errClientID is the error of an ID that ValidateClientID refuses.
 var errClientID = xerrors.Errorf("a client ID is 1 to %d lower-case letters, digits and hyphens, with no hyphen at either end", maxClientIDBytes)
 

@@ -229,3 +229,60 @@ func TestTheServiceResolverFindsOnlyALiveClient(t *testing.T) {
 	_, err = resolve(ctx, "ci-watcher", bothScopes)
 	require.ErrorIs(t, err, faucet.ErrInvalidToken)
 }
+
+// A token keeps the scopes it was issued with, less any that the client no
+// longer holds, and gets the grants that the client holds now. An update
+// that widens the client widens no token.
+func TestAnUpdateOfTheClientReachesItsTokensAtOnce(t *testing.T) {
+	t.Parallel()
+	store, _, _ := newServiceAccess(t)
+	ctx := context.Background()
+	resolve := oauth.ServiceResolver(store)
+	c, err := store.Client(ctx, "ci-watcher")
+	require.NoError(t, err)
+
+	narrowed, err := c.WithAccess([]string{"repo:coder/coder"}, []faucet.Scope{faucet.ScopeEventsRead})
+	require.NoError(t, err)
+	_, err = store.UpdateClient(ctx, narrowed)
+	require.NoError(t, err)
+	token := bothScopes
+	p, err := resolve(ctx, "ci-watcher", token)
+	require.NoError(t, err)
+	require.Equal(t, []faucet.Scope{faucet.ScopeEventsRead}, p.Scopes(), "a token loses a scope that the client lost")
+	require.Equal(t, bothScopes, token, "the resolver leaves the token's scopes alone")
+	client, ok := p.ServiceClient()
+	require.True(t, ok)
+	require.Equal(t, []string{"repo:coder/coder"}, client.Grants)
+	_, err = resolve(ctx, "ci-watcher", []faucet.Scope{faucet.ScopeEventsSubscribe})
+	require.ErrorIs(t, err, faucet.ErrInvalidToken, "a token whose scopes the client holds none of is refused")
+
+	widened, err := c.WithAccess(c.Grants, bothScopes)
+	require.NoError(t, err)
+	_, err = store.UpdateClient(ctx, widened)
+	require.NoError(t, err)
+	p, err = resolve(ctx, "ci-watcher", []faucet.Scope{faucet.ScopeEventsRead})
+	require.NoError(t, err)
+	require.Equal(t, []faucet.Scope{faucet.ScopeEventsRead}, p.Scopes(), "a token gains no scope that the client gained")
+}
+
+func TestWithAccessNeedsAGrantAndAValidClient(t *testing.T) {
+	t.Parallel()
+	c, _, err := oauth.NewClient("ci-watcher", resource, bothScopes, []string{"repo:coder/faucet"}, time.Now())
+	require.NoError(t, err)
+	_, err = c.WithAccess(nil, bothScopes)
+	require.ErrorContains(t, err, "at least one grant")
+	_, err = c.WithAccess([]string{"repo:coder/faucet"}, nil)
+	require.ErrorContains(t, err, "at least one scope")
+	_, err = c.WithAccess([]string{"org:coder/faucet"}, bothScopes)
+	require.Error(t, err)
+
+	grants, scopes := []string{"all"}, []faucet.Scope{faucet.ScopeEventsSubscribe}
+	got, err := c.WithAccess(grants, scopes)
+	require.NoError(t, err)
+	grants[0], scopes[0] = "repo:evil/repo", faucet.ScopeEventsRead
+	require.Equal(t, []string{"all"}, got.Grants, "the client shares no slice with its caller")
+	require.Equal(t, []faucet.Scope{faucet.ScopeEventsSubscribe}, got.Scopes)
+	require.Equal(t, []string{"repo:coder/faucet"}, c.Grants, "the receiver keeps its own")
+	require.Equal(t, c.SecretHash, got.SecretHash)
+	require.Equal(t, c.Resource, got.Resource)
+}

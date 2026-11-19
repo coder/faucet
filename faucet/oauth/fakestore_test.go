@@ -166,6 +166,20 @@ func (s *fakeStore) DisableClient(_ context.Context, id string, now time.Time) (
 	return cloneClient(s.clients[i]), nil
 }
 
+func (s *fakeStore) UpdateClient(_ context.Context, c oauth.Client) (oauth.Client, error) {
+	if err := c.Validate(); err != nil {
+		return oauth.Client{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := slices.IndexFunc(s.clients, func(o oauth.Client) bool { return o.ID == c.ID && o.Live() })
+	if i < 0 {
+		return oauth.Client{}, oauth.ErrUnknownClient
+	}
+	s.clients[i].Grants, s.clients[i].Scopes = slices.Clone(c.Grants), slices.Clone(c.Scopes)
+	return cloneClient(s.clients[i]), nil
+}
+
 func (s *fakeStore) AddTrustRule(_ context.Context, clientID string, r oauth.TrustRule, now time.Time) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

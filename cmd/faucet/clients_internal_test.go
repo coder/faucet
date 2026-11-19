@@ -590,3 +590,92 @@ func TestTheTrustCommandsPrintTheirUsageForHelp(t *testing.T) {
 		}
 	}
 }
+
+// update sets the scopes, the grants or both of a client in place, so the
+// service keeps its ID, its secret and its trust rules.
+func TestTheClientsCommandUpdatesAClientInPlace(t *testing.T) {
+	t.Parallel()
+	getenv, store := newClientsDatabase(t)
+	ctx := context.Background()
+	const resource = "https://faucet.example.com/github/mcp"
+	require.NoError(t, store.RecordOwner(ctx, faucet.Owner{ID: 7, Login: "Coder"}))
+	_, _, err := clients(t, getenv, "create", "-resource", resource, "-no-secret", "-scope", "events:read", "-grant", "org:coder", "superblink")
+	require.NoError(t, err)
+	_, _, err = clients(t, getenv, trustVercel("superblink", vercelPins...)...)
+	require.NoError(t, err)
+	before, err := store.Client(ctx, "superblink")
+	require.NoError(t, err)
+
+	out, notice, err := clients(t, getenv, "update", "superblink", "-scope", "events:read,events:subscribe")
+	require.NoError(t, err)
+	require.Equal(t, "superblink holds org:Coder#7, with the scopes events:read,events:subscribe.\n", out)
+	require.Contains(t, notice, "the service needs a new token")
+	after, err := store.Client(ctx, "superblink")
+	require.NoError(t, err)
+	want := before
+	want.Scopes = []faucet.Scope{faucet.ScopeEventsRead, faucet.ScopeEventsSubscribe}
+	require.Equal(t, want, after, "the client keeps its grants, its resource, its creation time and its lack of a secret")
+	rules, err := store.TrustRules(ctx, "superblink")
+	require.NoError(t, err)
+	require.Len(t, rules, 1, "the client keeps its trust rule")
+
+	out, _, err = clients(t, getenv, "update", "superblink", "-grant", "repo:coder/faucet", "-grant", "org:coder")
+	require.NoError(t, err)
+	require.Equal(t, "superblink holds repo:coder/faucet, org:Coder#7, with the scopes events:read,events:subscribe.\n", out, "an org grant is bound as create binds it, and the scopes stay")
+
+	out, _, err = clients(t, getenv, "update", "superblink", "-scope", "events:subscribe", "-grant", "all")
+	require.NoError(t, err)
+	require.Equal(t, "superblink holds all, with the scopes events:subscribe.\n", out)
+	after, err = store.Client(ctx, "superblink")
+	require.NoError(t, err)
+	require.Equal(t, []string{"all"}, after.Grants)
+	require.Equal(t, []faucet.Scope{faucet.ScopeEventsSubscribe}, after.Scopes)
+}
+
+func TestTheClientsCommandRefusesAnUpdateThatCannotWork(t *testing.T) {
+	t.Parallel()
+	getenv, store := newClientsDatabase(t)
+	ctx := context.Background()
+	const resource = "https://faucet.example.com/github/mcp"
+	require.NoError(t, store.RecordOwner(ctx, faucet.Owner{ID: 7, Login: "coder"}))
+	for _, id := range []string{"ci", "gone"} {
+		_, _, err := clients(t, getenv, "create", "-resource", resource, "-scope", "events:read", "-grant", "repo:coder/faucet", id)
+		require.NoError(t, err)
+	}
+	_, _, err := clients(t, getenv, "disable", "gone")
+	require.NoError(t, err)
+	ci, err := store.Client(ctx, "ci")
+	require.NoError(t, err)
+	gone, err := store.Client(ctx, "gone")
+	require.NoError(t, err)
+
+	for name, tc := range map[string]struct {
+		args []string
+		says string
+	}{
+		"no flag":                         {[]string{"update", "ci"}, "name -scope, -grant or both"},
+		"no client ID":                    {[]string{"update", "-scope", "events:read"}, "name the client ID before the flags"},
+		"a flag before the ID":            {[]string{"update", "-scope", "events:read", "ci"}, "name the client ID before the flags"},
+		"an argument after the flags":     {[]string{"update", "ci", "-scope", "events:read", "more"}, "nothing after them"},
+		"an upper-case ID":                {[]string{"update", "CI", "-scope", "events:read"}, "a client ID is"},
+		"an unknown client":               {[]string{"update", "nobody", "-scope", "events:read"}, `there is no client "nobody"`},
+		"a disabled client":               {[]string{"update", "gone", "-scope", "events:read,events:subscribe"}, "an update cannot bring it back"},
+		"an empty scope list":             {[]string{"update", "ci", "-scope", ""}, "-scope"},
+		"an unknown scope":                {[]string{"update", "ci", "-scope", "events:read,events:admin"}, "-scope"},
+		"an org grant of a repo":          {[]string{"update", "ci", "-grant", "org:coder/faucet"}, "org:coder/faucet"},
+		"an org grant of another account": {[]string{"update", "ci", "-grant", "org:coder#8"}, "names account 8"},
+		"an org grant of no account":      {[]string{"update", "ci", "-grant", "org:nobody"}, "cannot tell which account"},
+		"an empty grant":                  {[]string{"update", "ci", "-grant", ""}, ""},
+	} {
+		out, _, err := clients(t, getenv, tc.args...)
+		require.Error(t, err, name)
+		require.ErrorContains(t, err, tc.says, name)
+		require.Empty(t, out, name)
+	}
+	got, err := store.Client(ctx, "ci")
+	require.NoError(t, err)
+	require.Equal(t, ci, got, "a refused update changes nothing")
+	got, err = store.Client(ctx, "gone")
+	require.NoError(t, err)
+	require.Equal(t, gone, got, "a disabled client keeps what it held")
+}

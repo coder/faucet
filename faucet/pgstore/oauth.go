@@ -155,6 +155,24 @@ func (s *Store) DisableClient(ctx context.Context, id string, now time.Time) (_ 
 	return clientOf(row)
 }
 
+// UpdateClient implements oauth.Store.
+func (s *Store) UpdateClient(ctx context.Context, c oauth.Client) (_ oauth.Client, err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	if err := c.Validate(); err != nil {
+		return oauth.Client{}, xerrors.Errorf("validate client: %w", err)
+	}
+	row, err := s.q.UpdateServiceClient(ctx, database.UpdateServiceClientParams{
+		ClientID: c.ID, Grants: append([]string{}, c.Grants...), Scopes: scopeNames(c.Scopes),
+	})
+	switch {
+	case xerrors.Is(err, sql.ErrNoRows):
+		return oauth.Client{}, oauth.ErrUnknownClient
+	case err != nil:
+		return oauth.Client{}, xerrors.Errorf("update client: %w", err)
+	}
+	return clientOf(row)
+}
+
 // AddTrustRule implements oauth.Store.
 func (s *Store) AddTrustRule(ctx context.Context, clientID string, r oauth.TrustRule, now time.Time) (_ int64, err error) {
 	defer func() { err = endedBy(ctx, err) }()

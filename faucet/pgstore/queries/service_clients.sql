@@ -18,3 +18,9 @@ UPDATE faucet_service_clients
 SET disabled_at = coalesce(disabled_at, @now::timestamptz)
 WHERE client_id = @client_id
 RETURNING client_id, secret_hash, resource, grants, scopes, created_at, disabled_at;
+
+-- name: UpdateServiceClient :one
+UPDATE faucet_service_clients
+SET grants = @grants::text[], scopes = @scopes::text[]
+WHERE client_id = @client_id AND disabled_at IS NULL
+RETURNING client_id, secret_hash, resource, grants, scopes, created_at, disabled_at;

@@ -24,6 +24,7 @@ import (
 )
 
 const (
+	updateUsage  = "faucet clients update <client-id> [-scope <scopes>] [-grant <grant> [-grant ...]]"
 	trustUsage   = "faucet clients trust <client-id> -issuer <url> -claim <name>=<value> [-claim ...] [-jwks-file <path>]"
 	trustsUsage  = "faucet clients trusts <client-id>"
 	untrustUsage = "faucet clients untrust <client-id> <rule-id>"
@@ -33,6 +34,7 @@ const clientsUsage = `usage:
   faucet clients create [-resource <url>] [-scope <scopes>] [-no-secret] -grant <grant> [-grant ...] <client-id>
   faucet clients list
   faucet clients disable <client-id>
+  ` + updateUsage + `
   ` + trustUsage + `
   ` + trustsUsage + `
   ` + untrustUsage + `
@@ -46,6 +48,10 @@ repository of the user or organization that holds the login now, under any
 later login too, or all for every repository. org:<login>#<account ID> is
 taken only when that account holds the login now. The client keeps each org
 grant with the ID of its account, which create and list show.
+update sets the scopes, the grants or both of a live client, and keeps the
+rest. On its next request, a token of the client takes the new grants and
+holds only the scopes that it was issued with and the client holds, so a new
+scope needs a new token.
 -no-secret makes a client with no secret, which the client credentials grant
 refuses, for workloads that log in with their own OIDC tokens. A trust rule
 lets a token that -issuer signs act as the client when it holds each -claim
@@ -106,7 +112,7 @@ type clientStore interface {
 
 func isClientsCommand(name string) bool {
 	switch name {
-	case "create", "list", "disable", "trust", "trusts", "untrust":
+	case "create", "list", "disable", "update", "trust", "trusts", "untrust":
 		return true
 	}
 	return false
@@ -128,6 +134,8 @@ func clientsCommand(ctx context.Context, args []string, store clientStore, publi
 			return xerrors.New(clientsUsage)
 		}
 		return disableClient(ctx, args[1], store, now, stdout)
+	case "update":
+		return updateClient(ctx, args[1:], store, stdout, stderr)
 	case "trust":
 		return trustClient(ctx, args[1:], store, now, stdout, stderr)
 	case "trusts":
@@ -192,13 +200,9 @@ func createClient(ctx context.Context, args []string, store clientStore, publicU
 	if err := checkResource(*resource, pinned); err != nil {
 		return err
 	}
-	var scopes []faucet.Scope
-	for _, name := range strings.Split(*scopeList, ",") {
-		scope, err := faucet.ParseScope(strings.TrimSpace(name))
-		if err != nil {
-			return xerrors.Errorf("-scope: %w", err)
-		}
-		scopes = append(scopes, scope)
+	scopes, err := parseScopes(*scopeList)
+	if err != nil {
+		return err
 	}
 	bound, err := oauth.BindGrants(ctx, store, grants)
 	if err != nil {
@@ -231,6 +235,81 @@ func createClient(ctx context.Context, args []string, store clientStore, publicU
 		next = "Keep the secret now: faucet stores only its hash and cannot show it again."
 	}
 	_, err = fmt.Fprintf(stderr, "The client holds %s. An org grant names the account after its #.\n%s\n", strings.Join(c.Grants, ", "), next)
+	return err
+}
+
+func parseScopes(list string) ([]faucet.Scope, error) {
+	var scopes []faucet.Scope
+	for _, name := range strings.Split(list, ",") {
+		scope, err := faucet.ParseScope(strings.TrimSpace(name))
+		if err != nil {
+			return nil, xerrors.Errorf("-scope: %w", err)
+		}
+		scopes = append(scopes, scope)
+	}
+	return scopes, nil
+}
+
+// updateClient sets the scopes, the grants or both of a live client in place,
+// so the service keeps its ID, its secret, its trust rules and its
+// subscriptions. An org grant is bound as create binds it.
+func updateClient(ctx context.Context, args []string, store clientStore, stdout, stderr io.Writer) error {
+	flags := commandFlags("update", updateUsage, stderr)
+	scopeList := flags.String("scope", "", "the scopes that the client's tokens can hold, comma separated, in place of the ones it holds")
+	var grants grantFlags
+	flags.Var(&grants, "grant", "what the client may read, in place of its grants: repo:<owner>/<name>, org:<login>, org:<login>#<account ID> or all; repeat it for more")
+	var id string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		id, args = args[0], args[1:]
+	}
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if id == "" || flags.NArg() != 0 {
+		return xerrors.New("name the client ID before the flags, and nothing after them\n" + clientsUsage)
+	}
+	set := map[string]bool{}
+	flags.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if !set["scope"] && !set["grant"] {
+		return xerrors.New("name -scope, -grant or both: update changes nothing else\n" + clientsUsage)
+	}
+	if err := oauth.ValidateClientID(id); err != nil {
+		return err
+	}
+	c, err := knownClient(ctx, store, id)
+	switch {
+	case err != nil:
+		return err
+	case !c.Live():
+		return xerrors.Errorf("client %q is disabled, and an update cannot bring it back", id)
+	}
+	scopes, held := c.Scopes, c.Grants
+	if set["scope"] {
+		if scopes, err = parseScopes(*scopeList); err != nil {
+			return err
+		}
+	}
+	if set["grant"] {
+		if held, err = oauth.BindGrants(ctx, store, grants); err != nil {
+			return err
+		}
+	}
+	updated, err := c.WithAccess(held, scopes)
+	if err != nil {
+		return err
+	}
+	updated, err = store.UpdateClient(ctx, updated)
+	if xerrors.Is(err, oauth.ErrUnknownClient) {
+		return xerrors.Errorf("client %q was disabled before the update, which changed nothing", id)
+	}
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "%s holds %s, with the scopes %s.\n", updated.ID, strings.Join(updated.Grants, ", "), strings.Join(scopeNames(updated.Scopes), ","))
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stderr, "On its next request, a token of the client takes the new grants and holds only the scopes that it was issued with and the client holds: for a new scope, the service needs a new token. A subscription that the client can no longer make gets no renewal, and ends when it expires, within 10 minutes.")
 	return err
 }
 
