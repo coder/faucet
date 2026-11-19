@@ -645,11 +645,12 @@ func TestUpdatingAClientReachesItsTokenOnTheNextRequest(t *testing.T) {
 	srv := newLoginServer(t, func(c *loginConfig) { c.webhook = &faucet.WebhookDeps{Key: key, Callbacks: allow} })
 	publicURL, err := parseOrigin(srv.URL)
 	require.NoError(t, err)
-	update := func(args ...string) {
+	update := func(args ...string) string {
 		t.Helper()
 		var stdout, stderr bytes.Buffer
 		err := clientsCommand(context.Background(), append([]string{"update", "ci-watcher"}, args...), srv.store, publicURL, publicURL, time.Now(), &stdout, &stderr)
 		require.NoError(t, err, stderr.String())
+		return stdout.String()
 	}
 	secret := srv.client(t, "ci-watcher", "/github/mcp", bothScopes, "repo:octo-org/octo-repo")
 	srv.deliver(t, "d-1")
@@ -664,12 +665,12 @@ func TestUpdatingAClientReachesItsTokenOnTheNextRequest(t *testing.T) {
 	require.NoError(t, poll(session))
 	require.NoError(t, subscribeTo(ctx, session, "octo-org/octo-repo"))
 
-	update("-scope", "events:read")
+	require.Contains(t, update("-scope", "events:read"), "faucet deleted its 1 subscriptions", "a client that cannot subscribe keeps no subscription")
 	require.NoError(t, poll(session), "the token keeps the scope that the client holds")
 	require.Error(t, subscribeTo(ctx, session, "octo-org/octo-repo"), "the token drops the scope that the client lost")
 	narrow := connectSubscriber(ctx, t, ts, srv.token(t, "ci-watcher", secret))
 
-	update("-grant", "repo:octo-org/other")
+	require.NotContains(t, update("-grant", "repo:octo-org/other"), "deleted", "an update of the grants alone deletes no subscription")
 	require.Error(t, poll(session), "the token takes the new grants")
 
 	update("-scope", "events:read,events:subscribe", "-grant", "repo:octo-org/octo-repo")

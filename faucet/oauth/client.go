@@ -113,18 +113,36 @@ func NewSecretlessClient(id, resource string, scopes []faucet.Scope, grants []st
 	return c, nil
 }
 
-// WithAccess returns c with these grants and scopes in place of its own, for
-// Store.UpdateClient. As at creation, it needs at least one grant, and it
-// takes grants as BindGrants returns them.
-func (c Client) WithAccess(grants []string, scopes []faucet.Scope) (Client, error) {
-	if len(grants) == 0 {
-		return Client{}, xerrors.New("a client needs at least one grant, or it can read nothing")
+// ClientUpdate is what Store.UpdateClient sets. A nil set keeps the one
+// that the client holds, so an update of the scopes alone cannot undo an
+// update of the grants that ran at the same time.
+type ClientUpdate struct {
+	// Grants are as BindGrants or RebindGrants returns them.
+	Grants []string
+	Scopes []faucet.Scope
+}
+
+// Validate reports whether a store may apply u.
+func (u ClientUpdate) Validate() error {
+	switch {
+	case u.Grants == nil && u.Scopes == nil:
+		return xerrors.New("an update sets the grants, the scopes or both")
+	case u.Grants != nil && len(u.Grants) == 0:
+		return xerrors.New("a client needs at least one grant, or it can read nothing")
+	case u.Scopes != nil && len(u.Scopes) == 0:
+		return xerrors.New("a client needs at least one scope")
 	}
-	c.Grants, c.Scopes = slices.Clone(grants), slices.Clone(scopes)
-	if err := c.Validate(); err != nil {
-		return Client{}, err
+	for _, s := range u.Scopes {
+		if _, err := faucet.ParseScope(string(s)); err != nil {
+			return err
+		}
 	}
-	return c, nil
+	for _, g := range u.Grants {
+		if _, err := parseGrant(g); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // errClientID is the error of an ID that ValidateClientID refuses.
@@ -147,7 +165,7 @@ func ValidateClientID(id string) error {
 
 // clientGrant is what one grant names: a repository, written owner/name,
 // every repository of an account, by its ID, or every repository. login is
-// the account's login when the client was made, which only says what an
+// the account's login when the grant was set, which only says what an
 // operator granted.
 type clientGrant struct {
 	repo      string
@@ -232,6 +250,42 @@ func BindGrants(ctx context.Context, owners Repositories, grants []string) ([]st
 		bound = append(bound, orgGrantPrefix+o.Login+accountSeparator+strconv.FormatInt(o.ID, 10))
 	}
 	return bound, nil
+}
+
+// RebindGrants is BindGrants for an update of a client that holds held. An
+// org grant that the client holds, as faucet clients list shows it, stays as
+// it is with no lookup, so it survives a rename of its account or a new
+// holder of its login. An "org:<login>" is refused when the client holds the
+// login with another account than the one that holds it now, because the
+// operator could mean either.
+func RebindGrants(ctx context.Context, owners Repositories, held, grants []string) ([]string, error) {
+	heldByLogin := map[string]clientGrant{}
+	for _, g := range parseGrants(held) {
+		if g.namesAnAccount() {
+			heldByLogin[strings.ToLower(g.login)] = g
+		}
+	}
+	rebound := make([]string, 0, len(grants))
+	for _, g := range grants {
+		if i := slices.IndexFunc(held, func(h string) bool { return strings.EqualFold(h, g) }); i >= 0 && strings.HasPrefix(g, orgGrantPrefix) {
+			rebound = append(rebound, held[i])
+			continue
+		}
+		bound, err := BindGrants(ctx, owners, []string{g})
+		if err != nil {
+			return nil, err
+		}
+		login, unbound := strings.CutPrefix(g, orgGrantPrefix)
+		unbound = unbound && !strings.Contains(login, accountSeparator)
+		if h, ok := heldByLogin[strings.ToLower(login)]; unbound && ok {
+			if now, _ := parseGrant(bound[0]); now.accountID != h.accountID {
+				return nil, xerrors.Errorf("the client holds %s%s%s%d, and %s names account %d now: write %s%s%s%d to keep that grant, or %s for the account that holds the login now",
+					orgGrantPrefix, h.login, accountSeparator, h.accountID, login, now.accountID, orgGrantPrefix, h.login, accountSeparator, h.accountID, bound[0])
+			}
+		}
+		rebound = append(rebound, bound[0])
+	}
+	return rebound, nil
 }
 
 func errOperatorGrant(g string) error {

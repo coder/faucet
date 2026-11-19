@@ -156,13 +156,15 @@ func (s *Store) DisableClient(ctx context.Context, id string, now time.Time) (_ 
 }
 
 // UpdateClient implements oauth.Store.
-func (s *Store) UpdateClient(ctx context.Context, c oauth.Client) (_ oauth.Client, err error) {
+func (s *Store) UpdateClient(ctx context.Context, id string, u oauth.ClientUpdate) (_ oauth.Client, err error) {
 	defer func() { err = endedBy(ctx, err) }()
-	if err := c.Validate(); err != nil {
-		return oauth.Client{}, xerrors.Errorf("validate client: %w", err)
+	if err := u.Validate(); err != nil {
+		return oauth.Client{}, xerrors.Errorf("validate the update: %w", err)
 	}
 	row, err := s.q.UpdateServiceClient(ctx, database.UpdateServiceClientParams{
-		ClientID: c.ID, Grants: append([]string{}, c.Grants...), Scopes: scopeNames(c.Scopes),
+		ClientID:  id,
+		SetGrants: u.Grants != nil, Grants: append([]string{}, u.Grants...),
+		SetScopes: u.Scopes != nil, Scopes: scopeNames(u.Scopes),
 	})
 	switch {
 	case xerrors.Is(err, sql.ErrNoRows):

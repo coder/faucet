@@ -238,12 +238,8 @@ func TestAnUpdateOfTheClientReachesItsTokensAtOnce(t *testing.T) {
 	store, _, _ := newServiceAccess(t)
 	ctx := context.Background()
 	resolve := oauth.ServiceResolver(store)
-	c, err := store.Client(ctx, "ci-watcher")
-	require.NoError(t, err)
 
-	narrowed, err := c.WithAccess([]string{"repo:coder/coder"}, []faucet.Scope{faucet.ScopeEventsRead})
-	require.NoError(t, err)
-	_, err = store.UpdateClient(ctx, narrowed)
+	_, err := store.UpdateClient(ctx, "ci-watcher", oauth.ClientUpdate{Grants: []string{"repo:coder/coder"}, Scopes: []faucet.Scope{faucet.ScopeEventsRead}})
 	require.NoError(t, err)
 	token := bothScopes
 	p, err := resolve(ctx, "ci-watcher", token)
@@ -256,33 +252,56 @@ func TestAnUpdateOfTheClientReachesItsTokensAtOnce(t *testing.T) {
 	_, err = resolve(ctx, "ci-watcher", []faucet.Scope{faucet.ScopeEventsSubscribe})
 	require.ErrorIs(t, err, faucet.ErrInvalidToken, "a token whose scopes the client holds none of is refused")
 
-	widened, err := c.WithAccess(c.Grants, bothScopes)
-	require.NoError(t, err)
-	_, err = store.UpdateClient(ctx, widened)
+	_, err = store.UpdateClient(ctx, "ci-watcher", oauth.ClientUpdate{Scopes: bothScopes})
 	require.NoError(t, err)
 	p, err = resolve(ctx, "ci-watcher", []faucet.Scope{faucet.ScopeEventsRead})
 	require.NoError(t, err)
 	require.Equal(t, []faucet.Scope{faucet.ScopeEventsRead}, p.Scopes(), "a token gains no scope that the client gained")
 }
 
-func TestWithAccessNeedsAGrantAndAValidClient(t *testing.T) {
+func TestAClientUpdateSetsSomethingValid(t *testing.T) {
 	t.Parallel()
-	c, _, err := oauth.NewClient("ci-watcher", resource, bothScopes, []string{"repo:coder/faucet"}, time.Now())
-	require.NoError(t, err)
-	_, err = c.WithAccess(nil, bothScopes)
-	require.ErrorContains(t, err, "at least one grant")
-	_, err = c.WithAccess([]string{"repo:coder/faucet"}, nil)
-	require.ErrorContains(t, err, "at least one scope")
-	_, err = c.WithAccess([]string{"org:coder/faucet"}, bothScopes)
-	require.Error(t, err)
+	for name, tc := range map[string]struct {
+		u    oauth.ClientUpdate
+		says string
+	}{
+		"nothing":          {oauth.ClientUpdate{}, "sets the grants, the scopes or both"},
+		"no grant":         {oauth.ClientUpdate{Grants: []string{}}, "at least one grant"},
+		"no scope":         {oauth.ClientUpdate{Scopes: []faucet.Scope{}}, "at least one scope"},
+		"an unknown scope": {oauth.ClientUpdate{Scopes: []faucet.Scope{"events:everything"}}, "events:everything"},
+		"an unbound grant": {oauth.ClientUpdate{Grants: []string{"org:coder"}}, "names no account"},
+	} {
+		require.ErrorContains(t, tc.u.Validate(), tc.says, name)
+	}
+	require.NoError(t, oauth.ClientUpdate{Grants: []string{"org:coder#7", "all"}}.Validate())
+	require.NoError(t, oauth.ClientUpdate{Scopes: bothScopes}.Validate())
+}
 
-	grants, scopes := []string{"all"}, []faucet.Scope{faucet.ScopeEventsSubscribe}
-	got, err := c.WithAccess(grants, scopes)
+// An update keeps an org grant that the client holds with no lookup, so a
+// grant copied from the list survives a rename, and refuses an org:<login>
+// that would move the grant to another account unseen.
+func TestRebindGrantsKeepsTheAccountsThatTheClientHolds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	repos := fakeRepos{owners: map[string]faucet.Owner{"coder": {ID: 8, Login: "coder"}, "octo": {ID: 9, Login: "Octo"}}}
+	held := []string{"org:Coder#7", "repo:coder/faucet"}
+
+	got, err := oauth.RebindGrants(ctx, repos, held, []string{"org:coder#7", "repo:coder/coder", "org:octo"})
 	require.NoError(t, err)
-	grants[0], scopes[0] = "repo:evil/repo", faucet.ScopeEventsRead
-	require.Equal(t, []string{"all"}, got.Grants, "the client shares no slice with its caller")
-	require.Equal(t, []faucet.Scope{faucet.ScopeEventsSubscribe}, got.Scopes)
-	require.Equal(t, []string{"repo:coder/faucet"}, c.Grants, "the receiver keeps its own")
-	require.Equal(t, c.SecretHash, got.SecretHash)
-	require.Equal(t, c.Resource, got.Resource)
+	require.Equal(t, []string{"org:Coder#7", "repo:coder/coder", "org:Octo#9"}, got, "a held grant stays as it is, and a new one is bound")
+
+	_, err = oauth.RebindGrants(ctx, repos, held, []string{"org:coder"})
+	require.ErrorContains(t, err, "the client holds org:Coder#7, and coder names account 8 now: write org:Coder#7 to keep that grant, or org:coder#8 for the account that holds the login now")
+	got, err = oauth.RebindGrants(ctx, repos, held, []string{"org:coder#8"})
+	require.NoError(t, err, "naming the account is a choice")
+	require.Equal(t, []string{"org:coder#8"}, got)
+	_, err = oauth.RebindGrants(ctx, repos, held, []string{"org:coder#6"})
+	require.ErrorContains(t, err, "names account 6", "a grant that the client does not hold is bound as at creation")
+	_, err = oauth.RebindGrants(ctx, repos, held, []string{"org:nobody"})
+	require.ErrorIs(t, err, faucet.ErrUnknownOwner)
+
+	repos.owners["coder"] = faucet.Owner{ID: 7, Login: "coder"}
+	got, err = oauth.RebindGrants(ctx, repos, held, []string{"org:coder"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"org:coder#7"}, got, "the login names the account that the client holds")
 }

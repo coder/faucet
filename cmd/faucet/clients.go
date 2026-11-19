@@ -51,7 +51,9 @@ grant with the ID of its account, which create and list show.
 update sets the scopes, the grants or both of a live client, and keeps the
 rest. On its next request, a token of the client takes the new grants and
 holds only the scopes that it was issued with and the client holds, so a new
-scope needs a new token.
+scope needs a new token. A -scope without events:subscribe deletes the
+client's subscriptions. An org grant that the client holds stays bound to its
+account.
 -no-secret makes a client with no secret, which the client credentials grant
 refuses, for workloads that log in with their own OIDC tokens. A trust rule
 lets a token that -issuer signs act as the client when it holds each -claim
@@ -283,33 +285,37 @@ func updateClient(ctx context.Context, args []string, store clientStore, stdout,
 	case !c.Live():
 		return xerrors.Errorf("client %q is disabled, and an update cannot bring it back", id)
 	}
-	scopes, held := c.Scopes, c.Grants
+	var u oauth.ClientUpdate
 	if set["scope"] {
-		if scopes, err = parseScopes(*scopeList); err != nil {
+		if u.Scopes, err = parseScopes(*scopeList); err != nil {
 			return err
 		}
 	}
 	if set["grant"] {
-		if held, err = oauth.BindGrants(ctx, store, grants); err != nil {
+		if u.Grants, err = oauth.RebindGrants(ctx, store, c.Grants, grants); err != nil {
 			return err
 		}
 	}
-	updated, err := c.WithAccess(held, scopes)
-	if err != nil {
-		return err
-	}
-	updated, err = store.UpdateClient(ctx, updated)
+	updated, err := store.UpdateClient(ctx, id, u)
 	if xerrors.Is(err, oauth.ErrUnknownClient) {
 		return xerrors.Errorf("client %q was disabled before the update, which changed nothing", id)
 	}
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(stdout, "%s holds %s, with the scopes %s.\n", updated.ID, strings.Join(updated.Grants, ", "), strings.Join(scopeNames(updated.Scopes), ","))
-	if err != nil {
+	if _, err := fmt.Fprintf(stdout, "%s holds %s, with the scopes %s.\n", updated.ID, strings.Join(updated.Grants, ", "), strings.Join(scopeNames(updated.Scopes), ",")); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintln(stderr, "On its next request, a token of the client takes the new grants and holds only the scopes that it was issued with and the client holds: for a new scope, the service needs a new token. A subscription that the client can no longer make gets no renewal, and ends when it expires, within 10 minutes.")
+	if set["scope"] && !slices.Contains(updated.Scopes, faucet.ScopeEventsSubscribe) {
+		deleted, err := store.DeleteSubscriptionsOf(ctx, faucet.ServiceLogin(id))
+		if err != nil {
+			return xerrors.Errorf("%s holds no %s now, but its subscriptions could not be deleted, so run faucet clients update again: %w", id, faucet.ScopeEventsSubscribe, err)
+		}
+		if _, err := fmt.Fprintf(stdout, "It holds no %s, so faucet deleted its %d subscriptions.\n", faucet.ScopeEventsSubscribe, deleted); err != nil {
+			return err
+		}
+	}
+	_, err = fmt.Fprintln(stderr, "On its next request, a token of the client takes the new grants and holds only the scopes that it was issued with and the client holds: for a new scope, the service needs a new token. A subscription to a target that the new grants do not cover gets no renewal, and ends when it expires, within 10 minutes.")
 	return err
 }
 

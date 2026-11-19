@@ -21,6 +21,7 @@ RETURNING client_id, secret_hash, resource, grants, scopes, created_at, disabled
 
 -- name: UpdateServiceClient :one
 UPDATE faucet_service_clients
-SET grants = @grants::text[], scopes = @scopes::text[]
+SET grants = CASE WHEN @set_grants::boolean THEN @grants::text[] ELSE grants END,
+    scopes = CASE WHEN @set_scopes::boolean THEN @scopes::text[] ELSE scopes END
 WHERE client_id = @client_id AND disabled_at IS NULL
 RETURNING client_id, secret_hash, resource, grants, scopes, created_at, disabled_at;

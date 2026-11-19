@@ -129,19 +129,28 @@ func (q *Queries) ListServiceClients(ctx context.Context) ([]FaucetServiceClient
 
 const updateServiceClient = `-- name: UpdateServiceClient :one
 UPDATE faucet_service_clients
-SET grants = $1::text[], scopes = $2::text[]
-WHERE client_id = $3 AND disabled_at IS NULL
+SET grants = CASE WHEN $1::boolean THEN $2::text[] ELSE grants END,
+    scopes = CASE WHEN $3::boolean THEN $4::text[] ELSE scopes END
+WHERE client_id = $5 AND disabled_at IS NULL
 RETURNING client_id, secret_hash, resource, grants, scopes, created_at, disabled_at
 `
 
 type UpdateServiceClientParams struct {
-	Grants   []string
-	Scopes   []string
-	ClientID string
+	SetGrants bool
+	Grants    []string
+	SetScopes bool
+	Scopes    []string
+	ClientID  string
 }
 
 func (q *Queries) UpdateServiceClient(ctx context.Context, arg UpdateServiceClientParams) (FaucetServiceClient, error) {
-	row := q.db.QueryRowContext(ctx, updateServiceClient, pq.Array(arg.Grants), pq.Array(arg.Scopes), arg.ClientID)
+	row := q.db.QueryRowContext(ctx, updateServiceClient,
+		arg.SetGrants,
+		pq.Array(arg.Grants),
+		arg.SetScopes,
+		pq.Array(arg.Scopes),
+		arg.ClientID,
+	)
 	var i FaucetServiceClient
 	err := row.Scan(
 		&i.ClientID,
