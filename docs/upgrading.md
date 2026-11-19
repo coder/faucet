@@ -4,7 +4,7 @@ The server applies every schema change at start (on Vercel, in production only, 
 
 ## To clients updated in place
 
-This came in the change that added `faucet clients update`. It needs no migration.
+This came in [#74](https://github.com/coder/faucet/pull/74). It needs no migration.
 
 - **A token of a service holds only the scopes that its client holds now.** Before, a token kept every scope that it was issued with until it expired. No client could lose a scope before, so this changes nothing for one made earlier.
 - **A host that embeds faucet:** an `oauth.Store` of your own must also implement `UpdateClient` and pass the new `storetest.RunOAuth` subtests.
