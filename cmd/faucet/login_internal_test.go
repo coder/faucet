@@ -632,3 +632,51 @@ func TestARenewalChecksAccessAgainForEveryKindOfCaller(t *testing.T) {
 		require.EqualValues(t, 2, counted.reads.Load()-before, "the token check reads the client, and the renewal reads it again")
 	})
 }
+
+// faucet clients update changes what a token of the client can do on its next
+// request: the token takes the new grants and holds only the scopes that it
+// was issued with and the client holds now, so a new scope needs a new token.
+func TestUpdatingAClientReachesItsTokenOnTheNextRequest(t *testing.T) {
+	t.Parallel()
+	key, err := faucet.NewWebhookKey(bytes.Repeat([]byte{1}, 32))
+	require.NoError(t, err)
+	allow, err := faucet.NewCallbackAllowlist([]string{"https://hooks.example.com"}, false)
+	require.NoError(t, err)
+	srv := newLoginServer(t, func(c *loginConfig) { c.webhook = &faucet.WebhookDeps{Key: key, Callbacks: allow} })
+	publicURL, err := parseOrigin(srv.URL)
+	require.NoError(t, err)
+	update := func(args ...string) string {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		err := clientsCommand(context.Background(), append([]string{"update", "ci-watcher"}, args...), srv.store, publicURL, publicURL, time.Now(), &stdout, &stderr)
+		require.NoError(t, err, stderr.String())
+		return stdout.String()
+	}
+	secret := srv.client(t, "ci-watcher", "/github/mcp", bothScopes, "repo:octo-org/octo-repo")
+	srv.deliver(t, "d-1")
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	ts := &testServer{Server: srv.Server, mcpPath: "/github/mcp"}
+	session := connectSubscriber(ctx, t, ts, srv.token(t, "ci-watcher", secret))
+	poll := func(s *mcp.ClientSession) error {
+		_, err := mcp.CallCustomMethod[*eventsParams, *eventsResult](ctx, s, "events/poll", pollParams("octo-org/octo-repo", nil))
+		return err
+	}
+	require.NoError(t, poll(session))
+	require.NoError(t, subscribeTo(ctx, session, "octo-org/octo-repo"))
+
+	require.Contains(t, update("-scope", "events:read"), "faucet deleted its 1 subscriptions", "a client that cannot subscribe keeps no subscription")
+	require.NoError(t, poll(session), "the token keeps the scope that the client holds")
+	require.Error(t, subscribeTo(ctx, session, "octo-org/octo-repo"), "the token drops the scope that the client lost")
+	narrow := connectSubscriber(ctx, t, ts, srv.token(t, "ci-watcher", secret))
+
+	require.NotContains(t, update("-grant", "repo:octo-org/other"), "deleted", "an update of the grants alone deletes no subscription")
+	require.Error(t, poll(session), "the token takes the new grants")
+
+	update("-scope", "events:read,events:subscribe", "-grant", "repo:octo-org/octo-repo")
+	require.NoError(t, poll(session))
+	require.NoError(t, subscribeTo(ctx, session, "octo-org/octo-repo"), "the token holds a scope that it was issued with again")
+	require.Error(t, subscribeTo(ctx, narrow, "octo-org/octo-repo"), "a token gains no scope that it was not issued with")
+	renewed := connectSubscriber(ctx, t, ts, srv.token(t, "ci-watcher", secret))
+	require.NoError(t, subscribeTo(ctx, renewed, "octo-org/octo-repo"), "a new token holds the new scope")
+}

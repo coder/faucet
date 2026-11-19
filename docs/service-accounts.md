@@ -19,6 +19,8 @@ The command prints `client_id` and `client_secret` once. Faucet keeps only a has
 
 `faucet clients list` shows every client without its secret. `faucet clients disable <client-id>` ends one: it gets no new token, the token it holds fails on its next request, and faucet deletes its subscriptions with the deliveries they queued. A subscription that the service made in the moment before the disable can outlive it, so run the command again if that matters. The command leaves a lease that the service holds on a [raw event](events.md#raw-events). The lease ends 60 minutes after the service's last poll. Until then, faucet stores the events that the lease asked for, and the service cannot read them. The commands never migrate, so the database must be at the newest migration.
 
+`faucet clients update <client-id> [-scope <scopes>] [-grant <grant> [-grant ...]]` sets the scopes, the grants or both of a live client in place, so the service keeps its ID, its secret and its trust rules, and its subscriptions unless `-scope` leaves out `events:subscribe`. The flags take what `create`'s take, each one replaces that whole set, and the set that the command does not name stays as the client holds it then, even when another update changed it meanwhile. From its next request, a token of the client takes the new grants and holds only the scopes that it was issued with and the client still holds. A wait that started before the update can run for up to 50 more seconds. A token gains no scope: the service gets a new scope with its next token, 15 minutes at most later, when its token request names that scope or none. When `-scope` leaves out `events:subscribe`, faucet deletes the client's subscriptions with the deliveries they queued, as `disable` does, and the same moment applies: run the command again if that matters. A subscription to a target that new grants do not cover keeps its deliveries until it expires, 10 minutes at most, because faucet checks access when it renews a subscription and at no other time (see [webhooks.md](webhooks.md)), and faucet keeps storing the [raw events](events.md#raw-events) that a lease of it asked for, which the service cannot read, until the lease ends 60 minutes after the service's last poll. The command refuses a disabled client.
+
 ## What the service's MCP client does
 
 The client needs only the endpoint URL, the client ID and the secret. go-sdk's `extauth.ClientCredentialsHandler` and the TypeScript SDK's `ClientCredentialsProvider` both do the rest, and the end-to-end tests run both.
@@ -49,15 +51,15 @@ sequenceDiagram
 
 ## Grants
 
-A client holds one or more grants, which only `faucet clients create` sets:
+A client holds one or more grants, which `faucet clients create` sets and `faucet clients update` replaces:
 
 | Grant | Covers | The [targets](events.md#targets) it allows |
 | --- | --- | --- |
 | `repo:<owner>/<name>` | that repository | `repo` of it |
-| `org:<login>` | every repository of the user or organization that holds `<login>` when the client is made, also one it makes later, under any later login | `owner` of the account by its current login, and `repo` of any of its repositories |
+| `org:<login>` | every repository of the user or organization that holds `<login>` when the grant is set, also one it makes later, under any later login | `owner` of the account by its current login, and `repo` of any of its repositories |
 | `all` | every repository and owner that faucet receives deliveries from | every target, `all: true` included |
 
-`faucet clients create` binds an `org:` grant to the account that holds the login then, and the client keeps it as `org:<login>#<account ID>`, which the command prints and `faucet clients list` shows. An operator can also write `org:<login>#<account ID>`, which the command takes only when that account holds the login now. The command refuses a login that no delivery has named, because faucet cannot tell which account it is: make the client once GitHub has sent a delivery from the account or one of its repositories.
+`faucet clients create` and `faucet clients update` bind an `org:` grant to the account that holds the login then, and the client keeps it as `org:<login>#<account ID>`, which the command prints and `faucet clients list` shows. An operator can also write `org:<login>#<account ID>`, which the command takes only when that account holds the login now. The command refuses a login that no delivery has named, because faucet cannot tell which account it is: make the client once GitHub has sent a delivery from the account or one of its repositories. `faucet clients update` keeps an `org:<login>#<account ID>` that the client holds as it is, with no lookup, so a grant copied from `faucet clients list` survives a rename of its account. It refuses an `org:<login>` that the client holds with another account than the one that holds the login now, and names both forms, so that no update moves a grant to another account unseen.
 
 A grant covers every event that faucet offers of what it names, and that includes the [raw events](events.md#raw-events), whose data is GitHub's whole payload. Names and logins match ignoring case, as GitHub does.
 
@@ -104,6 +106,7 @@ sequenceDiagram
 | `faucet clients trust <client-id> -issuer <url> -claim <name>=<value> [-claim ...] [-jwks-file <path>]` | Adds a trust rule and prints its `rule_id`. It refuses a rule that pins too little for its issuer, and says what to pin. |
 | `faucet clients trusts <client-id>` | Lists the client's rules with their IDs, claims and where their keys come from. |
 | `faucet clients untrust <client-id> <rule-id>` | Removes one rule. |
+| `faucet clients update <client-id> [-scope <scopes>] [-grant <grant> ...]` | Sets the scopes, the grants or both, as for every client. The trust rules stay. |
 | `faucet clients disable <client-id>` | Ends the client, as for every client. |
 
 Without `-jwks-file`, faucet fetches the issuer's keys from its OpenID discovery document, `<issuer>/.well-known/openid-configuration`, over `https` at public addresses only. Pass `-jwks-file` with the issuer's JWK Set for an issuer that faucet cannot reach. Faucet never fetches pasted keys, so when the issuer rotates its key, add a rule with the new set, then remove the old one. A client with a secret can hold trust rules too, and then logs in both ways.

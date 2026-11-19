@@ -34,6 +34,9 @@ func RunOAuth(t *testing.T, newStore func(t *testing.T) oauth.Store) {
 		{"DisableClientKeepsTheFirstTime", disableClientKeepsTheFirstTime},
 		{"InsertClientValidatesInput", insertClientValidatesInput},
 		{"ClientSharesNoSliceWithItsCaller", clientSharesNoSliceWithItsCaller},
+		{"UpdateClientSetsWhatItNamesOnly", updateClientSetsWhatItNamesOnly},
+		{"UpdateClientRefusesAnUnknownOrDisabledClient", updateClientRefusesAnUnknownOrDisabledClient},
+		{"UpdateClientValidatesInput", updateClientValidatesInput},
 	}
 	for _, st := range subtests {
 		t.Run(st.name, func(t *testing.T) {
@@ -355,4 +358,76 @@ func clientSharesNoSliceWithItsCaller(t *testing.T, s oauth.Store) {
 	again, err := s.Client(ctx, "ci-watcher")
 	require.NoError(t, err)
 	requireSameClient(t, want, again)
+}
+
+// An update sets only what it names, so an update of the scopes alone keeps
+// grants that another update set meanwhile.
+func updateClientSetsWhatItNamesOnly(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	at := time.Now()
+	c := clientAt("ci-watcher", at)
+	require.NoError(t, s.InsertClient(ctx, c))
+	require.NoError(t, s.InsertClient(ctx, clientAt("triage", at)))
+
+	got, err := s.UpdateClient(ctx, "ci-watcher", oauth.ClientUpdate{Grants: []string{"org:coder#95932066"}})
+	require.NoError(t, err)
+	want := c
+	want.Grants = []string{"org:coder#95932066"}
+	requireSameClient(t, want, got)
+
+	got, err = s.UpdateClient(ctx, "ci-watcher", oauth.ClientUpdate{Scopes: []faucet.Scope{faucet.ScopeEventsSubscribe}})
+	require.NoError(t, err)
+	want.Scopes = []faucet.Scope{faucet.ScopeEventsSubscribe}
+	requireSameClient(t, want, got)
+
+	got, err = s.UpdateClient(ctx, "ci-watcher", oauth.ClientUpdate{Grants: []string{"all", "repo:coder/faucet"}, Scopes: []faucet.Scope{faucet.ScopeEventsRead}})
+	require.NoError(t, err)
+	want.Grants, want.Scopes = []string{"all", "repo:coder/faucet"}, []faucet.Scope{faucet.ScopeEventsRead}
+	requireSameClient(t, want, got)
+	again, err := s.Client(ctx, "ci-watcher")
+	require.NoError(t, err)
+	requireSameClient(t, want, again)
+	untouched, err := s.Client(ctx, "triage")
+	require.NoError(t, err)
+	requireSameClient(t, clientAt("triage", at), untouched)
+}
+
+func updateClientRefusesAnUnknownOrDisabledClient(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	at := time.Now()
+	require.NoError(t, s.InsertClient(ctx, clientAt("ci-watcher", at)))
+	update := oauth.ClientUpdate{Grants: []string{"all"}}
+	_, err := s.UpdateClient(ctx, "ci-watcher2", update)
+	require.ErrorIs(t, err, oauth.ErrUnknownClient)
+
+	disabled, err := s.DisableClient(ctx, "ci-watcher", at.Add(time.Minute))
+	require.NoError(t, err)
+	_, err = s.UpdateClient(ctx, "ci-watcher", update)
+	require.ErrorIs(t, err, oauth.ErrUnknownClient, "a disabled client keeps what it held")
+	got, err := s.Client(ctx, "ci-watcher")
+	require.NoError(t, err)
+	requireSameClient(t, disabled, got)
+	all, err := s.Clients(ctx)
+	require.NoError(t, err)
+	require.Len(t, all, 1, "an update makes no client")
+}
+
+func updateClientValidatesInput(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	c := clientAt("ci-watcher", time.Now())
+	require.NoError(t, s.InsertClient(ctx, c))
+	for name, u := range map[string]oauth.ClientUpdate{
+		"nothing":          {},
+		"no grant":         {Grants: []string{}},
+		"no scope":         {Scopes: []faucet.Scope{}},
+		"an unknown scope": {Scopes: []faucet.Scope{"events:everything"}},
+		"a bad grant":      {Grants: []string{"org:coder/faucet"}},
+		"an unbound grant": {Grants: []string{"org:coder"}},
+	} {
+		_, err := s.UpdateClient(ctx, "ci-watcher", u)
+		require.Error(t, err, name)
+	}
+	got, err := s.Client(ctx, "ci-watcher")
+	require.NoError(t, err)
+	requireSameClient(t, c, got)
 }

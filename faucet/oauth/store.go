@@ -123,6 +123,11 @@ type Store interface {
 	// A client that is disabled already keeps the time it was first
 	// disabled. It returns ErrUnknownClient when there is no such client.
 	DisableClient(ctx context.Context, id string, now time.Time) (Client, error)
+	// UpdateClient sets the grants, the scopes or both of the live client
+	// with this ID as u says, keeps the rest of the client as it is, and
+	// returns the client. It fails when u is not valid, and returns
+	// ErrUnknownClient when there is no such client or it is disabled.
+	UpdateClient(ctx context.Context, id string, u ClientUpdate) (Client, error)
 
 	// AddTrustRule adds r, at now, to the trust rules of the client with this
 	// ID, live or disabled, and returns the rule's ID, which no other rule

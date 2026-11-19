@@ -11,9 +11,10 @@ import (
 	"github.com/coder/quartz"
 )
 
-// SubjectResolver returns the principal of a live subject, holding scopes.
-// It returns faucet.ErrInvalidToken when the subject has ended, such as a
-// disabled client or a session that logged out.
+// SubjectResolver returns the principal of a live subject, holding scopes or
+// some of them, such as those that a client still holds. It returns
+// faucet.ErrInvalidToken when the subject has ended, such as a disabled
+// client or a session that logged out, or holds none of scopes.
 type SubjectResolver func(ctx context.Context, subject string, scopes []faucet.Scope) (faucet.Principal, error)
 
 // Verifier checks the access tokens that faucet mints.
@@ -81,7 +82,7 @@ func (v *Verifier) Verify(ctx context.Context, token, resource string) (faucet.P
 	p, err := resolve(ctx, t.Subject, slices.Clone(t.Scopes))
 	switch {
 	case xerrors.Is(err, faucet.ErrInvalidToken):
-		return faucet.Principal{}, xerrors.Errorf("the %s subject is not live: %w", t.SubjectKind, err)
+		return faucet.Principal{}, xerrors.Errorf("the %s subject is not live or holds none of the token's scopes: %w", t.SubjectKind, err)
 	case err != nil:
 		return faucet.Principal{}, xerrors.Errorf("resolve the %s subject: %w", t.SubjectKind, err)
 	}

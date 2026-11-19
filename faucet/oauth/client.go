@@ -113,6 +113,38 @@ func NewSecretlessClient(id, resource string, scopes []faucet.Scope, grants []st
 	return c, nil
 }
 
+// ClientUpdate is what Store.UpdateClient sets. A nil set keeps the one
+// that the client holds, so an update of the scopes alone cannot undo an
+// update of the grants that ran at the same time.
+type ClientUpdate struct {
+	// Grants are as BindGrants or RebindGrants returns them.
+	Grants []string
+	Scopes []faucet.Scope
+}
+
+// Validate reports whether a store may apply u.
+func (u ClientUpdate) Validate() error {
+	switch {
+	case u.Grants == nil && u.Scopes == nil:
+		return xerrors.New("an update sets the grants, the scopes or both")
+	case u.Grants != nil && len(u.Grants) == 0:
+		return xerrors.New("a client needs at least one grant, or it can read nothing")
+	case u.Scopes != nil && len(u.Scopes) == 0:
+		return xerrors.New("a client needs at least one scope")
+	}
+	for _, s := range u.Scopes {
+		if _, err := faucet.ParseScope(string(s)); err != nil {
+			return err
+		}
+	}
+	for _, g := range u.Grants {
+		if _, err := parseGrant(g); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // errClientID is the error of an ID that ValidateClientID refuses.
 var errClientID = xerrors.Errorf("a client ID is 1 to %d lower-case letters, digits and hyphens, with no hyphen at either end", maxClientIDBytes)
 
@@ -133,13 +165,24 @@ func ValidateClientID(id string) error {
 
 // clientGrant is what one grant names: a repository, written owner/name,
 // every repository of an account, by its ID, or every repository. login is
-// the account's login when the client was made, which only says what an
+// the account's login when the grant was set, which only says what an
 // operator granted.
 type clientGrant struct {
 	repo      string
 	login     string
 	accountID int64
 	all       bool
+}
+
+// String returns g as a client holds it.
+func (g clientGrant) String() string {
+	switch {
+	case g.all:
+		return allGrant
+	case g.namesAnAccount():
+		return orgGrantPrefix + g.login + accountSeparator + strconv.FormatInt(g.accountID, 10)
+	}
+	return repoGrantPrefix + g.repo
 }
 
 // namesAnAccount reports whether g is an org grant.
@@ -218,6 +261,66 @@ func BindGrants(ctx context.Context, owners Repositories, grants []string) ([]st
 		bound = append(bound, orgGrantPrefix+o.Login+accountSeparator+strconv.FormatInt(o.ID, 10))
 	}
 	return bound, nil
+}
+
+// RebindGrants is BindGrants for an update of a client that holds held. An
+// org grant that the client holds, as faucet clients list shows it, stays as
+// it is with no lookup, so it survives a rename of its account or a new
+// holder of its login. An "org:<login>" is refused when the client holds the
+// login with another account than the one that holds it now, because the
+// operator could mean either.
+func RebindGrants(ctx context.Context, owners Repositories, held, grants []string) ([]string, error) {
+	heldByLogin := map[string][]clientGrant{}
+	for _, g := range parseGrants(held) {
+		if g.namesAnAccount() {
+			heldByLogin[strings.ToLower(g.login)] = append(heldByLogin[strings.ToLower(g.login)], g)
+		}
+	}
+	rebound := make([]string, 0, len(grants))
+	for _, g := range grants {
+		// An org grant that a build before bound grants stored as
+		// org:<login> names no account, so it is bound as a new one is.
+		if i := slices.IndexFunc(held, func(h string) bool { return strings.EqualFold(h, g) }); i >= 0 && strings.HasPrefix(g, orgGrantPrefix) {
+			if _, err := parseGrant(held[i]); err == nil {
+				rebound = append(rebound, held[i])
+				continue
+			}
+		}
+		bound, err := BindGrants(ctx, owners, []string{g})
+		if xerrors.Is(err, faucet.ErrUnknownOwner) {
+			if h := heldByLogin[strings.ToLower(strings.TrimPrefix(g, orgGrantPrefix))]; len(h) > 0 {
+				return nil, xerrors.Errorf("no delivery names the account of %s now, and the client holds %s: write that to keep the grant: %w", g, h[0].String(), err)
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := movesAHeldGrant(g, bound[0], heldByLogin); err != nil {
+			return nil, err
+		}
+		rebound = append(rebound, bound[0])
+	}
+	return rebound, nil
+}
+
+// movesAHeldGrant refuses g, an "org:<login>" that an operator wrote and that
+// binds to bound, when the client holds the login only with other accounts.
+func movesAHeldGrant(g, bound string, heldByLogin map[string][]clientGrant) error {
+	login, ok := strings.CutPrefix(g, orgGrantPrefix)
+	if !ok || strings.Contains(login, accountSeparator) {
+		return nil
+	}
+	now, err := parseGrant(bound)
+	if err != nil {
+		return err
+	}
+	held := heldByLogin[strings.ToLower(login)]
+	if len(held) == 0 || slices.ContainsFunc(held, func(h clientGrant) bool { return h.accountID == now.accountID }) {
+		return nil
+	}
+	keep := held[0].String()
+	return xerrors.Errorf("the client holds %s, and %s names account %d now: write %s to keep that grant, or %s for the account that holds the login now",
+		keep, login, now.accountID, keep, bound)
 }
 
 func errOperatorGrant(g string) error {

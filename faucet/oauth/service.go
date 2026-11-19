@@ -12,17 +12,27 @@ import (
 )
 
 // ServiceResolver returns the SubjectResolver of service clients in store.
-// The subject of a live client is a service with the client's grants and
-// the token's scopes. An unknown or disabled client is
-// faucet.ErrInvalidToken, so disabling a client fails its tokens on their
-// next request.
+// The subject of a live client is a service with the grants that the client
+// holds now and the token's scopes that it still holds. An unknown or
+// disabled client, or one that holds none of the token's scopes, is
+// faucet.ErrInvalidToken. So an operator who disables a client or updates
+// what it holds changes what its tokens do on their next request.
 func ServiceResolver(store Store) SubjectResolver {
 	return func(ctx context.Context, id string, scopes []faucet.Scope) (faucet.Principal, error) {
 		c, err := liveClient(ctx, store, id)
 		if err != nil {
 			return faucet.Principal{}, err
 		}
-		return faucet.NewService(faucet.ServiceClient{ClientID: c.ID, Grants: c.Grants}, scopes)
+		var held []faucet.Scope
+		for _, s := range scopes {
+			if slices.Contains(c.Scopes, s) {
+				held = append(held, s)
+			}
+		}
+		if len(held) == 0 {
+			return faucet.Principal{}, rejected("the client holds none of the token's scopes")
+		}
+		return faucet.NewService(faucet.ServiceClient{ClientID: c.ID, Grants: c.Grants}, held)
 	}
 }
 

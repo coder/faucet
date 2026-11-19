@@ -2,6 +2,14 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## To clients updated in place
+
+This came in [#74](https://github.com/coder/faucet/pull/74). It needs no migration.
+
+- **A token of a service holds only the scopes that its client holds now.** Before, a token kept every scope that it was issued with until it expired. No client could lose a scope before, so this changes nothing for one made earlier.
+- **A rolling deploy:** until every instance runs this build, an instance of the build before lets a token use every scope that it was issued with, so a narrowed `-scope` reaches it only when the token expires, 15 minutes at most. Grants reach every instance at once.
+- **A host that embeds faucet:** an `oauth.Store` of your own must also implement `UpdateClient`, which takes an `oauth.ClientUpdate`, and pass the new `storetest.RunOAuth` subtests.
+
 ## To workload logins (migration `000017_workload_trusts`)
 
 This came in [#63](https://github.com/coder/faucet/pull/63) and, with the token exchange, [#65](https://github.com/coder/faucet/pull/65). A Vercel function or a Kubernetes pod can now log in as a service client with the token that its platform signs for it (see [service-accounts.md](service-accounts.md#log-in-with-a-workload-identity)). Nothing changes until an operator runs `faucet clients trust`.
