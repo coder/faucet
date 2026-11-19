@@ -299,6 +299,9 @@ func TestRebindGrantsKeepsTheAccountsThatTheClientHolds(t *testing.T) {
 	require.ErrorContains(t, err, "names account 6", "a grant that the client does not hold is bound as at creation")
 	_, err = oauth.RebindGrants(ctx, repos, held, []string{"org:nobody"})
 	require.ErrorIs(t, err, faucet.ErrUnknownOwner)
+	_, err = oauth.RebindGrants(ctx, repos, []string{"org:gone#5"}, []string{"org:gone"})
+	require.ErrorIs(t, err, faucet.ErrUnknownOwner)
+	require.ErrorContains(t, err, "the client holds org:gone#5: write that to keep the grant", "a login that no account holds now points to the held grant")
 
 	got, err = oauth.RebindGrants(ctx, repos, []string{"org:coder#7", "org:coder#8"}, []string{"org:coder"})
 	require.NoError(t, err, "the client holds the login with the account that holds it now too")

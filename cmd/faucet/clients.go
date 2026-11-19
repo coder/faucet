@@ -253,8 +253,9 @@ func parseScopes(list string) ([]faucet.Scope, error) {
 }
 
 // updateClient sets the scopes, the grants or both of a live client in place,
-// so the service keeps its ID, its secret, its trust rules and its
-// subscriptions. An org grant is bound as create binds it.
+// so the service keeps its ID, its secret and its trust rules, and its
+// subscriptions unless -scope leaves out events:subscribe. RebindGrants binds
+// the grants, so an org grant that the client holds keeps its account.
 func updateClient(ctx context.Context, args []string, store clientStore, stdout, stderr io.Writer) error {
 	flags := commandFlags("update", updateUsage, stderr)
 	scopeList := flags.String("scope", "", "the scopes that the client's tokens can hold, comma separated, in place of the ones it holds")

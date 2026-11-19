@@ -174,6 +174,17 @@ type clientGrant struct {
 	all       bool
 }
 
+// String returns g as a client holds it.
+func (g clientGrant) String() string {
+	switch {
+	case g.all:
+		return allGrant
+	case g.namesAnAccount():
+		return orgGrantPrefix + g.login + accountSeparator + strconv.FormatInt(g.accountID, 10)
+	}
+	return repoGrantPrefix + g.repo
+}
+
 // namesAnAccount reports whether g is an org grant.
 func (g clientGrant) namesAnAccount() bool { return g.accountID > 0 }
 
@@ -272,6 +283,11 @@ func RebindGrants(ctx context.Context, owners Repositories, held, grants []strin
 			continue
 		}
 		bound, err := BindGrants(ctx, owners, []string{g})
+		if xerrors.Is(err, faucet.ErrUnknownOwner) {
+			if h := heldByLogin[strings.ToLower(strings.TrimPrefix(g, orgGrantPrefix))]; len(h) > 0 {
+				return nil, xerrors.Errorf("no delivery names the account of %s now, and the client holds %s: write that to keep the grant: %w", g, h[0].String(), err)
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -298,7 +314,7 @@ func movesAHeldGrant(g, bound string, heldByLogin map[string][]clientGrant) erro
 	if len(held) == 0 || slices.ContainsFunc(held, func(h clientGrant) bool { return h.accountID == now.accountID }) {
 		return nil
 	}
-	keep := orgGrantPrefix + held[0].login + accountSeparator + strconv.FormatInt(held[0].accountID, 10)
+	keep := held[0].String()
 	return xerrors.Errorf("the client holds %s, and %s names account %d now: write %s to keep that grant, or %s for the account that holds the login now",
 		keep, login, now.accountID, keep, bound)
 }
