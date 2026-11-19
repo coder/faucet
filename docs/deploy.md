@@ -40,7 +40,33 @@ A preview runs any branch's code, and the Neon integration gives previews the pr
 3. **Deploy by pushing to `main`.** A variable change only applies to deployments built after it. Don't run `vercel deploy` by hand: on a project with no production deployment, it created one.
 
 4. **Point the GitHub webhook** at `https://<production domain>/webhook/github`. Don't put Vercel Deployment Protection on that domain, because GitHub and MCP clients can't pass it.
-5. **With the browser login on, rate limit its consent form at the edge.** Each `POST /oauth/authorize` that carries a valid form stores a login request for 10 minutes, and a script can send faucet's `Origin` and keep the cookie, so faucet bounds the rows only by time (see [security.md](security.md#the-browser-login)). Add a rule under the project's **Firewall** in the same change that sets the browser login's variables: when the request path equals `/oauth/authorize` and the method is `POST`, rate limit by IP, such as 10 requests a minute, and deny the rest with 429. A person presses Continue once per login, so the limit only stops scripts. Leave `GET /oauth/authorize` out of the rule: it stores nothing.
+5. **Apply the [firewall rules](#firewall).**
+
+### Firewall
+
+[`vercel.firewall.json`](../vercel.firewall.json) holds the project's Vercel Firewall rules. Vercel does not read the file at deploy: `vercel.json` can deny or challenge a route but not rate limit it. Apply the rules with the CLI, from a directory linked to the project (`vercel link`), and publish them:
+
+```sh
+jq -c '.[]' vercel.firewall.json | while read -r rule; do
+  name=$(jq -r .name <<<"$rule")
+  if vercel firewall rules inspect "$name" >/dev/null 2>&1; then
+    vercel firewall rules edit "$name" --json "$rule" --yes
+  else
+    vercel firewall rules add --json "$rule" --yes
+  fi
+done
+vercel firewall diff
+vercel firewall publish
+```
+
+A change to a rule changes the file and the project together: merge the file, then run the commands. `vercel firewall rules list` shows what is live.
+
+| Rule | Matches | Per IP | Why |
+| --- | --- | --- | --- |
+| Rate limit MCP | `/github/mcp` and `/mcp` | 120 requests a minute, then 429 | Every caller reaches these before faucet checks its token, and a bearer that is not faucet's costs a `GET /user` at GitHub. Faucet's own limits per login hold per process, and Vercel runs many processes. An agent sends a few requests a minute, and a wait holds one for up to 50 seconds. |
+| Rate limit consent form | `POST /oauth/authorize` | 10 requests a minute, then 429 | Each post that carries a valid form stores a login request for 10 minutes, and a script can send faucet's `Origin` and keep the cookie, so faucet bounds the rows only by time (see [security.md](security.md#the-browser-login)). A person presses Continue once per login. `GET /oauth/authorize` stores nothing and is left out. |
+
+Vercel counts each region apart, so traffic spread over regions can pass a limit, and callers behind one address share it. Leave `/webhook/github` without a rule. GitHub sends bursts from a few addresses and does not resend a failed delivery, so one that got 429 is lost unless [redelivery](redelivery.md) asks for it again.
 
 ### The public URL
 
