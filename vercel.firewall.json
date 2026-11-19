@@ -1,0 +1,36 @@
+[
+  {
+    "name": "Rate limit MCP",
+    "description": "Per-IP limit on the MCP endpoints, which every caller reaches before faucet checks its token. See docs/deploy.md#firewall.",
+    "active": true,
+    "conditionGroup": [
+      { "conditions": [{ "type": "path", "op": "eq", "value": "/github/mcp" }] },
+      { "conditions": [{ "type": "path", "op": "eq", "value": "/mcp" }] }
+    ],
+    "action": {
+      "mitigate": {
+        "action": "rate_limit",
+        "rateLimit": { "algo": "fixed_window", "window": 60, "limit": 120, "keys": ["ip"], "action": "rate_limit" }
+      }
+    }
+  },
+  {
+    "name": "Rate limit consent form",
+    "description": "Per-IP limit on POST /oauth/authorize, which stores a login request for 10 minutes. See docs/deploy.md#firewall.",
+    "active": true,
+    "conditionGroup": [
+      {
+        "conditions": [
+          { "type": "path", "op": "eq", "value": "/oauth/authorize" },
+          { "type": "method", "op": "eq", "value": "POST" }
+        ]
+      }
+    ],
+    "action": {
+      "mitigate": {
+        "action": "rate_limit",
+        "rateLimit": { "algo": "fixed_window", "window": 60, "limit": 10, "keys": ["ip"], "action": "rate_limit" }
+      }
+    }
+  }
+]
