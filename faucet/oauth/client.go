@@ -278,9 +278,13 @@ func RebindGrants(ctx context.Context, owners Repositories, held, grants []strin
 	}
 	rebound := make([]string, 0, len(grants))
 	for _, g := range grants {
+		// An org grant that a build before bound grants stored as
+		// org:<login> names no account, so it is bound as a new one is.
 		if i := slices.IndexFunc(held, func(h string) bool { return strings.EqualFold(h, g) }); i >= 0 && strings.HasPrefix(g, orgGrantPrefix) {
-			rebound = append(rebound, held[i])
-			continue
+			if _, err := parseGrant(held[i]); err == nil {
+				rebound = append(rebound, held[i])
+				continue
+			}
 		}
 		bound, err := BindGrants(ctx, owners, []string{g})
 		if xerrors.Is(err, faucet.ErrUnknownOwner) {

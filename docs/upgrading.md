@@ -7,6 +7,7 @@ The server applies every schema change at start (on Vercel, in production only, 
 This came in [#74](https://github.com/coder/faucet/pull/74). It needs no migration.
 
 - **A token of a service holds only the scopes that its client holds now.** Before, a token kept every scope that it was issued with until it expired. No client could lose a scope before, so this changes nothing for one made earlier.
+- **A rolling deploy:** until every instance runs this build, an instance of the build before lets a token use every scope that it was issued with, so a narrowed `-scope` reaches it only when the token expires, 15 minutes at most. Grants reach every instance at once.
 - **A host that embeds faucet:** an `oauth.Store` of your own must also implement `UpdateClient`, which takes an `oauth.ClientUpdate`, and pass the new `storetest.RunOAuth` subtests.
 
 ## To workload logins (migration `000017_workload_trusts`)
