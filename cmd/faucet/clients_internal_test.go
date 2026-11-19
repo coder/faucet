@@ -712,3 +712,24 @@ func TestAnUpdateThatADisableOvertakesChangesNothing(t *testing.T) {
 	require.False(t, c.Live())
 	require.Equal(t, []string{"repo:coder/faucet"}, c.Grants)
 }
+
+// An org grant that the client holds stays bound to its account through the
+// command, and org:<login> cannot move it to the login's new holder unseen.
+func TestAnUpdateKeepsTheAccountOfAHeldOrgGrant(t *testing.T) {
+	t.Parallel()
+	getenv, store := newClientsDatabase(t)
+	ctx := context.Background()
+	require.NoError(t, store.RecordOwner(ctx, faucet.Owner{ID: 7, Login: "coder"}))
+	_, _, err := clients(t, getenv, "create", "-resource", "https://faucet.example.com/github/mcp", "-grant", "org:coder", "ci")
+	require.NoError(t, err)
+	require.NoError(t, store.RecordOwner(ctx, faucet.Owner{ID: 8, Login: "coder"}), "another account takes the login")
+
+	out, _, err := clients(t, getenv, "update", "ci", "-grant", "org:coder#7", "-grant", "repo:coder/faucet")
+	require.NoError(t, err, "a grant copied from the list needs no lookup")
+	require.Equal(t, "ci holds org:coder#7, repo:coder/faucet, with the scopes events:read,events:subscribe.\n", out)
+	_, _, err = clients(t, getenv, "update", "ci", "-grant", "org:coder")
+	require.ErrorContains(t, err, "the client holds org:coder#7, and coder names account 8 now: write org:coder#7 to keep that grant, or org:coder#8 for the account that holds the login now")
+	c, err := store.Client(ctx, "ci")
+	require.NoError(t, err)
+	require.Equal(t, []string{"org:coder#7", "repo:coder/faucet"}, c.Grants)
+}

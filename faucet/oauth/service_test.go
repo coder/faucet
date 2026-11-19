@@ -300,6 +300,10 @@ func TestRebindGrantsKeepsTheAccountsThatTheClientHolds(t *testing.T) {
 	_, err = oauth.RebindGrants(ctx, repos, held, []string{"org:nobody"})
 	require.ErrorIs(t, err, faucet.ErrUnknownOwner)
 
+	got, err = oauth.RebindGrants(ctx, repos, []string{"org:coder#7", "org:coder#8"}, []string{"org:coder"})
+	require.NoError(t, err, "the client holds the login with the account that holds it now too")
+	require.Equal(t, []string{"org:coder#8"}, got)
+
 	repos.owners["coder"] = faucet.Owner{ID: 7, Login: "coder"}
 	got, err = oauth.RebindGrants(ctx, repos, held, []string{"org:coder"})
 	require.NoError(t, err)

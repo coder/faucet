@@ -259,10 +259,10 @@ func BindGrants(ctx context.Context, owners Repositories, grants []string) ([]st
 // login with another account than the one that holds it now, because the
 // operator could mean either.
 func RebindGrants(ctx context.Context, owners Repositories, held, grants []string) ([]string, error) {
-	heldByLogin := map[string]clientGrant{}
+	heldByLogin := map[string][]clientGrant{}
 	for _, g := range parseGrants(held) {
 		if g.namesAnAccount() {
-			heldByLogin[strings.ToLower(g.login)] = g
+			heldByLogin[strings.ToLower(g.login)] = append(heldByLogin[strings.ToLower(g.login)], g)
 		}
 	}
 	rebound := make([]string, 0, len(grants))
@@ -275,17 +275,32 @@ func RebindGrants(ctx context.Context, owners Repositories, held, grants []strin
 		if err != nil {
 			return nil, err
 		}
-		login, unbound := strings.CutPrefix(g, orgGrantPrefix)
-		unbound = unbound && !strings.Contains(login, accountSeparator)
-		if h, ok := heldByLogin[strings.ToLower(login)]; unbound && ok {
-			if now, _ := parseGrant(bound[0]); now.accountID != h.accountID {
-				return nil, xerrors.Errorf("the client holds %s%s%s%d, and %s names account %d now: write %s%s%s%d to keep that grant, or %s for the account that holds the login now",
-					orgGrantPrefix, h.login, accountSeparator, h.accountID, login, now.accountID, orgGrantPrefix, h.login, accountSeparator, h.accountID, bound[0])
-			}
+		if err := movesAHeldGrant(g, bound[0], heldByLogin); err != nil {
+			return nil, err
 		}
 		rebound = append(rebound, bound[0])
 	}
 	return rebound, nil
+}
+
+// movesAHeldGrant refuses g, an "org:<login>" that an operator wrote and that
+// binds to bound, when the client holds the login only with other accounts.
+func movesAHeldGrant(g, bound string, heldByLogin map[string][]clientGrant) error {
+	login, ok := strings.CutPrefix(g, orgGrantPrefix)
+	if !ok || strings.Contains(login, accountSeparator) {
+		return nil
+	}
+	now, err := parseGrant(bound)
+	if err != nil {
+		return err
+	}
+	held := heldByLogin[strings.ToLower(login)]
+	if len(held) == 0 || slices.ContainsFunc(held, func(h clientGrant) bool { return h.accountID == now.accountID }) {
+		return nil
+	}
+	keep := orgGrantPrefix + held[0].login + accountSeparator + strconv.FormatInt(held[0].accountID, 10)
+	return xerrors.Errorf("the client holds %s, and %s names account %d now: write %s to keep that grant, or %s for the account that holds the login now",
+		keep, login, now.accountID, keep, bound)
 }
 
 func errOperatorGrant(g string) error {
