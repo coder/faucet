@@ -76,6 +76,11 @@ describe('cron routes', () => {
       raw_events_deleted: expect.any(Number),
       expired_leases: expect.any(Number),
       raw_failures: expect.any(Number),
+      expired_access_tokens: expect.any(Number),
+      expired_auth_requests: expect.any(Number),
+      ended_sessions: expect.any(Number),
+      unused_connections: expect.any(Number),
+      unused_access_checks: expect.any(Number),
     });
     expect(await deliveriesOf(cron, armed.repoId)).toEqual([]);
     expect(cron.leaksSecret(reply.body + JSON.stringify([...reply.headers]))).toBe(false);

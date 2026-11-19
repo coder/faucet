@@ -166,7 +166,7 @@ func newBrowserServer(t *testing.T, configure ...func(*faucet.Deps)) *browserSer
 	logs := &syncBuffer{}
 	logger := slog.Make(sloghuman.Sink(logs)).Leveled(slog.LevelDebug)
 	githubAPI := faucet.TokenAuthorizer{BaseURL: github.URL, Client: github.Client()}
-	tokens, login, checks, err := newLogin(publicURL, browser, store, faucet.NewAccessCache(githubAPI, clock), githubAPI, clock, logger)
+	tokens, login, checks, err := newLogin(publicURL, browser, store, githubAPI, clock, logger)
 	require.NoError(t, err)
 	deps := faucet.Deps{
 		Store: store, Secret: []byte(testSecret), Logger: logger, Authorizer: checks.authorizer, ServiceGrants: checks.grants,
@@ -195,6 +195,41 @@ func browserLoginFor(githubURL string, roots *x509.CertPool) (*oauth.BrowserLogi
 	}
 	cfg.browserLogin.Documents = faucet.HTTPClientOptions{AllowInsecureLoopback: true, RootCAs: roots}
 	return cfg.browserLogin, nil
+}
+
+// A GitHub token is not a faucet token, so it gets the 401 that starts the
+// login, as a request with no token does, and faucet never sends it to
+// GitHub. The token here is one that GitHub knows and that can read the
+// repository: GitHub would vouch for it, and still it does not get in,
+// because no GitHub API says what a fine-grained token may read.
+func TestAGitHubTokenGetsTheLoginChallengeAndNeverReachesGitHub(t *testing.T) {
+	t.Parallel()
+	srv := newBrowserServer(t)
+	srv.deliver(t, "d-pasted")
+	githubTokens := []string{
+		"ghp_pasted0123456789abcdefghijklmnopqrstu", "github_pat_11ABCDEFG0_pasted0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRS",
+		"gho_pasted0123456789abcdefghijklmnopqrstu", "ghu_pasted0123456789abcdefghijklmnopqrstu", "ghs_pasted0123456789abcdefghijklmnopqrstu",
+		strings.Repeat("0123456789abcdef", 2) + "01234567",
+	}
+	srv.github.mu.Lock()
+	for _, token := range githubTokens {
+		srv.github.access[token] = true
+	}
+	srv.github.mu.Unlock()
+	for _, path := range mcpPaths {
+		ts := &testServer{Server: srv.Server, mcpPath: path}
+		want := `Bearer resource_metadata="` + srv.URL + `/.well-known/oauth-protected-resource` + path + `", scope="events:read events:subscribe"`
+		for _, token := range githubTokens {
+			status, challenge, body := rawPost(t, ts, "Bearer "+token)
+			require.Equal(t, http.StatusUnauthorized, status, "%s %.8s...", path, token)
+			require.Equal(t, want, challenge, "%s %.8s...", path, token)
+			require.Equal(t, "unauthorized\n", body)
+		}
+	}
+	srv.github.mu.Lock()
+	defer srv.github.mu.Unlock()
+	require.Empty(t, srv.github.apiCalls, "faucet sends no bearer to GitHub")
+	require.NotContains(t, srv.logs.String(), "pasted0123456789", "no log line holds the token")
 }
 
 func (s *browserServer) deliver(t *testing.T, delivery string) {

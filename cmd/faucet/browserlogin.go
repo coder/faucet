@@ -21,11 +21,10 @@ const (
 )
 
 // loadBrowserLoginConfig reads the settings of the browser login, in which
-// a user logs in at GitHub through faucet's GitHub App. With none of them
-// set the login is off. With some set, every one that is needed must be
-// set, so a typo does not turn the login off, and the public URL must be
-// set, because the login server lives at it. No error names a value, because
-// two of them are secrets.
+// a user logs in at GitHub through faucet's GitHub App, at the login server
+// of cfg.publicURL. With none of them set the login is off. With some set,
+// every one that is needed must be set, so a typo does not turn the login
+// off. No error names a value, because two of them are secrets.
 func loadBrowserLoginConfig(getenv func(string) string, cfg *config) error {
 	clientID, clientSecret, rawKeys, githubURL := getenv(envGitHubAppClientID), getenv(envGitHubAppClientSecret), getenv(envTokenKey), getenv(envGitHubURL)
 	if clientID == "" && clientSecret == "" && rawKeys == "" && githubURL == "" {
@@ -36,9 +35,6 @@ func loadBrowserLoginConfig(getenv func(string) string, cfg *config) error {
 		if v.value == "" {
 			missing = append(missing, v.name)
 		}
-	}
-	if cfg.publicURL == nil {
-		missing = append(missing, envPublicURL)
 	}
 	if len(missing) > 0 {
 		return xerrors.Errorf("the browser login needs %s", strings.Join(missing, ", "))

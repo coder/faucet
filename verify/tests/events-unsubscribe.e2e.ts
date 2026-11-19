@@ -29,7 +29,7 @@ describe('events unsubscribe', () => {
     expect(reply.result).toMatchObject({ resultType: 'complete' });
     expect(await faucet.subscriptions(marker)).toEqual([]);
     await expect.poll(() => unsubscribedLine(repoId, id).test(appLog())).toBe(true);
-    expect(appLog()).toMatch(new RegExp(`\\[info\\]\\s+unsubscribed\\s.*login=verify-user\\s+subscription=${id}\\b`));
+    expect(appLog()).toMatch(new RegExp(`\\[info\\]\\s+unsubscribed\\s.*login=${faucet.login}\\s+subscription=${id}\\b`));
     expect(occurrences(appLog(), marker)).toBe(0);
   });
 
@@ -69,8 +69,8 @@ describe('events unsubscribe', () => {
     const before = await faucet.subscriptions(marker);
     const neverSubscribed = subscribeParams(repoId, marker, { delivery: delivery(marker, { url: callbackUrl(marker, '/never') }) });
 
-    const theirs = await unsubscribe(faucet, params, { as: 'other' });
-    const nobodys = await unsubscribe(faucet, neverSubscribed, { as: 'other' });
+    const theirs = await unsubscribe(faucet.as('other'), params);
+    const nobodys = await unsubscribe(faucet.as('other'), neverSubscribed);
     const mineNever = await unsubscribe(faucet, neverSubscribed);
     const after = await faucet.subscriptions(marker);
     const mine = await unsubscribe(faucet, params);
@@ -93,13 +93,13 @@ describe('events unsubscribe', () => {
     const marker = newMarker();
     const params = subscribeParams(repoId, marker);
     await subscribed(faucet, params);
-    await subscribed(faucet, params, { as: 'other' });
+    await subscribed(faucet.as('other'), params);
 
-    const reply = await unsubscribe(faucet, params, { as: 'other' });
+    const reply = await unsubscribe(faucet.as('other'), params);
     const rows = await faucet.subscriptions(marker);
 
     expect(reply.error).toBeNull();
-    expect(rows.map((r) => r.principal)).toEqual(['verify-user']);
+    expect(rows.map((r) => r.principal)).toEqual([faucet.login]);
   });
 
   test('the event, arguments and URL are the key: a near miss removes nothing and the exact key removes the row', async ({ faucet }) => {
@@ -164,7 +164,7 @@ describe('events unsubscribe', () => {
     expect(await faucet.subscriptions(marker)).toHaveLength(1);
   });
 
-  test('a request without a valid token is 401, and a parameter that is not valid is refused with its own error, and nothing is removed', async ({ faucet }) => {
+  test('a request without a faucet token is 401, and a parameter that is not valid is refused with its own error, and nothing is removed', async ({ faucet }) => {
     const repoId = newRepoId();
     const marker = newMarker();
     const params = subscribeParams(repoId, marker);

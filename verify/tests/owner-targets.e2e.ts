@@ -53,25 +53,29 @@ describe('owner targets', () => {
       expect(output()).not.toContain(secret);
       expect(output()).not.toContain(token);
       expect(started.leaksSecret(output())).toBe(false);
-    }, { publicUrl: true });
+    });
   });
 
-  test('an owner or all target is refused to a caller with a GitHub token', async ({ faucet }) => {
-    const marker = newMarker();
-    for (const target of [{ owner: 'verify' }, { all: true }]) {
-      const polled = await faucet.mcp('events/poll', { name: EVENT, arguments: target });
-      expect(polled.error?.code, polled.body).toBe(-32024);
-      expect(polled.error?.message).toContain(SERVICE_ONLY);
+  test('an owner or all target is refused to the person of the browser login', async ({ faucet }) => {
+    await withDeliveryFaucet(faucet, async (started) => {
+      const person = started.as('person');
+      const marker = newMarker();
+      await deliverRun(started, newRepoId());
+      for (const target of [{ owner: 'verify' }, { all: true }]) {
+        const polled = await person.mcp('events/poll', { name: EVENT, arguments: target });
+        expect(polled.error?.code, polled.body).toBe(-32024);
+        expect(polled.error?.message).toContain(SERVICE_ONLY);
 
-      const refused = await subscribe(faucet, { name: EVENT, arguments: target, delivery: delivery(marker) });
-      expect(refused.error?.code, refused.body).toBe(-32024);
-      expect(refused.error?.message).toContain(SERVICE_ONLY);
+        const refused = await subscribe(person, { name: EVENT, arguments: target, delivery: delivery(marker) });
+        expect(refused.error?.code, refused.body).toBe(-32024);
+        expect(refused.error?.message).toContain(SERVICE_ONLY);
 
-      const waited = await faucet.waitForEvents({ ...target, types: [EVENT], cursor: 0, timeout_s: 1 });
-      expect(waited.isError, waited.text).toBe(true);
-      expect(waited.text).toContain(SERVICE_ONLY);
-    }
-    expect(await faucet.subscriptions(marker)).toEqual([]);
+        const waited = await person.waitForEvents({ ...target, types: [EVENT], cursor: 0, timeout_s: 1 });
+        expect(waited.isError, waited.text).toBe(true);
+        expect(waited.text).toContain(SERVICE_ONLY);
+      }
+      expect(await started.subscriptions(marker)).toEqual([]);
+    }, { browserLogin: true });
   });
 
   // The owner is known, so each refusal comes from the grants alone.
@@ -93,6 +97,6 @@ describe('owner targets', () => {
       }
       const covered = await started.mcp('events/poll', { name: EVENT, arguments: { repo: `verify/r${repoId}` } }, { token: orgOnly });
       expect(covered.error, `an org grant covers a repository of its owner: ${covered.body}`).toBeNull();
-    }, { publicUrl: true });
+    });
   });
 });

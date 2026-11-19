@@ -156,14 +156,14 @@ describe('events list', () => {
     }
   });
 
-  test('a request without a valid GitHub token is 401', async ({ faucet }) => {
+  test('a request without a faucet token is 401 with the challenge', async ({ faucet }) => {
     const none = await faucet.mcp('events/list', {}, { token: null });
     const wrong = await faucet.mcp('events/list', {}, { token: `ghp_${'0'.repeat(40)}` });
 
     for (const reply of [none, wrong]) {
       expect(reply.status).toBe(401);
       expect(reply.body).toBe('unauthorized\n');
-      expect(reply.headers.get('www-authenticate')).toBe('Bearer');
+      expect(reply.headers.get('www-authenticate')).toBe(faucet.challenge());
     }
   });
 

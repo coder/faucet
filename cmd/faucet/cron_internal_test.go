@@ -201,10 +201,9 @@ func newCronServer(t *testing.T, opts cronOptions) *cronServer {
 		retention = 30 * 24 * time.Hour
 	}
 
-	authorizer := faucet.TokenAuthorizer{BaseURL: "http://127.0.0.1:1"}
 	deps := faucet.Deps{
 		Store: store, Secret: []byte(testSecret), Logger: logger, Clock: clock,
-		Authorizer:    authorizer,
+		Authorizer:    grantChecks{},
 		PrincipalFrom: principalFrom,
 	}
 	if opts.webhook {
@@ -223,8 +222,9 @@ func newCronServer(t *testing.T, opts cronOptions) *cronServer {
 		require.NoError(t, err)
 	}
 
-	cron := cronRoutes{secret: []byte(opts.secret), svc: svc, retention: retention, delivers: opts.webhook, redeliverer: redeliverer, clock: clock, logger: logger}
-	srv := httptest.NewServer(newRouter(svc, bearers{github: authorizer}, nil, cron, logger))
+	tokens, login := newMemLogin(t, newMemTokens(), clock, nil, logger)
+	cron := cronRoutes{secret: []byte(opts.secret), svc: svc, retention: retention, delivers: opts.webhook, redeliverer: redeliverer, login: login, clock: clock, logger: logger}
+	srv := httptest.NewServer(newRouter(svc, tokens, login, cron, logger))
 	t.Cleanup(srv.Close)
 	return &cronServer{Server: srv, store: store, redelivery: redeliveries, hooks: hooks, clock: clock, logs: logs}
 }
@@ -351,7 +351,7 @@ func TestCronPurgeDeletesWhatIsOlderThanTheRetention(t *testing.T) {
 		require.Equal(t, int64(11), got.PurgedThrough)
 		require.Equal(t, int64(2), got.ExpiredSubscriptions, "the reply counts the expired subscriptions")
 		require.Equal(t, int64(5), got.EndedDeliveries, "and the deliveries that ended with them")
-		require.NotContains(t, body, "expired_access_tokens", "a server without FAUCET_PUBLIC_URL keeps no access token to count")
+		require.Contains(t, body, `"expired_access_tokens":0`, "the reply counts what the login server purged")
 	}
 }
 
@@ -496,7 +496,7 @@ func TestCronDeliverFailureIsAGenericServerError(t *testing.T) {
 func TestLoadConfigCron(t *testing.T) {
 	t.Parallel()
 
-	base := map[string]string{envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret}
+	base := map[string]string{envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret, envPublicURL: testOrigin}
 	load := func(extra map[string]string) (config, error) {
 		return loadConfig(func(name string) string {
 			if v, ok := extra[name]; ok {
@@ -543,7 +543,7 @@ func TestLoadConfigCronSecretIsOneThatARequestCanCarry(t *testing.T) {
 
 	load := func(secret string) (config, error) {
 		return loadConfig(func(name string) string {
-			return map[string]string{envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret, envCronSecret: secret}[name]
+			return map[string]string{envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret, envPublicURL: testOrigin, envCronSecret: secret}[name]
 		})
 	}
 	const sixteen = "0123456789abcdef"
@@ -586,7 +586,7 @@ func TestLoadConfigHookAdmin(t *testing.T) {
 	t.Parallel()
 
 	load := func(extra map[string]string) (config, error) {
-		env := map[string]string{envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret}
+		env := map[string]string{envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret, envPublicURL: testOrigin}
 		for k, v := range extra {
 			env[k] = v
 		}

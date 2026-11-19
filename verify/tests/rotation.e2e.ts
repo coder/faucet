@@ -75,19 +75,21 @@ describe('secret rotation', () => {
     });
   });
 
+  // The person loses access when GitHub stops answering for the repository, which ends the subscription at its next renewal.
   test('a terminated envelope is signed with both stored secrets during the window and never with the secret of the renewal', async ({ faucet, receiver }) => {
     await withDeliveryFaucet(faucet, async (started, output) => {
+      const person = started.as('person');
       const repoId = newRepoId();
       const at = await endpoint(receiver, 'ok');
       const oldSecret = at.secret;
       const nextSecret = newSecret();
       const renewalSecret = newSecret();
       const params = paramsFor(repoId, at);
-      const subscription = await subscribed(started, params);
-      await subscribed(started, { ...params, delivery: { url: at.url, secret: nextSecret } });
+      const subscription = await subscribed(person, params);
+      await subscribed(person, { ...params, delivery: { url: at.url, secret: nextSecret } });
 
       await receiver.revoke(repoId);
-      const refused = await subscribe(started, { ...params, delivery: { url: at.url, secret: renewalSecret } });
+      const refused = await subscribe(person, { ...params, delivery: { url: at.url, secret: renewalSecret } });
       expect(refused.error?.code, 'the renewal gets the Forbidden of a denied subscribe').toBe(-32024);
 
       const [terminated] = await envelopeRequests(receiver, at, 'terminated');
@@ -97,6 +99,6 @@ describe('secret rotation', () => {
       for (const secret of [oldSecret, nextSecret, renewalSecret]) {
         expect(output()).not.toContain(secret.slice('whsec_'.length));
       }
-    });
+    }, { browserLogin: true });
   });
 });

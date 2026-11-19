@@ -25,10 +25,6 @@ const (
 
 type principalKey struct{}
 
-type authenticator interface {
-	Authenticate(ctx context.Context, token string) (faucet.Principal, error)
-}
-
 func principalFrom(ctx context.Context) (faucet.Principal, error) {
 	p, ok := ctx.Value(principalKey{}).(faucet.Principal)
 	if !ok {
@@ -74,40 +70,30 @@ type faucetVerifier interface {
 	Verify(ctx context.Context, token, resource string) (faucet.Principal, error)
 }
 
-// bearers sends each bearer token to the one that can check it.
+// bearers checks the tokens that faucet mints, for the endpoints of origin.
 type bearers struct {
-	// github resolves a GitHub token, such as a pasted personal access token.
-	github authenticator
-	// faucet verifies the tokens that faucet mints. Nil, the default, rejects
-	// every one of them.
 	faucet faucetVerifier
-	// origin is faucet's public URL when faucet is set. The resource of an
-	// endpoint is the origin and the endpoint's path.
+	// origin is faucet's public URL. The resource of an endpoint is the
+	// origin and the endpoint's path.
 	origin *url.URL
 }
 
-// newBearers returns the bearers for github and, when verifier is not nil,
-// for faucet's own tokens. A verifier needs origin, faucet's public URL,
-// because a token is valid only on the resource it was issued for.
-func newBearers(github authenticator, verifier faucetVerifier, origin string) (bearers, error) {
-	b := bearers{github: github}
+// newBearers returns the bearers that verifier checks. It needs origin,
+// faucet's public URL, because a token is valid only on the resource it was
+// issued for.
+func newBearers(verifier faucetVerifier, origin string) (bearers, error) {
 	if verifier == nil {
-		return b, nil
+		return bearers{}, xerrors.New("the token verifier is required")
 	}
 	u, err := parseOrigin(origin)
 	if err != nil {
 		return bearers{}, err
 	}
-	b.faucet, b.origin = verifier, u
-	return b, nil
+	return bearers{faucet: verifier, origin: u}, nil
 }
 
-// resource is the resource of the endpoint at path, empty when faucet tokens
-// are off.
+// resource is the resource of the endpoint at path.
 func (b bearers) resource(path string) string {
-	if b.origin == nil {
-		return ""
-	}
 	return b.origin.JoinPath(path).String()
 }
 
@@ -118,10 +104,9 @@ func protectedResourcePath(path string) string {
 	return "/.well-known/oauth-protected-resource" + path
 }
 
-// challenge is the WWW-Authenticate of a 401 from the endpoint at path when
-// faucet's login server is on. It names the endpoint's metadata and every
-// scope, so a client that sent no token can find the login server (RFC 9728
-// section 5.1).
+// challenge is the WWW-Authenticate of a 401 from the endpoint at path. It
+// names the endpoint's metadata and every scope, so a client that sent no
+// faucet token can find the login server (RFC 9728 section 5.1).
 func (b bearers) challenge(path string) string {
 	return `Bearer resource_metadata="` + b.origin.JoinPath(protectedResourcePath(path)).String() + `", scope="` + strings.Join(scopeNames(faucet.AllScopes()), " ") + `"`
 }
@@ -178,53 +163,34 @@ func isLoopback(host string) bool {
 }
 
 // requireBearer admits a request to the endpoint at path only when its bearer
-// token is valid, and answers any other with a 401 that carries challenge. A token with a faucet prefix is faucet's own: it goes to
-// the faucet verifier, for the endpoint's resource, and never to GitHub.
-// Every other token goes to GitHub. A token is handed to its checker and goes
-// no further: it is not logged and not stored. Every request without a valid
-// token gets the same 401, so the response does not say why it was refused.
-func requireBearer(b bearers, path, challenge string, logger slog.Logger, next http.Handler) http.Handler {
-	resource := b.resource(path)
+// token is a valid faucet token for the endpoint's resource, and answers any
+// other with a 401 that names the endpoint's metadata. Faucet takes no GitHub
+// token: GitHub would answer that a token with only metadata access can see a
+// private repository, and no GitHub API says what a fine-grained token may
+// read. A token goes no further than the verifier: it is not logged and not
+// stored, and never reaches GitHub. Every request without a valid token gets
+// the same 401, so the response does not say why it was refused.
+func requireBearer(b bearers, path string, logger slog.Logger, next http.Handler) http.Handler {
+	resource, challenge := b.resource(path), b.challenge(path)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := bearerToken(r.Header.Get("Authorization"))
-		if !ok {
+		if !ok || !oauth.Minted(token) {
 			unauthorized(w, challenge)
 			return
 		}
-		if oauth.Minted(token) {
-			p, err := b.verifyFaucetToken(r.Context(), token, resource)
-			switch {
-			case xerrors.Is(err, faucet.ErrInvalidToken):
-				// One line of text: slog.Error would add the error's stack frames.
-				logger.Debug(r.Context(), "faucet token rejected", slog.F("reason", err.Error()))
-				unauthorized(w, challenge)
-			case err != nil:
-				logger.Warn(r.Context(), "could not check the faucet token", slog.Error(err))
-				http.Error(w, "could not check the token", http.StatusInternalServerError)
-			default:
-				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
-			}
-			return
-		}
-		p, err := b.github.Authenticate(r.Context(), token)
+		p, err := b.faucet.Verify(r.Context(), token, resource)
 		switch {
 		case xerrors.Is(err, faucet.ErrInvalidToken):
+			// One line of text: slog.Error would add the error's stack frames.
+			logger.Debug(r.Context(), "faucet token rejected", slog.F("reason", err.Error()))
 			unauthorized(w, challenge)
-			return
 		case err != nil:
-			logger.Warn(r.Context(), "could not check the GitHub token", slog.Error(err))
-			http.Error(w, "could not check the token with GitHub", http.StatusBadGateway)
-			return
+			logger.Warn(r.Context(), "could not check the faucet token", slog.Error(err))
+			http.Error(w, "could not check the token", http.StatusInternalServerError)
+		default:
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
 	})
-}
-
-func (b bearers) verifyFaucetToken(ctx context.Context, token, resource string) (faucet.Principal, error) {
-	if b.faucet == nil {
-		return faucet.Principal{}, xerrors.Errorf("this server accepts no faucet token yet: %w", faucet.ErrInvalidToken)
-	}
-	return b.faucet.Verify(ctx, token, resource)
 }
 
 func unauthorized(w http.ResponseWriter, challenge string) {
@@ -232,9 +198,8 @@ func unauthorized(w http.ResponseWriter, challenge string) {
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 }
 
-// bearerToken extracts the token from "Bearer <token>". It accepts only
-// printable ASCII without spaces, because the token goes into a header of the
-// request to GitHub.
+// bearerToken extracts the token from "Bearer <token>". It accepts at most
+// maxTokenBytes of printable ASCII without spaces.
 func bearerToken(header string) (string, bool) {
 	scheme, token, ok := strings.Cut(header, " ")
 	if !ok || !strings.EqualFold(scheme, "Bearer") || !validBearerToken(token) {

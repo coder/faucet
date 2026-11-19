@@ -4,9 +4,8 @@ An agent waits for GitHub events on one repository through the `wait_for_github_
 
 ## Sub-features
 
-- A bearer token that GitHub accepts is required. No header, a malformed header, or a token GitHub refuses is 401 with the body `unauthorized` and `WWW-Authenticate: Bearer`.
-- A bearer that starts with a faucet prefix (`fct_`, `fcr_` or `fcs_`) is faucet's own token and never reaches GitHub. Faucet mints none yet, so every such bearer is the same 401, and the GitHub stub gets no request.
-- The token must be able to read the repository. A repository it cannot see and one that does not exist both give the tool error `repository not found or not accessible` and no events.
+- A token that faucet minted for `/github/mcp` is required: a service's from the client credentials grant, or the person's from the browser login. No header, a malformed header, a bearer with a faucet prefix (`fct_`, `fcr_` or `fcs_`) that faucet did not mint, or a GitHub token is 401 with the body `unauthorized` and the challenge `Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource/github/mcp", scope="events:read events:subscribe"`. faucet judges every bearer itself, so the GitHub stub gets no request.
+- The principal must be able to read the repository. For the person, GitHub decides: a repository the person cannot see and one that does not exist both give the tool error `repository not found or not accessible` and no events. A service reads a repository that a grant covers and a delivery named, and any other is a tool error that says why.
 - `repo` is `owner/name` (a service may name `owner` or `all` instead, see [Owner targets](owner-targets.md)), `types` holds at least one of the fifteen typed event names (families or exact types; the tool takes no raw name), `actions` optionally narrows the families in `types` that have each action, leaves a family that has none of them whole, and must hold only actions of one of them, the [field filters](field-filters.md) narrow only the names in `types` that offer them and each must be offered by one, `timeout_s` is 1 to 50 (default 45), `sha` is 40 hex characters, `pr` and `cursor` are not negative, and a `pr` with only `ci.jobs` or `ci.statuses` events in `types` is refused, because GitHub names no pull request in them. Anything else is a tool error that names the problem.
 - One login can hold 10 waits open at once in a process (`Deps.MaxWaitsPerLogin`). The 11th is a tool error `too many waits are open for this account` at once, and it ends nothing else. Another login is not counted.
 - `types`, `actions`, the field filters, `sha` and `pr` narrow the events. Each event's `type` is its exact type, also when `types` named its family. A wait without `cursor` starts at the present, or ten minutes back when `sha` is set. A given `cursor` always wins.
@@ -14,7 +13,7 @@ An agent waits for GitHub events on one repository through the `wait_for_github_
 
 ## How to get to it (user POV)
 
-An agent's MCP client sends `tools/call` to `/github/mcp` with `Authorization: Bearer <GitHub token>`. The stub plays GitHub: it knows one token and the repositories named `verify/r<id>`. The test plays GitHub's webhooks through `faucet.deliver` and the agent through `faucet.waitForEvents`.
+An agent's MCP client sends `tools/call` to `/github/mcp` with `Authorization: Bearer <faucet token>`. The test plays GitHub's webhooks through `faucet.deliver` and the agent through `faucet.waitForEvents`, as the faucet's service, or as the person on a faucet with the browser login, where the stub plays GitHub and knows the repositories named `verify/r<id>`.
 
 ## Driving it with e2e
 
@@ -35,5 +34,5 @@ wait-input|http|fuzzer|Send repo, types, sha, pr, cursor and timeout_s values th
 ## Gotchas
 
 - An empty wait takes its full `timeout_s`, so tests use 1 or 2 seconds.
-- The stub's repository id is the number in the name, which is how a test gets a repository nobody else writes to.
+- The id of a repository `verify/r<id>` is the number in its name, from the harness's ping for a service and from the stub for the person, which is how a test gets a repository nobody else writes to.
 - A wait started before its event is delivered must pass a `cursor`. Without one it starts at the present and can miss an event delivered between the call and its first poll.

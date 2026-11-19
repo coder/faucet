@@ -88,11 +88,7 @@ const PERSON = { id: 4242, login: 'verify-person' };
 const APP_ACCESS_SECONDS = 8 * 60;
 const APP_REFRESH_SECONDS = 184 * 24 * 60 * 60;
 
-// The stub plays GitHub. It knows two tokens and answers GET /user with the login of the token (verify-user and
-// verify-other) and GET /repos/verify/r<id> with repository id <id> for both. Every other repository is 404, like one the
-// token cannot see, and so is one that the receiver's control channel has revoked.
-//
-// It also serves the deliveries API of the org webhook verify/7 to `hookToken` alone, as GitHub does: attempts newest first,
+// The stub plays GitHub. It serves the deliveries API of the org webhook verify/7 to `hookToken` alone, as GitHub does: attempts newest first,
 // 100 at most per page, a Link header with a keyset cursor (v1_<attempt id>), nothing older than 72 hours. A redelivery
 // request makes the stub post the stored payload, signed, to the faucet that the test named, and add the answer as a new
 // attempt. A test sets the attempts and reads the requests through /__stub/, which needs `control`. The request log names
@@ -101,9 +97,11 @@ const APP_REFRESH_SECONDS = 184 * 24 * 60 * 60;
 // It plays GitHub's side of the browser login too, for faucet's GitHub App `app` and PERSON. GET /login/oauth/authorize sends
 // the browser straight back to redirect_uri with a code and the state. POST /login/oauth/access_token trades the code, with
 // the App's secret, the same redirect_uri and the PKCE verifier, or a refresh token, for a new pair of ghu_ and ghr_ tokens.
-// A code and a refresh token work once, and a refusal is status 200 with an error, as GitHub's is. The API answers PERSON's
-// access tokens like the run's token. GET /__stub/app lists the tokens it issued and the token requests it answered.
-async function startGitHubStub({ token, otherToken, hookToken, control, revoked, app }) {
+// A code and a refresh token work once, and a refusal is status 200 with an error, as GitHub's is. The API takes PERSON's
+// access tokens alone: GET /user answers PERSON, and GET /repos/verify/r<id> answers repository id <id>. Every other
+// repository is 404, like one the person cannot see, and so is one that the receiver's control channel has revoked. Any
+// other credential is 401. GET /__stub/app lists the tokens it issued and the token requests it answered.
+async function startGitHubStub({ hookToken, control, revoked, app }) {
   const reply = (res, status, body, headers = {}) => {
     res.writeHead(status, { 'Content-Type': 'application/json', ...headers });
     res.end(JSON.stringify(body));
@@ -116,7 +114,6 @@ async function startGitHubStub({ token, otherToken, hookToken, control, revoked,
   const isPerson = (auth) => auth?.startsWith('Bearer ') === true && appAccess.has(auth.slice('Bearer '.length));
   const kindOf = (auth) => {
     if (auth === `Bearer ${hookToken}`) return 'hook';
-    if (auth === `Bearer ${token}` || auth === `Bearer ${otherToken}`) return 'user';
     if (isPerson(auth)) return 'person';
     return auth ? 'other' : 'none';
   };
@@ -289,10 +286,8 @@ async function startGitHubStub({ token, otherToken, hookToken, control, revoked,
       if (url.pathname.startsWith('/orgs/')) return await hooks(req, res, url);
       if (req.method === 'GET' && url.pathname === '/login/oauth/authorize') return authorizeApp(res, url);
       if (req.method === 'POST' && url.pathname === '/login/oauth/access_token') return await exchangeAppToken(req, res);
-      const person = isPerson(req.headers.authorization);
-      const login = { [`Bearer ${token}`]: 'verify-user', [`Bearer ${otherToken}`]: 'verify-other' }[req.headers.authorization ?? ''];
-      if (login === undefined && !person) return reply(res, 401, { message: 'Bad credentials' });
-      if (url.pathname === '/user') return reply(res, 200, person ? PERSON : { login });
+      if (!isPerson(req.headers.authorization)) return reply(res, 401, { message: 'Bad credentials' });
+      if (url.pathname === '/user') return reply(res, 200, PERSON);
       const repo = /^\/repos\/verify\/r(\d+)$/.exec(url.pathname);
       if (repo && !revoked.has(Number(repo[1]))) return reply(res, 200, { id: Number(repo[1]) });
       return reply(res, 404, { message: 'Not Found' });
@@ -627,8 +622,6 @@ async function runStack({ port }, abort) {
     const tls = { cert: join(tlsDir, 'cert.pem'), key: join(tlsDir, 'key.pem') };
 
     const secret = randomBytes(32).toString('hex');
-    const githubToken = `ghp_${randomBytes(20).toString('hex')}`;
-    const otherToken = `ghp_${randomBytes(20).toString('hex')}`;
     const webhookKey = randomBytes(32).toString('base64');
     const cron = {
       port: await freePort(),
@@ -640,9 +633,7 @@ async function runStack({ port }, abort) {
     };
     const revoked = new Set();
     const githubApp = { clientId: `Iv1.${randomBytes(8).toString('hex')}`, clientSecret: randomBytes(20).toString('hex') };
-    githubStub = await startGitHubStub({
-      token: githubToken, otherToken, hookToken: cron.hookToken, control: cron.stubControl, revoked, app: githubApp,
-    });
+    githubStub = await startGitHubStub({ hookToken: cron.hookToken, control: cron.stubControl, revoked, app: githubApp });
     const stubUrl = `http://127.0.0.1:${githubStub.address().port}`;
     await createDatabase(psql, dir, CRON_DB);
     const receiverControl = randomBytes(16).toString('hex');
@@ -651,7 +642,7 @@ async function runStack({ port }, abort) {
     writeFileSync(
       stateFile(port),
       JSON.stringify({
-        dbHost: dir, dbPort: DB_PORT, psql, secret, githubToken, otherToken, webhookKey, binary, e2eBinary, agentBinary,
+        dbHost: dir, dbPort: DB_PORT, psql, secret, webhookKey, binary, e2eBinary, agentBinary,
         loginAgentBinary, tls, githubApp, cron: { ...cron, stubUrl }, receiver: receiverState,
       }),
       { mode: 0o600 },
@@ -664,6 +655,7 @@ async function runStack({ port }, abort) {
         DATABASE_URL: databaseUrl(CRON_DB),
         GITHUB_WEBHOOK_SECRET: cron.webhookSecret,
         PORT: String(cron.port),
+        FAUCET_PUBLIC_URL: `http://127.0.0.1:${cron.port}`,
         FAUCET_GITHUB_API_URL: stubUrl,
         CRON_SECRET: cron.cronSecret,
       },
@@ -677,6 +669,7 @@ async function runStack({ port }, abort) {
         DATABASE_URL: databaseUrl('postgres'),
         GITHUB_WEBHOOK_SECRET: secret,
         PORT: String(port),
+        FAUCET_PUBLIC_URL: `http://127.0.0.1:${port}`,
         FAUCET_GITHUB_API_URL: stubUrl,
         FAUCET_WEBHOOK_KEY: webhookKey,
         FAUCET_WEBHOOK_ALLOWED_ORIGINS: CALLBACK_ORIGIN,

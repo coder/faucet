@@ -62,7 +62,7 @@ describe('service accounts', () => {
 
       expect(output()).not.toContain(secret);
       expect(started.leaksSecret(output())).toBe(false);
-    }, { publicUrl: true });
+    });
   });
 
   // The TypeScript SDK's discovery parses the metadata with a schema that needs authorization_endpoint, even for a client that
@@ -89,7 +89,7 @@ describe('service accounts', () => {
       } finally {
         await client.close();
       }
-    }, { publicUrl: true });
+    });
   });
 
   test('a workload logs in through the TypeScript SDK with its platform token, waits for an event and lists events', async ({ faucet, issuer }) => {
@@ -165,7 +165,7 @@ describe('service accounts', () => {
 
       for (const secret of [...subjects, token]) expect(output()).not.toContain(secret);
       expect(started.leaksSecret(output())).toBe(false);
-    }, { publicUrl: true, e2eBuild: true });
+    }, { e2eBuild: true });
   });
 
   // A service that reads only raw events can start. The push that nobody wants is not stored, and it still names the
@@ -204,7 +204,7 @@ describe('service accounts', () => {
       expect(output()).not.toContain(secret);
       expect(output()).not.toContain(token);
       expect(started.leaksSecret(output())).toBe(false);
-    }, { publicUrl: true });
+    });
   });
 
   test('every 401 names the metadata of its path, and /mcp has its own', async ({ faucet }) => {
@@ -239,7 +239,7 @@ describe('service accounts', () => {
       const old = await started.clients(['create', '-resource', `${started.baseUrl}/mcp`, '-grant', 'repo:verify/r1', 'old-agent']);
       expect(old.code, '/mcp, the old path, takes no new client').toBe(1);
       expect(old.stderr).toContain('takes no new client');
-    }, { publicUrl: true });
+    });
   });
 
   test('a disabled client logs in no more, and the list says when it was disabled', async ({ faucet }) => {
@@ -263,22 +263,6 @@ describe('service accounts', () => {
       expect(list.stdout).not.toContain(secret);
       const again = await started.clients(['create', '-resource', `${started.baseUrl}/github/mcp`, '-grant', `repo:${repo}`, 'retired']);
       expect(again.code, 'a disabled client keeps its ID').toBe(1);
-    }, { publicUrl: true });
-  });
-
-  test('without FAUCET_PUBLIC_URL there is no login server, and no delivery writes a repository', async ({ faucet }) => {
-    const repoId = newRepoId();
-    await deliverRun(faucet, repoId);
-    expect(await faucet.sql(`select count(*) from faucet_repos where repo_id = ${repoId}`)).toBe('0');
-
-    for (const path of ['/.well-known/oauth-authorization-server', '/.well-known/oauth-protected-resource/github/mcp', '/.well-known/oauth-protected-resource/mcp', '/oauth/authorize']) {
-      expect((await faucet.request(path)).status, path).toBe(404);
-    }
-    const token = await faucet.request('/oauth/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'grant_type=client_credentials',
     });
-    expect(token.status).toBe(404);
   });
 });

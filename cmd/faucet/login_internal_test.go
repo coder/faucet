@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/auth/extauth"
-	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 	"github.com/stretchr/testify/require"
@@ -38,11 +37,10 @@ import (
 // server's own URL, over a scratch database.
 type loginServer struct {
 	*httptest.Server
-	db     *sql.DB
-	store  *pgstore.Store
-	svc    *faucet.Service
-	github *githubStub
-	logs   *syncBuffer
+	db    *sql.DB
+	store *pgstore.Store
+	svc   *faucet.Service
+	logs  *syncBuffer
 }
 
 // loginConfig is what newLoginServer changes from its defaults.
@@ -74,16 +72,14 @@ func newLoginServer(t *testing.T, configure ...func(*loginConfig)) *loginServer 
 	srv := httptest.NewUnstartedServer(nil)
 	publicURL, err := parseOrigin("http://" + srv.Listener.Addr().String())
 	require.NoError(t, err)
-	github := newGitHubStub(t)
 	clock := quartz.NewReal()
 	logs := &syncBuffer{}
 	logger := slog.Make(sloghuman.Sink(logs)).Leveled(slog.LevelDebug)
-	cache := faucet.NewAccessCache(faucet.TokenAuthorizer{BaseURL: github.URL, Client: github.Client()}, clock)
 	var logins loginStore = store
 	if cfg.logins != nil {
 		logins = cfg.logins(store)
 	}
-	tokens, login, checks, err := newLogin(publicURL, nil, logins, cache, nil, clock, logger)
+	tokens, login, checks, err := newLogin(publicURL, nil, logins, nil, clock, logger)
 	require.NoError(t, err)
 	svc, _, err := newServices(config{secret: testSecret, publicURL: publicURL, webhook: cfg.webhook, rawEvents: cfg.rawEvents}, store, checks, clock, logger)
 	require.NoError(t, err)
@@ -91,7 +87,7 @@ func newLoginServer(t *testing.T, configure ...func(*loginConfig)) *loginServer 
 	srv.Config.Handler = newRouter(svc, tokens, login, cron, logger)
 	srv.Start()
 	t.Cleanup(srv.Close)
-	return &loginServer{Server: srv, db: db, store: store, svc: svc, github: github, logs: logs}
+	return &loginServer{Server: srv, db: db, store: store, svc: svc, logs: logs}
 }
 
 // client stores a client that an operator made for the endpoint at path,
@@ -236,9 +232,6 @@ func TestAServiceLogsInWithClientCredentialsAloneAndWaitsForAnEvent(t *testing.T
 	require.NoError(t, json.Unmarshal(raw, &out))
 	require.Len(t, out.Events, 1)
 	require.Equal(t, int64(300029405), out.Events[0].RepoID)
-
-	paths, _ := srv.github.seen()
-	require.Empty(t, paths, "a service never reaches GitHub")
 	requireNoTokenPiece(t, srv.logs.String(), []string{secret})
 }
 
@@ -290,7 +283,7 @@ func TestEvery401NamesTheMetadataOfItsPath(t *testing.T) {
 	for _, path := range mcpPaths {
 		ts := &testServer{Server: srv.Server, mcpPath: path}
 		want := `Bearer resource_metadata="` + srv.URL + `/.well-known/oauth-protected-resource` + path + `", scope="events:read events:subscribe"`
-		for _, header := range []string{"", "Bearer", "Basic YWxpY2U6c2VjcmV0", "Bearer " + staleToken, "Bearer fct_unknown", "Bearer " + newFaucetToken(t, "fct_")} {
+		for _, header := range []string{"", "Bearer", "Basic YWxpY2U6c2VjcmV0", "Bearer ghp_stale0123456789abcdefghijklmnopqrstu", "Bearer fct_unknown", "Bearer " + newFaucetToken(t, "fct_")} {
 			status, challenge, body := rawPost(t, ts, header)
 			require.Equal(t, http.StatusUnauthorized, status, "%s %q", path, header)
 			require.Equal(t, want, challenge, "%s %q", path, header)
@@ -322,8 +315,6 @@ func TestAServiceIsCheckedByItsGrantsAndTheReposThatDeliveriesNamed(t *testing.T
 	require.NoError(t, err)
 	require.True(t, res.IsError)
 	require.Contains(t, toolText(t, res), "no grant of this service names octo-org/other")
-	paths, _ := srv.github.seen()
-	require.Empty(t, paths)
 }
 
 // A client made for another server's endpoint gets no token here, and the
@@ -360,53 +351,6 @@ func TestDisablingAClientFailsItsTokenOnTheNextRequest(t *testing.T) {
 	require.Error(t, err, "the next request is refused, and the handler gets no new token")
 }
 
-// With the login server on, a GitHub token takes the path it always took.
-func TestAGitHubTokenWorksBesideTheLoginServer(t *testing.T) {
-	t.Parallel()
-	srv := newLoginServer(t)
-	ts := &testServer{Server: srv.Server, github: srv.github, mcpPath: "/github/mcp"}
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-	session := ts.connect(ctx, t, aliceToken)
-	res, err := call(ctx, session, "o/r", map[string]any{"cursor": 0, "timeout_s": 1})
-	require.NoError(t, err)
-	require.False(t, res.IsError, toolText(t, res))
-	paths, _ := srv.github.seen()
-	require.Equal(t, []string{"/user", "/repos/o/r"}, paths)
-}
-
-// Without FAUCET_PUBLIC_URL, none of the login routes exist and a 401 is the
-// one faucet sent before it had them.
-func TestTheLoginRoutesAreOffWithoutAPublicURL(t *testing.T) {
-	t.Parallel()
-	srv := newTestServer(t)
-	for _, path := range []string{"/.well-known/oauth-protected-resource/github/mcp", "/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-authorization-server", "/oauth/authorize"} {
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+path, nil)
-		require.NoError(t, err)
-		resp, err := srv.Client().Do(req)
-		require.NoError(t, err)
-		_ = resp.Body.Close()
-		require.Equal(t, http.StatusNotFound, resp.StatusCode, path)
-	}
-	for _, path := range []string{"/oauth/token", "/oauth/revoke"} {
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+path, bytes.NewReader([]byte("grant_type=client_credentials")))
-		require.NoError(t, err)
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		resp, err := srv.Client().Do(req)
-		require.NoError(t, err)
-		_ = resp.Body.Close()
-		require.Equal(t, http.StatusNotFound, resp.StatusCode, path)
-	}
-
-	for _, path := range mcpPaths {
-		srv.mcpPath = path
-		status, challenge, body := rawPost(t, srv, "")
-		require.Equal(t, http.StatusUnauthorized, status)
-		require.Equal(t, "Bearer", challenge)
-		require.Equal(t, "unauthorized\n", body)
-	}
-}
-
 // R16: a client computes the resource from the URL it was given, byte for
 // byte, so faucet refuses to start with a public URL in any other form.
 func TestLoadConfigTakesThePublicURLOnlyInTheFormAClientComputes(t *testing.T) {
@@ -416,9 +360,8 @@ func TestLoadConfigTakesThePublicURLOnlyInTheFormAClientComputes(t *testing.T) {
 			return map[string]string{envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret, envPublicURL: publicURL}[name]
 		})
 	}
-	cfg, err := load("")
-	require.NoError(t, err)
-	require.Nil(t, cfg.publicURL, "the login server is off without it")
+	_, err := load("")
+	require.ErrorContains(t, err, envPublicURL+" is required", "every caller logs in at the public URL, so the server needs it")
 
 	for _, good := range []string{"https://faucet.example.com", "https://faucet.example.com:8443", "http://127.0.0.1:8080", "http://localhost:3000"} {
 		cfg, err := load(good)
@@ -590,11 +533,11 @@ func subscribeTo(ctx context.Context, session *mcp.ClientSession, repo string) e
 	return err
 }
 
-// Every renewal checks access again at its source (R3), through the
-// Authorizer that run() composes: GitHub for a GitHub token, past the minute
-// that the cache remembers, and the client's row for a service, past the
-// grants that the token check read.
-func TestARenewalChecksAccessAgainForEveryKindOfCaller(t *testing.T) {
+// Every renewal of a service checks access again at its source (R3), through
+// the Authorizer that run() composes: the client's row, past the grants that
+// the token check read. TestABrowserUserAsksGitHubOnceForReadsAndAtEveryRenewal
+// checks the other kind of caller, a person who logged in through a browser.
+func TestARenewalOfAServiceChecksAccessAgain(t *testing.T) {
 	t.Parallel()
 	key, err := faucet.NewWebhookKey(bytes.Repeat([]byte{1}, 32))
 	require.NoError(t, err)
@@ -611,26 +554,12 @@ func TestARenewalChecksAccessAgainForEveryKindOfCaller(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	t.Cleanup(cancel)
 
-	t.Run("GitHubToken", func(t *testing.T) {
-		t.Parallel()
-		person := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, aliceToken)
-		require.NoError(t, subscribeTo(ctx, person, "o/r"))
-		srv.github.mu.Lock()
-		srv.github.revoked = true
-		srv.github.mu.Unlock()
-		var rpcErr *jsonrpc.Error
-		require.ErrorAs(t, subscribeTo(ctx, person, "o/r"), &rpcErr, "the renewal asks GitHub, which revoked the access, within the minute the cache remembers")
-		require.Contains(t, rpcErr.Message, "not found or not accessible")
-	})
-	t.Run("Service", func(t *testing.T) {
-		t.Parallel()
-		secret := srv.client(t, "ci-watcher", "/github/mcp", bothScopes, "repo:octo-org/octo-repo")
-		srv.deliver(t, "d-1")
-		service := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, srv.token(t, "ci-watcher", secret))
-		before := counted.reads.Load()
-		require.NoError(t, subscribeTo(ctx, service, "octo-org/octo-repo"))
-		require.EqualValues(t, 2, counted.reads.Load()-before, "the token check reads the client, and the renewal reads it again")
-	})
+	secret := srv.client(t, "ci-watcher", "/github/mcp", bothScopes, "repo:octo-org/octo-repo")
+	srv.deliver(t, "d-1")
+	service := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, srv.token(t, "ci-watcher", secret))
+	before := counted.reads.Load()
+	require.NoError(t, subscribeTo(ctx, service, "octo-org/octo-repo"))
+	require.EqualValues(t, 2, counted.reads.Load()-before, "the token check reads the client, and the renewal reads it again")
 }
 
 // faucet clients update changes what a token of the client can do on its next

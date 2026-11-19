@@ -42,7 +42,7 @@ func TestPrepareSchemaMigratesOnlyInProduction(t *testing.T) {
 		t.Helper()
 		cfg, err := loadConfig(func(name string) string {
 			return map[string]string{
-				envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret,
+				envDatabaseURL: "postgres://localhost/faucet", envSecret: testSecret, envPublicURL: testOrigin,
 				envVercel: vercel, envVercelEnv: vercelEnv,
 			}[name]
 		})

@@ -812,16 +812,40 @@ func TestACheckRefusesANameThatOnlyItsLowerCaseMakesValid(t *testing.T) {
 	require.Empty(t, h.checkedRepos(1))
 }
 
-// A repository checker that remembers answers, as *faucet.AccessCache does,
-// still answers a renewal fresh: the access check asks it with RepoIDFresh,
-// never with RepoID.
+// rememberingRepos answers RepoID with the first grant that GitHub gave for
+// a repository, as a repository checker that remembers answers does, and
+// asks GitHub at every RepoIDFresh.
+type rememberingRepos struct {
+	faucet.TokenAuthorizer
+	mu      sync.Mutex
+	granted map[string]int64
+}
+
+func (r *rememberingRepos) RepoID(ctx context.Context, p faucet.Principal, repo string) (int64, error) {
+	r.mu.Lock()
+	id, ok := r.granted[repo]
+	r.mu.Unlock()
+	if ok {
+		return id, nil
+	}
+	id, err := r.TokenAuthorizer.RepoID(ctx, p, repo)
+	if err == nil {
+		r.mu.Lock()
+		r.granted[repo] = id
+		r.mu.Unlock()
+	}
+	return id, err
+}
+
+// A repository checker that remembers answers still answers a renewal
+// fresh: the access check asks it with RepoIDFresh, never with RepoID.
 func TestARenewalThroughACachingRepositoryCheckerAsksGitHub(t *testing.T) {
 	t.Parallel()
 	h := newGrantHarness(t, newFakeStore())
 	p := h.principal(h.redeem(h.approve("login-1", 1)))
 	access, err := oauth.NewUserAccess(oauth.UserAccessDeps{
 		Store: h.store, Clock: h.clock, Logger: slog.Make(), Login: *h.login,
-		Repos: faucet.NewAccessCache(h.github.repos(), h.clock),
+		Repos: &rememberingRepos{TokenAuthorizer: h.github.repos(), granted: map[string]int64{}},
 	})
 	require.NoError(t, err)
 	require.NoError(t, h.repoID(access, p, "o/x").err)

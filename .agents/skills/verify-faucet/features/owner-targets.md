@@ -1,6 +1,6 @@
 # Owner targets
 
-A service agent reads the events of every repository of one owner, or of every repository, through one wait, poll or subscription, instead of naming one repository. The operator grants it with `faucet clients create -grant org:<login>` or `-grant all`. The arguments name the target: `{"owner": "<login>"}` or `{"all": true}` in place of `{"repo": "<owner>/<name>"}`, with an optional `repos` list of full names. Callers with a GitHub token keep naming one repository.
+A service agent reads the events of every repository of one owner, or of every repository, through one wait, poll or subscription, instead of naming one repository. The operator grants it with `faucet clients create -grant org:<login>` or `-grant all`. The arguments name the target: `{"owner": "<login>"}` or `{"all": true}` in place of `{"repo": "<owner>/<name>"}`, with an optional `repos` list of full names. The person of the browser login keeps naming one repository.
 
 ## Sub-features
 
@@ -9,7 +9,7 @@ A service agent reads the events of every repository of one owner, or of every r
 - `faucet_subscriptions` stores the target as `target_kind` (`repo`, `owner` or `all`), `owner_id` (the owner's GitHub ID) and `repo_id` (0 for `owner` and `all`).
 - One `owner` subscription gets the events of every repository of the owner that arrive after it, once each, and no event of another owner. `repos` keeps the repositories it names, matched ignoring case against the full name that each delivery carried.
 - The wait tool and `events/poll` read `owner` and `all` targets as they read `repo`.
-- A caller with a GitHub token (or an OAuth user) that names `owner` or `all` gets -32024 from `events/poll` and `events/subscribe`, and a tool error from the wait tool, with `owner and all targets are for service clients; name one repository with repo`. A refused subscribe writes no row.
+- A person of the browser login who names `owner` or `all` gets -32024 from `events/poll` and `events/subscribe`, and a tool error from the wait tool, with `owner and all targets are for service clients; name one repository with repo`. A refused subscribe writes no row.
 - An `owner` target reads only the typed events stored since the migration that added `faucet_events.owner_id`, because older rows hold 0 there. An `all` target reads every event.
 - A raw delivery of an organization that names no repository reaches `owner` and `all` interests only, and never one that names `repos`.
 
@@ -19,7 +19,7 @@ An operator runs `faucet clients create -grant org:<login> <client-id>` and give
 
 ## Driving it with e2e
 
-`tests/owner-targets.e2e.ts`, with the helpers of `tests/services.ts` and `tests/delivery.ts`. The subscription case runs on a delivery faucet with its login server on (`withDeliveryFaucet(faucet, fn, { publicUrl: true })`) and the receiver. It tries to make a client with `-grant org:verify`, which is refused while no repository of `verify` has sent a delivery, delivers a run of one repository (owner `verify`, ID 1), makes the client, then subscribes once with `{"owner": "verify"}` and once with `repos` naming a second repository that has never sent a delivery. It delivers a run of each repository and one of another owner, runs `/cron/deliver`, and waits with the same target. The token refusals run on the main faucet, and the grant refusals on a faucet of their own (`withFaucet(..., { publicUrl: true })`).
+`tests/owner-targets.e2e.ts`, with the helpers of `tests/services.ts` and `tests/delivery.ts`. The subscription case runs on a delivery faucet (`withDeliveryFaucet(faucet, fn)`) and the receiver. It tries to make a client with `-grant org:verify`, which is refused while no repository of `verify` has sent a delivery, delivers a run of one repository (owner `verify`, ID 1), makes the client, then subscribes once with `{"owner": "verify"}` and once with `repos` naming a second repository that has never sent a delivery. It delivers a run of each repository and one of another owner, runs `/cron/deliver`, and waits with the same target. The refusals of the person run on a delivery faucet with the browser login (`withDeliveryFaucet(faucet, fn, { browserLogin: true })`), and the grant refusals on a faucet of their own (`withFaucet(...)`).
 
 ## Proof
 

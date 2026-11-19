@@ -100,7 +100,7 @@ describe('events subscribe', () => {
     expect(reply.result?.cursor).toMatch(/^v1\.\d+$/);
     expect(rows).toHaveLength(1);
     expect(row).toMatchObject({
-      principal: 'verify-user',
+      principal: faucet.login,
       callback_url: (params.delivery as { url: string }).url,
       event_type: EVENT,
       arguments: { repo: repoOf(repoId), sha, pr: 7 },
@@ -149,18 +149,23 @@ describe('events subscribe', () => {
     expect(await faucet.subscriptions(marker)).toHaveLength(1);
   });
 
-  test('a repository the token cannot read gets the same -32024 reply as one that does not exist, and nothing is written', async ({ faucet }) => {
-    const marker = newMarker();
-    const hidden = await subscribe(faucet, subscribeParams(newRepoId(), marker, { arguments: { repo: 'other/repo' } }));
-    const missing = await subscribe(faucet, subscribeParams(newRepoId(), marker, { arguments: { repo: 'verify/never-existed' } }));
+  // GitHub decides what the person reads, and answers 404 for a repository the person cannot see, as for one that does not exist.
+  test('a repository the person cannot read gets the same -32024 reply as one that does not exist, and nothing is written', async ({ faucet }) => {
+    const env = { FAUCET_WEBHOOK_KEY: randomBytes(32).toString('base64'), FAUCET_WEBHOOK_ALLOWED_ORIGINS: CALLBACK_ORIGIN };
+    await faucet.withFaucet(env, async (started) => {
+      const person = started.as('person');
+      const marker = newMarker();
+      const hidden = await subscribe(person, subscribeParams(newRepoId(), marker, { arguments: { repo: 'other/repo' } }));
+      const missing = await subscribe(person, subscribeParams(newRepoId(), marker, { arguments: { repo: 'verify/never-existed' } }));
 
-    for (const reply of [hidden, missing]) {
-      expect(reply.status).toBe(200);
-      expect(reply.result).toBeNull();
-      expect(reply.error).toEqual({ code: -32024, message: REPO_DENIED });
-    }
-    expect(hidden.body).toBe(missing.body);
-    expect(await faucet.subscriptions(marker)).toEqual([]);
+      for (const reply of [hidden, missing]) {
+        expect(reply.status).toBe(200);
+        expect(reply.result).toBeNull();
+        expect(reply.error).toEqual({ code: -32024, message: REPO_DENIED });
+      }
+      expect(hidden.body).toBe(missing.body);
+      expect(await started.subscriptions(marker)).toEqual([]);
+    }, { browserLogin: true });
   });
 
   test('a bad parameter is refused before repository access, and repository access before the callback origin', async ({ faucet }) => {
@@ -395,19 +400,20 @@ describe('events subscribe', () => {
     const theirs = newSecret();
 
     const first = await subscribed(faucet, subscribeParams(repoId, marker, { delivery: delivery(marker, { url, secret: mine }) }));
-    const second = await subscribed(faucet, subscribeParams(repoId, marker, { delivery: delivery(marker, { url, secret: theirs }) }), { as: 'other' });
+    const second = await subscribed(faucet.as('other'), subscribeParams(repoId, marker, { delivery: delivery(marker, { url, secret: theirs }) }));
     const afterSecond = await faucet.subscriptions(marker);
     await subscribed(faucet, subscribeParams(repoId, marker, { delivery: delivery(marker, { url, secret: newSecret() }) }));
     const afterRefresh = await faucet.subscriptions(marker);
 
     expect(second.id).not.toBe(first.id);
-    expect(afterSecond.map((r) => r.principal).sort()).toEqual(['verify-other', 'verify-user']);
+    const other = faucet.as('other').login;
+    expect(afterSecond.map((r) => r.principal).sort()).toEqual([faucet.login, other].sort());
     expect(afterSecond.map((r) => r.repo_id)).toEqual([repoId, repoId]);
     const byPrincipal = (rows: typeof afterSecond, login: string) => rows.find((r) => r.principal === login)!;
-    expect(faucet.openSecret(byPrincipal(afterSecond, 'verify-user'))).toBe(mine);
-    expect(faucet.openSecret(byPrincipal(afterSecond, 'verify-other'))).toBe(theirs);
-    expect(byPrincipal(afterRefresh, 'verify-other')).toEqual(byPrincipal(afterSecond, 'verify-other'));
-    await expect.poll(() => new RegExp(`\\[info\\]\\s+subscribed\\s.*login=verify-other\\s+subscription=${second.id}\\b`).test(appLog())).toBe(true);
+    expect(faucet.openSecret(byPrincipal(afterSecond, faucet.login))).toBe(mine);
+    expect(faucet.openSecret(byPrincipal(afterSecond, other))).toBe(theirs);
+    expect(byPrincipal(afterRefresh, other)).toEqual(byPrincipal(afterSecond, other));
+    await expect.poll(() => new RegExp(`\\[info\\]\\s+subscribed\\s.*login=${other}\\s+subscription=${second.id}\\b`).test(appLog())).toBe(true);
   });
 
   test('the expiry is the requested ttlMs, capped at 10 minutes and raised to 30 seconds, in the reply and in the row', async ({ faucet }) => {
@@ -504,7 +510,7 @@ describe('events subscribe', () => {
     expect(await faucet.subscriptions(marker)).toEqual([]);
   });
 
-  test('a request without a valid token is 401, and a missing or different Mcp-Name header is -32020, and none writes a row', async ({ faucet }) => {
+  test('a request without a faucet token is 401 with the challenge, and a missing or different Mcp-Name header is -32020, and none writes a row', async ({ faucet }) => {
     const marker = newMarker();
     const params = subscribeParams(newRepoId(), marker);
 
@@ -516,7 +522,7 @@ describe('events subscribe', () => {
     for (const reply of [none, wrong]) {
       expect(reply.status).toBe(401);
       expect(reply.body).toBe('unauthorized\n');
-      expect(reply.headers.get('www-authenticate')).toBe('Bearer');
+      expect(reply.headers.get('www-authenticate')).toBe(faucet.challenge());
     }
     for (const reply of [unnamed, mismatched]) {
       expect(reply.status).toBe(400);
@@ -600,7 +606,7 @@ describe('events subscribe', () => {
       const refused = await subscribe(started, over);
       const full = await started.subscriptions(marker);
       const refreshed = await subscribe(started, held[0]!);
-      const otherPrincipal = await subscribe(started, over, { as: 'other' });
+      const otherPrincipal = await subscribe(started.as('other'), over);
       await unsubscribe(started, held[1]!);
       const afterFree = await subscribe(started, over);
       const final = await started.subscriptions(marker);

@@ -5,17 +5,17 @@ Faucet serves its GitHub events MCP endpoint at `POST /github/mcp`. `POST /mcp` 
 ## Sub-features
 
 - Both paths run the same handler behind the same bearer check and the same 75 second write deadline. A tool call, `events/list`, `events/poll`, `events/subscribe` and `events/unsubscribe` answer the same on both.
-- Without a valid token, both paths are 401 with the body `unauthorized` and `WWW-Authenticate: Bearer`. With `FAUCET_PUBLIC_URL` set, the header names the path's own metadata document instead ([Service accounts](service-accounts.md)).
+- Without a token that faucet minted, both paths are 401 with the body `unauthorized` and a `WWW-Authenticate` header that names the path's own metadata document ([Service accounts](service-accounts.md)). A GitHub token is 401 the same way, and faucet sends no request to GitHub for it.
 - Each path is its own resource, so a faucet access token works only on the path that it was issued for. `tests/service-accounts.e2e.ts` and the Go test `TestAFaucetAccessTokenWorksOnlyOnItsOwnResource` pin it.
 - Vercel's catch-all rewrite routes both paths to the `faucet` service (`TestVercelRewritesRouteTheMCPPathsToTheServer`).
 
 ## How to get to it (user POV)
 
-An agent's MCP client points at `https://<host>/github/mcp` with `Authorization: Bearer <GitHub token>`. An older client still points at `https://<host>/mcp`. The test plays both clients through `faucet.mcp` with `opts.path`.
+An agent's MCP client points at `https://<host>/github/mcp` with `Authorization: Bearer <faucet token>`. An older client still points at `https://<host>/mcp`. The test plays both clients through `faucet.mcp` with `opts.path`, as the person of the browser login, because `/mcp` takes no new service client.
 
 ## Driving it with e2e
 
-`tests/mcp-paths.e2e.ts` sends the 401 cases to each path, compares `events/list` on the two paths, and calls the wait tool on each path for one stored event. Every other MCP test calls `/github/mcp`. Live: not reachable from a browser, use `run_tests {files: ["tests/mcp-paths.e2e.ts"]}`.
+`tests/mcp-paths.e2e.ts` sends the 401 cases to each path of the main faucet and checks that the GitHub stub got no request, then, on a faucet with the browser login, compares `events/list` on the two paths and calls the wait tool on each path for one stored event, with the person's token for that path. Every other MCP test calls `/github/mcp`. Live: not reachable from a browser, use `run_tests {files: ["tests/mcp-paths.e2e.ts"]}`.
 
 ## Proof
 

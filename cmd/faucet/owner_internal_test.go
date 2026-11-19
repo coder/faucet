@@ -179,8 +179,6 @@ func TestAServiceGrantedAnOwnerReadsARepositoryBeforeItsFirstDelivery(t *testing
 			require.NoError(t, err)
 			require.Equal(t, []string{runOf(coderExisting), runOf(coderNewRepo)}, hooks.runsOf("/owner"))
 			require.Equal(t, []string{runOf(coderNewRepo)}, hooks.runsOf("/narrowed"))
-			paths, _ := srv.github.seen()
-			require.Empty(t, paths, "a service never reaches GitHub")
 		})
 	}
 }
@@ -189,10 +187,10 @@ func TestAServiceGrantedAnOwnerReadsARepositoryBeforeItsFirstDelivery(t *testing
 // repository, and has no answer for an owner or every repository.
 func TestAPersonIsToldThatOwnerAndAllTargetsAreForServices(t *testing.T) {
 	t.Parallel()
-	srv := newLoginServer(t)
+	srv := newBrowserServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
-	session := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, aliceToken)
+	session := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, srv.accessToken(ctx, t, "/github/mcp"))
 	const want = "owner and all targets are for service clients; name one repository with repo: repository not found or not accessible"
 
 	for _, target := range []map[string]any{{"owner": "o"}, {"all": true}} {
@@ -209,8 +207,9 @@ func TestAPersonIsToldThatOwnerAndAllTargetsAreForServices(t *testing.T) {
 		require.EqualValues(t, -32024, denied.Code)
 		require.Equal(t, want, denied.Message)
 	}
-	paths, _ := srv.github.seen()
-	require.NotContains(t, strings.Join(paths, " "), "/repos/", "no repository is looked up")
+	srv.github.mu.Lock()
+	defer srv.github.mu.Unlock()
+	require.NotContains(t, strings.Join(srv.github.apiCalls, " "), "/repos/", "no repository is looked up")
 }
 
 // An org grant covers each repository whose deliveries named the owner's
