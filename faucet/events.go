@@ -241,7 +241,7 @@ func (s *Service) startPoll(ctx context.Context, logger slog.Logger, p Principal
 	release, ok := s.polls.acquire(p.Login)
 	if !ok {
 		logger.Info(ctx, "poll refused, too many running", slog.F("login", p.Login))
-		return nil, rpcError(codeResourceExhausted, errTooManyPolls.Error(), nil)
+		return nil, rpcError(codeResourceExhausted, errTooManyPolls.Error(), map[string]any{"limit": "polls", "max": s.polls.limit})
 	}
 	return release, nil
 }

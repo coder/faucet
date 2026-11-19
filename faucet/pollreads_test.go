@@ -93,6 +93,7 @@ func requireRefusedPoll(t *testing.T, rpcErr *jsonrpc.Error) {
 	require.NotNil(t, rpcErr)
 	require.EqualValues(t, codeResourceExhausted, rpcErr.Code, rpcErr.Message)
 	require.Contains(t, rpcErr.Message, "too many polls")
+	require.JSONEq(t, `{"limit":"polls","max":5}`, string(rpcErr.Data), "the error names the limit, as SEP-3415 asks")
 }
 
 // One login can run a few polls at once, so it cannot hold every connection
