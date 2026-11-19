@@ -4,7 +4,7 @@ The server applies every schema change at start (on Vercel, in production only, 
 
 ## GitHub tokens are refused
 
-This came in [#PR](https://github.com/coder/faucet/pull/PR). It needs no migration. **Turn on the [browser login](browser-login.md) in production before you deploy it**: from this release a person has no other way in, and a caller that sends a GitHub token gets 401.
+This came in [#76](https://github.com/coder/faucet/pull/76). It needs no migration. **Turn on the [browser login](browser-login.md) in production before you deploy it**: from this release a person has no other way in, and a caller that sends a GitHub token gets 401.
 
 - **A GitHub token as the bearer token is refused.** `/github/mcp` and `/mcp` answer it as they answer a request with no token: 401, with the `WWW-Authenticate` challenge that names the endpoint's metadata. Faucet sends it nowhere. GitHub's `GET /repos/{owner}/{name}` answers a fine-grained token that holds only the `Metadata` permission, or a user token of another GitHub App, for a private repository whose pull requests and checks that token cannot read, and no GitHub API says what a fine-grained token may read (see [security.md](security.md#access-to-events)).
 - **What a caller does instead.** A person's coding agent drops its token and connects with none, and its user logs in through a browser (see [browser-login.md](browser-login.md#what-the-user-sees)). A service agent logs in as a client that an operator makes, with its secret or with its workload's own token (see [service-accounts.md](service-accounts.md)).
