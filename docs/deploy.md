@@ -63,7 +63,7 @@ A change to a rule changes the file and the project together: merge the file, th
 
 | Rule | Matches | Per IP | Why |
 | --- | --- | --- | --- |
-| Rate limit MCP | `/github/mcp` and `/mcp` | 120 requests a minute, then 429 | Every caller reaches these before faucet checks its token, and a bearer that is not faucet's costs a `GET /user` at GitHub. Faucet's own limits per login hold per process, and Vercel runs many processes. An agent sends a few requests a minute, and a wait holds one for up to 50 seconds. |
+| Rate limit MCP | `/github/mcp` and `/mcp` | 120 requests a minute, then 429 | Every caller reaches these before faucet checks its token, and each token with faucet's prefix costs a database lookup. Faucet's own limits per login hold per process, and Vercel runs many processes. An agent sends a few requests a minute, and a wait holds one for up to 50 seconds. |
 | Rate limit consent form | `POST /oauth/authorize` | 10 requests a minute, then 429 | Each post that carries a valid form stores a login request for 10 minutes, and a script can send faucet's `Origin` and keep the cookie, so faucet bounds the rows only by time (see [security.md](security.md#the-browser-login)). A person presses Continue once per login. `GET /oauth/authorize` stores nothing and is left out. |
 
 Vercel counts each region apart, so traffic spread over regions can pass a limit, and callers behind one address share it. Leave `/webhook/github` without a rule. GitHub sends bursts from a few addresses and does not resend a failed delivery, so one that got 429 is lost unless [redelivery](redelivery.md) asks for it again.
