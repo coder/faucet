@@ -213,6 +213,39 @@ func parsePollArguments(input *jsonschema.Resolved, raw json.RawMessage) (pollAr
 	return args, nil
 }
 
+// readWindow is how many event IDs one read of events looks at, whatever
+// their target, so a statement costs about the same however far behind its
+// cursor is and however few events match. A read that stops short of the head
+// says so, and the caller goes on from where it stopped.
+const readWindow = 50_000
+
+// windowThrough is the Through of a read of one window from after.
+func windowThrough(after int64) int64 {
+	if after > math.MaxInt64-readWindow {
+		return 0
+	}
+	return after + readWindow
+}
+
+// crossedPurge reports whether a read from after reached the purge mark of
+// page, which deleted events that the read did not get. Only the read that
+// reaches the mark says so, so a purge that spans several windows is reported
+// once.
+func crossedPurge(after int64, page PollPage) bool {
+	return after < page.PurgedThrough && page.Next >= page.PurgedThrough
+}
+
+// startPoll takes one of the login's places for a poll, so that one login
+// cannot hold every connection of the store.
+func (s *Service) startPoll(ctx context.Context, logger slog.Logger, p Principal) (release func(), err error) {
+	release, ok := s.polls.acquire(p.Login)
+	if !ok {
+		logger.Info(ctx, "poll refused, too many running", slog.F("login", p.Login))
+		return nil, rpcError(codeResourceExhausted, errTooManyPolls.Error(), nil)
+	}
+	return release, nil
+}
+
 func (s *Service) pollEventsMethod(ctx context.Context, _ *mcp.ServerSession, p *eventsPollParams) (*eventsPollResult, error) {
 	if p != nil && p.Name != "" && len(s.rawOffered) > 0 {
 		if entry, ok := s.rawEntry(p.Name); ok {
@@ -228,11 +261,20 @@ func (s *Service) pollEventsMethod(ctx context.Context, _ *mcp.ServerSession, p 
 	}
 	logger := s.logger.With(req.target.logField(), slog.F("event", req.entry.name))
 
-	target, err := s.authorize(ctx, logger, "poll", ScopeEventsRead, req.target)
+	principal, err := s.principal(ctx, logger, "poll", ScopeEventsRead)
+	if err != nil {
+		return nil, accessError(err)
+	}
+	target, err := s.authorizeTarget(ctx, logger, principal, "poll", req.target)
 	if err != nil {
 		return nil, accessError(err)
 	}
 	req.query.Target = target
+	release, err := s.startPoll(ctx, logger, principal)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	res, err := s.readEvents(ctx, req)
 	if err != nil {
@@ -255,13 +297,14 @@ func (s *Service) readEvents(ctx context.Context, req pollRequest) (*eventsPollR
 	}
 	q := req.query
 	q.After = after
+	q.Through = windowThrough(after)
 	q.Limit = req.limit + 1
 	page, err := s.store.PollEvents(ctx, q)
 	if err != nil {
 		return nil, err
 	}
-	truncated = truncated || after < page.PurgedThrough
-	events, cursor, hasMore := page.Events, page.Next, false
+	truncated = truncated || crossedPurge(after, page)
+	events, cursor, hasMore := page.Events, page.Next, q.Through > 0 && page.Next == q.Through
 	if len(events) > int(req.limit) {
 		events = events[:req.limit]
 		cursor = events[len(events)-1].ID

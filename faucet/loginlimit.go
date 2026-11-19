@@ -6,29 +6,39 @@ import (
 	"golang.org/x/xerrors"
 )
 
-const defaultMaxWaitsPerLogin = 10
+const (
+	defaultMaxWaitsPerLogin = 10
+	// defaultMaxPollsPerLogin is half of the connections that cmd/faucet
+	// opens, so one login's polls cannot hold every one of them.
+	defaultMaxPollsPerLogin = 5
+)
 
-var errTooManyWaits = xerrors.New("too many waits are open for this account, try again when one ends")
+var (
+	errTooManyWaits = xerrors.New("too many waits are open for this account, try again when one ends")
+	errTooManyPolls = xerrors.New("too many polls are running for this account, try again when one ends")
+)
 
-// waitLimiter counts the waits each login holds open. A login's entry exists
-// only while a wait holds it, so the map is never larger than the number of
-// open waits.
-type waitLimiter struct {
+// loginLimiter counts the calls of one kind that each login holds open. A
+// login's entry exists only while a call holds it, so the map is never larger
+// than the number of open calls.
+type loginLimiter struct {
 	limit int
 	mu    sync.Mutex
 	open  map[string]int
 }
 
-func newWaitLimiter(limit int) *waitLimiter {
+// newLoginLimiter allows limit calls per login, or byDefault when limit is
+// zero. A negative limit allows any number.
+func newLoginLimiter(limit, byDefault int) *loginLimiter {
 	if limit == 0 {
-		limit = defaultMaxWaitsPerLogin
+		limit = byDefault
 	}
-	return &waitLimiter{limit: limit, open: map[string]int{}}
+	return &loginLimiter{limit: limit, open: map[string]int{}}
 }
 
 // acquire takes one slot of login and returns the function that gives it back.
 // It returns false when the login holds the limit already.
-func (l *waitLimiter) acquire(login string) (release func(), ok bool) {
+func (l *loginLimiter) acquire(login string) (release func(), ok bool) {
 	if l.limit < 0 {
 		return func() {}, true
 	}

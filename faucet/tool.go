@@ -232,14 +232,6 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	return nil, out, nil
 }
 
-func (s *Service) authorize(ctx context.Context, logger slog.Logger, op string, scope Scope, a targetArguments) (Target, error) {
-	p, err := s.principal(ctx, logger, op, scope)
-	if err != nil {
-		return Target{}, err
-	}
-	return s.authorizeTarget(ctx, logger, p, op, a)
-}
-
 // principal returns the caller of this request when it holds scope, the
 // scope of op, before any repository is looked up.
 func (s *Service) principal(ctx context.Context, logger slog.Logger, op string, scope Scope) (Principal, error) {
@@ -359,19 +351,27 @@ func (s *Service) poll(ctx context.Context, req waitRequest) (PollPage, bool, er
 	q := req.query
 	truncated := false
 	for {
+		q.Through = windowThrough(q.After)
 		page, err := s.store.PollEvents(ctx, q)
 		if err != nil {
 			return PollPage{}, false, err
 		}
-		truncated = truncated || q.After < page.PurgedThrough
+		truncated = truncated || crossedPurge(q.After, page)
 		if len(page.Events) > 0 {
 			return page, truncated, nil
 		}
+		windowEnded := q.Through > 0 && page.Next == q.Through
 		q.After = page.Next
 
 		remaining := s.clock.Until(deadline)
 		if remaining <= 0 {
 			return page, truncated, nil
+		}
+		if windowEnded {
+			if err := ctx.Err(); err != nil {
+				return PollPage{}, false, err
+			}
+			continue
 		}
 		timer := s.clock.NewTimer(min(pollInterval, remaining))
 		select {
