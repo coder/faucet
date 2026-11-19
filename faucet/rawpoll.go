@@ -82,6 +82,11 @@ func (s *Service) pollRaw(ctx context.Context, entry *rawEntry, p *eventsPollPar
 	if err != nil {
 		return nil, accessError(err)
 	}
+	release, err := s.startPoll(ctx, logger, principal)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	key := NewSubscriptionKeyHash(principal.Login, "", entry.name, req.args.canonical())
 	now := s.clock.Now()
 	if req.cursor != nil && req.cursor.hasLease {

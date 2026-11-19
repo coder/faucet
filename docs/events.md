@@ -60,7 +60,7 @@ A family also takes filters named after a field of its data, so an agent wakes o
 - "Pull requests into main to review" is `pr.activity` with `actions: ["opened", "reopened", "ready_for_review", "synchronize"]` and `base_branch: ["main"]`.
 - A field that is null passes no value, so a `conclusion` filter matches no run, job or check that has not completed.
 - `head_branch` never matches a branch of a fork, because a fork's `main` is not this repository's. It matches only events whose `from_fork` is false, so an event stored before `from_fork` existed matches none.
-- The store applies the filters before it cuts a page, so `maxEvents`, `hasMore`, the cursor and the 100 deliveries that a subscription may hold count only the events that match. It reads the `data` of the rows that the target and the cursor select, with no index of its own.
+- The store applies the filters before it cuts a page, so `maxEvents`, `hasMore`, the cursor and the 100 deliveries that a subscription may hold count only the events that match. It reads the `data` of the rows that the target and the cursor select, with no index of its own, and one read looks at no more than 50000 event IDs. A poll that stopped there before the newest event says `hasMore`, also when it found nothing, and its cursor goes on from there. A wait reads on through the windows without sleeping.
 
 ## What an event carries
 

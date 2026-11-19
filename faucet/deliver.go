@@ -43,10 +43,6 @@ const (
 	// The reads of a run share the few seconds before the sends need the rest
 	// of its deadline, so one principal must leave most of them to others.
 	scanTimeout = time.Second
-	// scanWindow is how many event IDs one read of a subscription looks at,
-	// whatever their target, so its cost does not depend on how far behind
-	// the subscription is or where its target's events lie.
-	scanWindow = 50_000
 	// maxEventBodyBytes is the largest body that faucet sends, the delivery
 	// profile of SEP-3415.
 	maxEventBodyBytes = 256 << 10
@@ -368,7 +364,7 @@ func (r *deliveryRun) enqueue(ctx context.Context) error {
 	return nil
 }
 
-// scan reads a subscription's events in windows of scanWindow event IDs and
+// scan reads a subscription's events in windows of readWindow event IDs and
 // queues each window's matches with the window's end as the new read
 // position, so one statement costs at most a window whatever the target, and
 // a read that runs out of time keeps the windows it finished. It
@@ -430,7 +426,7 @@ func (r *deliveryRun) enqueueWindow(ctx, readCtx context.Context, now time.Time,
 		RepoNames: args.repoNames(),
 		After:     target.ScannedThrough,
 		Limit:     MaxPendingDeliveries - target.Pending,
-		Through:   target.ScannedThrough + scanWindow,
+		Through:   windowThrough(target.ScannedThrough),
 	})
 	if err != nil {
 		return false, xerrors.Errorf("read events for a subscription: %w", err)

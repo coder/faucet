@@ -64,6 +64,11 @@ type Deps struct {
 	// drops its connection cannot pile them up. Zero means 10. A negative value
 	// removes the cap. The call over the cap fails at once.
 	MaxWaitsPerLogin int
+	// MaxPollsPerLogin caps how many events/poll calls one login runs at once
+	// in this process, so one login cannot hold every connection of the
+	// store. Zero means 5. A negative value removes the cap. The call over the
+	// cap fails at once with a resource exhausted error.
+	MaxPollsPerLogin int
 }
 
 type WebhookDeps struct {
@@ -102,7 +107,8 @@ type Service struct {
 	webhook       *webhookState
 	recordRepos   bool
 	redelivered   func(ctx context.Context, deliveryID string) (bool, error)
-	waits         *waitLimiter
+	waits         *loginLimiter
+	polls         *loginLimiter
 	listed        []eventDescriptor
 }
 
@@ -140,7 +146,8 @@ func New(d Deps) (*Service, error) {
 		clock:         d.Clock,
 		recordRepos:   d.RecordRepositories,
 		redelivered:   d.Redelivered,
-		waits:         newWaitLimiter(d.MaxWaitsPerLogin),
+		waits:         newLoginLimiter(d.MaxWaitsPerLogin, defaultMaxWaitsPerLogin),
+		polls:         newLoginLimiter(d.MaxPollsPerLogin, defaultMaxPollsPerLogin),
 	}
 	delivery := []string{deliveryPoll}
 	if d.Webhook != nil {

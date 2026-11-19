@@ -27,7 +27,7 @@ A browser login is checked with the same `GET /repos/{owner}/{name}`, sent with 
 
 A GitHub rate-limit answer counts as a failed check that the caller can retry, not as a denial.
 
-One login can hold 10 waits open at once per process. Embedders can change that with `Deps.MaxWaitsPerLogin`.
+One login can hold 10 waits open at once per process, and run 5 `events/poll` calls at once, typed or raw names together. The call over either limit fails at once, and a poll over it gets `ResourceExhausted` with `data.limit` `polls`. Embedders can change them with `Deps.MaxWaitsPerLogin` and `Deps.MaxPollsPerLogin`.
 
 ## Principals and scopes
 
