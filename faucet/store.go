@@ -55,8 +55,8 @@ func (e Event) Validate() error {
 		return xerrors.New("delivery ID is required")
 	case e.Type == "":
 		return xerrors.New("type is required")
-	case e.RepoID == 0:
-		return xerrors.New("repo ID is required")
+	case e.RepoID <= 0:
+		return xerrors.New("repo ID must be positive")
 	case e.OwnerID < 0:
 		return xerrors.New("owner ID must not be negative")
 	case len(e.Data) == 0:

@@ -74,10 +74,13 @@ CREATE TRIGGER faucet_events_number
   BEFORE INSERT ON faucet_events
   FOR EACH ROW EXECUTE FUNCTION faucet_events_number();
 
+-- A row of a repository ID that is not positive, which only an older build
+-- could store, has no line to mark, and must not fail the purge of every
+-- other row.
 CREATE FUNCTION faucet_events_mark_purged() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   INSERT INTO faucet_event_lines (kind, target_id, purged_through)
-  SELECT 'repo', p.repo_id, max(p.repo_seq) FROM purged p GROUP BY p.repo_id
+  SELECT 'repo', p.repo_id, max(p.repo_seq) FROM purged p WHERE p.repo_id > 0 GROUP BY p.repo_id
   UNION ALL
   SELECT 'owner', p.owner_id, max(p.owner_seq) FROM purged p WHERE p.owner_id > 0 GROUP BY p.owner_id
   ON CONFLICT (kind, target_id) DO UPDATE
