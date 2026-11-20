@@ -38,19 +38,23 @@ const (
 
 // loginGitHub stands in for GitHub. Its authorize page sends the browser
 // straight back with a code, as GitHub does for a user who authorized the
-// App before; its token endpoint trades a code for tokens once, under PKCE;
-// and /user names the user of an access token.
+// App before; its token endpoint trades a code for tokens once, under PKCE,
+// and a refresh token for a new pair once; and /user names the user of an
+// access token.
 type loginGitHub struct {
 	*httptest.Server
 	mu sync.Mutex
-	// authorizes counts the browsers that reached the authorize page, and
-	// trades the calls of the token endpoint.
-	authorizes, trades int
+	// authorizes counts the browsers that reached the authorize page,
+	// trades the trades of a code and refreshes those of a refresh token.
+	authorizes, trades, refreshes int
 	// codes are the codes that the authorize page gave and the token
 	// endpoint has not traded yet.
 	codes map[string]loginGitHubCode
-	// users are the access tokens that the token endpoint gave.
-	users map[string]bool
+	// users are the access tokens that GitHub takes, and refresh the
+	// refresh tokens.
+	users, refresh map[string]bool
+	// userStatus, when not zero, answers every GET /user.
+	userStatus int
 	// issued are the tokens of each trade, in order.
 	issued []loginGitHubTokens
 	// deny makes the user refuse at GitHub.
@@ -66,7 +70,7 @@ type loginGitHubTokens struct{ access, refresh string }
 
 func newLoginGitHub(t *testing.T) *loginGitHub {
 	t.Helper()
-	g := &loginGitHub{codes: map[string]loginGitHubCode{}, users: map[string]bool{}}
+	g := &loginGitHub{codes: map[string]loginGitHubCode{}, users: map[string]bool{}, refresh: map[string]bool{}}
 	g.Server = httptest.NewServer(http.HandlerFunc(g.serve))
 	t.Cleanup(g.Close)
 	return g
@@ -94,8 +98,12 @@ func (g *loginGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Redirect(w, r, q.Get("redirect_uri")+"?"+back.Encode(), http.StatusFound)
 	case "/login/oauth/access_token":
-		g.trades++
 		_ = r.ParseForm()
+		if r.PostForm.Get("grant_type") == "refresh_token" {
+			g.refreshPair(w, r.PostForm)
+			return
+		}
+		g.trades++
 		code, ok := g.codes[r.PostForm.Get("code")]
 		delete(g.codes, r.PostForm.Get("code"))
 		w.Header().Set("Content-Type", "application/json")
@@ -108,15 +116,12 @@ func (g *loginGitHub) serve(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, g.tokenAnswer)
 			return
 		}
-		g.n++
-		tokens := loginGitHubTokens{access: fmt.Sprintf("ghu_access%d", g.n), refresh: fmt.Sprintf("ghr_refresh%d", g.n)}
-		g.users[tokens.access] = true
-		g.issued = append(g.issued, tokens)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token": tokens.access, "expires_in": 28800, "refresh_token": tokens.refresh,
-			"refresh_token_expires_in": 15897600, "token_type": "bearer", "scope": "",
-		})
+		g.answerPair(w)
 	case "/user":
+		if g.userStatus != 0 {
+			w.WriteHeader(g.userStatus)
+			return
+		}
 		if !g.users[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")] {
 			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
 			return
@@ -126,6 +131,55 @@ func (g *loginGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// answerPair gives a new pair of tokens in the answer that GitHub documents
+// for a trade and a refresh, at
+// https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens.
+func (g *loginGitHub) answerPair(w http.ResponseWriter) {
+	g.n++
+	tokens := loginGitHubTokens{access: fmt.Sprintf("ghu_access%d", g.n), refresh: fmt.Sprintf("ghr_refresh%d", g.n)}
+	g.users[tokens.access], g.refresh[tokens.refresh] = true, true
+	g.issued = append(g.issued, tokens)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"access_token": tokens.access, "expires_in": 28800, "refresh_token": tokens.refresh,
+		"refresh_token_expires_in": 15897600, "token_type": "bearer", "scope": "",
+	})
+}
+
+// refreshPair trades a refresh token for a new pair. As GitHub documents,
+// the refresh token and the access token of its pair stop working, and a
+// refresh token that GitHub does not take is bad_refresh_token.
+func (g *loginGitHub) refreshPair(w http.ResponseWriter, form url.Values) {
+	g.refreshes++
+	w.Header().Set("Content-Type", "application/json")
+	presented := form.Get("refresh_token")
+	if !g.refresh[presented] || form.Get("client_id") != loginAppClientID || form.Get("client_secret") != loginAppSecret {
+		_, _ = io.WriteString(w, `{"error":"bad_refresh_token","error_description":"The refresh token passed is incorrect or expired."}`)
+		return
+	}
+	delete(g.refresh, presented)
+	for _, pair := range g.issued {
+		if pair.refresh == presented {
+			delete(g.users, pair.access)
+		}
+	}
+	g.answerPair(w)
+}
+
+// revoke makes GitHub refuse every token that it gave, as when the user
+// revokes the App.
+func (g *loginGitHub) revoke() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	clear(g.users)
+	clear(g.refresh)
+}
+
+func (g *loginGitHub) refreshCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.refreshes
 }
 
 func (g *loginGitHub) authorizeCount() int {
@@ -287,6 +341,7 @@ func newLoginHarness(t *testing.T) *loginHarness {
 	require.NoError(t, err)
 	mux.Handle(oauth.AuthorizePath, server.AuthorizeHandler())
 	mux.Handle(oauth.GitHubCallbackPath, server.GitHubCallbackHandler())
+	mux.Handle("POST "+oauth.TokenPath, server.TokenHandler())
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	h.transport = srv.Client().Transport
@@ -324,13 +379,18 @@ func (h *loginHarness) newClient(name string, members map[string]any) loginClien
 	return c
 }
 
+// verifier is the PKCE verifier of c's logins.
+func (c loginClient) verifier() string {
+	return "agent-verifier-0123456789abcdefghijklmnopqrstuvwxyz" + strings.ReplaceAll(c.path, "/", "-")
+}
+
 // request is the query of a valid authorization request of c.
 func (h *loginHarness) request(c loginClient) url.Values {
 	return url.Values{
 		"response_type":         {"code"},
 		"client_id":             {c.id},
 		"redirect_uri":          {c.redirectURI},
-		"code_challenge":        {loginS256("agent-verifier-" + c.path)},
+		"code_challenge":        {loginS256(c.verifier())},
 		"code_challenge_method": {"S256"},
 		"resource":              {h.resource},
 		"scope":                 {"events:read events:subscribe"},
