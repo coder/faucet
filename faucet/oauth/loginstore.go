@@ -47,11 +47,18 @@ type LoginStore interface {
 	// ApproveAuthRequest stores a.Connection, in place of the connection
 	// with the same ID if there is one, and moves the request from pending
 	// to approved with the code's hash, the connection's ID and the code's
-	// expiry. It applies only to the pending request with a.RequestID that
+	// expiry. Before it replaces a connection, it calls alive with the
+	// connection as stored, and no RefreshConnection and no other
+	// ApproveAuthRequest changes that connection until the step ends.
+	// Unless alive returned true, the same step ends at a.Now every live
+	// session of the connection, and moves the connection's other approved
+	// requests to expired without their codes, so that no client redeems
+	// them. It applies only to the pending request with a.RequestID that
 	// holds a.GitHubState and has not expired at a.Now. Otherwise it
-	// returns ErrUnknownAuthRequest and changes nothing, the connection
-	// included. It fails when a is not valid.
-	ApproveAuthRequest(ctx context.Context, a Approval) error
+	// returns ErrUnknownAuthRequest and changes nothing, the connection, its
+	// sessions and its requests included, even when alive ran. It fails
+	// when a is not valid. alive must not call the store.
+	ApproveAuthRequest(ctx context.Context, a Approval, alive func(current Connection) bool) error
 	// AuthRequestByCode returns the request whose code has this hash, in
 	// whatever state it is, or ErrUnknownAuthRequest.
 	AuthRequestByCode(ctx context.Context, code TokenHash) (AuthRequest, error)

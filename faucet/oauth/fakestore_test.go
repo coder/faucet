@@ -418,13 +418,16 @@ func (s *fakeStore) connectionLock(id string) *sync.Mutex {
 	return l
 }
 
-func (s *fakeStore) ApproveAuthRequest(_ context.Context, a oauth.Approval) error {
+func (s *fakeStore) ApproveAuthRequest(ctx context.Context, a oauth.Approval, alive func(current oauth.Connection) bool) error {
 	if err := a.Validate(); err != nil {
 		return err
 	}
-	l := s.connectionLock(a.Connection.ID)
+	id := a.Connection.ID
+	l := s.connectionLock(id)
 	l.Lock()
 	defer l.Unlock()
+	current, err := s.Connection(ctx, id)
+	keep := err == nil && alive(current)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, ok := s.requests[a.RequestID]
@@ -434,8 +437,17 @@ func (s *fakeStore) ApproveAuthRequest(_ context.Context, a oauth.Approval) erro
 	if s.requestHolds(r.ID, func(o oauth.AuthRequest) bool { return o.CodeHash == a.Code }) {
 		return xerrors.New("duplicate code hash")
 	}
-	s.connections[a.Connection.ID] = cloneConnection(a.Connection)
-	r.State, r.CodeHash, r.ConnectionID, r.ExpiresAt = oauth.AuthRequestApproved, a.Code, a.Connection.ID, a.ExpiresAt
+	s.connections[id] = cloneConnection(a.Connection)
+	if !keep {
+		for otherID, other := range s.requests {
+			if other.ConnectionID == id && other.State == oauth.AuthRequestApproved {
+				other.State, other.CodeHash, other.ConnectionID = oauth.AuthRequestExpired, oauth.TokenHash{}, ""
+				s.requests[otherID] = other
+			}
+		}
+		s.endConnectionSessions(id, a.Now)
+	}
+	r.State, r.CodeHash, r.ConnectionID, r.ExpiresAt = oauth.AuthRequestApproved, a.Code, id, a.ExpiresAt
 	s.requests[r.ID] = r
 	return nil
 }
@@ -598,14 +610,20 @@ func (s *fakeStore) RefreshConnection(ctx context.Context, id string, now time.T
 	case oauth.ReplaceConnection:
 		s.connections[id] = cloneConnection(change.Connection)
 	case oauth.EndConnectionSessions:
-		for sessionID, session := range s.sessions {
-			if session.ConnectionID == id && session.Live() {
-				session.EndedAt = now
-				s.sessions[sessionID] = session
-			}
-		}
+		s.endConnectionSessions(id, now)
 	}
 	return cloneConnection(s.connections[id]), nil
+}
+
+// endConnectionSessions ends at now the live sessions of the connection
+// with this ID. The caller holds s.mu.
+func (s *fakeStore) endConnectionSessions(id string, now time.Time) {
+	for sessionID, session := range s.sessions {
+		if session.ConnectionID == id && session.Live() {
+			session.EndedAt = now
+			s.sessions[sessionID] = session
+		}
+	}
 }
 
 func (s *fakeStore) DeleteEndedSessions(_ context.Context, now, idleSince time.Time) (int64, error) {

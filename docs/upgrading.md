@@ -2,6 +2,13 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## To a login that checks the GitHub authorization it replaces
+
+This came in [#84](https://github.com/coder/faucet/pull/84). It changes nothing for a host with the browser login off.
+
+- **A login of a user whose stored GitHub tokens GitHub no longer takes ends that user's other sessions**, and the codes that no client has redeemed yet. When GitHub takes them, the other sessions stay (see [browser-login.md](browser-login.md#how-a-session-ends)).
+- **A host that embeds faucet:** `oauth.LoginStore.ApproveAuthRequest` takes an `alive` check that the store runs while it holds the user's connection, and a `LoginStore` of your own must pass the new `storetest` subtests.
+
 ## To cursors per target (migration `000018_target_lines`)
 
 This came in [#78](https://github.com/coder/faucet/pull/78). A cursor used to be faucet's event ID, which counts the events of every repository, so a caller of one repository could tell from its cursors how many events, and when, other repositories received. A cursor is now a place among the events of the target that the call names, written `v2.<n>` (see [events.md](events.md#cursors)).
@@ -86,7 +93,7 @@ This came in [#55](https://github.com/coder/faucet/pull/55). A service can now r
 
 ## To the browser login (migration `000013_browser_login`)
 
-This came in [#54](https://github.com/coder/faucet/pull/54). Nothing that a client sees changes until you set `FAUCET_GITHUB_APP_CLIENT_ID`, `FAUCET_GITHUB_APP_CLIENT_SECRET` and `FAUCET_TOKEN_KEY` next to `FAUCET_PUBLIC_URL` (see [browser-login.md](browser-login.md)). With only some of them set, the server refuses to start and names the missing ones. Then:
+This came in [#54](https://github.com/coder/faucet/pull/54). Nothing that a client sees changes until you set `FAUCET_GITHUB_APP_CLIENT_ID`, `FAUCET_GITHUB_APP_CLIENT_SECRET` and `FAUCET_TOKEN_KEY` next to `FAUCET_PUBLIC_URL` (see [browser-login.md](browser-login.md#how-a-session-ends)). With only some of them set, the server refuses to start and names the missing ones. Then:
 
 - `/oauth/authorize` shows the consent page and takes its form, the new route `/oauth/github/callback` takes GitHub's answer, `/oauth/token` also takes the `authorization_code` and `refresh_token` grants, and the new route `/oauth/revoke` revokes a client's own tokens (RFC 7009), service clients' included. The authorization server metadata lists the new grants and the revocation endpoint, and says that faucet takes client ID metadata documents.
 - Faucet keeps the GitHub App tokens of the users who log in, sealed under `FAUCET_TOKEN_KEY` (see [security.md](security.md#three-kinds-of-caller)).

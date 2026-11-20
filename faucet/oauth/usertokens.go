@@ -156,6 +156,40 @@ func (c connections) renew(ctx context.Context, current Connection) (Connection,
 	return next, tokens.access, nil
 }
 
+// authorized returns nil when GitHub still takes the pair of current, a
+// connection whose pair a login replaces: GitHub names the connection's user
+// for the access token while it lasts past userTokenMargin, and trades the
+// refresh token after that. Any other answer is an error, so a user who
+// revoked faucet's App at GitHub and a GitHub that does not answer look the
+// same. The pair that a refresh gives is dropped, as the login replaces it.
+// authorized does not call the store.
+func (c connections) authorized(ctx context.Context, current Connection) error {
+	ctx, cancel := context.WithTimeout(ctx, githubRefreshTimeout)
+	defer cancel()
+	if current.AccessExpiresAt.After(c.clock.Now().Add(userTokenMargin)) {
+		access, err := c.keys.accessToken(current)
+		if err != nil {
+			return err
+		}
+		user, err := c.github.user(ctx, access)
+		switch {
+		case err != nil:
+			return xerrors.Errorf("ask GitHub whose token connection %s holds: %w", current.ID, err)
+		case user.id != current.UpstreamUserID:
+			return xerrors.Errorf("connection %s holds the token of GitHub user %d", current.ID, user.id)
+		}
+		return nil
+	}
+	refresh, err := c.keys.refreshToken(current)
+	if err != nil {
+		return err
+	}
+	if _, err := c.github.refresh(ctx, refresh); err != nil {
+		return xerrors.Errorf("refresh the GitHub token of connection %s: %w", current.ID, err)
+	}
+	return nil
+}
+
 // UserResolver returns the SubjectResolver of users who logged in through a
 // browser. The subject is a session ID, and the principal is an OAuth user
 // of that session, never of another session of the same user. An unknown

@@ -30,6 +30,7 @@ var loginSubtests = []struct {
 	{"ApproveRefusesAnOutdatedGitHubStateAnExpiredRequestAndASecondApproval", approveRefusesAnOutdatedGitHubStateAnExpiredRequestAndASecondApproval},
 	{"ARefusedApprovalLeavesTheConnectionAsItWas", aRefusedApprovalLeavesTheConnectionAsItWas},
 	{"ApproveReplacesTheTokensOfAUserWhoLogsInAgain", approveReplacesTheTokensOfAUserWhoLogsInAgain},
+	{"ApproveEndsWhatTheReplacedConnectionServesUnlessItIsAlive", approveEndsWhatTheReplacedConnectionServesUnlessItIsAlive},
 	{"RedeemMakesTheSessionAndItsFirstAccessTokenFromTheRequest", redeemMakesTheSessionAndItsFirstAccessTokenFromTheRequest},
 	{"RedeemRefusesAnExpiredCodeAnUnknownCodeAndASecondUse", redeemRefusesAnExpiredCodeAnUnknownCodeAndASecondUse},
 	{"OnlyOneOfManyRedemptionsAtOnceMakesASession", onlyOneOfManyRedemptionsAtOnceMakesASession},
@@ -56,6 +57,7 @@ var loginSubtests = []struct {
 	{"RefreshConnectionChangesNothingWhenItsCallbackFailsOrItsChangeIsNotValid", refreshConnectionChangesNothingWhenItsCallbackFailsOrItsChangeIsNotValid},
 	{"ASecondRefreshOfAConnectionWaitsAndSeesWhatTheFirstStored", aSecondRefreshOfAConnectionWaitsAndSeesWhatTheFirstStored},
 	{"AnApprovalWaitsForARefreshOfItsConnection", anApprovalWaitsForARefreshOfItsConnection},
+	{"ARefreshWaitsForTheCheckOfAnApproval", aRefreshWaitsForTheCheckOfAnApproval},
 	{"StepsThatDoNotChangeTheConnectionDoNotWaitForItsRefresh", stepsThatDoNotChangeTheConnectionDoNotWaitForItsRefresh},
 	{"LoginRowsShareNoSliceWithTheirCaller", loginRowsShareNoSliceWithTheirCaller},
 }
@@ -120,6 +122,11 @@ func connectionAt(userID int64, updated time.Time) oauth.Connection {
 		UpdatedAt:        updated,
 	}
 }
+
+// stillAlive and revoked answer an approval's question whether GitHub
+// still takes the authorization of the connection that it replaces.
+func stillAlive(oauth.Connection) bool { return true }
+func revoked(oauth.Connection) bool    { return false }
 
 // approvalOf approves r, with the GitHub state of its first consent, at now.
 func approvalOf(r oauth.AuthRequest, c oauth.Connection, now time.Time) oauth.Approval {
@@ -198,7 +205,7 @@ func approvedRequest(t *testing.T, s oauth.Store, id string, c oauth.Connection,
 func approve(t *testing.T, s oauth.Store, r oauth.AuthRequest, c oauth.Connection, now time.Time) oauth.AuthRequest {
 	t.Helper()
 	a := approvalOf(r, c, now)
-	require.NoError(t, s.ApproveAuthRequest(context.Background(), a))
+	require.NoError(t, s.ApproveAuthRequest(context.Background(), a, stillAlive))
 	r.State, r.CodeHash, r.ConnectionID, r.ExpiresAt = oauth.AuthRequestApproved, a.Code, c.ID, a.ExpiresAt
 	return r
 }
@@ -440,7 +447,7 @@ func expireEndsOnlyAPendingRequest(t *testing.T, s oauth.Store) {
 	requireRequestByCode(t, s, redeemed)
 
 	require.ErrorIs(t, s.ConsentAuthRequest(ctx, consentAgain(pending, oauth.HashToken("another state")), now), oauth.ErrUnknownAuthRequest)
-	require.ErrorIs(t, s.ApproveAuthRequest(ctx, approvalOf(pending, c, now)), oauth.ErrUnknownAuthRequest)
+	require.ErrorIs(t, s.ApproveAuthRequest(ctx, approvalOf(pending, c, now), stillAlive), oauth.ErrUnknownAuthRequest)
 	_, err = s.RedeemAuthRequest(ctx, redemptionOf(approved.ID, approved.ID, now))
 	require.NoError(t, err, "an approved request is still redeemed")
 }
@@ -454,7 +461,10 @@ func approveStoresTheConnectionAndTheCodeInOneStep(t *testing.T, s oauth.Store) 
 	require.ErrorIs(t, err, oauth.ErrUnknownConnection)
 
 	a := approvalOf(r, c, now.Add(time.Minute))
-	require.NoError(t, s.ApproveAuthRequest(ctx, a))
+	require.NoError(t, s.ApproveAuthRequest(ctx, a, func(oauth.Connection) bool {
+		t.Error("alive ran for a connection that the store does not hold")
+		return true
+	}))
 	requireConnectionIs(t, s, c)
 	want := r
 	want.State, want.CodeHash, want.ConnectionID, want.ExpiresAt = oauth.AuthRequestApproved, a.Code, c.ID, a.ExpiresAt
@@ -488,7 +498,7 @@ func approveRefusesAnOutdatedGitHubStateAnExpiredRequestAndASecondApproval(t *te
 		"an unknown ID":                   approval("req-unknown", current, now),
 		"another ID with the right state": approval(other.ID, current, now),
 	} {
-		require.ErrorIs(t, s.ApproveAuthRequest(ctx, a), oauth.ErrUnknownAuthRequest, name)
+		require.ErrorIs(t, s.ApproveAuthRequest(ctx, a, stillAlive), oauth.ErrUnknownAuthRequest, name)
 		requireNoRequestByCode(t, s, attempt, name)
 		_, err := s.Connection(ctx, c.ID)
 		require.ErrorIs(t, err, oauth.ErrUnknownConnection, name)
@@ -498,10 +508,10 @@ func approveRefusesAnOutdatedGitHubStateAnExpiredRequestAndASecondApproval(t *te
 	requireRequestByGitHubState(t, s, expired)
 
 	first := approval(r.ID, current, r.ExpiresAt.Add(-time.Microsecond))
-	require.NoError(t, s.ApproveAuthRequest(ctx, first))
+	require.NoError(t, s.ApproveAuthRequest(ctx, first, stillAlive))
 	second := approval(r.ID, current, now)
 	second.Code, second.Connection = codeOf("a second approval"), connectionAt(2, now)
-	require.ErrorIs(t, s.ApproveAuthRequest(ctx, second), oauth.ErrUnknownAuthRequest)
+	require.ErrorIs(t, s.ApproveAuthRequest(ctx, second, stillAlive), oauth.ErrUnknownAuthRequest)
 	requireNoRequestByCode(t, s, second.Code)
 	_, err := s.Connection(ctx, second.Connection.ID)
 	require.ErrorIs(t, err, oauth.ErrUnknownConnection)
@@ -513,6 +523,7 @@ func aRefusedApprovalLeavesTheConnectionAsItWas(t *testing.T, s oauth.Store) {
 	ctx := context.Background()
 	now := loginNow()
 	first := connectionAt(1, now)
+	session := newSession(t, s, "req-0", first, now)
 	held := approvedRequest(t, s, "req-1", first, now)
 	again := consentedRequest(t, s, "req-2", now)
 	current := oauth.HashToken("github state of the second Continue")
@@ -522,19 +533,20 @@ func aRefusedApprovalLeavesTheConnectionAsItWas(t *testing.T, s oauth.Store) {
 	newer.Login = "renamed"
 
 	outdated := approvalOf(again, newer, now.Add(time.Minute))
-	require.ErrorIs(t, s.ApproveAuthRequest(ctx, outdated), oauth.ErrUnknownAuthRequest)
+	require.ErrorIs(t, s.ApproveAuthRequest(ctx, outdated, revoked), oauth.ErrUnknownAuthRequest)
 	requireConnectionIs(t, s, first, "a refused approval")
 
 	takenCode := outdated
 	takenCode.GitHubState, takenCode.Code = current, held.CodeHash
-	require.Error(t, s.ApproveAuthRequest(ctx, takenCode))
+	require.Error(t, s.ApproveAuthRequest(ctx, takenCode, revoked))
 	requireConnectionIs(t, s, first, "an approval that fails on its code")
 	requireRequestByCode(t, s, held)
 	requireRequestByGitHubState(t, s, again)
+	requireSessionIs(t, s, session)
 
 	stranger := outdated
 	stranger.Connection = connectionAt(2, now)
-	require.ErrorIs(t, s.ApproveAuthRequest(ctx, stranger), oauth.ErrUnknownAuthRequest)
+	require.ErrorIs(t, s.ApproveAuthRequest(ctx, stranger, revoked), oauth.ErrUnknownAuthRequest)
 	_, err := s.Connection(ctx, stranger.Connection.ID)
 	require.ErrorIs(t, err, oauth.ErrUnknownConnection, "a refused approval makes no connection")
 }
@@ -553,6 +565,57 @@ func approveReplacesTheTokensOfAUserWhoLogsInAgain(t *testing.T, s oauth.Store) 
 	requireSessionIs(t, s, session)
 }
 
+// A login that replaces the tokens of a connection whose authorization
+// GitHub no longer takes ends, in the same step, the sessions of the
+// connection and the codes of it that no client redeemed yet.
+func approveEndsWhatTheReplacedConnectionServesUnlessItIsAlive(t *testing.T, s oauth.Store) {
+	ctx := context.Background()
+	now := loginNow()
+	first := connectionAt(1, now)
+	session := newSession(t, s, "req-1", first, now)
+	unredeemed := approvedRequest(t, s, "req-2", first, now)
+	other := newSession(t, s, "req-3", connectionAt(2, now), now)
+	approvedAt := func(r oauth.AuthRequest, a oauth.Approval) oauth.AuthRequest {
+		r.State, r.CodeHash, r.ConnectionID, r.ExpiresAt = oauth.AuthRequestApproved, a.Code, a.Connection.ID, a.ExpiresAt
+		return r
+	}
+	codeEnded := func(r oauth.AuthRequest) {
+		t.Helper()
+		requireNoRequestByCode(t, s, r.CodeHash, "a code of the replaced connection")
+		r.State, r.CodeHash, r.ConnectionID = oauth.AuthRequestExpired, oauth.TokenHash{}, ""
+		requireRequestByGitHubState(t, s, r)
+	}
+
+	kept := consentedRequest(t, s, "req-4", now)
+	keptApproval := approvalOf(kept, connectionAt(1, now.Add(time.Minute)), now.Add(time.Minute))
+	var seen oauth.Connection
+	require.NoError(t, s.ApproveAuthRequest(ctx, keptApproval, func(current oauth.Connection) bool {
+		seen = current
+		return true
+	}))
+	requireSameConnection(t, first, seen)
+	requireSessionIs(t, s, session)
+	requireRequestByCode(t, s, unredeemed)
+	kept = approvedAt(kept, keptApproval)
+
+	ending := consentedRequest(t, s, "req-5", now)
+	endingApproval := approvalOf(ending, connectionAt(1, now.Add(2*time.Minute)), now.Add(2*time.Minute))
+	require.NoError(t, s.ApproveAuthRequest(ctx, endingApproval, func(current oauth.Connection) bool {
+		seen = current
+		return false
+	}))
+	requireSameConnection(t, keptApproval.Connection, seen)
+	requireConnectionIs(t, s, endingApproval.Connection)
+	session.EndedAt = endingApproval.Now
+	requireSessionIs(t, s, session)
+	requireSessionIs(t, s, other)
+	codeEnded(unredeemed)
+	codeEnded(kept)
+	requireRequestByCode(t, s, approvedAt(ending, endingApproval))
+	_, err := s.RedeemAuthRequest(ctx, redemptionOf(ending.ID, ending.ID, endingApproval.Now))
+	require.NoError(t, err, "the code of the approval that ended the others is redeemed")
+}
+
 func redeemMakesTheSessionAndItsFirstAccessTokenFromTheRequest(t *testing.T, s oauth.Store) {
 	ctx := context.Background()
 	now := loginNow()
@@ -561,7 +624,7 @@ func redeemMakesTheSessionAndItsFirstAccessTokenFromTheRequest(t *testing.T, s o
 	r.ClientID, r.ClientName = "https://other-agent.example.com/client.json", "Other Agent"
 	r.Resource, r.Scopes = "https://faucet.example.com/mcp", []faucet.Scope{faucet.ScopeEventsRead}
 	require.NoError(t, s.ConsentAuthRequest(ctx, consentOf(r), now))
-	require.NoError(t, s.ApproveAuthRequest(ctx, approvalOf(r, c, now)))
+	require.NoError(t, s.ApproveAuthRequest(ctx, approvalOf(r, c, now), stillAlive))
 
 	red := redemptionOf(r.ID, "first", now.Add(30*time.Second))
 	session, err := s.RedeemAuthRequest(ctx, red)
@@ -715,7 +778,7 @@ func consentApproveRedeemAndRotateValidateInput(t *testing.T, s oauth.Store) {
 	} {
 		a := approvalOf(r, c, now)
 		mutate(&a)
-		require.Error(t, s.ApproveAuthRequest(ctx, a), name)
+		require.Error(t, s.ApproveAuthRequest(ctx, a, stillAlive), name)
 		requireRequestByGitHubState(t, s, r)
 		_, err := s.Connection(ctx, c.ID)
 		require.ErrorIs(t, err, oauth.ErrUnknownConnection, name)
@@ -773,7 +836,7 @@ func aHashThatAnotherRowHoldsIsRefusedAndChangesNothing(t *testing.T, s oauth.St
 
 	a := approvalOf(r, c, now)
 	a.Code = held.CodeHash
-	require.Error(t, s.ApproveAuthRequest(ctx, a))
+	require.Error(t, s.ApproveAuthRequest(ctx, a, stillAlive))
 	requireRequestByCode(t, s, held)
 	requireRequestByGitHubState(t, s, r)
 	r = approve(t, s, r, c, now)
@@ -1366,7 +1429,7 @@ func anApprovalWaitsForARefreshOfItsConnection(t *testing.T, s oauth.Store) {
 
 	release, refreshDone := heldRefresh(ctx, t, s, c.ID, now, oauth.ConnectionChange{Kind: oauth.ReplaceConnection, Connection: refreshed})
 	approveDone := make(chan error, 1)
-	go func() { approveDone <- s.ApproveAuthRequest(ctx, approvalOf(again, approved, now)) }()
+	go func() { approveDone <- s.ApproveAuthRequest(ctx, approvalOf(again, approved, now), stillAlive) }()
 
 	select {
 	case err := <-approveDone:
@@ -1380,6 +1443,57 @@ func anApprovalWaitsForARefreshOfItsConnection(t *testing.T, s oauth.Store) {
 	got, err := s.AuthRequestByCode(ctx, codeOf(again.ID))
 	require.NoError(t, err)
 	require.Equal(t, oauth.AuthRequestApproved, got.State)
+}
+
+// An approval asks GitHub about the connection that it replaces while it
+// holds it, so a refresh of the connection waits and then sees the tokens of
+// the approval.
+func aRefreshWaitsForTheCheckOfAnApproval(t *testing.T, s oauth.Store) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	now := loginNow()
+	c := connectionAt(1, now)
+	approvedRequest(t, s, "req-1", c, now)
+	again := consentedRequest(t, s, "req-2", now)
+	approved := connectionAt(1, now.Add(time.Hour))
+	approved.Login = "approved"
+
+	started, released := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(released) }) }
+	t.Cleanup(release)
+	approveDone := make(chan error, 1)
+	go func() {
+		approveDone <- s.ApproveAuthRequest(ctx, approvalOf(again, approved, now), func(oauth.Connection) bool {
+			close(started)
+			<-released
+			return true
+		})
+	}()
+	select {
+	case <-started:
+	case err := <-approveDone:
+		t.Fatalf("the approval returned (%v) before its check ran", err)
+	}
+	seen := make(chan oauth.Connection, 1)
+	refreshDone := make(chan error, 1)
+	go func() {
+		_, err := s.RefreshConnection(ctx, c.ID, now, func(current oauth.Connection) (oauth.ConnectionChange, error) {
+			seen <- current
+			return oauth.ConnectionChange{Kind: oauth.KeepConnection}, nil
+		})
+		refreshDone <- err
+	}()
+
+	select {
+	case <-seen:
+		t.Fatal("a refresh ran its callback while an approval checked the connection")
+	case <-time.After(holdFor):
+	}
+	release()
+	require.NoError(t, <-approveDone)
+	requireSameConnection(t, approved, <-seen)
+	require.NoError(t, <-refreshDone)
 }
 
 // A refresh calls GitHub while it holds its connection, so only a step that
@@ -1406,7 +1520,7 @@ func stepsThatDoNotChangeTheConnectionDoNotWaitForItsRefresh(t *testing.T, s oau
 		return oauth.ConnectionChange{Kind: oauth.KeepConnection}, nil
 	})
 	require.NoError(t, err)
-	require.NoError(t, s.ApproveAuthRequest(ctx, approvalOf(again, other, now)))
+	require.NoError(t, s.ApproveAuthRequest(ctx, approvalOf(again, other, now), stillAlive))
 	require.True(t, watchdog.Stop(), "a step waited for the refresh of a connection it does not change")
 	release()
 	require.NoError(t, <-refreshDone)
@@ -1420,7 +1534,7 @@ func loginRowsShareNoSliceWithTheirCaller(t *testing.T, s oauth.Store) {
 	r.Scopes[0] = faucet.ScopeEventsSubscribe
 	c, wantConnection := connectionAt(1, now), connectionAt(1, now)
 	a := approvalOf(want, c, now)
-	require.NoError(t, s.ApproveAuthRequest(ctx, a))
+	require.NoError(t, s.ApproveAuthRequest(ctx, a, stillAlive))
 	c.AccessToken[0], c.RefreshToken[0] = 'X', 'X'
 	want.State, want.GitHubStateHash, want.CodeHash, want.ConnectionID, want.ExpiresAt = oauth.AuthRequestApproved, a.GitHubState, a.Code, c.ID, a.ExpiresAt
 	for _, read := range []func() (oauth.AuthRequest, error){

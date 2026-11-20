@@ -226,7 +226,7 @@ func TestTheConsentPageSaysWhoAsksForWhatAndWhereTheBrowserReturns(t *testing.T)
 	require.Equal(t, oauth.AuthRequest{
 		ID: consent.id, State: oauth.AuthRequestPending, ClientID: client.id, ClientName: "Agent agent",
 		RedirectURI: client.redirectURI, ClientState: "agent-state-/cb/agent", Resource: h.resource, Scopes: bothScopes,
-		CodeChallenge: loginS256("agent-verifier-/cb/agent"), BrowserHash: oauth.HashToken(cookie.Value),
+		CodeChallenge: loginS256(client.verifier()), BrowserHash: oauth.HashToken(cookie.Value),
 		CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
 	}, stored, "the request is the one of the page, sealed in its form")
 }
