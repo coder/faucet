@@ -165,8 +165,8 @@ func TestRawStoreOverBinaryParameters(t *testing.T) {
 	})
 }
 
-// CursorAt(t) is the highest ID received before t, which is only a prefix of
-// the log if a later ID never carries an earlier time. A time taken when the
+// PositionAt(t) is the highest position received before t, which is only a
+// prefix of the line if a later ID never carries an earlier time. A time taken when the
 // transaction starts breaks that for an insert that then waits for the lock.
 func TestInsertEventIsStampedWhenItIsWrittenNotWhenItsTransactionStarts(t *testing.T) {
 	t.Parallel()

@@ -747,7 +747,7 @@ func requireRemaining(t *testing.T, s faucet.Store, want ...faucet.Event) {
 }
 
 // purgeDeletesOnlyEventsReceivedBefore takes its boundaries from the stored
-// ReceivedAt values, like cursorAtReturnsHighestIDReceivedBefore.
+// ReceivedAt values, like positionAtReturnsTheHighestPositionReceivedBefore.
 func purgeDeletesOnlyEventsReceivedBefore(t *testing.T, s faucet.Store) {
 	ctx := context.Background()
 

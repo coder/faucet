@@ -51,7 +51,7 @@ func endedBy(ctx context.Context, err error) error {
 // order, so a reader that sees ID n has seen every lower ID that will commit.
 // The row's time is taken at the insert, under the lock, and not by the
 // column default at the start of the transaction, so a higher ID never carries
-// an earlier time and CursorAt returns a prefix of the log.
+// an earlier time and PositionAt returns a prefix of each line.
 func (s *Store) InsertEvent(ctx context.Context, ev faucet.Event) (_ faucet.Event, _ bool, err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if err := ev.Validate(); err != nil {
