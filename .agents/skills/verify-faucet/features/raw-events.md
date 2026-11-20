@@ -13,7 +13,7 @@ faucet stores a GitHub event that has no typed family only while a live interest
 - With `fields`, a poller gets only those members, and faucet stores only the members that some interest asked for.
 - `events/subscribe` with a raw name answers a cursor `r1.<position>`. A stored event is sent by `/cron/deliver` as a signed webhook whose body has the raw name as `name`, the payload as `data` and an `r1.` cursor.
 - `/cron/purge` drops the payload of a raw event once no delivery and no lease waits for it, and keeps its delivery ID until the retention, so a redelivery stays a duplicate. The reply counts it in `raw_events_cleared`.
-- A typed cursor (`v1.`) with a raw name is the JSON-RPC error -32602.
+- A typed cursor (`v2.` or `v1.`) with a raw name is the JSON-RPC error -32602.
 - One event of one target holds at most 100 live subscriptions and leases, and one login at most 10 leases and 10 subscriptions of it. The Go tests pin these limits (`faucet/rawlimits_test.go`, `storetest.RunRaw`); the e2e suite does not fill them.
 
 ## How to get to it (user POV)
