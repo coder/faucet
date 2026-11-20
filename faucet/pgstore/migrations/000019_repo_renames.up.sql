@@ -8,3 +8,12 @@ CREATE TABLE faucet_repo_renames (
   repo_id bigint NOT NULL CHECK (repo_id > 0),
   seen_at timestamptz NOT NULL
 );
+
+-- A fresh rename or transfer from a name that a row does not hold may be a
+-- missed rename or an old body sent again, and the store cannot tell which.
+-- It keeps the rename's names as the candidate, and a row with a candidate
+-- resolves no name until a fresh rename from its name or its candidate.
+ALTER TABLE faucet_repos
+  ADD COLUMN candidate_owner_id bigint CHECK (candidate_owner_id > 0),
+  ADD COLUMN candidate_full_name text,
+  ADD CONSTRAINT faucet_repos_candidate_whole CHECK ((candidate_owner_id IS NULL) = (candidate_full_name IS NULL));

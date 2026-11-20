@@ -384,10 +384,14 @@ type Store interface {
 	// the login that the row's owner holds now, it gives the row the names of
 	// rename.Repo at seenAt (Renamed). GitHub writes From under the owner's
 	// login at the time, which the row lacks when the owner was renamed after
-	// it was seen. Any other name is stale or newer: a rename that is not Late
-	// replaces it (RenameQuarantined), so that a missed rename leaves no
-	// old name bound to the repository, and a Late one changes nothing
-	// (RenameLate). It calls rename.Repo.Validate.
+	// it was seen. The same holds for the candidate that a quarantine keeps,
+	// and a rename from either name clears it. Any other name is stale or
+	// newer: a rename that is not Late keeps its names as the candidate and
+	// quarantines the row (RenameQuarantined), so that neither a missed
+	// rename nor an old body sent again leaves a name bound to the
+	// repository, and a Late one changes nothing (RenameLate). A row with a
+	// candidate resolves no name in RepositoryByName, and RecordRepository
+	// leaves it so. It calls rename.Repo.Validate.
 	RenameRepository(ctx context.Context, rename RepositoryRename, seenAt time.Time) (RenameOutcome, error)
 	// RecordOwner records that a signed delivery named the account owner.ID
 	// with owner.Login. The account keeps the login of its latest

@@ -28,6 +28,9 @@ func (s *fakeStore) nowLocked() time.Time {
 type fakeRepo struct {
 	repo   faucet.Repository
 	seenAt time.Time
+	// candidate is the names of a rename from a name that repo did not hold.
+	// A row with one resolves no name.
+	candidate *faucet.Repository
 }
 
 type fakeRepoOwner struct {
@@ -55,16 +58,21 @@ func (s *fakeStore) RenameRepository(_ context.Context, rename faucet.Repository
 		s.renameBodies[rename.Body] = true
 		outcome = faucet.Renamed
 		i := slices.IndexFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == rename.Repo.ID })
+		held := i >= 0 && (s.holdsLocked(s.repos[i].repo, rename.From) ||
+			s.repos[i].candidate != nil && s.holdsLocked(*s.repos[i].candidate, rename.From))
 		switch {
 		case i < 0:
 			s.repos = append(s.repos, fakeRepo{repo: rename.Repo, seenAt: seenAt})
 			return
-		case strings.EqualFold(s.repos[i].repo.FullName, rename.From) || strings.EqualFold(s.currentNameLocked(s.repos[i].repo), rename.From):
-		case rename.Late:
+		case rename.Late && (s.repos[i].candidate != nil || !held):
 			outcome = faucet.RenameLate
 			return
+		case held:
 		default:
 			outcome = faucet.RenameQuarantined
+			candidate := rename.Repo
+			s.repos[i].candidate = &candidate
+			return
 		}
 		s.repos[i] = fakeRepo{repo: rename.Repo, seenAt: seenAt}
 	})
@@ -159,7 +167,7 @@ func (s *fakeStore) RepositoryByName(_ context.Context, fullName string) (faucet
 			found = &s.repos[i]
 		}
 	}
-	if found == nil {
+	if found == nil || found.candidate != nil {
 		return faucet.Repository{}, faucet.ErrUnknownRepository
 	}
 	_, held, _ := strings.Cut(found.repo.FullName, "/")
@@ -190,6 +198,12 @@ func (s *fakeStore) OwnerByID(_ context.Context, id int64) (faucet.Owner, error)
 		return faucet.Owner{}, faucet.ErrUnknownOwner
 	}
 	return faucet.Owner{ID: id, Login: o.login}, nil
+}
+
+// holdsLocked reports whether from names repo, as it was seen or under the
+// login that its owner holds now.
+func (s *fakeStore) holdsLocked(repo faucet.Repository, from string) bool {
+	return strings.EqualFold(repo.FullName, from) || strings.EqualFold(s.currentNameLocked(repo), from)
 }
 
 // currentNameLocked is the full name of repo under the login that its owner

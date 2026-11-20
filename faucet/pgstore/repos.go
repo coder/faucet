@@ -49,22 +49,29 @@ func (s *Store) RenameRepository(ctx context.Context, rename faucet.RepositoryRe
 	case recorded == 0:
 		return faucet.RenameSeenBefore, nil
 	}
-	holdsFrom, err := q.LockRepositoryHolding(ctx, database.LockRepositoryHoldingParams{RepoID: repo.ID, FromFullName: rename.From})
+	held, err := q.LockRepositoryHolding(ctx, database.LockRepositoryHoldingParams{RepoID: repo.ID, FromFullName: rename.From})
 	outcome := faucet.Renamed
 	switch {
 	case xerrors.Is(err, sql.ErrNoRows):
 	case err != nil:
 		return 0, xerrors.Errorf("read repository: %w", err)
-	case !holdsFrom && rename.Late:
+	case rename.Late && (held.Quarantined || !held.HoldsFrom):
 		outcome = faucet.RenameLate
-	case !holdsFrom:
+	case !held.HoldsFrom:
 		outcome = faucet.RenameQuarantined
 	}
-	if outcome != faucet.RenameLate {
+	switch outcome {
+	case faucet.Renamed:
 		if err := q.RenameRepository(ctx, database.RenameRepositoryParams{
 			RepoID: repo.ID, OwnerID: repo.OwnerID, OwnerLogin: repo.OwnerLogin, FullName: repo.FullName, SeenAt: seenAt,
 		}); err != nil {
 			return 0, xerrors.Errorf("rename repository: %w", err)
+		}
+	case faucet.RenameQuarantined:
+		if err := q.QuarantineRepository(ctx, database.QuarantineRepositoryParams{
+			RepoID: repo.ID, OwnerID: sql.NullInt64{Int64: repo.OwnerID, Valid: true}, FullName: sql.NullString{String: repo.FullName, Valid: true},
+		}); err != nil {
+			return 0, xerrors.Errorf("quarantine repository: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -120,7 +127,7 @@ func (s *Store) RepositoryByName(ctx context.Context, fullName string) (_ faucet
 	}
 	row, err := s.q.GetRepositoryByName(ctx, database.GetRepositoryByNameParams{OwnerLogin: owner, Name: name})
 	switch {
-	case xerrors.Is(err, sql.ErrNoRows):
+	case xerrors.Is(err, sql.ErrNoRows), err == nil && row.Quarantined:
 		return faucet.Repository{}, faucet.ErrUnknownRepository
 	case err != nil:
 		return faucet.Repository{}, xerrors.Errorf("read repository: %w", err)
