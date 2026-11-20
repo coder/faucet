@@ -4,7 +4,7 @@ The server applies every schema change at start (on Vercel, in production only, 
 
 ## To renames taken once (migration `000019_repo_renames`)
 
-This fixes how a host that records repositories (with `FAUCET_PUBLIC_URL`) moves a repository's name, which a `repo:` grant resolves through (see [service-accounts.md](service-accounts.md#grants)).
+This came in [#83](https://github.com/coder/faucet/pull/83). It fixes how a host that records repositories (with `FAUCET_PUBLIC_URL`) moves a repository's name, which a `repo:` grant resolves through (see [service-accounts.md](service-accounts.md#grants)).
 
 - **A rename or transfer whose write fails is answered 500**, so GitHub records the failure and redelivery asks for it again. Every other delivery whose repository write fails goes on as before.
 - **A rename or transfer from a name that faucet does not hold now moves the repository**, and logs `a rename or transfer of the repository never reached faucet`. Before, it changed nothing and left the old name bound. One that redelivery asked for still changes nothing then.
