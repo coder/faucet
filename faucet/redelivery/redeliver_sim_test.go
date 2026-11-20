@@ -9,7 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet/redelivery"
+	"github.com/coder/superblink-events/faucet/redelivery"
 )
 
 // These tests run a webhook for hours against a GitHub that lists its

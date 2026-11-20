@@ -7,8 +7,8 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/internal/githubapi"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/internal/githubapi"
 )
 
 // ServiceResolver returns the SubjectResolver of service clients in store.

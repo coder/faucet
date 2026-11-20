@@ -8,8 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/faucet"
 	"github.com/coder/quartz"
+	"github.com/coder/superblink-events/faucet"
 )
 
 func newPurgeService(t *testing.T) (*faucet.Service, *fakeStore, *quartz.Mock) {

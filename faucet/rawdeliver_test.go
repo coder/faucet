@@ -11,7 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
+	"github.com/coder/superblink-events/faucet"
 )
 
 func newRawDeliverHarness(t *testing.T, mutate ...func(*faucet.Deps)) *deliverHarness {

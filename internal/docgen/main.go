@@ -16,10 +16,10 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/coder/faucet/faucet"
+	"github.com/coder/superblink-events/faucet"
 )
 
-const module = "github.com/coder/faucet"
+const module = "github.com/coder/superblink-events"
 
 func main() {
 	if err := run(); err != nil {

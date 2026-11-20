@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/faucet"
 	"github.com/coder/quartz"
+	"github.com/coder/superblink-events/faucet"
 )
 
 func newRepositoryHarness(t *testing.T, mutate ...func(*faucet.Deps)) (*fakeStore, *quartz.Mock, http.Handler) {

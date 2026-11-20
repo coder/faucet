@@ -8,8 +8,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/redelivery"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/redelivery"
 )
 
 // RedeliveryStore is a store that passes both contracts: events, which

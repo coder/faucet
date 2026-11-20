@@ -21,7 +21,7 @@ import (
 // faucet is core, the internals below hold helpers, the adapters below sit
 // between core and the features, and every other directory under faucet/ is
 // a feature.
-const module = "github.com/coder/faucet"
+const module = "github.com/coder/superblink-events"
 
 // The two lists that are kept by hand, each entry one package. A directory
 // under faucet/internal or under an adapter that the lists do not name is a

@@ -6,7 +6,7 @@ import (
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog/v3"
-	"github.com/coder/faucet/faucet/internal/githubapi"
+	"github.com/coder/superblink-events/faucet/internal/githubapi"
 )
 
 // TargetKind says what a read covers.

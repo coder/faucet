@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/coder/faucet/faucet"
+	"github.com/coder/superblink-events/faucet"
 )
 
 // continueDelay is how long the consent page must be visible and in focus

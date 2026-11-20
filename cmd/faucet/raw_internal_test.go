@@ -24,11 +24,11 @@ import (
 
 	"cdr.dev/slog/v3"
 	"cdr.dev/slog/v3/sloggers/sloghuman"
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/oauth"
-	"github.com/coder/faucet/faucet/pgstore"
-	"github.com/coder/faucet/faucet/redelivery"
 	"github.com/coder/quartz"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/oauth"
+	"github.com/coder/superblink-events/faucet/pgstore"
+	"github.com/coder/superblink-events/faucet/redelivery"
 )
 
 const rawPush = `{"ref":"refs/heads/main","repository":{"id":42,"full_name":"o/r","owner":{"id":7,"login":"o"}}}`

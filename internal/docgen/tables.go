@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/coder/faucet/faucet"
+	"github.com/coder/superblink-events/faucet"
 )
 
 // tables renders each generated block by name.

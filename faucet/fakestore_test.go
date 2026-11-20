@@ -14,8 +14,8 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/storetest"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/storetest"
 )
 
 func (s *fakeStore) nowLocked() time.Time {

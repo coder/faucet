@@ -12,7 +12,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
+	"github.com/coder/superblink-events/faucet"
 )
 
 var rawPollCursor = regexp.MustCompile(`^r1\.(\d+)\.[0-9a-f]{32}$`)

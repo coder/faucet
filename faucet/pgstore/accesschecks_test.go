@@ -8,8 +8,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet/oauth"
-	"github.com/coder/faucet/faucet/pgstore"
+	"github.com/coder/superblink-events/faucet/oauth"
+	"github.com/coder/superblink-events/faucet/pgstore"
 )
 
 // A use of a fresh access check that moves no last use writes no row, so

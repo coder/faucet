@@ -14,9 +14,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"cdr.dev/slog/v3"
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/redelivery"
 	"github.com/coder/quartz"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/redelivery"
 )
 
 type ghAttempt struct {

@@ -10,7 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet/oauth"
+	"github.com/coder/superblink-events/faucet/oauth"
 )
 
 // serveWith adds header to every answer for the document of c.

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/coder/faucet/faucet"
+	"github.com/coder/superblink-events/faucet"
 )
 
 func repoRoot(t *testing.T) string {
@@ -254,7 +254,7 @@ func TestCheckNames(t *testing.T) {
 		"cmd/faucet/e2e.go":                "//go:build faucet_e2e\n\npackage main\n\nfunc e2e(r chi.Router) { r.Get(\"/e2e\", nil) }\n",
 		"faucet/db_test.go":                "package faucet_test\n\nimport \"os\"\n\nvar dbVar = os.Getenv(\"FAUCET_TEST_ONLY\")\n",
 		"faucet/internal/pgtest/pgtest.go": "package pgtest\n\nimport \"os\"\n\nfunc URL() string { return os.Getenv(\"FAUCET_TEST_DATABASE_URL\") }\n",
-		"verify/go.mod":                    "module github.com/coder/faucet/verify\n",
+		"verify/go.mod":                    "module github.com/coder/superblink-events/verify\n",
 		"verify/run.go":                    "package verify\n\nimport \"os\"\n\nvar v = os.Getenv(\"FAUCET_VERIFY_ONLY\")\n",
 		"docs/a.md":                        "# A\n\n## Second part\n\n## Twice\n\n## Twice\n\n```sh\n## Not a heading\n```\n",
 		"docs/images/map.png":              "",

@@ -12,7 +12,7 @@ import (
 	standardwebhooks "github.com/standard-webhooks/standard-webhooks/libraries/go"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
+	"github.com/coder/superblink-events/faucet"
 )
 
 func TestSignWebhookIsVerifiedByTheStandardWebhooksLibrary(t *testing.T) {

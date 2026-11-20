@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet/oauth"
+	"github.com/coder/superblink-events/faucet/oauth"
 )
 
 // accessCheckSubtests is the contract of oauth.AccessCheckStore, one

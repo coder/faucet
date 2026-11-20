@@ -11,7 +11,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/cmd/faucet/internal/dbconn"
+	"github.com/coder/superblink-events/cmd/faucet/internal/dbconn"
 )
 
 const fakePassword = "fake-db-password-7c1f4e"

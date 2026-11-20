@@ -8,9 +8,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/internal/pgtest"
-	"github.com/coder/faucet/faucet/pgstore"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/internal/pgtest"
+	"github.com/coder/superblink-events/faucet/pgstore"
 )
 
 func postgresDB(t *testing.T) *sql.DB {

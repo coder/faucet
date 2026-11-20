@@ -7,8 +7,8 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/pgstore/database"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/pgstore/database"
 )
 
 func (s *Store) ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32, skipPrincipals ...string) (_ []faucet.ScanTarget, err error) {
