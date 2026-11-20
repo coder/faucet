@@ -28,6 +28,9 @@ func (s *fakeStore) nowLocked() time.Time {
 type fakeRepo struct {
 	repo   faucet.Repository
 	seenAt time.Time
+	// quarantined is set by a rename from a name that repo did not hold. A
+	// quarantined row resolves no name.
+	quarantined bool
 }
 
 type fakeRepoOwner struct {
@@ -42,16 +45,36 @@ func (s *fakeStore) RecordRepository(_ context.Context, repo faucet.Repository, 
 	})
 }
 
-func (s *fakeStore) RenameRepository(_ context.Context, repo faucet.Repository, from string, seenAt time.Time) error {
-	return s.writeRepository(repo, func() {
-		i := slices.IndexFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID })
+func (s *fakeStore) RenameRepository(_ context.Context, rename faucet.RepositoryRename, seenAt time.Time) (faucet.RenameOutcome, error) {
+	var outcome faucet.RenameOutcome
+	err := s.writeRepository(rename.Repo, func() {
+		if s.renameBodies[rename.Body] {
+			outcome = faucet.RenameSeenBefore
+			return
+		}
+		if s.renameBodies == nil {
+			s.renameBodies = map[[32]byte]bool{}
+		}
+		s.renameBodies[rename.Body] = true
+		outcome = faucet.Renamed
+		i := slices.IndexFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == rename.Repo.ID })
+		held := i >= 0 && s.holdsLocked(s.repos[i].repo, rename.From)
 		switch {
 		case i < 0:
-			s.repos = append(s.repos, fakeRepo{repo: repo, seenAt: seenAt})
-		case strings.EqualFold(s.repos[i].repo.FullName, from) || strings.EqualFold(s.currentNameLocked(s.repos[i].repo), from):
-			s.repos[i] = fakeRepo{repo: repo, seenAt: seenAt}
+			s.repos = append(s.repos, fakeRepo{repo: rename.Repo, seenAt: seenAt})
+			return
+		case rename.Late && (s.repos[i].quarantined || !held):
+			outcome = faucet.RenameLate
+			return
+		case held:
+		default:
+			outcome = faucet.RenameQuarantined
+			s.repos[i].quarantined = true
+			return
 		}
+		s.repos[i] = fakeRepo{repo: rename.Repo, seenAt: seenAt}
 	})
+	return outcome, err
 }
 
 func (s *fakeStore) AddOwner(_ context.Context, owner faucet.Owner) error {
@@ -142,7 +165,7 @@ func (s *fakeStore) RepositoryByName(_ context.Context, fullName string) (faucet
 			found = &s.repos[i]
 		}
 	}
-	if found == nil {
+	if found == nil || found.quarantined {
 		return faucet.Repository{}, faucet.ErrUnknownRepository
 	}
 	_, held, _ := strings.Cut(found.repo.FullName, "/")
@@ -173,6 +196,12 @@ func (s *fakeStore) OwnerByID(_ context.Context, id int64) (faucet.Owner, error)
 		return faucet.Owner{}, faucet.ErrUnknownOwner
 	}
 	return faucet.Owner{ID: id, Login: o.login}, nil
+}
+
+// holdsLocked reports whether from names repo, as it was seen or under the
+// login that its owner holds now.
+func (s *fakeStore) holdsLocked(repo faucet.Repository, from string) bool {
+	return strings.EqualFold(repo.FullName, from) || strings.EqualFold(s.currentNameLocked(repo), from)
 }
 
 // currentNameLocked is the full name of repo under the login that its owner

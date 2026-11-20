@@ -20,7 +20,7 @@ Schedule it every 10 minutes (`*/10 * * * *`) with `Authorization: Bearer <CRON_
 
 A run reads GitHub's deliveries, newest first, down to where the previous run stopped, less a 5 minute overlap for attempts that GitHub wrote late. A stretch that it can't read within its page limit is kept as an open range, with GitHub's cursor, and later runs read the ranges, newest first.
 
-A delivery qualifies when an attempt failed (any answer outside 200 to 299, or none), faucet stores its event and action or someone wants it as a [raw event](events.md#raw-events) when the run starts, and faucet has no event with its GUID. A stored delivery, or one that later succeeded, is never asked for. Only one run works at a time: a second one answers `busy: true`.
+A delivery qualifies when an attempt failed (any answer outside 200 to 299, or none), faucet stores its event and action, someone wants it as a [raw event](events.md#raw-events) when the run starts, or it renamed or transferred a repository on a host that records repositories ([service accounts](service-accounts.md#grants)), and faucet has no event with its GUID. A stored delivery, or one that later succeeded, is never asked for. Only one run works at a time: a second one answers `busy: true`.
 
 
 ## Final states

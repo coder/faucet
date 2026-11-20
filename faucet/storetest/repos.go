@@ -2,6 +2,8 @@ package storetest
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"testing"
 	"time"
 
@@ -13,7 +15,10 @@ import (
 var repositorySubtests = []subtest{
 	{"RecordRepositoryKeepsTheNamesAnIDWasFirstSeenUnder", recordRepositoryKeepsTheNamesAnIDWasFirstSeenUnder},
 	{"RenameRepositoryMovesANameAndANewRepositoryCanTakeTheOldOne", renameRepositoryMovesANameAndANewRepositoryCanTakeTheOldOne},
-	{"RenameRepositoryFromANameTheRowDoesNotHoldChangesNothing", renameRepositoryFromANameTheRowDoesNotHoldChangesNothing},
+	{"ARenameFromANameTheRowDoesNotHoldQuarantinesItUnlessLate", aRenameFromANameTheRowDoesNotHoldQuarantinesItUnlessLate},
+	{"AKeptOldRenameGivesNoNameBack", aKeptOldRenameGivesNoNameBack},
+	{"KeptRenamesThatChainGiveNoNameBack", keptRenamesThatChainGiveNoNameBack},
+	{"RenameRepositoryJudgesEachBodyOnce", renameRepositoryJudgesEachBodyOnce},
 	{"RenameRepositoryOfAnUnknownIDRecordsIt", renameRepositoryOfAnUnknownIDRecordsIt},
 	{"RepositoryByNameIgnoresCaseAndTakesTheLatestHolderOfAName", repositoryByNameIgnoresCaseAndTakesTheLatestHolderOfAName},
 	{"RepositoryByNameOfAnUnseenNameIsUnknown", repositoryByNameOfAnUnseenNameIsUnknown},
@@ -41,11 +46,31 @@ func recordDelivered(t *testing.T, s faucet.Store, repo faucet.Repository, at ti
 }
 
 // renameDelivered renames repo from from and records the login of its owner,
-// as a repository event that renamed it does.
-func renameDelivered(t *testing.T, s faucet.Store, repo faucet.Repository, from string, at time.Time) {
+// as a repository event that GitHub sent at at and that renamed it does.
+func renameDelivered(t *testing.T, s faucet.Store, repo faucet.Repository, from string, at time.Time) faucet.RenameOutcome {
 	t.Helper()
-	require.NoError(t, s.RecordOwner(context.Background(), faucet.Owner{ID: repo.OwnerID, Login: repo.OwnerLogin}))
-	require.NoError(t, s.RenameRepository(context.Background(), repo, from, at))
+	return renameAs(t, s, renameOf(repo, from, at), at)
+}
+
+// renameOf is the rename of a repository event that GitHub sent at at. Its
+// Body stands for the signed body, which differs between any two events.
+func renameOf(repo faucet.Repository, from string, at time.Time) faucet.RepositoryRename {
+	body := sha256.Sum256(fmt.Appendf(nil, "%d %s %s %s", repo.ID, from, repo.FullName, at.Format(time.RFC3339Nano)))
+	return faucet.RepositoryRename{Repo: repo, From: from, Body: body}
+}
+
+func renameAs(t *testing.T, s faucet.Store, rename faucet.RepositoryRename, at time.Time) faucet.RenameOutcome {
+	t.Helper()
+	require.NoError(t, s.RecordOwner(context.Background(), faucet.Owner{ID: rename.Repo.OwnerID, Login: rename.Repo.OwnerLogin}))
+	outcome, err := s.RenameRepository(context.Background(), rename, at)
+	require.NoError(t, err)
+	return outcome
+}
+
+// late is rename as a delivery that faucet's redelivery asked for.
+func late(rename faucet.RepositoryRename) faucet.RepositoryRename {
+	rename.Late = true
+	return rename
 }
 
 func requireRepositoryNamed(t *testing.T, s faucet.Store, fullName string, want faucet.Repository) {
@@ -75,7 +100,7 @@ func recordRepositoryKeepsTheNamesAnIDWasFirstSeenUnder(t *testing.T, s faucet.S
 func renameRepositoryMovesANameAndANewRepositoryCanTakeTheOldOne(t *testing.T, s faucet.Store) {
 	recordDelivered(t, s, repositoryNamed(1, "coder/faucet"), repositoryTime)
 	renamed := faucet.Repository{ID: 1, OwnerID: 8, OwnerLogin: "acme", FullName: "acme/tap"}
-	renameDelivered(t, s, renamed, "Coder/Faucet", repositoryTime.Add(time.Minute))
+	require.Equal(t, faucet.Renamed, renameDelivered(t, s, renamed, "Coder/Faucet", repositoryTime.Add(time.Minute)))
 	requireRepositoryNamed(t, s, "acme/tap", renamed)
 	requireUnknownName(t, s, "coder/faucet")
 
@@ -87,19 +112,93 @@ func renameRepositoryMovesANameAndANewRepositoryCanTakeTheOldOne(t *testing.T, s
 	requireRepositoryNamed(t, s, "acme/tap", renamed)
 }
 
-// GitHub can deliver an older rename again after a newer one. Its from
-// names a name that the row no longer holds, so it changes nothing.
-func renameRepositoryFromANameTheRowDoesNotHoldChangesNothing(t *testing.T, s faucet.Store) {
-	recordDelivered(t, s, repositoryNamed(1, "coder/x"), repositoryTime)
-	renameDelivered(t, s, repositoryNamed(1, "coder/y"), "coder/x", repositoryTime.Add(time.Minute))
-	renameDelivered(t, s, repositoryNamed(1, "coder/z"), "coder/y", repositoryTime.Add(2*time.Minute))
-	renameDelivered(t, s, repositoryNamed(1, "coder/y"), "coder/x", repositoryTime.Add(3*time.Minute))
-	requireRepositoryNamed(t, s, "coder/z", repositoryNamed(1, "coder/z"))
-	requireUnknownName(t, s, "coder/y")
+// A rename that never reached the store, or whose write failed, leaves the
+// row with the name from before it. A fresh rename or transfer after it names
+// the name that it moved the repository from, which the row does not hold.
+// The store cannot tell such a rename from an old one that someone kept and
+// sent again, so it takes neither name: the row resolves no name
+// (RenameQuarantined). A rename from the name that the rename gave cannot
+// lift it either, since kept bodies can chain. When redelivery brings the
+// missed rename late, it changes nothing, and it is not judged again when it
+// comes fresh.
+func aRenameFromANameTheRowDoesNotHoldQuarantinesItUnlessLate(t *testing.T, s faucet.Store) {
+	recordDelivered(t, s, repositoryNamed(1, "coder/r"), repositoryTime)
+	missed := renameOf(repositoryNamed(1, "coder/s"), "coder/r", repositoryTime.Add(time.Minute))
+	moved := faucet.Repository{ID: 1, OwnerID: 8, OwnerLogin: "acme", FullName: "acme/s"}
+	require.Equal(t, faucet.RenameQuarantined, renameDelivered(t, s, moved, "coder/s", repositoryTime.Add(2*time.Minute)))
+	for _, name := range []string{"coder/r", "coder/s", "acme/s"} {
+		requireUnknownName(t, s, name)
+	}
+
+	require.Equal(t, faucet.RenameLate, renameAs(t, s, late(missed), repositoryTime.Add(3*time.Minute)))
+	require.Equal(t, faucet.RenameSeenBefore, renameAs(t, s, missed, repositoryTime.Add(4*time.Minute)))
+	recordDelivered(t, s, moved, repositoryTime.Add(5*time.Minute))
+	requireUnknownName(t, s, "acme/s")
+	requireUnknownName(t, s, "coder/r")
+
+	next := faucet.Repository{ID: 1, OwnerID: 8, OwnerLogin: "acme", FullName: "acme/t"}
+	require.Equal(t, faucet.RenameQuarantined, renameDelivered(t, s, next, "acme/s", repositoryTime.Add(6*time.Minute)))
+	for _, name := range []string{"coder/r", "acme/s", "acme/t"} {
+		requireUnknownName(t, s, name)
+	}
+}
+
+// Two kept bodies that chain, a rename to a name and a rename from it, give
+// the repository no name back: the second names a name that the row does
+// not hold either.
+func keptRenamesThatChainGiveNoNameBack(t *testing.T, s faucet.Store) {
+	atNew := faucet.Repository{ID: 1, OwnerID: 20, OwnerLogin: "new", FullName: "new/s"}
+	recordDelivered(t, s, atNew, repositoryTime)
+	old := func(name string) faucet.Repository {
+		return faucet.Repository{ID: 1, OwnerID: 10, OwnerLogin: "old", FullName: name}
+	}
+	require.Equal(t, faucet.RenameQuarantined, renameAs(t, s, renameOf(old("old/r"), "old/a", repositoryTime), repositoryTime.Add(time.Minute)))
+	require.Equal(t, faucet.RenameQuarantined, renameAs(t, s, renameOf(old("old/s"), "old/r", repositoryTime), repositoryTime.Add(2*time.Minute)))
+	for _, name := range []string{"old/r", "old/s", "new/s"} {
+		requireUnknownName(t, s, name)
+	}
+}
+
+// A kept body that the store never judged, such as one signed before the
+// store kept bodies, can come again fresh. When its from is not the name
+// that the row holds, it gives the repository no name back: the name that
+// the row held stops resolving, and the body's name does not start.
+func aKeptOldRenameGivesNoNameBack(t *testing.T, s faucet.Store) {
+	atNew := faucet.Repository{ID: 1, OwnerID: 20, OwnerLogin: "new", FullName: "new/r"}
+	recordDelivered(t, s, atNew, repositoryTime)
+	kept := renameOf(faucet.Repository{ID: 1, OwnerID: 10, OwnerLogin: "old", FullName: "old/r"}, "old/q", repositoryTime)
+	require.Equal(t, faucet.RenameQuarantined, renameAs(t, s, kept, repositoryTime.Add(time.Minute)))
+	requireUnknownName(t, s, "old/r")
+	requireUnknownName(t, s, "new/r")
+
+	// GitHub's next rename names the name that the row held before.
+	next := faucet.Repository{ID: 1, OwnerID: 20, OwnerLogin: "new", FullName: "new/s"}
+	require.Equal(t, faucet.Renamed, renameDelivered(t, s, next, "new/r", repositoryTime.Add(2*time.Minute)))
+	requireRepositoryNamed(t, s, "new/s", next)
+	requireUnknownName(t, s, "old/r")
+}
+
+// GitHub signs only the body of a delivery, so a body that the store judged
+// can come again under any delivery GUID. It changes nothing, fresh or late,
+// even after the repository returned to the name that it moved the
+// repository from.
+func renameRepositoryJudgesEachBodyOnce(t *testing.T, s faucet.Store) {
+	atNew := faucet.Repository{ID: 1, OwnerID: 20, OwnerLogin: "new", FullName: "new/r"}
+	atOld := faucet.Repository{ID: 1, OwnerID: 10, OwnerLogin: "old", FullName: "old/r"}
+	recordDelivered(t, s, atNew, repositoryTime)
+	away := renameOf(atOld, "new/r", repositoryTime.Add(time.Minute))
+	require.Equal(t, faucet.Renamed, renameAs(t, s, away, repositoryTime.Add(time.Minute)))
+	require.Equal(t, faucet.Renamed, renameDelivered(t, s, atNew, "old/r", repositoryTime.Add(2*time.Minute)))
+
+	for _, replay := range []faucet.RepositoryRename{away, late(away)} {
+		require.Equal(t, faucet.RenameSeenBefore, renameAs(t, s, replay, repositoryTime.Add(3*time.Minute)))
+		requireRepositoryNamed(t, s, "new/r", atNew)
+		requireUnknownName(t, s, "old/r")
+	}
 }
 
 func renameRepositoryOfAnUnknownIDRecordsIt(t *testing.T, s faucet.Store) {
-	renameDelivered(t, s, repositoryNamed(3, "coder/new"), "coder/old", repositoryTime)
+	require.Equal(t, faucet.Renamed, renameAs(t, s, late(renameOf(repositoryNamed(3, "coder/new"), "coder/old", repositoryTime)), repositoryTime))
 	requireRepositoryNamed(t, s, "coder/new", repositoryNamed(3, "coder/new"))
 }
 
@@ -122,6 +221,7 @@ func repositoryByNameOfAnUnseenNameIsUnknown(t *testing.T, s faucet.Store) {
 
 func recordAndRenameRepositoryValidateInput(t *testing.T, s faucet.Store) {
 	ctx := context.Background()
+	refused := renameOf(repositoryNamed(1, "coder/tap"), "coder/faucet", repositoryTime)
 	for _, bad := range []faucet.Repository{
 		{},
 		{ID: 1, OwnerID: 7, OwnerLogin: "coder", FullName: "faucet"},
@@ -133,9 +233,11 @@ func recordAndRenameRepositoryValidateInput(t *testing.T, s faucet.Store) {
 		{ID: 1, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/fau\x00cet"},
 	} {
 		require.Error(t, s.RecordRepository(ctx, bad, repositoryTime), "%+v", bad)
-		require.Error(t, s.RenameRepository(ctx, bad, "coder/faucet", repositoryTime), "%+v", bad)
+		_, err := s.RenameRepository(ctx, faucet.RepositoryRename{Repo: bad, From: "coder/faucet", Body: refused.Body}, repositoryTime)
+		require.Error(t, err, "%+v", bad)
 	}
 	requireUnknownName(t, s, "coder/faucet")
+	require.Equal(t, faucet.Renamed, renameAs(t, s, refused, repositoryTime), "a refused rename records no body")
 }
 
 // A login can move to another account, as when an organization is renamed
@@ -251,10 +353,11 @@ func aRepositoryOfARenamedAccountIsFoundAndRenamedUnderItsNewLogin(t *testing.T,
 	requireUnknownName(t, s, "old-coder/faucet")
 
 	tap := faucet.Repository{ID: 5, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/tap"}
-	renameDelivered(t, s, tap, "coder/faucet", repositoryTime.Add(2*time.Hour))
+	require.Equal(t, faucet.Renamed, renameDelivered(t, s, tap, "coder/faucet", repositoryTime.Add(2*time.Hour)))
 	requireRepositoryNamed(t, s, "coder/tap", tap)
 	requireUnknownName(t, s, "coder/faucet")
 
-	renameDelivered(t, s, faucet.Repository{ID: 5, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/faucet"}, "old-coder/x", repositoryTime.Add(3*time.Hour))
+	older := renameOf(faucet.Repository{ID: 5, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/faucet"}, "old-coder/x", repositoryTime)
+	require.Equal(t, faucet.RenameLate, renameAs(t, s, late(older), repositoryTime.Add(3*time.Hour)))
 	requireRepositoryNamed(t, s, "coder/tap", tap)
 }

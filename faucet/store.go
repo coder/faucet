@@ -373,14 +373,26 @@ type Store interface {
 	// move a name back to it. The login of repo's owner is RecordOwner's or
 	// AddOwner's to record. It calls repo.Validate.
 	RecordRepository(ctx context.Context, repo Repository, seenAt time.Time) error
-	// RenameRepository gives the row of repo.ID the names of repo at seenAt
-	// when its FullName is from, ignoring case, either as the row holds it or
-	// under the login that the row's owner holds now, and inserts it when
-	// there is no row. GitHub writes from under the owner's current login,
-	// which the row lacks when the owner was renamed after it was seen. A repository event that renamed or transferred the repository
-	// from that name calls it, so a replayed older rename, whose from the row
-	// no longer holds, changes nothing. It calls repo.Validate.
-	RenameRepository(ctx context.Context, repo Repository, from string, seenAt time.Time) error
+	// RenameRepository applies a repository event that renamed or transferred
+	// a repository, and judges each body once: a rename whose Body it judged
+	// before changes nothing (RenameSeenBefore), so a replay of a transfer
+	// cannot give the repository a name back after it returned to the name
+	// that the transfer moved it from. It records the Body in the same
+	// transaction as the names, and a failed call records neither. With no
+	// row of rename.Repo.ID, it inserts one (Renamed). When the row's full
+	// name is rename.From, ignoring case, either as the row holds it or under
+	// the login that the row's owner holds now, it gives the row the names of
+	// rename.Repo at seenAt (Renamed). GitHub writes From under the owner's
+	// login at the time, which the row lacks when the owner was renamed after
+	// it was seen, and lifts a quarantine unless Late. Any other name is
+	// stale or newer: a rename that is not Late quarantines the row
+	// (RenameQuarantined) and keeps its names, so that neither a missed
+	// rename nor an old body sent again binds a name to the repository, and
+	// a Late one changes nothing (RenameLate). Kept bodies can chain, so a
+	// quarantine keeps no name of the rename that caused it. A quarantined
+	// row resolves no name in RepositoryByName, and RecordRepository leaves
+	// it so. It calls rename.Repo.Validate.
+	RenameRepository(ctx context.Context, rename RepositoryRename, seenAt time.Time) (RenameOutcome, error)
 	// RecordOwner records that a signed delivery named the account owner.ID
 	// with owner.Login. The account keeps the login of its latest
 	// delivery, because GitHub sends no event for each repository of an

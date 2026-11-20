@@ -2,6 +2,7 @@ package faucet
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -67,16 +68,53 @@ func (r Repository) Validate() error {
 	return nil
 }
 
+// RepositoryRename is a repository event that renamed a repository or
+// transferred it to another owner. Repo holds its names after the event, and
+// From its full name before, as GitHub wrote it.
+type RepositoryRename struct {
+	Repo Repository
+	From string
+	// Body is the SHA-256 of the delivery's signed body. GitHub signs the
+	// body alone, so a replay of it under another delivery GUID has the same
+	// Body.
+	Body [sha256.Size]byte
+	// Late is true for a delivery that faucet's redelivery asked GitHub to
+	// send again. It can come after a newer rename of the repository.
+	Late bool
+}
+
+// RenameOutcome is what Store.RenameRepository did with a rename.
+type RenameOutcome int
+
+const (
+	// Renamed means the repository took the rename's names: the store held
+	// the name that it renamed the repository from, or no row of it.
+	Renamed RenameOutcome = iota + 1
+	// RenameQuarantined means the store held another name: a rename before
+	// this one never reached it, or this one is an old body sent again, and
+	// the store cannot tell which. The repository resolves no name until a
+	// fresh rename from the name that the store holds.
+	RenameQuarantined
+	// RenameLate means the rename was late and the store held another name,
+	// which a newer rename can have given, so it changed nothing.
+	RenameLate
+	// RenameSeenBefore means the store had judged a rename with the same body
+	// before, so it changed nothing.
+	RenameSeenBefore
+)
+
 // recordRepository records the repository and the organization that a
 // signed delivery names, so a service can be granted them by name before
 // faucet stores an event of them, and so the login of each account follows
 // its latest delivery. A delivery that redelivery asked GitHub to send again
 // names the accounts as they were when it first came, so it adds an account
 // that the store lacks and moves no login. Only a repository event that
-// renames or transfers a repository, from the name that the store holds,
-// changes the names of a repository the store knows. A failed write is
-// logged, and the delivery goes on: the next one that names them writes them.
-func (s *Service) recordRepository(ctx context.Context, logger slog.Logger, eventName, deliveryID string, payload []byte) {
+// renames or transfers a repository changes the names of a repository that
+// the store knows (Store.RenameRepository). A failed write of such an event
+// fails the delivery, so that GitHub records the failure and redelivery asks
+// for it again. Any other failed write is logged, and the delivery goes on:
+// the next one that names the accounts writes them.
+func (s *Service) recordRepository(ctx context.Context, logger slog.Logger, eventName, deliveryID string, payload []byte) error {
 	named, hasRepo := repositoryOf(eventName, payload)
 	var owners []Owner
 	if org, ok := organizationOf(payload); ok {
@@ -89,18 +127,42 @@ func (s *Service) recordRepository(ctx context.Context, logger slog.Logger, even
 	for _, owner := range owners {
 		s.recordOwner(ctx, logger, owner, replay)
 	}
-	if !hasRepo {
-		return
+	switch {
+	case !hasRepo:
+		return nil
+	case named.previous == "":
+		if err := s.store.RecordRepository(ctx, named.repo, s.clock.Now()); err != nil {
+			logger.Warn(ctx, "could not record the repository", slog.Error(err))
+		}
+		return nil
 	}
-	var err error
-	if named.previous != "" {
-		err = s.store.RenameRepository(ctx, named.repo, named.previous, s.clock.Now())
-	} else {
-		err = s.store.RecordRepository(ctx, named.repo, s.clock.Now())
-	}
+	rename := RepositoryRename{Repo: named.repo, From: named.previous, Body: sha256.Sum256(payload), Late: replay()}
+	outcome, err := s.store.RenameRepository(ctx, rename, s.clock.Now())
 	if err != nil {
-		logger.Warn(ctx, "could not record the repository", slog.Error(err))
+		return xerrors.Errorf("rename the repository: %w", err)
 	}
+	if outcome == RenameQuarantined {
+		logger.Warn(ctx, "a rename or transfer of the repository never reached faucet, or an old one came again, so the repository resolves no name",
+			slog.F("repo_id", rename.Repo.ID), slog.F("from", rename.From), slog.F("full_name", rename.Repo.FullName))
+	}
+	return nil
+}
+
+// RedeliveryWants is the value that a host gives redelivery.Deps.Wants. It
+// wants what RawWants wants and, when the service records repositories, every
+// repository event that renamed or transferred a repository, so that
+// redelivery asks again for one whose write failed.
+func (s *Service) RedeliveryWants(ctx context.Context) (func(event, action string, repoID int64) bool, error) {
+	raw, err := s.RawWants(ctx)
+	return func(event, action string, repoID int64) bool {
+		return s.recordRepos && renamesRepository(event, action) || raw(event, action, repoID)
+	}, err
+}
+
+// renamesRepository reports whether a delivery of the event and action
+// renamed or transferred a repository.
+func renamesRepository(eventName, action string) bool {
+	return eventName == "repository" && (action == "renamed" || action == "transferred")
 }
 
 // recordOwner writes the login of owner when it is new or changed, which
@@ -128,12 +190,13 @@ func (s *Service) recordOwner(ctx context.Context, logger slog.Logger, owner Own
 
 // replayed reports whether redelivery asked GitHub to send the delivery of
 // deliveryID again. When it cannot tell, it says yes, so that the delivery
-// moves no login: a login that stays stale until the next delivery is safer
-// than one that a replay gives back.
+// moves no login, and a rename moves a name only from the name that the store
+// holds: a name that stays stale until the next delivery is safer than one
+// that a replay gives back.
 func (s *Service) replayed(ctx context.Context, logger slog.Logger, deliveryID string) bool {
 	replay, err := s.redelivered(ctx, deliveryID)
 	if err != nil {
-		logger.Warn(ctx, "could not tell whether the delivery is a redelivery, so it moves no login", slog.Error(err))
+		logger.Warn(ctx, "could not tell whether the delivery is a redelivery, so it is taken as one", slog.Error(err))
 		return true
 	}
 	return replay
@@ -204,7 +267,7 @@ func repositoryOf(eventName string, payload []byte) (namedRepository, bool) {
 		return namedRepository{}, false
 	}
 	named := namedRepository{repo: r}
-	if eventName != "repository" {
+	if !renamesRepository(eventName, body.Action) {
 		return named, true
 	}
 	owner, name, _ := strings.Cut(r.FullName, "/")
