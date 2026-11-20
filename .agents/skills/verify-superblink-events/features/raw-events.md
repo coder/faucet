@@ -4,7 +4,7 @@ Superblink Events stores a GitHub event that has no typed family only while a li
 
 ## Sub-features
 
-- Every Superblink Events that the suite starts has `FAUCET_RAW_EVENTS` set to `RAW_EVENTS` of `verify/env.mjs` (`issue_comment,issues,push,release`). A test sets `FAUCET_RAW_EVENTS: ''` to start one without raw events: its `events/list` offers the typed names only, and a raw name is the error -32023 `unknown event type`.
+- Every Superblink Events server that the suite starts has `FAUCET_RAW_EVENTS` set to `RAW_EVENTS` of `verify/env.mjs` (`issue_comment,issues,push,release`). A test sets `FAUCET_RAW_EVENTS: ''` to start one without raw events: its `events/list` offers the typed names only, and a raw name is the error -32023 `unknown event type`.
 - A refused event (`repository_advisory`, the secret scanning and Dependabot alerts, `member`, `deploy_key` and the others of the `raw-events` table in `docs/events.md`) in `FAUCET_RAW_EVENTS` makes the server exit 1 with `FAUCET_RAW_EVENTS: <event> is refused: ...`. A name that Superblink Events cannot offer raw, such as `pull_request`, exits 1 too. `tests/startup.e2e.ts` covers both.
 - `events/list` offers the raw names of `FAUCET_RAW_EVENTS` after the fifteen typed ones, in rising order. Each takes `repo` (a service also `owner` or `all`, see [Owner targets](owner-targets.md)), and optionally `actions` (the payload's top-level `action`) and `fields` (paths of payload members, for example `repository.id`).
 - A signed delivery of such an event is 202 `ignored` with no row while no interest of its repository wants it. With one it is 200 `stored`, and the same delivery ID again is 200 `duplicate`.

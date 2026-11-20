@@ -240,4 +240,4 @@ After the team is renamed, its tokens name a new issuer, and the rule matches no
 
    Anyone who can run a pod as that service account in that namespace can log in as the client, and so can anyone allowed to create `serviceaccounts/token` for it, with no pod: `kubectl create token digest-bot -n apps --audience https://superblink-events.example.com --duration 24h`. Superblink Events asks the cluster nothing about a token (no TokenReview), so such a token logs in until it expires, after its pod or its service account is gone. Superblink Events takes no subject token that lives more than 24 hours, and `faucet clients untrust` or `disable` cuts one off sooner.
 
-3. Log in with the provider of the Vercel example, with `() => readFile('/var/run/secrets/faucet/token', 'utf8')` from `node:fs/promises` as the token, or post the form with any other client.
+3. Log in with the provider of the Vercel example, with `() => readFile('/var/run/secrets/superblink-events/token', 'utf8')` from `node:fs/promises` as the token, or post the form with any other client.
