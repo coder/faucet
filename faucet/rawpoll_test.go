@@ -30,7 +30,7 @@ func newRawPollHarness(t *testing.T, mutate ...func(*faucet.Deps)) *rawPollHarne
 }
 
 // deliver posts a signed delivery and returns the handler's answer.
-func (h *rawPollHarness) deliver(event, delivery string, body []byte) string {
+func (h *webhookHarness) deliver(event, delivery string, body []byte) string {
 	h.t.Helper()
 	rec := httptest.NewRecorder()
 	h.svc.WebhookHandler().ServeHTTP(rec, newRequest(http.MethodPost, body, event, delivery))
@@ -67,7 +67,7 @@ func (h *rawPollHarness) open(extra ...any) pollOutcome {
 	return opened
 }
 
-func (h *rawPollHarness) allow(repo string, id int64) {
+func (h *webhookHarness) allow(repo string, id int64) {
 	h.authz.mu.Lock()
 	defer h.authz.mu.Unlock()
 	h.authz.repos[repo] = id
