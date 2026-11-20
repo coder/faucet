@@ -74,11 +74,17 @@ func (s *fakeStore) InsertEvent(_ context.Context, ev faucet.Event) (faucet.Even
 			return e, false, nil
 		}
 	}
+	return s.appendLocked(ev), true, nil
+}
+
+// appendLocked stores ev as the newest event, with the fields that the store
+// assigns, and returns it.
+func (s *fakeStore) appendLocked(ev faucet.Event) faucet.Event {
 	s.lastID++
 	ev.ID = s.lastID
 	ev.ReceivedAt = s.nowLocked()
 	s.events = append(s.events, ev)
-	return ev, true, nil
+	return ev
 }
 
 func (s *fakeStore) EventsAfter(_ context.Context, afterID int64, limit int32) ([]faucet.Event, error) {

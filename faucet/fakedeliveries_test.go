@@ -371,10 +371,9 @@ func (s *fakeStore) appendRunEvents(n int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for range n {
-		s.lastID++
-		s.events = append(s.events, faucet.Event{
-			ID: s.lastID, Source: "github", DeliveryID: fmt.Sprintf("history-%d", s.lastID), Type: "ci.run_completed",
-			RepoID: repoID, Data: json.RawMessage(sampleData["ci.run_completed"]), ReceivedAt: s.nowLocked(),
+		s.appendLocked(faucet.Event{
+			Source: "github", DeliveryID: fmt.Sprintf("history-%d", s.lastID+1), Type: "ci.run_completed",
+			RepoID: repoID, Data: json.RawMessage(sampleData["ci.run_completed"]),
 		})
 	}
 }
