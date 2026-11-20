@@ -68,8 +68,17 @@ WITH due AS (
 SELECT
   c.key_hash, c.event_id, c.message_id, c.attempts, c.enqueued_at,
   s.created_at AS incarnation, s.event_type, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.target_kind, s.repo_id, s.owner_id,
-  (SELECT COALESCE(MIN(p.event_id), c.event_id) - 1 FROM faucet_deliveries p WHERE p.key_hash = c.key_hash)::bigint AS watermark,
-  e.id AS stored_event_id, e.source, e.delivery_id, e.type, e.repo_id AS event_repo_id, e.owner_id AS event_owner_id, e.repo_name, e.prs, e.head_sha, COALESCE(e.data, 'null'::jsonb)::jsonb AS data, e.received_at
+  (COALESCE(
+    (SELECT CASE s.target_kind
+        WHEN 'repo' THEN CASE WHEN w.repo_id = s.repo_id THEN w.repo_seq END
+        WHEN 'owner' THEN CASE WHEN w.owner_id = s.owner_id THEN w.owner_seq END
+        ELSE w.id
+      END
+      FROM faucet_events w
+      WHERE w.id = (SELECT COALESCE(MIN(p.event_id), c.event_id) FROM faucet_deliveries p WHERE p.key_hash = c.key_hash)),
+    faucet_line_purged_through(s.target_kind, s.repo_id, s.owner_id)
+  ) - 1)::bigint AS watermark,
+  e.id AS stored_event_id, e.source, e.delivery_id, e.type, e.repo_id AS event_repo_id, e.owner_id AS event_owner_id, e.repo_name, e.prs, e.head_sha, COALESCE(e.data, 'null'::jsonb)::jsonb AS data, e.received_at, e.repo_seq, e.owner_seq
 FROM claimed c
 JOIN faucet_subscriptions s ON s.key_hash = c.key_hash
 LEFT JOIN faucet_events e ON e.id = c.event_id;
@@ -129,7 +138,8 @@ UPDATE faucet_subscriptions s
 SET gap_lease_until = sqlc.arg(lease_until)
 FROM due
 WHERE s.key_hash = due.key_hash
-RETURNING s.key_hash, s.created_at AS incarnation, s.gap_through, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until;
+RETURNING s.key_hash, s.created_at AS incarnation, s.gap_through, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until,
+  faucet_line_purged_through(s.target_kind, s.repo_id, s.owner_id)::bigint AS line_purged_through;
 
 -- name: FinishGap :exec
 UPDATE faucet_subscriptions

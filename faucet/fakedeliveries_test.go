@@ -61,14 +61,6 @@ func (s *fakeStore) pendingLocked(key faucet.SubscriptionKeyHash) int32 {
 	return n
 }
 
-func (s *fakeStore) headLocked() int64 {
-	head := s.purgeMark
-	for _, e := range s.events {
-		head = max(head, e.ID)
-	}
-	return head
-}
-
 func (s *fakeStore) ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32, skipPrincipals ...string) ([]faucet.ScanTarget, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -81,7 +73,7 @@ func (s *fakeStore) ScanTargets(ctx context.Context, now time.Time, maxPending, 
 	if maxPending <= 0 || limit <= 0 {
 		return nil, xerrors.New("max pending and limit must be positive")
 	}
-	head := s.headLocked()
+	head := int64(s.headLocked(faucet.AllTarget()))
 	var targets []faucet.ScanTarget
 	for key, sub := range s.subs {
 		pending := s.pendingLocked(key)
@@ -169,10 +161,16 @@ func (s *fakeStore) ClaimDelivery(ctx context.Context, now time.Time, lease time
 	bestRow.attempts++
 	bestRow.leaseUntil = now.Add(lease)
 	sub := s.subs[best.key]
-	watermark := best.eventID
+	lowest := best.eventID
 	for k := range s.deliveries {
 		if k.key == best.key {
-			watermark = min(watermark, k.eventID)
+			lowest = min(lowest, k.eventID)
+		}
+	}
+	watermark := s.purgedThroughLocked(sub.Target)
+	for _, e := range s.events {
+		if e.ID == lowest && sub.Target.Covers(e.RepoID, e.OwnerID) {
+			watermark = sub.Target.PositionOf(e)
 		}
 	}
 	claim := faucet.DeliveryClaim{
@@ -185,7 +183,7 @@ func (s *fakeStore) ClaimDelivery(ctx context.Context, now time.Time, lease time
 		PreviousSecretEnc:   slices.Clone(sub.PreviousSecretEnc),
 		PreviousSecretUntil: sub.PreviousSecretUntil,
 		Target:              sub.Target,
-		Watermark:           watermark - 1,
+		Watermark:           max(watermark-1, 0),
 	}
 	for _, e := range s.events {
 		if e.ID == best.eventID {
@@ -220,6 +218,7 @@ func (s *fakeStore) ClaimGap(ctx context.Context, now time.Time, lease time.Dura
 	gap.leaseUntil = now.Add(lease)
 	return faucet.GapClaim{
 		Ref:         faucet.GapRef{Key: best, Incarnation: sub.CreatedAt, Through: gap.through},
+		Cursor:      s.purgedThroughLocked(sub.Target),
 		CallbackURL: sub.CallbackURL, SecretEnc: slices.Clone(sub.SecretEnc),
 		PreviousSecretEnc: slices.Clone(sub.PreviousSecretEnc), PreviousSecretUntil: sub.PreviousSecretUntil,
 	}, true, nil

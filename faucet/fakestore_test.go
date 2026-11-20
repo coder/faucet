@@ -211,36 +211,93 @@ func (s *fakeStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.Po
 	if through == 0 {
 		through = math.MaxInt64
 	}
-	var head int64
-	var page faucet.PollPage
+	page := faucet.PollPage{Next: min(s.headLocked(q.Target), through), PurgedThrough: s.purgedThroughLocked(q.Target)}
 	for _, e := range s.events {
-		head = max(head, e.ID)
-		if e.ID <= q.After || e.ID > through || !q.Target.Covers(e.RepoID, e.OwnerID) || len(page.Events) == int(q.Limit) {
-			continue
-		}
-		if len(q.RepoNames) > 0 && !slices.Contains(q.RepoNames, strings.ToLower(e.RepoName)) {
-			continue
-		}
-		if len(q.Types) > 0 && !slices.Contains(q.Types, e.Type) {
-			continue
-		}
-		if q.HeadSHA != "" && e.HeadSHA != q.HeadSHA {
-			continue
-		}
-		if q.PR != 0 && !slices.Contains(e.PRs, q.PR) {
-			continue
-		}
-		if !slices.ContainsFunc(q.Fields, func(f faucet.FieldFilter) bool { return !passes(e, f) }) {
+		at := q.Target.PositionOf(e)
+		if at > q.After && at <= through && matches(e, q.EventFilter) && len(page.Events) < int(q.Limit) {
 			page.Events = append(page.Events, e)
 		}
 	}
-	head = max(head, s.purgeMark)
-	page.Next = max(min(head, through), q.After)
+	if len(page.Events) == int(q.Limit) {
+		page.Next = q.Target.PositionOf(page.Events[len(page.Events)-1])
+	}
+	return page, nil
+}
+
+func (s *fakeStore) ScanEvents(_ context.Context, q faucet.ScanQuery) (faucet.ScanPage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return faucet.ScanPage{}, s.err
+	}
+	if err := q.Validate(); err != nil {
+		return faucet.ScanPage{}, err
+	}
+	s.scans = append(s.scans, q)
+
+	through := q.Through
+	if through == 0 {
+		through = math.MaxInt64
+	}
+	var page faucet.ScanPage
+	for _, e := range s.events {
+		if e.ID > q.After && e.ID <= through && matches(e, q.EventFilter) && len(page.Events) < int(q.Limit) {
+			page.Events = append(page.Events, e)
+		}
+	}
+	page.Next = max(min(int64(s.headLocked(faucet.AllTarget())), through), q.After)
 	page.PurgedThrough = s.purgeMark
 	if len(page.Events) == int(q.Limit) {
 		page.Next = page.Events[len(page.Events)-1].ID
 	}
 	return page, nil
+}
+
+func matches(e faucet.Event, f faucet.EventFilter) bool {
+	switch {
+	case !f.Target.Covers(e.RepoID, e.OwnerID):
+		return false
+	case len(f.RepoNames) > 0 && !slices.Contains(f.RepoNames, strings.ToLower(e.RepoName)):
+		return false
+	case len(f.Types) > 0 && !slices.Contains(f.Types, e.Type):
+		return false
+	case f.HeadSHA != "" && e.HeadSHA != f.HeadSHA:
+		return false
+	case f.PR != 0 && !slices.Contains(e.PRs, f.PR):
+		return false
+	}
+	return !slices.ContainsFunc(f.Fields, func(field faucet.FieldFilter) bool { return !passes(e, field) })
+}
+
+// fakeLine names the line of a repository or an owner.
+type fakeLine struct {
+	kind faucet.TargetKind
+	id   int64
+}
+
+func lineOf(t faucet.Target) fakeLine {
+	return fakeLine{kind: t.Kind(), id: t.RepoID() + t.OwnerID()}
+}
+
+// purgedThroughLocked is the purge mark of t's line.
+func (s *fakeStore) purgedThroughLocked(t faucet.Target) faucet.Position {
+	if t.Kind() == faucet.TargetAll {
+		return faucet.Position(s.purgeMark)
+	}
+	return s.linePurges[lineOf(t)]
+}
+
+// headLocked is the newest position of t's line, which a purge may have
+// deleted.
+func (s *fakeStore) headLocked(t faucet.Target) faucet.Position {
+	if t.Kind() != faucet.TargetAll {
+		return s.lineHeads[lineOf(t)]
+	}
+	head := faucet.Position(s.purgeMark)
+	for _, e := range s.events {
+		head = max(head, faucet.Position(e.ID))
+	}
+	return head
 }
 
 func passes(e faucet.Event, f faucet.FieldFilter) bool {
@@ -260,20 +317,41 @@ func passes(e faucet.Event, f faucet.FieldFilter) bool {
 	return false
 }
 
-func (s *fakeStore) CursorAt(_ context.Context, t time.Time) (int64, error) {
+func (s *fakeStore) PositionAt(_ context.Context, target faucet.Target, t time.Time) (faucet.Position, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.err != nil {
 		return 0, s.err
 	}
 	s.cursorLookups = append(s.cursorLookups, t)
-	id := s.purgeMark
+	p := s.purgedThroughLocked(target)
 	for _, e := range s.events {
-		if e.ReceivedAt.Before(t) {
-			id = max(id, e.ID)
+		if target.Covers(e.RepoID, e.OwnerID) && e.ReceivedAt.Before(t) {
+			p = max(p, target.PositionOf(e))
 		}
 	}
-	return id, nil
+	return p, nil
+}
+
+func (s *fakeStore) StartAfter(_ context.Context, target faucet.Target, p faucet.Position) (int64, faucet.Position, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return 0, 0, s.err
+	}
+	if p < 0 {
+		return 0, 0, xerrors.New("position must not be negative")
+	}
+	head := s.headLocked(target)
+	if p >= head {
+		return int64(s.headLocked(faucet.AllTarget())), head, nil
+	}
+	for _, e := range s.events {
+		if target.Covers(e.RepoID, e.OwnerID) && target.PositionOf(e) > p {
+			return max(e.ID-1, s.purgeMark), p, nil
+		}
+	}
+	return int64(s.headLocked(faucet.AllTarget())), p, nil
 }
 
 func (s *fakeStore) Purge(_ context.Context, before time.Time) (faucet.PurgeResult, error) {
@@ -298,10 +376,21 @@ func (s *fakeStore) Purge(_ context.Context, before time.Time) (faucet.PurgeResu
 		}
 		res.Deleted++
 		s.purgeMark = max(s.purgeMark, e.ID)
+		s.raiseLinePurgeLocked(faucet.RepoTarget(e.RepoID), e)
+		if e.OwnerID > 0 {
+			s.raiseLinePurgeLocked(faucet.OwnerTarget(e.OwnerID), e)
+		}
 	}
 	s.events = kept
 	res.PurgedThrough = s.purgeMark
 	return res, nil
+}
+
+func (s *fakeStore) raiseLinePurgeLocked(t faucet.Target, e faucet.Event) {
+	if s.linePurges == nil {
+		s.linePurges = map[fakeLine]faucet.Position{}
+	}
+	s.linePurges[lineOf(t)] = max(s.linePurges[lineOf(t)], t.PositionOf(e))
 }
 
 // advanceSubscriptionsThatLoseNothingLocked moves a subscription that is not
@@ -365,7 +454,7 @@ func (s *fakeStore) upsertSubscriptionLocked(sub faucet.Subscription, now time.T
 	grace := sub.RotationGrace
 	sub.RotationGrace = 0
 	if row, ok := s.subs[sub.KeyHash]; ok {
-		sub.CreatedAt, sub.Cursor, sub.Status = row.CreatedAt, row.Cursor, row.Status
+		sub.CreatedAt, sub.Cursor, sub.Position, sub.Status = row.CreatedAt, row.Cursor, row.Position, row.Status
 		switch {
 		case bytes.Equal(row.SecretEnc, sub.SecretEnc):
 			sub.PreviousSecretEnc, sub.PreviousSecretUntil = row.PreviousSecretEnc, row.PreviousSecretUntil
@@ -470,6 +559,12 @@ func (s *fakeStore) lookups() []time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.cursorLookups)
+}
+
+func (s *fakeStore) scanQueries() []faucet.ScanQuery {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.scans)
 }
 
 func (s *fakeStore) pollQueries() []faucet.PollQuery {

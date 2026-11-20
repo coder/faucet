@@ -336,7 +336,7 @@ func TestAnAgentLogsInThroughABrowserAndWaitsForAnEvent(t *testing.T) {
 	defer cancel()
 	session, err := srv.connect(ctx, t, "/github/mcp")
 	require.NoError(t, err, srv.logs.String())
-	res, err := call(ctx, session, browserFixtureRepo, map[string]any{"cursor": 0, "timeout_s": 1})
+	res, err := call(ctx, session, browserFixtureRepo, map[string]any{"cursor": "v2.0", "timeout_s": 1})
 	require.NoError(t, err)
 	require.False(t, res.IsError, toolText(t, res))
 	var out struct {
@@ -351,7 +351,7 @@ func TestAnAgentLogsInThroughABrowserAndWaitsForAnEvent(t *testing.T) {
 	require.Equal(t, int64(300029405), out.Events[0].RepoID)
 	require.Equal(t, 1, srv.github.calls("/repos/"+browserFixtureRepo), "GitHub answered for the repository with the token that faucet keeps")
 
-	hidden, err := call(ctx, session, "octo-org/hidden", map[string]any{"cursor": 0, "timeout_s": 1})
+	hidden, err := call(ctx, session, "octo-org/hidden", map[string]any{"cursor": "v2.0", "timeout_s": 1})
 	require.NoError(t, err)
 	require.True(t, hidden.IsError, "a repository that the person's GitHub login cannot read is refused")
 
@@ -406,7 +406,7 @@ func TestABrowserUserAsksGitHubOnceForReadsAndAtEveryRenewal(t *testing.T) {
 	lookups := func() int { return srv.github.calls("/repos/" + browserFixtureRepo) }
 
 	for i := range 2 {
-		res, err := call(ctx, agent, browserFixtureRepo, map[string]any{"cursor": 0, "timeout_s": 1})
+		res, err := call(ctx, agent, browserFixtureRepo, map[string]any{"cursor": "v2.0", "timeout_s": 1})
 		require.NoError(t, err)
 		require.False(t, res.IsError, toolText(t, res))
 		_, err = callEvents(ctx, agent, "events/poll", pollParams(browserFixtureRepo, nil))

@@ -27,7 +27,7 @@ WHERE id > sqlc.arg(after_id)
 ORDER BY id
 LIMIT sqlc.arg(row_limit);
 
--- name: PollEvents :many
+-- name: ScanEvents :many
 -- Each kind of target has a branch of its own, so each reads its own index:
 -- faucet_events_poll for a repository, faucet_events_owner for an owner, and
 -- the primary key for all. An event stored before owners were recorded has
@@ -58,18 +58,97 @@ WITH mark AS (
   LIMIT sqlc.arg(row_limit)
 )
 SELECT
-  head.max_id,
+  head.max_id AS head,
   (SELECT purged_through FROM mark)::bigint AS purged_through,
   page.id, page.source, page.delivery_id, page.type, page.repo_id, page.owner_id, page.repo_name, page.prs, page.head_sha,
   COALESCE(page.data, 'null'::jsonb)::jsonb AS data,
-  page.received_at
+  page.received_at, page.repo_seq, page.owner_seq
 FROM head LEFT JOIN page ON true
 ORDER BY page.id;
 
--- name: CursorAt :one
-SELECT GREATEST(COALESCE(MAX(id), 0), (SELECT purged_through FROM faucet_purge_mark))::bigint AS cursor
-FROM faucet_events
-WHERE received_at < sqlc.arg(before);
+-- name: PollLine :many
+-- A read of the line of one target by position: repo_seq on
+-- faucet_events_repo_line for a repository, owner_seq on
+-- faucet_events_owner_line for an owner, and the ID on the primary key for
+-- all. The positions of a line rise with the ID, so the page is in ID order.
+-- The head and the purge mark are the line's, read in the same snapshot.
+WITH line AS (
+  SELECT
+    faucet_line_head(sqlc.arg(target_kind)::text, sqlc.arg(repo_id)::bigint, sqlc.arg(owner_id)::bigint)::bigint AS head,
+    faucet_line_purged_through(sqlc.arg(target_kind)::text, sqlc.arg(repo_id)::bigint, sqlc.arg(owner_id)::bigint)::bigint AS purged_through
+), page AS (
+  SELECT e.* FROM faucet_events e
+  WHERE (
+      (sqlc.arg(target_kind)::text = 'repo' AND e.repo_id = sqlc.arg(repo_id)::bigint
+        AND e.repo_seq > sqlc.arg(after)::bigint AND e.repo_seq <= sqlc.arg(through)::bigint)
+      OR (sqlc.arg(target_kind)::text = 'owner' AND e.owner_id = sqlc.arg(owner_id)::bigint AND e.owner_id > 0
+        AND e.owner_seq > sqlc.arg(after)::bigint AND e.owner_seq <= sqlc.arg(through)::bigint)
+      OR (sqlc.arg(target_kind)::text = 'all'
+        AND e.id > sqlc.arg(after)::bigint AND e.id <= sqlc.arg(through)::bigint)
+    )
+    AND (cardinality(sqlc.arg(repo_names)::text[]) = 0 OR lower(e.repo_name) = ANY(sqlc.arg(repo_names)::text[]))
+    AND (cardinality(sqlc.arg(types)::text[]) = 0 OR e.type = ANY(sqlc.arg(types)::text[]))
+    AND (sqlc.arg(head_sha)::text = '' OR e.head_sha = sqlc.arg(head_sha)::text)
+    AND (sqlc.arg(pr)::int = 0 OR sqlc.arg(pr)::int = ANY(e.prs))
+    AND NOT EXISTS (
+      SELECT 1 FROM jsonb_to_recordset(sqlc.arg(fields)::text::jsonb) AS f(field text, matches text[], types text[])
+      WHERE e.type = ANY(f.types) AND NOT COALESCE(e.data ->> f.field = ANY(f.matches), false)
+    )
+  ORDER BY e.id
+  LIMIT sqlc.arg(row_limit)
+)
+SELECT
+  line.head,
+  line.purged_through,
+  page.id, page.source, page.delivery_id, page.type, page.repo_id, page.owner_id, page.repo_name, page.prs, page.head_sha,
+  COALESCE(page.data, 'null'::jsonb)::jsonb AS data,
+  page.received_at, page.repo_seq, page.owner_seq
+FROM line LEFT JOIN page ON true
+ORDER BY page.id;
+
+-- name: PositionAt :one
+SELECT GREATEST(
+  CASE sqlc.arg(target_kind)::text
+    WHEN 'repo' THEN (SELECT MAX(e.repo_seq) FROM faucet_events e WHERE e.repo_id = sqlc.arg(repo_id)::bigint AND e.received_at < sqlc.arg(before))
+    WHEN 'owner' THEN (SELECT MAX(e.owner_seq) FROM faucet_events e WHERE e.owner_id = sqlc.arg(owner_id)::bigint AND e.owner_id > 0 AND e.received_at < sqlc.arg(before))
+    ELSE (SELECT MAX(e.id) FROM faucet_events e WHERE e.received_at < sqlc.arg(before))
+  END,
+  faucet_line_purged_through(sqlc.arg(target_kind)::text, sqlc.arg(repo_id)::bigint, sqlc.arg(owner_id)::bigint),
+  0
+)::bigint AS position;
+
+-- name: StartAfter :one
+-- next is the ID of the target's first event above the position, on its
+-- line's index. The highest event ID is read in the same snapshot as the head
+-- of the line, so an event of the target above that head commits with a
+-- higher ID.
+WITH line AS (
+  SELECT faucet_line_head(sqlc.arg(target_kind)::text, sqlc.arg(repo_id)::bigint, sqlc.arg(owner_id)::bigint)::bigint AS head
+), log AS (
+  SELECT
+    GREATEST(COALESCE(MAX(id), 0), (SELECT purged_through FROM faucet_purge_mark))::bigint AS head,
+    (SELECT purged_through FROM faucet_purge_mark)::bigint AS purged_through
+  FROM faucet_events
+), next AS (
+  SELECT CASE sqlc.arg(target_kind)::text
+    WHEN 'repo' THEN (
+      SELECT e.id FROM faucet_events e
+      WHERE e.repo_id = sqlc.arg(repo_id)::bigint AND e.repo_seq > sqlc.arg(position)::bigint
+      ORDER BY e.repo_seq LIMIT 1)
+    WHEN 'owner' THEN (
+      SELECT e.id FROM faucet_events e
+      WHERE e.owner_id = sqlc.arg(owner_id)::bigint AND e.owner_id > 0 AND e.owner_seq > sqlc.arg(position)::bigint
+      ORDER BY e.owner_seq LIMIT 1)
+    ELSE (SELECT MIN(e.id) FROM faucet_events e WHERE e.id > sqlc.arg(position)::bigint)
+  END AS id
+)
+SELECT
+  LEAST(sqlc.arg(position)::bigint, line.head)::bigint AS start,
+  (CASE
+    WHEN sqlc.arg(position)::bigint >= line.head OR next.id IS NULL THEN log.head
+    ELSE GREATEST(next.id - 1, log.purged_through)
+  END)::bigint AS after
+FROM line, log, next;
 
 -- name: LockPurgeMark :exec
 SELECT purged_through FROM faucet_purge_mark FOR UPDATE;
@@ -123,7 +202,7 @@ DELETE FROM faucet_subscriptions WHERE principal = sqlc.arg(principal) AND expir
 SELECT COUNT(*)::bigint AS others FROM faucet_subscriptions WHERE principal = sqlc.arg(principal) AND key_hash <> sqlc.arg(key_hash);
 
 -- name: UpsertSubscription :one
-INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, event_types, arguments, target_kind, repo_id, owner_id, secret_enc, cursor, scanned_through, created_at, updated_at, expires_at)
+INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, event_types, arguments, target_kind, repo_id, owner_id, secret_enc, cursor, scanned_through, position, created_at, updated_at, expires_at)
 VALUES (
   sqlc.arg(key_hash),
   sqlc.arg(principal),
@@ -137,6 +216,7 @@ VALUES (
   sqlc.arg(secret_enc),
   sqlc.arg(cursor),
   sqlc.arg(cursor),
+  sqlc.arg(position),
   sqlc.arg(now),
   sqlc.arg(now),
   sqlc.arg(expires_at)

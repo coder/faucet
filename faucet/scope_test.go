@@ -25,7 +25,7 @@ func serviceWith(t *testing.T, scopes ...faucet.Scope) func(*faucet.Deps) {
 func waitOnce(h *eventsHarness) (*mcp.CallToolResult, error) {
 	h.t.Helper()
 	return h.session.CallTool(h.ctx, &mcp.CallToolParams{Name: "wait_for_github_events", Arguments: map[string]any{
-		"repo": testRepo, "types": []string{"ci.run_completed"}, "cursor": 0, "timeout_s": 1,
+		"repo": testRepo, "types": []string{"ci.run_completed"}, "cursor": "v2.0", "timeout_s": 1,
 	}})
 }
 
@@ -38,7 +38,7 @@ func TestReadScopeWaitsAndPollsButCannotSubscribe(t *testing.T) {
 	res, err := waitOnce(h.eventsHarness)
 	require.NoError(t, err)
 	require.False(t, res.IsError, "events:read covers the wait tool: %v", res.Content)
-	require.Len(t, h.poll(pollParams("ci.run_completed", repoArgs(), raw("v1.0"))).Events, 1, "events:read covers events/poll")
+	require.Len(t, h.poll(pollParams("ci.run_completed", repoArgs(), raw("v2.0"))).Events, 1, "events:read covers events/poll")
 	calls := h.authz.callCount()
 
 	rpcErr := h.subscribeError(subscribeTo(repoArgs(), callbackURL, newSecret(t, 32)))

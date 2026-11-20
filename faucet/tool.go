@@ -42,17 +42,19 @@ type waitInput struct {
 	Actions  []string `json:"actions,omitempty" jsonschema:"only events of these GitHub actions, such as closed; each narrows the families in types that have it, and a family that has none of them stays whole; each must be an action of one of the families"`
 	SHA      string   `json:"sha,omitempty" jsonschema:"only events for this 40 character head commit SHA"`
 	PR       int32    `json:"pr,omitempty" jsonschema:"only events that mention this pull request number"`
-	Cursor   *int64   `json:"cursor,omitempty" jsonschema:"return events after this cursor, which is the cursor of an earlier result"`
+	Cursor   *string  `json:"cursor,omitempty" jsonschema:"return events after this cursor, the string that an earlier result or events/poll returned"`
 	TimeoutS *int     `json:"timeout_s,omitempty" jsonschema:"seconds to wait for an event, from 1 to 50, default 45"`
 	fieldArguments
 }
 
 type waitEvent struct {
-	ID      int64   `json:"id"`
-	Type    string  `json:"type"`
-	RepoID  int64   `json:"repo_id"`
-	PRs     []int32 `json:"prs"`
-	HeadSHA string  `json:"head_sha"`
+	// ID is the event's position on the line of the target that the call
+	// named.
+	ID      Position `json:"id"`
+	Type    string   `json:"type"`
+	RepoID  int64    `json:"repo_id"`
+	PRs     []int32  `json:"prs"`
+	HeadSHA string   `json:"head_sha"`
 	// Data holds a json.RawMessage. The field is typed any because the SDK
 	// infers an array schema for json.RawMessage and rejects the object.
 	Data       any       `json:"data"`
@@ -61,9 +63,10 @@ type waitEvent struct {
 
 type waitOutput struct {
 	Events []waitEvent `json:"events"`
-	Cursor int64       `json:"cursor"`
+	Cursor string      `json:"cursor"`
 	// Truncated is true when a retention purge deleted events after the
-	// cursor that the caller passed, so events may be missing.
+	// cursor that the caller passed, or the cursor is a legacy one that the
+	// wait cannot read, so events may be missing.
 	Truncated bool `json:"truncated"`
 }
 
@@ -76,7 +79,7 @@ type waitOutput struct {
 // may name every repository of an owner, or every repository, instead. Either
 // way it returns a cursor, and passing that cursor to the next call resumes
 // exactly where this one stopped, as long as the target and the filters stay
-// the same: the cursor is the newest event of any repository, so an event at
+// the same: the cursor is a place among the target's events, so an event at
 // or below it that matches only a new filter is never returned. Without a
 // cursor it starts at the present, or ten minutes back when sha is set.
 func (s *Service) Register(srv *mcp.Server) {
@@ -98,7 +101,7 @@ func (s *Service) Register(srv *mcp.Server) {
 
 type waitRequest struct {
 	query   PollQuery
-	cursor  *int64
+	cursor  *cursor
 	timeout time.Duration
 }
 
@@ -165,8 +168,13 @@ func (in waitInput) parse() (waitRequest, error) {
 	if in.PR != 0 && !slices.ContainsFunc(types, func(t string) bool { return !storedTypes[t].family.noPRs }) {
 		return waitRequest{}, xerrors.New("pr matches none of these types, because GitHub names no pull request in them; filter by sha")
 	}
-	if in.Cursor != nil && *in.Cursor < 0 {
-		return waitRequest{}, xerrors.New("cursor must not be negative")
+	var start *cursor
+	if in.Cursor != nil {
+		c, ok := decodeCursor(*in.Cursor)
+		if !ok {
+			return waitRequest{}, xerrors.New("cursor is not one this server returned")
+		}
+		start = &c
 	}
 	seconds := defaultWaitSeconds
 	if in.TimeoutS != nil {
@@ -179,14 +187,16 @@ func (in waitInput) parse() (waitRequest, error) {
 	slices.Sort(types)
 	return waitRequest{
 		query: PollQuery{
-			Types:     slices.Compact(types),
-			HeadSHA:   strings.ToLower(in.SHA),
-			PR:        in.PR,
-			Fields:    in.fieldFilters(func(name string) []string { return narrowedTypes(name, entries, entryTypes) }),
-			RepoNames: in.repoNames(),
-			Limit:     pageLimit,
+			EventFilter: EventFilter{
+				Types:     slices.Compact(types),
+				HeadSHA:   strings.ToLower(in.SHA),
+				PR:        in.PR,
+				Fields:    in.fieldFilters(func(name string) []string { return narrowedTypes(name, entries, entryTypes) }),
+				RepoNames: in.repoNames(),
+			},
+			Limit: pageLimit,
 		},
-		cursor:  in.Cursor,
+		cursor:  start,
 		timeout: time.Duration(seconds) * time.Second,
 	}, nil
 }
@@ -223,7 +233,8 @@ func (s *Service) waitForEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 		return nil, waitOutput{}, storeError(ctx, logger, err)
 	}
 
-	out := waitOutput{Events: make([]waitEvent, len(page.Events)), Cursor: page.Next, Truncated: truncated}
+	legacy := req.cursor != nil && req.cursor.legacy
+	out := waitOutput{Events: make([]waitEvent, len(page.Events)), Cursor: encodeCursor(page.Next), Truncated: truncated || legacy}
 	for i, ev := range page.Events {
 		if out.Events[i], err = toWaitEvent(ev, req.query.Target); err != nil {
 			return nil, waitOutput{}, storeError(ctx, logger, err)
@@ -327,20 +338,22 @@ func denied(ctx context.Context, logger slog.Logger, op string, err error) error
 	}
 }
 
-// startCursor picks where a wait begins. A given cursor wins. With a sha the
-// wait begins shaLookback ago. Otherwise it begins at the present, which is
-// the highest ID received before now. If the store's clock is ahead of ours,
-// an event from just before the call can still carry a time after now, and the
+// startCursor picks where a wait begins. A given cursor wins, except a legacy
+// one, which begins at the present. With a sha the wait begins shaLookback
+// ago. Otherwise it begins at the present, which is the highest position of
+// the target received before now. If the store's clock is ahead of ours, an
+// event from just before the call can still carry a time after now, and the
 // wait returns it. It cannot skip one that arrives later, because later events
-// get higher IDs than any that exist now.
-func (s *Service) startCursor(ctx context.Context, req waitRequest) (int64, error) {
+// get higher positions than any that exist now.
+func (s *Service) startCursor(ctx context.Context, req waitRequest) (Position, error) {
+	target := req.query.Target
 	switch {
-	case req.cursor != nil:
-		return *req.cursor, nil
-	case req.query.HeadSHA != "":
-		return s.store.CursorAt(ctx, s.clock.Now().Add(-shaLookback))
+	case req.cursor != nil && !req.cursor.legacy:
+		return req.cursor.position, nil
+	case req.cursor == nil && req.query.HeadSHA != "":
+		return s.store.PositionAt(ctx, target, s.clock.Now().Add(-shaLookback))
 	default:
-		return s.store.CursorAt(ctx, s.clock.Now())
+		return s.store.PositionAt(ctx, target, s.clock.Now())
 	}
 }
 
@@ -432,7 +445,7 @@ func toWaitEvent(ev Event, target Target) (waitEvent, error) {
 		data = marshalRaw(members)
 	}
 	return waitEvent{
-		ID:         ev.ID,
+		ID:         target.PositionOf(ev),
 		Type:       ev.Type,
 		RepoID:     ev.RepoID,
 		PRs:        prs,

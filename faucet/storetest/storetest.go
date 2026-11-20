@@ -33,13 +33,14 @@ func Run(t *testing.T, newStore func(t *testing.T) faucet.Store) {
 		{"PollEventsAppliesFiltersBeforeLimit", pollEventsAppliesFiltersBeforeLimit},
 		{"PollEventsAppliesFieldFilters", pollEventsAppliesFieldFilters},
 		{"PollEventsReturnsHeadCursorWhenNothingMatches", pollEventsReturnsHeadCursorWhenNothingMatches},
+		{"ScanEventsReturnsTheHeadIDWhenNothingMatches", scanEventsReturnsTheHeadIDWhenNothingMatches},
 		{"PollEventsReturnsLastIDWhenPageIsFull", pollEventsReturnsLastIDWhenPageIsFull},
 		{"PollEventsStopsAtThrough", pollEventsStopsAtThrough},
 		{"PollEventsValidatesQuery", pollEventsValidatesQuery},
-		{"CursorAtReturnsHighestIDReceivedBefore", cursorAtReturnsHighestIDReceivedBefore},
+		{"PositionAtReturnsTheHighestPositionReceivedBefore", positionAtReturnsTheHighestPositionReceivedBefore},
 		{"ConcurrentDuplicateDeliveryStoresOnce", concurrentDuplicateDeliveryStoresOnce},
 		{"PurgeDeletesOnlyEventsReceivedBefore", purgeDeletesOnlyEventsReceivedBefore},
-		{"PollEventsAndCursorAtNeverFallBelowThePurgeMark", pollEventsAndCursorAtNeverFallBelowThePurgeMark},
+		{"PollEventsAndPositionAtNeverFallBelowThePurgeMark", pollEventsAndPositionAtNeverFallBelowThePurgeMark},
 		{"PurgeUnderConcurrentInsertsKeepsNewEventsAndAnExactMark", purgeUnderConcurrentInsertsKeepsNewEventsAndAnExactMark},
 		{"PollEventsNeverHidesAConcurrentPurge", pollEventsNeverHidesAConcurrentPurge},
 		{"UpsertSubscriptionStoresThenRefreshes", upsertSubscriptionStoresThenRefreshes},
@@ -59,6 +60,7 @@ func Run(t *testing.T, newStore func(t *testing.T) faucet.Store) {
 	subtests = append(subtests, deliverySubtests...)
 	subtests = append(subtests, repositorySubtests...)
 	subtests = append(subtests, targetSubtests...)
+	subtests = append(subtests, lineSubtests...)
 	for _, st := range subtests {
 		t.Run(st.name, func(t *testing.T) {
 			t.Parallel()
@@ -94,6 +96,8 @@ func requireSameEvent(t *testing.T, want, got faucet.Event) {
 	require.Equal(t, want.RepoName, got.RepoName)
 	require.ElementsMatch(t, want.PRs, got.PRs)
 	require.Equal(t, want.HeadSHA, got.HeadSHA)
+	require.Equal(t, want.RepoPosition, got.RepoPosition)
+	require.Equal(t, want.OwnerPosition, got.OwnerPosition)
 	require.JSONEq(t, string(want.Data), string(got.Data))
 	require.True(t, want.ReceivedAt.Equal(got.ReceivedAt), "received_at differs: %s vs %s", want.ReceivedAt, got.ReceivedAt)
 }
@@ -107,7 +111,9 @@ func insertEventIsIdempotentPerDelivery(t *testing.T, s faucet.Store) {
 	require.True(t, inserted)
 	require.Positive(t, stored.ID)
 	require.False(t, stored.ReceivedAt.IsZero())
-	first.ID, first.ReceivedAt = stored.ID, stored.ReceivedAt
+	require.EqualValues(t, 1, stored.RepoPosition, "the first event of its repository")
+	require.EqualValues(t, 1, stored.OwnerPosition, "the first event of its owner")
+	first.ID, first.ReceivedAt, first.RepoPosition, first.OwnerPosition = stored.ID, stored.ReceivedAt, stored.RepoPosition, stored.OwnerPosition
 	requireSameEvent(t, first, stored)
 
 	retry := newEvent("delivery-1")
@@ -123,6 +129,12 @@ func insertEventIsIdempotentPerDelivery(t *testing.T, s faucet.Store) {
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 	requireSameEvent(t, stored, events[0])
+
+	next, inserted, err := s.InsertEvent(ctx, newEvent("delivery-2"))
+	require.NoError(t, err)
+	require.True(t, inserted)
+	require.EqualValues(t, 2, next.RepoPosition, "a delivery stored once takes one position")
+	require.EqualValues(t, 2, next.OwnerPosition)
 }
 
 func insertEventValidatesInput(t *testing.T, s faucet.Store) {
@@ -232,10 +244,10 @@ func concurrentInsertsCommitInIDOrder(t *testing.T, s faucet.Store) {
 		close(writersDone)
 	}()
 
-	// A reader follows the log by the last ID it saw, or by the Next of a poll.
-	// Next is the head ID of the same snapshot as the page, and a store that
-	// reads the head in a statement of its own skips an event that commits
-	// between the two.
+	// A reader follows the log by the last ID it saw, by the Next of a scan, or
+	// by the Next of a poll of the repository's line. Next is the head of the
+	// same snapshot as the page, and a store that reads the head in a
+	// statement of its own skips an event that commits between the two.
 	followers := []func(ctx context.Context, after int64) (events []faucet.Event, next int64, err error){
 		func(ctx context.Context, after int64) ([]faucet.Event, int64, error) {
 			events, err := s.EventsAfter(ctx, after, pageSize)
@@ -245,8 +257,12 @@ func concurrentInsertsCommitInIDOrder(t *testing.T, s faucet.Store) {
 			return events, after, err
 		},
 		func(ctx context.Context, after int64) ([]faucet.Event, int64, error) {
-			page, err := s.PollEvents(ctx, faucet.PollQuery{Target: faucet.RepoTarget(newEvent("").RepoID), After: after, Limit: pageSize})
+			page, err := s.ScanEvents(ctx, faucet.ScanQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(newEvent("").RepoID)}, After: after, Limit: pageSize})
 			return page.Events, page.Next, err
+		},
+		func(ctx context.Context, after int64) ([]faucet.Event, int64, error) {
+			page, err := s.PollEvents(ctx, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(newEvent("").RepoID)}, After: faucet.Position(after), Limit: pageSize})
+			return page.Events, int64(page.Next), err
 		},
 	}
 	seen := make([][]int64, readers*len(followers))
@@ -336,6 +352,9 @@ func seedPollEvents(t *testing.T, s faucet.Store) []faucet.Event {
 	return stored
 }
 
+// requirePollIDs polls q and requires the events want. A query that reads
+// its line from the start is also a scan from the start of the log, which must
+// find the same events.
 func requirePollIDs(t *testing.T, s faucet.Store, q faucet.PollQuery, want ...faucet.Event) faucet.PollPage {
 	t.Helper()
 	page, err := s.PollEvents(context.Background(), q)
@@ -344,12 +363,20 @@ func requirePollIDs(t *testing.T, s faucet.Store, q faucet.PollQuery, want ...fa
 	for i := range want {
 		requireSameEvent(t, want[i], page.Events[i])
 	}
+	if q.After == 0 && q.Through == 0 {
+		scan, err := s.ScanEvents(context.Background(), faucet.ScanQuery{EventFilter: q.EventFilter, Limit: q.Limit})
+		require.NoError(t, err)
+		require.Len(t, scan.Events, len(want), "a scan finds what the poll found")
+		for i := range want {
+			requireSameEvent(t, want[i], scan.Events[i])
+		}
+	}
 	return page
 }
 
 func pollEventsAppliesFiltersBeforeLimit(t *testing.T, s faucet.Store) {
 	e := seedPollEvents(t, s)
-	base := faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 100}
+	base := faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, Limit: 100}
 
 	tests := []struct {
 		name   string
@@ -363,9 +390,9 @@ func pollEventsAppliesFiltersBeforeLimit(t *testing.T, s faucet.Store) {
 		{"two types", func(q *faucet.PollQuery) { q.Types = []string{"pr.closed", "pr.review_submitted"} }, []faucet.Event{e[1], e[3]}},
 		{"sha", func(q *faucet.PollQuery) { q.HeadSHA = shaA }, []faucet.Event{e[0], e[3], e[4]}},
 		{"pr", func(q *faucet.PollQuery) { q.PR = 9 }, []faucet.Event{e[2], e[3]}},
-		{"after", func(q *faucet.PollQuery) { q.After = e[2].ID }, []faucet.Event{e[3], e[4]}},
+		{"after", func(q *faucet.PollQuery) { q.After = e[2].RepoPosition }, []faucet.Event{e[3], e[4]}},
 		{"all filters", func(q *faucet.PollQuery) {
-			q.Types, q.HeadSHA, q.PR, q.After = []string{"pr.review_submitted"}, shaA, 7, e[0].ID
+			q.Types, q.HeadSHA, q.PR, q.After = []string{"pr.review_submitted"}, shaA, 7, e[0].RepoPosition
 		}, []faucet.Event{e[3]}},
 		{"filters that exclude everything", func(q *faucet.PollQuery) { q.Types, q.PR = []string{"pr.closed"}, 9 }, nil},
 	}
@@ -437,57 +464,93 @@ func pollEventsAppliesFieldFilters(t *testing.T, s faucet.Store) {
 		{"no values pass nothing", runs, []faucet.FieldFilter{conclusion()}, nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			requirePollIDs(t, s, faucet.PollQuery{Target: faucet.RepoTarget(42), Types: tt.types, Fields: tt.fields, Limit: 100}, tt.want...)
+			requirePollIDs(t, s, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42), Types: tt.types, Fields: tt.fields}, Limit: 100}, tt.want...)
 		})
 	}
 
-	q := faucet.PollQuery{Target: faucet.RepoTarget(42), Types: runs, Fields: []faucet.FieldFilter{conclusion("failure", "timed_out")}, Limit: 1}
+	q := faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42), Types: runs, Fields: []faucet.FieldFilter{conclusion("failure", "timed_out")}}, Limit: 1}
 	for _, want := range []faucet.Event{e[0], e[2], e[4]} {
 		page := requirePollIDs(t, s, q, want)
-		require.Equal(t, want.ID, page.Next, "the field filters apply before the limit")
+		require.Equal(t, want.RepoPosition, page.Next, "the field filters apply before the limit")
 		q.After = page.Next
 	}
 	page := requirePollIDs(t, s, q)
-	require.Equal(t, e[5].ID, page.Next)
+	require.Equal(t, e[5].RepoPosition, page.Next)
 }
 
 func pollEventsReturnsHeadCursorWhenNothingMatches(t *testing.T, s faucet.Store) {
-	empty, err := s.PollEvents(context.Background(), faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 10})
+	empty, err := s.PollEvents(context.Background(), faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, Limit: 10})
 	require.NoError(t, err)
 	require.Empty(t, empty.Events)
 	require.Zero(t, empty.Next, "an empty store has head 0")
 
 	e := seedPollEvents(t, s)
-	head := e[5].ID
+	head := e[4].RepoPosition
+	require.EqualValues(t, 5, head, "the line of repository 42 numbers its five events")
+	require.EqualValues(t, 1, e[5].RepoPosition, "the line of repository 43 counts its own event only")
 
 	for name, q := range map[string]faucet.PollQuery{
-		"type nobody sent":                 {Target: faucet.RepoTarget(42), Types: []string{"pr.comment_created"}, Limit: 10},
-		"repo with no events":              {Target: faucet.RepoTarget(99), Limit: 10},
-		"already at the head":              {Target: faucet.RepoTarget(42), After: e[4].ID, Limit: 10},
-		"newer events only in other repos": {Target: faucet.RepoTarget(43), After: e[5].ID, Limit: 10},
+		"type nobody sent":    {EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42), Types: []string{"pr.comment_created"}}, Limit: 10},
+		"already at the head": {EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, After: head, Limit: 10},
+		"above the head":      {EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, After: head + 100, Limit: 10},
 	} {
 		page := requirePollIDs(t, s, q)
 		require.Equal(t, head, page.Next, name)
 	}
+	page := requirePollIDs(t, s, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(99)}, Limit: 10})
+	require.Zero(t, page.Next, "a repository with no events has head 0, whatever other repositories hold")
 
-	page := requirePollIDs(t, s, faucet.PollQuery{Target: faucet.RepoTarget(42), After: head + 100, Limit: 10})
-	require.Equal(t, head+100, page.Next, "the cursor never moves backwards")
-
-	page = requirePollIDs(t, s, faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 100}, e[0], e[1], e[2], e[3], e[4])
+	page = requirePollIDs(t, s, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, Limit: 100}, e[0], e[1], e[2], e[3], e[4])
 	require.Equal(t, head, page.Next, "a page with room left reports the head, not its last event")
+}
+
+func scanEventsReturnsTheHeadIDWhenNothingMatches(t *testing.T, s faucet.Store) {
+	scan := func(q faucet.ScanQuery) faucet.ScanPage {
+		t.Helper()
+		page, err := s.ScanEvents(context.Background(), q)
+		require.NoError(t, err)
+		return page
+	}
+	empty := scan(faucet.ScanQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, Limit: 10})
+	require.Empty(t, empty.Events)
+	require.Zero(t, empty.Next, "an empty store has head 0")
+
+	e := seedPollEvents(t, s)
+	head := e[5].ID
+	for name, q := range map[string]faucet.ScanQuery{
+		"type nobody sent":                 {EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42), Types: []string{"pr.comment_created"}}, Limit: 10},
+		"repo with no events":              {EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(99)}, Limit: 10},
+		"already at the head":              {EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, After: e[4].ID, Limit: 10},
+		"newer events only in other repos": {EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(43)}, After: e[5].ID, Limit: 10},
+	} {
+		page := scan(q)
+		require.Empty(t, page.Events, name)
+		require.Equal(t, head, page.Next, name)
+	}
+	page := scan(faucet.ScanQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, After: head + 100, Limit: 10})
+	require.Equal(t, head+100, page.Next, "the read position never moves backwards")
+
+	page = scan(faucet.ScanQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, Limit: 2})
+	require.Equal(t, e[1].ID, page.Next, "a full page ends at its last event")
+
+	page = scan(faucet.ScanQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42), Types: []string{"ci.run_completed"}, HeadSHA: shaA}, Limit: 10, Through: e[1].ID})
+	require.Len(t, page.Events, 1)
+	require.Equal(t, e[1].ID, page.Next, "the read stops at Through, an event ID of any target")
+	page = scan(faucet.ScanQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, After: e[4].ID, Limit: 10, Through: e[5].ID + 100})
+	require.Equal(t, head, page.Next, "past the head, the position is the head")
 }
 
 func pollEventsReturnsLastIDWhenPageIsFull(t *testing.T, s faucet.Store) {
 	e := seedPollEvents(t, s)
 
-	page := requirePollIDs(t, s, faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 2}, e[0], e[1])
-	require.Equal(t, e[1].ID, page.Next)
+	page := requirePollIDs(t, s, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, Limit: 2}, e[0], e[1])
+	require.Equal(t, e[1].RepoPosition, page.Next)
 
-	page = requirePollIDs(t, s, faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 5}, e[0], e[1], e[2], e[3], e[4])
-	require.Equal(t, e[4].ID, page.Next, "a page that is exactly full still reports its last event")
+	page = requirePollIDs(t, s, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, Limit: 5}, e[0], e[1], e[2], e[3], e[4])
+	require.Equal(t, e[4].RepoPosition, page.Next, "a page that is exactly full still reports its last event")
 
 	var got []faucet.Event
-	q := faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 2}
+	q := faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, Limit: 2}
 	for range 10 {
 		page, err := s.PollEvents(context.Background(), q)
 		require.NoError(t, err)
@@ -503,28 +566,28 @@ func pollEventsReturnsLastIDWhenPageIsFull(t *testing.T, s faucet.Store) {
 	}
 }
 
-// Through bounds the IDs that a read looks at, whatever their target, and
+// Through bounds the positions of the target's line that a read looks at, and
 // Next stops there, so the next read goes on from it.
 func pollEventsStopsAtThrough(t *testing.T, s faucet.Store) {
 	e := seedPollEvents(t, s)
-	q := faucet.PollQuery{Target: faucet.RepoTarget(42), Types: []string{"ci.run_completed"}, HeadSHA: shaA, Limit: 10, Through: e[1].ID}
+	q := faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42), Types: []string{"ci.run_completed"}, HeadSHA: shaA}, Limit: 10, Through: e[1].RepoPosition}
 
 	page := requirePollIDs(t, s, q, e[0])
-	require.Equal(t, e[1].ID, page.Next, "the read stops at Through")
-	q.After, q.Through = page.Next, e[3].ID
+	require.Equal(t, e[1].RepoPosition, page.Next, "the read stops at Through")
+	q.After, q.Through = page.Next, e[3].RepoPosition
 	page = requirePollIDs(t, s, q)
-	require.Equal(t, e[3].ID, page.Next, "a range without a match still moves the cursor")
-	q.After, q.Through = page.Next, e[5].ID+100
+	require.Equal(t, e[3].RepoPosition, page.Next, "a range without a match still moves the cursor")
+	q.After, q.Through = page.Next, e[4].RepoPosition+100
 	page = requirePollIDs(t, s, q, e[4])
-	require.Equal(t, e[5].ID, page.Next, "past the head, the cursor is the head")
+	require.Equal(t, e[4].RepoPosition, page.Next, "past the head, the cursor is the head")
 
-	q.After, q.Limit, q.Through = 0, 1, e[3].ID
+	q.After, q.Limit, q.Through = 0, 1, e[3].RepoPosition
 	page = requirePollIDs(t, s, q, e[0])
-	require.Equal(t, e[0].ID, page.Next, "a full page stops the read first")
+	require.Equal(t, e[0].RepoPosition, page.Next, "a full page stops the read first")
 }
 
 func pollEventsValidatesQuery(t *testing.T, s faucet.Store) {
-	good := faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 10}
+	good := faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, Limit: 10}
 	for name, mutate := range map[string]func(q *faucet.PollQuery){
 		"zero repo ID":     func(q *faucet.PollQuery) { q.Target = faucet.RepoTarget(0) },
 		"negative through": func(q *faucet.PollQuery) { q.Through = -1 },
@@ -543,15 +606,21 @@ func pollEventsValidatesQuery(t *testing.T, s faucet.Store) {
 	}
 	_, err := s.PollEvents(context.Background(), good)
 	require.NoError(t, err)
+	_, err = s.ScanEvents(context.Background(), faucet.ScanQuery{EventFilter: good.EventFilter, After: -1, Limit: 10})
+	require.Error(t, err, "a scan checks its query too")
+	_, err = s.ScanEvents(context.Background(), faucet.ScanQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(0)}, Limit: 10})
+	require.Error(t, err, "a scan checks its filter too")
 }
 
-// cursorAtReturnsHighestIDReceivedBefore takes its boundaries from the stored
-// ReceivedAt values, so it does not depend on the clock of the test process
-// matching the clock of the store.
-func cursorAtReturnsHighestIDReceivedBefore(t *testing.T, s faucet.Store) {
+// positionAtReturnsTheHighestPositionReceivedBefore takes its boundaries from
+// the stored ReceivedAt values, so it does not depend on the clock of the test
+// process matching the clock of the store. Events of another repository
+// arrive between the repository's own and move none of its answers.
+func positionAtReturnsTheHighestPositionReceivedBefore(t *testing.T, s faucet.Store) {
 	ctx := context.Background()
+	repo := faucet.RepoTarget(42)
 
-	none, err := s.CursorAt(ctx, time.Now())
+	none, err := s.PositionAt(ctx, repo, time.Now())
 	require.NoError(t, err)
 	require.Zero(t, none)
 
@@ -561,28 +630,40 @@ func cursorAtReturnsHighestIDReceivedBefore(t *testing.T, s faucet.Store) {
 		require.NoError(t, err)
 		stored = append(stored, got)
 		time.Sleep(2 * time.Millisecond)
+		other := newEvent(fmt.Sprintf("cursor-other-%d", i))
+		other.RepoID, other.OwnerID = 43, 8
+		_, _, err = s.InsertEvent(ctx, other)
+		require.NoError(t, err)
+		time.Sleep(2 * time.Millisecond)
 	}
 
 	for name, tt := range map[string]struct {
 		at   time.Time
-		want int64
+		want faucet.Position
 	}{
 		"before every event":           {stored[0].ReceivedAt.Add(-time.Hour), 0},
 		"exactly at the first event":   {stored[0].ReceivedAt, 0},
-		"exactly at the second event":  {stored[1].ReceivedAt, stored[0].ID},
-		"between the second and third": {stored[1].ReceivedAt.Add(time.Millisecond), stored[1].ID},
-		"exactly at the third event":   {stored[2].ReceivedAt, stored[1].ID},
-		"after every event":            {stored[2].ReceivedAt.Add(time.Hour), stored[2].ID},
+		"exactly at the second event":  {stored[1].ReceivedAt, 1},
+		"between the second and third": {stored[1].ReceivedAt.Add(time.Millisecond), 2},
+		"exactly at the third event":   {stored[2].ReceivedAt, 2},
+		"after every event":            {stored[2].ReceivedAt.Add(time.Hour), 3},
 	} {
-		got, err := s.CursorAt(ctx, tt.at)
-		require.NoError(t, err, name)
-		require.Equal(t, tt.want, got, name)
+		for _, target := range []faucet.Target{repo, faucet.OwnerTarget(7)} {
+			got, err := s.PositionAt(ctx, target, tt.at)
+			require.NoError(t, err, name)
+			require.Equal(t, tt.want, got, "%s on the line of %s", name, target.Kind())
+		}
 	}
+	all, err := s.PositionAt(ctx, faucet.AllTarget(), stored[1].ReceivedAt)
+	require.NoError(t, err)
+	require.EqualValues(t, stored[1].ID-1, all, "the line of the all target is the event ID")
 
-	page, err := s.PollEvents(ctx, faucet.PollQuery{Target: faucet.RepoTarget(42), After: stored[0].ID, Limit: 10})
+	at, err := s.PositionAt(ctx, repo, stored[1].ReceivedAt)
+	require.NoError(t, err)
+	page, err := s.PollEvents(ctx, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: repo}, After: at, Limit: 10})
 	require.NoError(t, err)
 	require.Len(t, page.Events, 2)
-	require.Equal(t, stored[1].ID, page.Events[0].ID, "CursorAt then PollEvents returns the events from that time on")
+	require.Equal(t, stored[1].ID, page.Events[0].ID, "PositionAt then PollEvents returns the events from that time on")
 }
 
 func difference(a, b []int64) []int64 {
@@ -704,9 +785,9 @@ func purgeDeletesOnlyEventsReceivedBefore(t *testing.T, s faucet.Store) {
 	require.Equal(t, faucet.PurgeResult{Deleted: 0, PurgedThrough: e[3].ID}, res, "purging an empty store keeps the mark")
 }
 
-func pollEventsAndCursorAtNeverFallBelowThePurgeMark(t *testing.T, s faucet.Store) {
+func pollEventsAndPositionAtNeverFallBelowThePurgeMark(t *testing.T, s faucet.Store) {
 	ctx := context.Background()
-	q := faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 10}
+	q := faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, Limit: 10}
 
 	before, err := s.PollEvents(ctx, q)
 	require.NoError(t, err)
@@ -715,27 +796,28 @@ func pollEventsAndCursorAtNeverFallBelowThePurgeMark(t *testing.T, s faucet.Stor
 	e := insertSpaced(t, s, "mark", 3)
 	_, err = s.Purge(ctx, e[2].ReceivedAt.Add(time.Hour))
 	require.NoError(t, err)
-	mark := e[2].ID
+	mark := e[2].RepoPosition
 
-	for _, after := range []int64{0, e[0].ID, mark, mark + 5} {
+	for _, after := range []faucet.Position{0, e[0].RepoPosition, mark, mark + 5} {
 		q.After = after
 		page, err := s.PollEvents(ctx, q)
 		require.NoError(t, err)
 		require.Empty(t, page.Events, "after %d", after)
 		require.Equal(t, mark, page.PurgedThrough, "after %d", after)
-		require.GreaterOrEqual(t, page.Next, max(mark, after), "after %d: a quiet store must not send a poller back below the mark", after)
+		require.Equal(t, mark, page.Next, "after %d: a line whose events are all purged keeps its head", after)
 	}
 
-	cursor, err := s.CursorAt(ctx, time.Now().Add(time.Hour))
+	position, err := s.PositionAt(ctx, faucet.RepoTarget(42), time.Now().Add(time.Hour))
 	require.NoError(t, err)
-	require.Equal(t, mark, cursor, "CursorAt is never below the mark, so a poll that starts now is not a truncated one")
+	require.Equal(t, mark, position, "PositionAt is never below the mark, so a poll that starts now is not a truncated one")
 
 	fresh, _, err := s.InsertEvent(ctx, newEvent("mark-fresh"))
 	require.NoError(t, err)
+	require.Equal(t, mark+1, fresh.RepoPosition, "the next event of the line gets the next position")
 	q.After = 0
 	page := requirePollIDs(t, s, q, fresh)
 	require.Equal(t, mark, page.PurgedThrough)
-	require.Equal(t, fresh.ID, page.Next)
+	require.Equal(t, fresh.RepoPosition, page.Next)
 }
 
 // purgeUnderConcurrentInsertsKeepsNewEventsAndAnExactMark runs purges while
@@ -828,7 +910,7 @@ func pollEventsNeverHidesAConcurrentPurge(t *testing.T, s faucet.Store) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
-	var cursor int64
+	var cursor faucet.Position
 	for round := range rounds {
 		events := make([]faucet.Event, batch)
 		for i := range events {
@@ -849,7 +931,7 @@ func pollEventsNeverHidesAConcurrentPurge(t *testing.T, s faucet.Store) {
 						done = true
 					default:
 					}
-					page, err := s.PollEvents(ctx, faucet.PollQuery{Target: faucet.RepoTarget(42), After: cursor, Limit: 100})
+					page, err := s.PollEvents(ctx, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, After: cursor, Limit: 100})
 					if err != nil {
 						t.Errorf("poll: %v", err)
 						return
@@ -859,8 +941,8 @@ func pollEventsNeverHidesAConcurrentPurge(t *testing.T, s faucet.Store) {
 						seen[ev.ID] = true
 					}
 					for _, ev := range events {
-						if !seen[ev.ID] && ev.ID > page.PurgedThrough {
-							t.Errorf("round %d: event %d is neither in the page nor at or below the purge mark %d", round, ev.ID, page.PurgedThrough)
+						if !seen[ev.ID] && ev.RepoPosition > page.PurgedThrough {
+							t.Errorf("round %d: event %d is neither in the page nor at or below the purge mark %d", round, ev.RepoPosition, page.PurgedThrough)
 							return
 						}
 					}
@@ -879,7 +961,7 @@ func pollEventsNeverHidesAConcurrentPurge(t *testing.T, s faucet.Store) {
 		if t.Failed() {
 			return
 		}
-		cursor = events[batch-1].ID
+		cursor = events[batch-1].RepoPosition
 	}
 }
 

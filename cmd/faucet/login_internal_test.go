@@ -218,7 +218,7 @@ func TestAServiceLogsInWithClientCredentialsAloneAndWaitsForAnEvent(t *testing.T
 	defer cancel()
 	session, err := srv.connectService(ctx, t, "/github/mcp", "ci-watcher", secret)
 	require.NoError(t, err)
-	res, err := call(ctx, session, "octo-org/octo-repo", map[string]any{"cursor": 0, "timeout_s": 1})
+	res, err := call(ctx, session, "octo-org/octo-repo", map[string]any{"cursor": "v2.0", "timeout_s": 1})
 	require.NoError(t, err)
 	require.False(t, res.IsError, toolText(t, res))
 	var out struct {
@@ -269,7 +269,7 @@ func TestTheMCPAliasHasItsOwnDiscovery(t *testing.T) {
 	srv.deliver(t, "d-1")
 	session, err := srv.connectService(ctx, t, "/mcp", "old-agent", secret)
 	require.NoError(t, err)
-	res, err := call(ctx, session, "octo-org/octo-repo", map[string]any{"cursor": 0, "timeout_s": 1})
+	res, err := call(ctx, session, "octo-org/octo-repo", map[string]any{"cursor": "v2.0", "timeout_s": 1})
 	require.NoError(t, err)
 	require.False(t, res.IsError, toolText(t, res))
 
@@ -301,17 +301,17 @@ func TestAServiceIsCheckedByItsGrantsAndTheReposThatDeliveriesNamed(t *testing.T
 	session, err := srv.connectService(ctx, t, "/github/mcp", "ci-watcher", secret)
 	require.NoError(t, err)
 
-	res, err := call(ctx, session, "octo-org/octo-repo", map[string]any{"cursor": 0, "timeout_s": 1})
+	res, err := call(ctx, session, "octo-org/octo-repo", map[string]any{"cursor": "v2.0", "timeout_s": 1})
 	require.NoError(t, err)
 	require.True(t, res.IsError, "no delivery has named the repository yet")
 	require.Contains(t, toolText(t, res), "faucet has received no webhook delivery from octo-org/octo-repo yet")
 
 	srv.deliver(t, "d-1")
-	res, err = call(ctx, session, "Octo-Org/Octo-Repo", map[string]any{"cursor": 0, "timeout_s": 1})
+	res, err = call(ctx, session, "Octo-Org/Octo-Repo", map[string]any{"cursor": "v2.0", "timeout_s": 1})
 	require.NoError(t, err)
 	require.False(t, res.IsError, toolText(t, res))
 
-	res, err = call(ctx, session, "octo-org/other", map[string]any{"cursor": 0, "timeout_s": 1})
+	res, err = call(ctx, session, "octo-org/other", map[string]any{"cursor": "v2.0", "timeout_s": 1})
 	require.NoError(t, err)
 	require.True(t, res.IsError)
 	require.Contains(t, toolText(t, res), "no grant of this service names octo-org/other")
@@ -342,12 +342,12 @@ func TestDisablingAClientFailsItsTokenOnTheNextRequest(t *testing.T) {
 	defer cancel()
 	session, err := srv.connectService(ctx, t, "/github/mcp", "ci-watcher", secret)
 	require.NoError(t, err)
-	_, err = call(ctx, session, "octo-org/octo-repo", map[string]any{"cursor": 0, "timeout_s": 1})
+	_, err = call(ctx, session, "octo-org/octo-repo", map[string]any{"cursor": "v2.0", "timeout_s": 1})
 	require.NoError(t, err)
 
 	_, err = srv.store.DisableClient(ctx, "ci-watcher", time.Now())
 	require.NoError(t, err)
-	_, err = call(ctx, session, "octo-org/octo-repo", map[string]any{"cursor": 0, "timeout_s": 1})
+	_, err = call(ctx, session, "octo-org/octo-repo", map[string]any{"cursor": "v2.0", "timeout_s": 1})
 	require.Error(t, err, "the next request is refused, and the handler gets no new token")
 }
 

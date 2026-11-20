@@ -81,18 +81,17 @@ func TestAQuietRepositorysCursorSaysNothingOfAnotherRepository(t *testing.T) {
 // run to run, times and the HMAC IDs, are left out.
 func TestAReaderOfOneTargetGetsTheSameAnswersWhateverOtherTargetsDo(t *testing.T) {
 	t.Parallel()
-	for _, onPostgres := range []bool{true, false} {
+	for storeName, newStore := range map[string]lineStore{"postgres": postgresLines, "fake": fakeLines} {
 		for _, kind := range []string{"repo", "owner"} {
-			name := map[bool]string{true: "postgres", false: "fake"}[onPostgres] + "/" + kind
-			t.Run(name, func(t *testing.T) {
+			t.Run(storeName+"/"+kind, func(t *testing.T) {
 				t.Parallel()
 				reader := repoLineReader()
 				if kind == "owner" {
 					reader = ownerLineReader(t)
 				}
-				quiet := newLineWorld(t, reader, onPostgres, false)
+				quiet := newLineWorld(t, reader, newStore, false)
 				quiet.run()
-				busy := newLineWorld(t, reader, onPostgres, true)
+				busy := newLineWorld(t, reader, newStore, true)
 				busy.run()
 				require.Equal(t, quiet.seen, busy.seen, "the reader of one target gets the same answers whatever other targets receive")
 			})
@@ -146,18 +145,24 @@ type lineWorld struct {
 
 const linePath = "/hook"
 
-func newLineWorld(t *testing.T, reader lineReader, onPostgres, busy bool) *lineWorld {
+// lineStore makes a store and the function that stores n events of repo in
+// it at once.
+type lineStore func(t *testing.T, repo ownedRepo) (faucet.Store, func(n int))
+
+func postgresLines(t *testing.T, repo ownedRepo) (faucet.Store, func(n int)) {
+	db := postgresDB(t)
+	return pgstore.New(db), func(n int) { insertManyOnPostgres(t, db, repo, n) }
+}
+
+func fakeLines(_ *testing.T, repo ownedRepo) (faucet.Store, func(n int)) {
+	fake := &fakeStore{now: time.Now}
+	return fake, func(n int) { fake.appendEventsOf(repo, n) }
+}
+
+func newLineWorld(t *testing.T, reader lineReader, newStore lineStore, busy bool) *lineWorld {
 	t.Helper()
 	w := &lineWorld{t: t, busy: busy, reader: reader, secret: newSecret(t, 32)}
-	if onPostgres {
-		db := postgresDB(t)
-		w.store = pgstore.New(db)
-		w.bulk = func(n int) { insertManyOnPostgres(t, db, reader.others[0], n) }
-	} else {
-		fake := &fakeStore{now: time.Now}
-		w.store = fake
-		w.bulk = func(n int) { fake.appendEventsOf(reader.others[0], n) }
-	}
+	w.store, w.bulk = newStore(t, reader.others[0])
 	useStore := func(d *faucet.Deps) { d.Store, d.Clock = w.store, quartz.NewReal() }
 	w.d = newDeliverHarness(t, append([]func(*faucet.Deps){useStore}, reader.caller...)...)
 	w.d.ledgerSkip = true
@@ -174,7 +179,7 @@ func newLineWorld(t *testing.T, reader lineReader, onPostgres, busy bool) *lineW
 func (w *lineWorld) run() {
 	t := w.t
 	w.other(5)
-	firstCut := w.mark()
+	firstCut := clearInstant()
 	start := w.poll("the head", "").Cursor
 	w.wait("a wait at the head", nil)
 	for range 3 {
@@ -204,19 +209,19 @@ func (w *lineWorld) run() {
 	w.follow("following the cursor after that purge", start, 100)
 
 	heads := []string{start}
-	marks := []time.Time{w.mark()}
+	marks := []time.Time{clearInstant()}
 	for range 3 {
 		heads = append(heads, w.poll("the head before an event", "").Cursor)
 		w.own()
 		w.other(1)
-		marks = append(marks, w.mark())
+		marks = append(marks, clearInstant())
 	}
 	w.sweep(heads, marks)
 
 	beforeLoss := w.poll("the head before the loss", "").Cursor
 	w.own()
 	w.own()
-	lossCut := w.mark()
+	lossCut := clearInstant()
 	w.other(2)
 	w.purge(lossCut)
 	lost := w.poll("a poll from the start after the target lost events", start)
@@ -283,8 +288,9 @@ func (w *lineWorld) ownIDs() []string {
 	return ids
 }
 
-// mark returns a time well clear of the events stored before and after it.
-func (w *lineWorld) mark() time.Time {
+// clearInstant returns a time well clear of the events stored before and
+// after it.
+func clearInstant() time.Time {
 	time.Sleep(100 * time.Millisecond)
 	at := time.Now()
 	time.Sleep(100 * time.Millisecond)
@@ -526,13 +532,13 @@ func TestACursorAboveTheHeadReadsOnFromTheHead(t *testing.T) {
 	t.Parallel()
 	h := newEventsHarness(t)
 	h.insert(repoID, "ci.run_completed", "")
+	h.insert(otherRepoID, "ci.run_completed", "")
 	h.insert(repoID, "ci.run_completed", "")
-	head := h.headCursor(repoArgs())
 
 	got := h.poll(pollParams("ci.run_completed", repoArgs(), cursorOf("v2.1000")))
 	require.Empty(t, got.Events)
 	require.False(t, got.Truncated)
-	require.Equal(t, head, got.Cursor)
+	require.Equal(t, "v2.2", got.Cursor, "the head of octo/repo is its second event")
 
 	next := h.insert(repoID, "ci.run_completed", "")
 	require.Equal(t, []string{next.DeliveryID}, h.poll(pollParams("ci.run_completed", repoArgs(), cursorOf(got.Cursor))).eventIDs())

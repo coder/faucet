@@ -196,7 +196,7 @@ func TestMCPTakesOneMessagePerRequest(t *testing.T) {
 	require.Len(t, tools.Tools, 1)
 	res, err := call(ctx, session, "o/r", nil)
 	require.NoError(t, err)
-	require.Contains(t, toolText(t, res), `"cursor":8`)
+	require.Contains(t, toolText(t, res), `"cursor":"v2.8"`)
 	head, err := callEvents(ctx, session, "events/poll", pollParams("o/r", nil))
 	require.NoError(t, err)
 	var cursor string

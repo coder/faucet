@@ -122,7 +122,7 @@ func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Dur
 		PreviousSecretEnc:   row.PreviousSecretEnc,
 		PreviousSecretUntil: row.PreviousSecretUntil.Time,
 		Target:              target,
-		Watermark:           row.Watermark,
+		Watermark:           faucet.Position(max(row.Watermark, 0)),
 	}
 	if row.StoredEventID.Valid {
 		claim.Event = &faucet.Event{
@@ -137,6 +137,9 @@ func (s *Store) ClaimDelivery(ctx context.Context, now time.Time, lease time.Dur
 			HeadSHA:    row.HeadSha.String,
 			Data:       row.Data,
 			ReceivedAt: row.ReceivedAt.Time,
+
+			RepoPosition:  faucet.Position(row.RepoSeq.Int64),
+			OwnerPosition: faucet.Position(row.OwnerSeq.Int64),
 		}
 	}
 	return claim, true, nil
@@ -163,6 +166,7 @@ func (s *Store) ClaimGap(ctx context.Context, now time.Time, lease time.Duration
 	}
 	return faucet.GapClaim{
 		Ref:                 faucet.GapRef{Key: key, Incarnation: row.Incarnation, Through: row.GapThrough},
+		Cursor:              faucet.Position(row.LinePurgedThrough),
 		CallbackURL:         row.CallbackUrl,
 		SecretEnc:           row.SecretEnc,
 		PreviousSecretEnc:   row.PreviousSecretEnc,

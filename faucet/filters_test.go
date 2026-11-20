@@ -300,7 +300,7 @@ func TestEventsListOffersEachFieldFilterOnlyWhereTheDataHasTheField(t *testing.T
 
 func waitIDs(t *testing.T, h *waitHarness, types []string, filters ...any) []int64 {
 	t.Helper()
-	res := h.call(args(append([]any{"repo", testRepo, "types", types, "cursor", 0}, filters...)...)).success(t)
+	res := h.call(args(append([]any{"repo", testRepo, "types", types, "cursor", "v2.0"}, filters...)...)).success(t)
 	ids := make([]int64, len(res.Events))
 	for i, ev := range res.Events {
 		ids[i] = ev.ID
@@ -348,7 +348,7 @@ func TestWaitWithAFieldFilterLeavesTheNamesThatDoNotOfferItWhole(t *testing.T) {
 		"a filter and only exact types": {"types", []string{"ci.run_completed"}, "head_branch", []string{"main"}},
 		"a filter of none of several":   {"types", []string{"pr.activity", "pr.reviews"}, "conclusion", []string{"failure"}},
 	} {
-		require.Contains(t, h.call(args(append([]any{"repo", testRepo, "cursor", 0}, filters...)...)).failure(t), "is a filter of none of the names in types", name)
+		require.Contains(t, h.call(args(append([]any{"repo", testRepo, "cursor", "v2.0"}, filters...)...)).failure(t), "is a filter of none of the names in types", name)
 	}
 }
 

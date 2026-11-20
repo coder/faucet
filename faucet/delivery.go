@@ -138,8 +138,12 @@ type DeliveryClaim struct {
 	PreviousSecretUntil time.Time
 	// Target is what the subscription is granted now.
 	Target Target
-	// Watermark is the lowest unsent event ID of the subscription, minus one.
-	Watermark int64
+	// Watermark is the position on the line of Target below the
+	// subscription's lowest unsent event: every event of the subscription at
+	// or below it has been delivered or given up. When a purge deleted that
+	// event, or it is not on the line, it is the line's purge mark less one,
+	// so a resume from it reports the loss.
+	Watermark Position
 	// Event is nil when a purge deleted the event.
 	Event *Event
 }
@@ -158,6 +162,10 @@ type GapRef struct {
 // subscription's callback and secrets as of the claim.
 type GapClaim struct {
 	Ref GapRef
+	// Cursor is the purge mark of the line of the subscription's target as of
+	// the claim, for a typed gap: every event of the target that still exists
+	// lies above it. A raw gap leaves it at zero.
+	Cursor Position
 	// CallbackURL and SecretEnc are the subscription's. SecretEnc is the sealed
 	// secret, never the plaintext.
 	CallbackURL string

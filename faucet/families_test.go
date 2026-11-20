@@ -241,7 +241,7 @@ func TestWaitForAFamilyReturnsTheExactTypeOfEachEvent(t *testing.T) {
 	closed := storeDelivery(h.ctx, t, h.store, "pull_request", "pull_request_closed", "closed-guid")
 	storeDelivery(h.ctx, t, h.store, "issue_comment", "issue_comment_created_on_pr", "comment-guid")
 
-	res := h.call(args("repo", testRepo, "types", []string{"pr.activity"}, "cursor", 0)).success(t)
+	res := h.call(args("repo", testRepo, "types", []string{"pr.activity"}, "cursor", "v2.0")).success(t)
 	require.Len(t, res.Events, 1)
 	require.Equal(t, closed.ID, res.Events[0].ID)
 	require.Equal(t, "pr.closed", res.Events[0].Type, "the wait tool reports the stored type")
@@ -344,7 +344,7 @@ func TestWaitWithActionsNarrowsOnlyTheFamiliesThatHaveThem(t *testing.T) {
 	storeDelivery(h.ctx, t, h.store, "pull_request_review", "pull_request_review_submitted", "review-guid")
 	ids := func(types []string, actions []string) []int64 {
 		t.Helper()
-		res := h.call(args("repo", testRepo, "types", types, "actions", actions, "cursor", 0)).success(t)
+		res := h.call(args("repo", testRepo, "types", types, "actions", actions, "cursor", "v2.0")).success(t)
 		got := make([]int64, len(res.Events))
 		for i, ev := range res.Events {
 			got[i] = ev.ID
@@ -359,8 +359,8 @@ func TestWaitWithActionsNarrowsOnlyTheFamiliesThatHaveThem(t *testing.T) {
 		"actions do not narrow an exact type")
 
 	for name, call := range map[string]map[string]any{
-		"an action of no family in types": args("repo", testRepo, "types", []string{"ci.runs"}, "actions", []string{"closed"}, "cursor", 0),
-		"an action and only exact types":  args("repo", testRepo, "types", []string{"pr.closed"}, "actions", []string{"closed"}, "cursor", 0),
+		"an action of no family in types": args("repo", testRepo, "types", []string{"ci.runs"}, "actions", []string{"closed"}, "cursor", "v2.0"),
+		"an action and only exact types":  args("repo", testRepo, "types", []string{"pr.closed"}, "actions", []string{"closed"}, "cursor", "v2.0"),
 	} {
 		require.Contains(t, h.call(call).failure(t), `action "closed"`, name)
 	}

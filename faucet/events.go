@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"strconv"
 	"strings"
 	"time"
 
@@ -28,7 +27,6 @@ const (
 
 	deliveryPoll   = "poll"
 	resultComplete = "complete"
-	cursorPrefix   = "v1."
 
 	recommendedPollMs = 5000
 	maxAgeLimitMs     = math.MaxInt64 / int64(time.Millisecond)
@@ -130,7 +128,7 @@ type pollRequest struct {
 	entry  *catalogEntry
 	target targetArguments
 	query  PollQuery
-	cursor *int64
+	cursor *cursor
 	maxAge time.Duration
 	limit  int32
 }
@@ -151,21 +149,21 @@ func parsePoll(p *eventsPollParams) (pollRequest, error) {
 	req := pollRequest{
 		entry:  entry,
 		target: args.targetArguments,
-		query: PollQuery{
+		query: PollQuery{EventFilter: EventFilter{
 			Types:     types,
 			HeadSHA:   strings.ToLower(args.SHA),
 			PR:        args.PR,
 			Fields:    args.fieldFilters(func(string) []string { return types }),
 			RepoNames: args.repoNames(),
-		},
+		}},
 		limit: pageLimit,
 	}
 	if p.Cursor != nil {
-		id, ok := decodeCursor(*p.Cursor)
+		c, ok := decodeCursor(*p.Cursor)
 		if !ok {
 			return pollRequest{}, invalidParams("cursor is not one this server returned")
 		}
-		req.cursor = &id
+		req.cursor = &c
 	}
 	if p.MaxEvents != nil {
 		if *p.MaxEvents < 1 {
@@ -213,14 +211,15 @@ func parsePollArguments(input *jsonschema.Resolved, raw json.RawMessage) (pollAr
 	return args, nil
 }
 
-// readWindow is how many event IDs one read of events looks at, whatever
-// their target, so a statement costs about the same however far behind its
-// cursor is and however few events match. A read that stops short of the head
-// says so, and the caller goes on from where it stopped.
+// readWindow is how many positions of the target's line, or event IDs for the
+// delivery scan, one read of events looks at, so a statement costs about the
+// same however far behind its cursor is and however few events match. A read
+// that stops short of the head says so, and the caller goes on from where it
+// stopped.
 const readWindow = 50_000
 
 // windowThrough is the Through of a read of one window from after.
-func windowThrough(after int64) int64 {
+func windowThrough[N ~int64](after N) N {
 	if after > math.MaxInt64-readWindow {
 		return 0
 	}
@@ -228,10 +227,10 @@ func windowThrough(after int64) int64 {
 }
 
 // crossedPurge reports whether a read from after reached the purge mark of
-// page, which deleted events that the read did not get. Only the read that
-// reaches the mark says so, so a purge that spans several windows is reported
-// once.
-func crossedPurge(after int64, page PollPage) bool {
+// the line it read, which deleted events that the read did not get. Only the
+// read that reaches the mark says so, so a purge that spans several windows is
+// reported once.
+func crossedPurge(after Position, page PollPage) bool {
 	return after < page.PurgedThrough && page.Next >= page.PurgedThrough
 }
 
@@ -284,14 +283,15 @@ func (s *Service) pollEventsMethod(ctx context.Context, _ *mcp.ServerSession, p 
 }
 
 func (s *Service) readEvents(ctx context.Context, req pollRequest) (*eventsPollResult, error) {
-	if req.cursor == nil {
-		head, err := s.store.CursorAt(ctx, s.clock.Now())
+	target := req.query.Target
+	if req.cursor == nil || req.cursor.legacy {
+		head, err := s.store.PositionAt(ctx, target, s.clock.Now())
 		if err != nil {
 			return nil, err
 		}
-		return newPollResult(nil, head, false, false), nil
+		return newPollResult(nil, head, req.cursor != nil, false), nil
 	}
-	after, truncated, err := s.replayStart(ctx, *req.cursor, req.maxAge)
+	after, truncated, err := s.replayStart(ctx, target, req.cursor.position, req.maxAge)
 	if err != nil {
 		return nil, err
 	}
@@ -307,23 +307,23 @@ func (s *Service) readEvents(ctx context.Context, req pollRequest) (*eventsPollR
 	events, cursor, hasMore := page.Events, page.Next, q.Through > 0 && page.Next == q.Through
 	if len(events) > int(req.limit) {
 		events = events[:req.limit]
-		cursor = events[len(events)-1].ID
+		cursor = target.PositionOf(events[len(events)-1])
 		hasMore = true
 	}
 	occurrences := make([]eventOccurrence, len(events))
 	for i, ev := range events {
-		if occurrences[i], err = occurrenceOf(req.entry.name, ev, req.query.Target); err != nil {
+		if occurrences[i], err = occurrenceOf(req.entry.name, ev, target); err != nil {
 			return nil, err
 		}
 	}
 	return newPollResult(occurrences, cursor, truncated, hasMore), nil
 }
 
-func (s *Service) replayStart(ctx context.Context, cursor int64, maxAge time.Duration) (after int64, truncated bool, err error) {
+func (s *Service) replayStart(ctx context.Context, target Target, cursor Position, maxAge time.Duration) (after Position, truncated bool, err error) {
 	if maxAge == 0 {
 		return cursor, false, nil
 	}
-	floor, err := s.store.CursorAt(ctx, s.clock.Now().Add(-maxAge))
+	floor, err := s.store.PositionAt(ctx, target, s.clock.Now().Add(-maxAge))
 	if err != nil {
 		return 0, false, err
 	}
@@ -333,7 +333,7 @@ func (s *Service) replayStart(ctx context.Context, cursor int64, maxAge time.Dur
 	return cursor, false, nil
 }
 
-func newPollResult(events []eventOccurrence, cursor int64, truncated, hasMore bool) *eventsPollResult {
+func newPollResult(events []eventOccurrence, cursor Position, truncated, hasMore bool) *eventsPollResult {
 	if events == nil {
 		events = []eventOccurrence{}
 	}
@@ -400,22 +400,6 @@ func marshalRaw(v any) json.RawMessage {
 		panic(fmt.Sprintf("marshal %T: %v", v, err))
 	}
 	return raw
-}
-
-func encodeCursor(id int64) string {
-	return cursorPrefix + strconv.FormatInt(id, 10)
-}
-
-func decodeCursor(cursor string) (int64, bool) {
-	digits, ok := strings.CutPrefix(cursor, cursorPrefix)
-	if !ok {
-		return 0, false
-	}
-	id, err := strconv.ParseInt(digits, 10, 64)
-	if err != nil || id < 0 || encodeCursor(id) != cursor {
-		return 0, false
-	}
-	return id, true
 }
 
 func rpcError(code int64, message string, data any) error {

@@ -25,30 +25,30 @@ type slowScans struct {
 	elapsed  func(time.Duration)
 }
 
-func (s *slowScans) PollEvents(ctx context.Context, q faucet.PollQuery) (faucet.PollPage, error) {
+func (s *slowScans) ScanEvents(ctx context.Context, q faucet.ScanQuery) (faucet.ScanPage, error) {
 	if q.HeadSHA == "" {
-		return s.Store.PollEvents(ctx, q)
+		return s.Store.ScanEvents(ctx, q)
 	}
 	start := time.Now()
 	defer func() { s.elapsed(time.Since(start)) }()
 	wait := time.Hour
-	var page faucet.PollPage
+	var page faucet.ScanPage
 	switch {
 	case s.perEvent > 0:
 		var err error
-		if page, err = s.Store.PollEvents(ctx, q); err != nil {
-			return faucet.PollPage{}, err
+		if page, err = s.Store.ScanEvents(ctx, q); err != nil {
+			return faucet.ScanPage{}, err
 		}
 		wait = time.Duration(page.Next-q.After) * s.perEvent
 	case !s.stall:
-		return faucet.PollPage{}, errStoreDown
+		return faucet.ScanPage{}, errStoreDown
 	}
 	select {
 	case <-ctx.Done():
-		return faucet.PollPage{}, ctx.Err()
+		return faucet.ScanPage{}, ctx.Err()
 	case <-time.After(wait):
 		if s.stall {
-			return faucet.PollPage{}, errStoreDown
+			return faucet.ScanPage{}, errStoreDown
 		}
 		return page, nil
 	}
@@ -126,7 +126,7 @@ func TestSlowReplaysMoveOnInEveryRunAndEnd(t *testing.T) {
 		for i := range 5 {
 			d.as(fmt.Sprintf("replayer-%d", i))
 			ep := d.endpoint(fmt.Sprintf("/replay-%d", i), "sha", testShaA)
-			d.subscribe(&rawParams{Name: "ci.run_completed", Arguments: raw(ep.args), Delivery: deliveryTo(d.rcv.url(ep.path), ep.secret), Cursor: cursorOf("v1.0")})
+			d.subscribe(&rawParams{Name: "ci.run_completed", Arguments: raw(ep.args), Delivery: deliveryTo(d.rcv.url(ep.path), ep.secret), Cursor: cursorOf("v2.0")})
 		}
 		d.advance(time.Second)
 		d.as("octocat")
@@ -163,7 +163,7 @@ func TestARunEndsAStoredSubscriptionWhoseListsArePastTheLimits(t *testing.T) {
 
 	require.Zero(t, d.deliverDue().Enqueued)
 	require.Empty(t, d.rows(), "the subscription ended")
-	for _, q := range d.store.pollQueries() {
+	for _, q := range d.store.scanQueries() {
 		require.Empty(t, q.Fields, "the run never read its events")
 	}
 	require.True(t, d.logsContain("stored arguments do not decode or pass the limits"))

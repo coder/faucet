@@ -82,19 +82,6 @@ func (q *Queries) CountOtherSubscriptions(ctx context.Context, arg CountOtherSub
 	return others, err
 }
 
-const cursorAt = `-- name: CursorAt :one
-SELECT GREATEST(COALESCE(MAX(id), 0), (SELECT purged_through FROM faucet_purge_mark))::bigint AS cursor
-FROM faucet_events
-WHERE received_at < $1
-`
-
-func (q *Queries) CursorAt(ctx context.Context, before time.Time) (int64, error) {
-	row := q.db.QueryRowContext(ctx, cursorAt, before)
-	var cursor int64
-	err := row.Scan(&cursor)
-	return cursor, err
-}
-
 const deleteEventsBefore = `-- name: DeleteEventsBefore :one
 WITH deleted AS (
   DELETE FROM faucet_events WHERE received_at < $1 RETURNING id
@@ -143,7 +130,7 @@ func (q *Queries) DeleteExpiredSubscriptionsOf(ctx context.Context, arg DeleteEx
 const deleteLiveSubscription = `-- name: DeleteLiveSubscription :one
 DELETE FROM faucet_subscriptions
 WHERE key_hash = $1 AND principal = $2 AND expires_at > $3
-RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until, gap_through, gap_lease_until, event_types, target_kind, owner_id
+RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until, gap_through, gap_lease_until, event_types, target_kind, owner_id, position
 `
 
 type DeleteLiveSubscriptionParams struct {
@@ -178,6 +165,7 @@ func (q *Queries) DeleteLiveSubscription(ctx context.Context, arg DeleteLiveSubs
 		pq.Array(&i.EventTypes),
 		&i.TargetKind,
 		&i.OwnerID,
+		&i.Position,
 	)
 	return i, err
 }
@@ -212,7 +200,7 @@ func (q *Queries) DeleteSubscriptionsOf(ctx context.Context, principal string) (
 }
 
 const eventsAfter = `-- name: EventsAfter :many
-SELECT id, source, delivery_id, type, repo_id, prs, head_sha, data, received_at, owner_id, repo_name FROM faucet_events
+SELECT id, source, delivery_id, type, repo_id, prs, head_sha, data, received_at, owner_id, repo_name, repo_seq, owner_seq FROM faucet_events
 WHERE id > $1
 ORDER BY id
 LIMIT $2
@@ -244,6 +232,8 @@ func (q *Queries) EventsAfter(ctx context.Context, arg EventsAfterParams) ([]Fau
 			&i.ReceivedAt,
 			&i.OwnerID,
 			&i.RepoName,
+			&i.RepoSeq,
+			&i.OwnerSeq,
 		); err != nil {
 			return nil, err
 		}
@@ -259,7 +249,7 @@ func (q *Queries) EventsAfter(ctx context.Context, arg EventsAfterParams) ([]Fau
 }
 
 const getEventByDelivery = `-- name: GetEventByDelivery :one
-SELECT id, source, delivery_id, type, repo_id, prs, head_sha, data, received_at, owner_id, repo_name FROM faucet_events WHERE delivery_id = $1
+SELECT id, source, delivery_id, type, repo_id, prs, head_sha, data, received_at, owner_id, repo_name, repo_seq, owner_seq FROM faucet_events WHERE delivery_id = $1
 `
 
 func (q *Queries) GetEventByDelivery(ctx context.Context, deliveryID string) (FaucetEvent, error) {
@@ -277,6 +267,8 @@ func (q *Queries) GetEventByDelivery(ctx context.Context, deliveryID string) (Fa
 		&i.ReceivedAt,
 		&i.OwnerID,
 		&i.RepoName,
+		&i.RepoSeq,
+		&i.OwnerSeq,
 	)
 	return i, err
 }
@@ -296,7 +288,7 @@ VALUES (
   clock_timestamp()
 )
 ON CONFLICT (delivery_id) DO NOTHING
-RETURNING id, source, delivery_id, type, repo_id, prs, head_sha, data, received_at, owner_id, repo_name
+RETURNING id, source, delivery_id, type, repo_id, prs, head_sha, data, received_at, owner_id, repo_name, repo_seq, owner_seq
 `
 
 type InsertEventParams struct {
@@ -336,6 +328,8 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (Fauce
 		&i.ReceivedAt,
 		&i.OwnerID,
 		&i.RepoName,
+		&i.RepoSeq,
+		&i.OwnerSeq,
 	)
 	return i, err
 }
@@ -367,14 +361,182 @@ func (q *Queries) LockSubscriptions(ctx context.Context, principal string) error
 	return err
 }
 
-const pollEvents = `-- name: PollEvents :many
+const pollLine = `-- name: PollLine :many
+WITH line AS (
+  SELECT
+    faucet_line_head($1::text, $2::bigint, $3::bigint)::bigint AS head,
+    faucet_line_purged_through($1::text, $2::bigint, $3::bigint)::bigint AS purged_through
+), page AS (
+  SELECT e.id, e.source, e.delivery_id, e.type, e.repo_id, e.prs, e.head_sha, e.data, e.received_at, e.owner_id, e.repo_name, e.repo_seq, e.owner_seq FROM faucet_events e
+  WHERE (
+      ($1::text = 'repo' AND e.repo_id = $2::bigint
+        AND e.repo_seq > $4::bigint AND e.repo_seq <= $5::bigint)
+      OR ($1::text = 'owner' AND e.owner_id = $3::bigint AND e.owner_id > 0
+        AND e.owner_seq > $4::bigint AND e.owner_seq <= $5::bigint)
+      OR ($1::text = 'all'
+        AND e.id > $4::bigint AND e.id <= $5::bigint)
+    )
+    AND (cardinality($6::text[]) = 0 OR lower(e.repo_name) = ANY($6::text[]))
+    AND (cardinality($7::text[]) = 0 OR e.type = ANY($7::text[]))
+    AND ($8::text = '' OR e.head_sha = $8::text)
+    AND ($9::int = 0 OR $9::int = ANY(e.prs))
+    AND NOT EXISTS (
+      SELECT 1 FROM jsonb_to_recordset($10::text::jsonb) AS f(field text, matches text[], types text[])
+      WHERE e.type = ANY(f.types) AND NOT COALESCE(e.data ->> f.field = ANY(f.matches), false)
+    )
+  ORDER BY e.id
+  LIMIT $11
+)
+SELECT
+  line.head,
+  line.purged_through,
+  page.id, page.source, page.delivery_id, page.type, page.repo_id, page.owner_id, page.repo_name, page.prs, page.head_sha,
+  COALESCE(page.data, 'null'::jsonb)::jsonb AS data,
+  page.received_at, page.repo_seq, page.owner_seq
+FROM line LEFT JOIN page ON true
+ORDER BY page.id
+`
+
+type PollLineParams struct {
+	TargetKind string
+	RepoID     int64
+	OwnerID    int64
+	After      int64
+	Through    int64
+	RepoNames  []string
+	Types      []string
+	HeadSha    string
+	Pr         int32
+	Fields     string
+	RowLimit   int32
+}
+
+type PollLineRow struct {
+	Head          int64
+	PurgedThrough int64
+	ID            sql.NullInt64
+	Source        sql.NullString
+	DeliveryID    sql.NullString
+	Type          sql.NullString
+	RepoID        sql.NullInt64
+	OwnerID       sql.NullInt64
+	RepoName      sql.NullString
+	Prs           []int32
+	HeadSha       sql.NullString
+	Data          json.RawMessage
+	ReceivedAt    sql.NullTime
+	RepoSeq       sql.NullInt64
+	OwnerSeq      sql.NullInt64
+}
+
+// A read of the line of one target by position: repo_seq on
+// faucet_events_repo_line for a repository, owner_seq on
+// faucet_events_owner_line for an owner, and the ID on the primary key for
+// all. The positions of a line rise with the ID, so the page is in ID order.
+// The head and the purge mark are the line's, read in the same snapshot.
+func (q *Queries) PollLine(ctx context.Context, arg PollLineParams) ([]PollLineRow, error) {
+	rows, err := q.db.QueryContext(ctx, pollLine,
+		arg.TargetKind,
+		arg.RepoID,
+		arg.OwnerID,
+		arg.After,
+		arg.Through,
+		pq.Array(arg.RepoNames),
+		pq.Array(arg.Types),
+		arg.HeadSha,
+		arg.Pr,
+		arg.Fields,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PollLineRow
+	for rows.Next() {
+		var i PollLineRow
+		if err := rows.Scan(
+			&i.Head,
+			&i.PurgedThrough,
+			&i.ID,
+			&i.Source,
+			&i.DeliveryID,
+			&i.Type,
+			&i.RepoID,
+			&i.OwnerID,
+			&i.RepoName,
+			pq.Array(&i.Prs),
+			&i.HeadSha,
+			&i.Data,
+			&i.ReceivedAt,
+			&i.RepoSeq,
+			&i.OwnerSeq,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const positionAt = `-- name: PositionAt :one
+SELECT GREATEST(
+  CASE $1::text
+    WHEN 'repo' THEN (SELECT MAX(e.repo_seq) FROM faucet_events e WHERE e.repo_id = $2::bigint AND e.received_at < $3)
+    WHEN 'owner' THEN (SELECT MAX(e.owner_seq) FROM faucet_events e WHERE e.owner_id = $4::bigint AND e.owner_id > 0 AND e.received_at < $3)
+    ELSE (SELECT MAX(e.id) FROM faucet_events e WHERE e.received_at < $3)
+  END,
+  faucet_line_purged_through($1::text, $2::bigint, $4::bigint),
+  0
+)::bigint AS position
+`
+
+type PositionAtParams struct {
+	TargetKind string
+	RepoID     int64
+	Before     time.Time
+	OwnerID    int64
+}
+
+func (q *Queries) PositionAt(ctx context.Context, arg PositionAtParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, positionAt,
+		arg.TargetKind,
+		arg.RepoID,
+		arg.Before,
+		arg.OwnerID,
+	)
+	var position int64
+	err := row.Scan(&position)
+	return position, err
+}
+
+const raisePurgeMark = `-- name: RaisePurgeMark :one
+UPDATE faucet_purge_mark
+SET purged_through = GREATEST(purged_through, $1::bigint)
+RETURNING purged_through
+`
+
+func (q *Queries) RaisePurgeMark(ctx context.Context, through int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, raisePurgeMark, through)
+	var purged_through int64
+	err := row.Scan(&purged_through)
+	return purged_through, err
+}
+
+const scanEvents = `-- name: ScanEvents :many
 WITH mark AS (
   SELECT purged_through FROM faucet_purge_mark
 ), head AS (
   SELECT GREATEST(COALESCE(MAX(id), 0), (SELECT purged_through FROM mark))::bigint AS max_id
   FROM faucet_events
 ), page AS (
-  SELECT e.id, e.source, e.delivery_id, e.type, e.repo_id, e.prs, e.head_sha, e.data, e.received_at, e.owner_id, e.repo_name FROM faucet_events e
+  SELECT e.id, e.source, e.delivery_id, e.type, e.repo_id, e.prs, e.head_sha, e.data, e.received_at, e.owner_id, e.repo_name, e.repo_seq, e.owner_seq FROM faucet_events e
   WHERE (
       ($1::text = 'repo' AND e.repo_id = $2::bigint)
       OR ($1::text = 'owner' AND e.owner_id = $3::bigint AND e.owner_id > 0)
@@ -394,16 +556,16 @@ WITH mark AS (
   LIMIT $11
 )
 SELECT
-  head.max_id,
+  head.max_id AS head,
   (SELECT purged_through FROM mark)::bigint AS purged_through,
   page.id, page.source, page.delivery_id, page.type, page.repo_id, page.owner_id, page.repo_name, page.prs, page.head_sha,
   COALESCE(page.data, 'null'::jsonb)::jsonb AS data,
-  page.received_at
+  page.received_at, page.repo_seq, page.owner_seq
 FROM head LEFT JOIN page ON true
 ORDER BY page.id
 `
 
-type PollEventsParams struct {
+type ScanEventsParams struct {
 	TargetKind string
 	RepoID     int64
 	OwnerID    int64
@@ -417,8 +579,8 @@ type PollEventsParams struct {
 	RowLimit   int32
 }
 
-type PollEventsRow struct {
-	MaxID         int64
+type ScanEventsRow struct {
+	Head          int64
 	PurgedThrough int64
 	ID            sql.NullInt64
 	Source        sql.NullString
@@ -431,14 +593,16 @@ type PollEventsRow struct {
 	HeadSha       sql.NullString
 	Data          json.RawMessage
 	ReceivedAt    sql.NullTime
+	RepoSeq       sql.NullInt64
+	OwnerSeq      sql.NullInt64
 }
 
 // Each kind of target has a branch of its own, so each reads its own index:
 // faucet_events_poll for a repository, faucet_events_owner for an owner, and
 // the primary key for all. An event stored before owners were recorded has
 // owner 0, which no owner target names.
-func (q *Queries) PollEvents(ctx context.Context, arg PollEventsParams) ([]PollEventsRow, error) {
-	rows, err := q.db.QueryContext(ctx, pollEvents,
+func (q *Queries) ScanEvents(ctx context.Context, arg ScanEventsParams) ([]ScanEventsRow, error) {
+	rows, err := q.db.QueryContext(ctx, scanEvents,
 		arg.TargetKind,
 		arg.RepoID,
 		arg.OwnerID,
@@ -455,11 +619,11 @@ func (q *Queries) PollEvents(ctx context.Context, arg PollEventsParams) ([]PollE
 		return nil, err
 	}
 	defer rows.Close()
-	var items []PollEventsRow
+	var items []ScanEventsRow
 	for rows.Next() {
-		var i PollEventsRow
+		var i ScanEventsRow
 		if err := rows.Scan(
-			&i.MaxID,
+			&i.Head,
 			&i.PurgedThrough,
 			&i.ID,
 			&i.Source,
@@ -472,6 +636,8 @@ func (q *Queries) PollEvents(ctx context.Context, arg PollEventsParams) ([]PollE
 			&i.HeadSha,
 			&i.Data,
 			&i.ReceivedAt,
+			&i.RepoSeq,
+			&i.OwnerSeq,
 		); err != nil {
 			return nil, err
 		}
@@ -486,21 +652,66 @@ func (q *Queries) PollEvents(ctx context.Context, arg PollEventsParams) ([]PollE
 	return items, nil
 }
 
-const raisePurgeMark = `-- name: RaisePurgeMark :one
-UPDATE faucet_purge_mark
-SET purged_through = GREATEST(purged_through, $1::bigint)
-RETURNING purged_through
+const startAfter = `-- name: StartAfter :one
+WITH line AS (
+  SELECT faucet_line_head($2::text, $3::bigint, $4::bigint)::bigint AS head
+), log AS (
+  SELECT
+    GREATEST(COALESCE(MAX(id), 0), (SELECT purged_through FROM faucet_purge_mark))::bigint AS head,
+    (SELECT purged_through FROM faucet_purge_mark)::bigint AS purged_through
+  FROM faucet_events
+), next AS (
+  SELECT CASE $2::text
+    WHEN 'repo' THEN (
+      SELECT e.id FROM faucet_events e
+      WHERE e.repo_id = $3::bigint AND e.repo_seq > $1::bigint
+      ORDER BY e.repo_seq LIMIT 1)
+    WHEN 'owner' THEN (
+      SELECT e.id FROM faucet_events e
+      WHERE e.owner_id = $4::bigint AND e.owner_id > 0 AND e.owner_seq > $1::bigint
+      ORDER BY e.owner_seq LIMIT 1)
+    ELSE (SELECT MIN(e.id) FROM faucet_events e WHERE e.id > $1::bigint)
+  END AS id
+)
+SELECT
+  LEAST($1::bigint, line.head)::bigint AS start,
+  (CASE
+    WHEN $1::bigint >= line.head OR next.id IS NULL THEN log.head
+    ELSE GREATEST(next.id - 1, log.purged_through)
+  END)::bigint AS after
+FROM line, log, next
 `
 
-func (q *Queries) RaisePurgeMark(ctx context.Context, through int64) (int64, error) {
-	row := q.db.QueryRowContext(ctx, raisePurgeMark, through)
-	var purged_through int64
-	err := row.Scan(&purged_through)
-	return purged_through, err
+type StartAfterParams struct {
+	Position   int64
+	TargetKind string
+	RepoID     int64
+	OwnerID    int64
+}
+
+type StartAfterRow struct {
+	Start int64
+	After int64
+}
+
+// next is the ID of the target's first event above the position, on its
+// line's index. The highest event ID is read in the same snapshot as the head
+// of the line, so an event of the target above that head commits with a
+// higher ID.
+func (q *Queries) StartAfter(ctx context.Context, arg StartAfterParams) (StartAfterRow, error) {
+	row := q.db.QueryRowContext(ctx, startAfter,
+		arg.Position,
+		arg.TargetKind,
+		arg.RepoID,
+		arg.OwnerID,
+	)
+	var i StartAfterRow
+	err := row.Scan(&i.Start, &i.After)
+	return i, err
 }
 
 const upsertSubscription = `-- name: UpsertSubscription :one
-INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, event_types, arguments, target_kind, repo_id, owner_id, secret_enc, cursor, scanned_through, created_at, updated_at, expires_at)
+INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, event_types, arguments, target_kind, repo_id, owner_id, secret_enc, cursor, scanned_through, position, created_at, updated_at, expires_at)
 VALUES (
   $1,
   $2,
@@ -515,8 +726,9 @@ VALUES (
   $11,
   $11,
   $12,
-  $12,
-  $13
+  $13,
+  $13,
+  $14
 )
 ON CONFLICT (key_hash) DO UPDATE SET
   event_types = EXCLUDED.event_types,
@@ -525,17 +737,17 @@ ON CONFLICT (key_hash) DO UPDATE SET
   owner_id = EXCLUDED.owner_id,
   previous_secret_enc = CASE
     WHEN faucet_subscriptions.secret_enc = EXCLUDED.secret_enc THEN faucet_subscriptions.previous_secret_enc
-    WHEN $14::timestamptz IS NULL THEN NULL
+    WHEN $15::timestamptz IS NULL THEN NULL
     ELSE faucet_subscriptions.secret_enc
   END,
   previous_secret_until = CASE
     WHEN faucet_subscriptions.secret_enc = EXCLUDED.secret_enc THEN faucet_subscriptions.previous_secret_until
-    ELSE $14::timestamptz
+    ELSE $15::timestamptz
   END,
   secret_enc = EXCLUDED.secret_enc,
   updated_at = EXCLUDED.updated_at,
   expires_at = EXCLUDED.expires_at
-RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until, gap_through, gap_lease_until, event_types, target_kind, owner_id
+RETURNING key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, created_at, updated_at, expires_at, scanned_through, last_delivery_at, last_error, failed_since, previous_secret_enc, previous_secret_until, gap_through, gap_lease_until, event_types, target_kind, owner_id, position
 `
 
 type UpsertSubscriptionParams struct {
@@ -550,6 +762,7 @@ type UpsertSubscriptionParams struct {
 	OwnerID             int64
 	SecretEnc           []byte
 	Cursor              int64
+	Position            int64
 	Now                 time.Time
 	ExpiresAt           time.Time
 	PreviousSecretUntil sql.NullTime
@@ -568,6 +781,7 @@ func (q *Queries) UpsertSubscription(ctx context.Context, arg UpsertSubscription
 		arg.OwnerID,
 		arg.SecretEnc,
 		arg.Cursor,
+		arg.Position,
 		arg.Now,
 		arg.ExpiresAt,
 		arg.PreviousSecretUntil,
@@ -596,6 +810,7 @@ func (q *Queries) UpsertSubscription(ctx context.Context, arg UpsertSubscription
 		pq.Array(&i.EventTypes),
 		&i.TargetKind,
 		&i.OwnerID,
+		&i.Position,
 	)
 	return i, err
 }

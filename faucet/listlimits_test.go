@@ -121,7 +121,7 @@ func TestEveryListArgumentHoldsItsLimitAndRefusesOneMore(t *testing.T) {
 				})
 				require.NoError(t, err)
 				wait := func(items []string) callOutcome {
-					return w.call(args("owner", "coder", "types", []string{"pr.activity", "ci.runs"}, "cursor", 0, tt.list, items))
+					return w.call(args("owner", "coder", "types", []string{"pr.activity", "ci.runs"}, "cursor", "v2.0", tt.list, items))
 				}
 				require.Equal(t, []int64{matching.ID}, wait(list(tt.limit)).success(t).ids())
 				require.Contains(t, wait(list(tt.limit+1)).failure(t), refusal)

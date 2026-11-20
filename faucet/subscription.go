@@ -78,6 +78,9 @@ type Subscription struct {
 	// Cursor is the event ID after which delivery starts. A refresh of a live
 	// subscription keeps it.
 	Cursor int64
+	// Position is where delivery starts on the line of Target, as the
+	// subscribe reply names it. A refresh of a live subscription keeps it.
+	Position Position
 	// CreatedAt and UpdatedAt are assigned by the store.
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -110,6 +113,8 @@ func (s Subscription) Validate(now time.Time) error {
 		return xerrors.New("sealed secret is required")
 	case s.Cursor < 0:
 		return xerrors.New("cursor must not be negative")
+	case s.Position < 0:
+		return xerrors.New("position must not be negative")
 	case !s.ExpiresAt.After(now):
 		return xerrors.New("expiry must be after now")
 	case s.RotationGrace < 0 || now.Add(s.RotationGrace).After(s.ExpiresAt):

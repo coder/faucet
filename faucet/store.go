@@ -13,7 +13,8 @@ import (
 
 // Event is one stored GitHub webhook, already normalized.
 type Event struct {
-	// ID is assigned by the store. It is the poll cursor.
+	// ID is assigned by the store. It counts the events of every target, so it
+	// is the place of the event on the line of the all target only.
 	ID     int64
 	Source string
 	// DeliveryID is the X-GitHub-Delivery header. It is unique per event.
@@ -32,10 +33,15 @@ type Event struct {
 	Data    json.RawMessage
 	// ReceivedAt is assigned by the store.
 	ReceivedAt time.Time
+	// RepoPosition and OwnerPosition are the event's places on the line of its
+	// repository and on the line of its owner, which it lacks (0) when
+	// OwnerID is 0. The store assigns them.
+	RepoPosition  Position
+	OwnerPosition Position
 }
 
 // Validate checks the fields a caller supplies to Store.InsertEvent.
-// ID and ReceivedAt are ignored because the store assigns them.
+// ID, ReceivedAt and the positions are ignored because the store assigns them.
 //
 // Validate accepts any valid JSON without NUL characters. Postgres jsonb
 // rejects a few other values, such as numbers beyond the float64 range or lone
@@ -69,8 +75,8 @@ func (e Event) Validate() error {
 	return nil
 }
 
-// PollQuery selects the events one waiter wants to see.
-type PollQuery struct {
+// EventFilter selects the events one reader wants to see.
+type EventFilter struct {
 	Target Target
 	// RepoNames limits the result to events whose RepoName, in lower case,
 	// is one of these lower-case full names. Empty means no limit.
@@ -84,7 +90,45 @@ type PollQuery struct {
 	PR int32
 	// Fields limits the result to events that pass every filter.
 	Fields []FieldFilter
-	// After is the cursor: only events with ID > After are returned.
+}
+
+// Validate checks the fields of a filter.
+func (f EventFilter) Validate() error {
+	switch {
+	case f.Target.Validate() != nil:
+		return xerrors.Errorf("target: %w", f.Target.Validate())
+	case f.PR < 0:
+		return xerrors.New("pr must not be negative")
+	case slices.ContainsFunc(f.Fields, func(f FieldFilter) bool { return f.Field == "" }):
+		return xerrors.New("a field filter must name a field")
+	}
+	return nil
+}
+
+// PollQuery reads one page of the line of its Target, for a caller of that
+// target.
+type PollQuery struct {
+	EventFilter
+	// After is the cursor: only events at positions above After are returned.
+	After Position
+	// Limit is the page size. It must be positive.
+	Limit int32
+	// Through, when positive, limits the result to events at positions at or
+	// below Through, so a read looks at no more than Through - After events of
+	// the Target however few of them match. Zero means no limit.
+	Through Position
+}
+
+// Validate checks the fields a caller supplies to Store.PollEvents.
+func (q PollQuery) Validate() error {
+	return validateRead(q.EventFilter, int64(q.After), int64(q.Through), q.Limit)
+}
+
+// ScanQuery reads the events of a subscription by event ID, as the delivery
+// scan keeps its read position.
+type ScanQuery struct {
+	EventFilter
+	// After is the read position: only events with ID > After are returned.
 	After int64
 	// Limit is the page size. It must be positive.
 	Limit int32
@@ -94,21 +138,21 @@ type PollQuery struct {
 	Through int64
 }
 
-// Validate checks the fields a caller supplies to Store.PollEvents.
-func (q PollQuery) Validate() error {
+// Validate checks the fields a caller supplies to Store.ScanEvents.
+func (q ScanQuery) Validate() error {
+	return validateRead(q.EventFilter, q.After, q.Through, q.Limit)
+}
+
+func validateRead(f EventFilter, after, through int64, limit int32) error {
 	switch {
-	case q.Target.Validate() != nil:
-		return xerrors.Errorf("target: %w", q.Target.Validate())
-	case q.Limit <= 0:
+	case f.Validate() != nil:
+		return f.Validate()
+	case limit <= 0:
 		return xerrors.New("limit must be positive")
-	case q.After < 0:
+	case after < 0:
 		return xerrors.New("after must not be negative")
-	case q.PR < 0:
-		return xerrors.New("pr must not be negative")
-	case q.Through < 0:
+	case through < 0:
 		return xerrors.New("through must not be negative")
-	case slices.ContainsFunc(q.Fields, func(f FieldFilter) bool { return f.Field == "" }):
-		return xerrors.New("a field filter must name a field")
 	}
 	return nil
 }
@@ -127,21 +171,37 @@ type FieldFilter struct {
 	Types []string
 }
 
-// PollPage is the result of Store.PollEvents.
+// PollPage is the result of Store.PollEvents. Every number in it is a
+// position on the line of the query's Target.
 type PollPage struct {
+	// Events are the matching events in the order of the line.
+	Events []Event
+	// Next is the cursor to poll with next. It is the position of the last
+	// event when the page is full. Otherwise it is the head of the line when
+	// the store answered, or Through when that is lower. It is never lower
+	// than the query's After unless After is above the head, which reads as
+	// the head, and not lower than PurgedThrough unless Through is.
+	Next Position
+	// PurgedThrough is the purge mark of the line: the highest position that a
+	// purge has deleted, or 0. The store reads it in the same snapshot as
+	// Events, so a caller whose cursor is below it knows that events above the
+	// cursor may be gone, whatever a purge did while the page was read.
+	PurgedThrough Position
+}
+
+// ScanPage is the result of Store.ScanEvents. Its numbers are event IDs.
+type ScanPage struct {
 	// Events are the matching events in ID order.
 	Events []Event
-	// Next is the cursor to poll with next. It is Events[len(Events)-1].ID
+	// Next is the read position to scan from next. It is the last event's ID
 	// when the page is full. Otherwise it is the highest event ID the store
-	// had when it answered, or Through when that is lower, so a waiter whose
-	// repository is quiet does not rescan other repositories' events. It is
+	// had when it answered, or Through when that is lower, so a subscription
+	// whose target is quiet does not rescan other targets' events. It is
 	// never lower than the query's After, and not lower than PurgedThrough
 	// unless Through is.
 	Next int64
 	// PurgedThrough is the purge mark: the highest event ID any purge has
-	// deleted, or 0. The store reads it in the same snapshot as Events, so a
-	// caller whose cursor is below it knows that events above the cursor may be
-	// gone, whatever a purge did while the page was read.
+	// deleted, or 0, read in the same snapshot as Events.
 	PurgedThrough int64
 }
 
@@ -184,32 +244,51 @@ func hasNUL(v any) bool {
 
 // Store persists events and serves them to pollers.
 //
-// Implementations must guarantee that event IDs are visible in commit order:
-// a reader that has seen ID n has already seen every ID below n that will ever
-// be visible. Without this, a poller that advances its cursor to n can skip an
-// event that commits late.
+// Implementations must guarantee that event IDs, and the positions of each
+// line, are visible in commit order: a reader that has seen ID n has already
+// seen every ID below n that will ever be visible. Without this, a poller that
+// advances its cursor to n can skip an event that commits late.
 type Store interface {
 	// InsertEvent stores ev once per DeliveryID. It returns the stored event and
 	// inserted=false when the DeliveryID already exists, in which case stored is
-	// the existing row and ev is discarded.
+	// the existing row and ev is discarded. A stored event gets the next
+	// position of its repository's line, and of its owner's when OwnerID is
+	// not 0: one above the head of the line.
 	InsertEvent(ctx context.Context, ev Event) (stored Event, inserted bool, err error)
 	// EventsAfter returns events with ID > afterID in ID order, at most limit rows.
 	// limit must be positive.
 	EventsAfter(ctx context.Context, afterID int64, limit int32) ([]Event, error)
-	// PollEvents returns one page for q. Every filter is applied before the
-	// limit, and the events and PollPage.Next come from one snapshot. Because
-	// IDs are visible in commit order, polling again with After set to Next
-	// never skips a matching event.
+	// PollEvents returns one page of the line of q.Target. Every filter is
+	// applied before the limit, and the events and PollPage.Next come from one
+	// snapshot. Because the events of a line are visible in the order of their
+	// positions, polling again with After set to Next never skips a matching
+	// event. What it returns depends on the events of q.Target alone: other
+	// targets' events, and purges of them, change none of it.
 	PollEvents(ctx context.Context, q PollQuery) (PollPage, error)
-	// CursorAt returns the highest event ID received before t, or 0 when there
-	// is none. It is never lower than the purge mark, so polling with it as
-	// the cursor returns the events from t on and is not reported as a gap. It
-	// returns the events from t on only if InsertEvent stamps ReceivedAt in ID
-	// order: an event must never carry an earlier time than a lower ID.
-	CursorAt(ctx context.Context, t time.Time) (int64, error)
+	// ScanEvents returns one page for q by event ID, as PollEvents did before
+	// targets had lines, for the delivery scan, which keeps its read position
+	// as an event ID. Nothing that it returns reaches a caller.
+	ScanEvents(ctx context.Context, q ScanQuery) (ScanPage, error)
+	// PositionAt returns the highest position on target's line of an event
+	// received before t, or 0 when there is none. It is never lower than the
+	// line's purge mark, so polling with it as the cursor returns the events
+	// from t on and is not reported as a gap. It returns the events from t on
+	// only if InsertEvent stamps ReceivedAt in ID order: an event must never
+	// carry an earlier time than a lower ID.
+	PositionAt(ctx context.Context, target Target, t time.Time) (Position, error)
+	// StartAfter returns where a subscription of target that starts after
+	// position p reads from: start is p, or the head of the line when p lies
+	// above it, and after is the event ID to store as Subscription.Cursor, so
+	// that the events of target above after are those above start. after is
+	// never below the purge mark, and when start is the head it is the
+	// highest event ID, so a subscription of a quiet target does not read the
+	// other targets' events or a purge of them as a gap.
+	StartAfter(ctx context.Context, target Target, p Position) (after int64, start Position, err error)
 	// Purge deletes the events received before the given time and raises the
-	// purge mark to the highest ID it deleted, in one transaction. The mark
-	// never moves down. It needs no insert lock: events commit in ID order, so
+	// purge mark to the highest ID it deleted, and the purge mark of every line
+	// that lost events to the highest position it lost, in one transaction. A
+	// mark never moves down, and a line whose events are all deleted keeps its
+	// head, so the next event of the target gets the next position. It needs no insert lock: events commit in ID order, so
 	// no event at or below the mark can appear after the purge.
 	//
 	// In the same transaction it moves every subscription whose read position
@@ -222,7 +301,7 @@ type Store interface {
 	// UpsertSubscription stores sub and returns the stored row. It calls
 	// sub.Validate(now). A row with the same KeyHash that expires after now is
 	// live: the call replaces its Target, SecretEnc and ExpiresAt and keeps its
-	// CreatedAt and Cursor. When the new SecretEnc differs from the row's, the
+	// CreatedAt, Cursor and Position. When the new SecretEnc differs from the row's, the
 	// row's becomes PreviousSecretEnc until now plus RotationGrace (and a
 	// previous secret from an earlier rotation is dropped). When it is equal,
 	// the previous secret and its end stay as they were. A row that has

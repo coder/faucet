@@ -279,14 +279,14 @@ func TestAnEventOfAnOwnerOrAllTargetNamesItsRepository(t *testing.T) {
 		Data: json.RawMessage(`{"conclusion":"success"}`),
 	})
 	require.NoError(t, err)
-	waited := w.call(args("owner", "coder", "types", []string{"ci.run_completed"}, "cursor", 0)).success(t)
+	waited := w.call(args("owner", "coder", "types", []string{"ci.run_completed"}, "cursor", "v2.0")).success(t)
 	require.Len(t, waited.Events, 1)
 	repo, id := named(t, waited.Events[0].Data)
 	require.Equal(t, coderA.fullName, repo)
 	require.EqualValues(t, coderA.id, id)
 
 	w.insert(repoID, "ci.run_completed", "")
-	waited = w.call(args("repo", testRepo, "types", []string{"ci.run_completed"}, "cursor", 0)).success(t)
+	waited = w.call(args("repo", testRepo, "types", []string{"ci.run_completed"}, "cursor", "v2.0")).success(t)
 	require.Len(t, waited.Events, 1)
 	require.JSONEq(t, `{"conclusion":"success"}`, string(waited.Events[0].Data), "a repo target's data is as before")
 }
