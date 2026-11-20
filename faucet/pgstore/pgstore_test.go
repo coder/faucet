@@ -220,7 +220,7 @@ func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {
 	require.EqualValues(t, 400, hostVersion)
 	var faucetVersion int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM `+pq.QuoteIdentifier(pgstore.MigrationsTable)).Scan(&faucetVersion))
-	require.EqualValues(t, 18, faucetVersion)
+	require.EqualValues(t, 19, faucetVersion)
 }
 
 // The raw events migration adds tables of its own and one index. A down
@@ -939,7 +939,10 @@ func TestRepositoryCallThatItsContextCutShortWrapsTheContextError(t *testing.T) 
 	repo := faucet.Repository{ID: 1, OwnerID: 7, OwnerLogin: "coder", FullName: "coder/faucet"}
 	for name, call := range map[string]func(context.Context) error{
 		"RecordRepository": func(ctx context.Context) error { return store.RecordRepository(ctx, repo, time.Now()) },
-		"RenameRepository": func(ctx context.Context) error { return store.RenameRepository(ctx, repo, "coder/tap", time.Now()) },
+		"RenameRepository": func(ctx context.Context) error {
+			_, err := store.RenameRepository(ctx, faucet.RepositoryRename{Repo: repo, From: "coder/tap"}, time.Now())
+			return err
+		},
 		"RepositoryByName": func(ctx context.Context) error {
 			_, err := store.RepositoryByName(ctx, repo.FullName)
 			return err

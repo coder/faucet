@@ -27,19 +27,50 @@ func (s *Store) RecordRepository(ctx context.Context, repo faucet.Repository, se
 	return nil
 }
 
-// RenameRepository implements faucet.Store.
-func (s *Store) RenameRepository(ctx context.Context, repo faucet.Repository, from string, seenAt time.Time) (err error) {
+// RenameRepository implements faucet.Store. The row of the body, which comes
+// first, makes a concurrent call with the same body wait, and then find it.
+// The row lock on the repository orders concurrent renames of it.
+func (s *Store) RenameRepository(ctx context.Context, rename faucet.RepositoryRename, seenAt time.Time) (_ faucet.RenameOutcome, err error) {
 	defer func() { err = endedBy(ctx, err) }()
+	repo := rename.Repo
 	if err := repo.Validate(); err != nil {
-		return xerrors.Errorf("validate repository: %w", err)
+		return 0, xerrors.Errorf("validate repository: %w", err)
 	}
-	if err := s.q.RenameRepository(ctx, database.RenameRepositoryParams{
-		RepoID: repo.ID, OwnerID: repo.OwnerID, OwnerLogin: repo.OwnerLogin, FullName: repo.FullName, SeenAt: seenAt,
-		PreviousFullName: from,
-	}); err != nil {
-		return xerrors.Errorf("rename repository: %w", err)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return 0, xerrors.Errorf("begin transaction: %w", err)
 	}
-	return nil
+	defer func() { _ = tx.Rollback() }()
+	q := s.q.WithTx(tx)
+	recorded, err := q.RecordRepositoryRename(ctx, database.RecordRepositoryRenameParams{BodySha256: rename.Body[:], RepoID: repo.ID, SeenAt: seenAt})
+	switch {
+	case err != nil:
+		return 0, xerrors.Errorf("record the body of the rename: %w", err)
+	case recorded == 0:
+		return faucet.RenameSeenBefore, nil
+	}
+	holdsFrom, err := q.LockRepositoryHolding(ctx, database.LockRepositoryHoldingParams{RepoID: repo.ID, FromFullName: rename.From})
+	outcome := faucet.Renamed
+	switch {
+	case xerrors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return 0, xerrors.Errorf("read repository: %w", err)
+	case !holdsFrom && rename.Late:
+		outcome = faucet.RenameLate
+	case !holdsFrom:
+		outcome = faucet.RenamedFromAStaleName
+	}
+	if outcome != faucet.RenameLate {
+		if err := q.RenameRepository(ctx, database.RenameRepositoryParams{
+			RepoID: repo.ID, OwnerID: repo.OwnerID, OwnerLogin: repo.OwnerLogin, FullName: repo.FullName, SeenAt: seenAt,
+		}); err != nil {
+			return 0, xerrors.Errorf("rename repository: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, xerrors.Errorf("commit: %w", err)
+	}
+	return outcome, nil
 }
 
 // RecordOwner implements faucet.Store. Another account that held the login

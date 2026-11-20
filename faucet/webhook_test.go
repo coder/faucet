@@ -48,6 +48,7 @@ type fakeStore struct {
 	deliveries    map[fakeDeliveryKey]*fakeDelivery
 	gaps          map[faucet.SubscriptionKeyHash]*fakeGap
 	repos         []fakeRepo
+	renameBodies  map[[32]byte]bool
 	owners        map[int64]fakeRepoOwner
 	ownerWrites   int
 	repoWrites    int

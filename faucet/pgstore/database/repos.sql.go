@@ -89,6 +89,33 @@ func (q *Queries) GetRepositoryByName(ctx context.Context, arg GetRepositoryByNa
 	return i, err
 }
 
+const lockRepositoryHolding = `-- name: LockRepositoryHolding :one
+SELECT (lower(r.full_name) = lower($1::text) OR EXISTS (
+     SELECT 1 FROM faucet_owners o
+     WHERE o.owner_id = r.owner_id
+       AND lower(o.login || '/' || split_part(r.full_name, '/', 2)) = lower($1::text)
+   ))::boolean AS holds_from
+FROM faucet_repos r
+WHERE r.repo_id = $2
+FOR UPDATE OF r
+`
+
+type LockRepositoryHoldingParams struct {
+	FromFullName string
+	RepoID       int64
+}
+
+// holds_from says whether the row's full name is @from_full_name, as the row
+// holds it or under the login that the row's owner holds now. GitHub writes
+// the name from under the owner's login now, which the row lacks when the
+// owner was renamed after the row was first seen.
+func (q *Queries) LockRepositoryHolding(ctx context.Context, arg LockRepositoryHoldingParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, lockRepositoryHolding, arg.FromFullName, arg.RepoID)
+	var holds_from bool
+	err := row.Scan(&holds_from)
+	return holds_from, err
+}
+
 const recordOwner = `-- name: RecordOwner :exec
 INSERT INTO faucet_owners (owner_id, login)
 VALUES ($1, $2)
@@ -130,6 +157,27 @@ func (q *Queries) RecordRepository(ctx context.Context, arg RecordRepositoryPara
 	return err
 }
 
+const recordRepositoryRename = `-- name: RecordRepositoryRename :execrows
+INSERT INTO faucet_repo_renames (body_sha256, repo_id, seen_at)
+VALUES ($1, $2, $3)
+ON CONFLICT (body_sha256) DO NOTHING
+`
+
+type RecordRepositoryRenameParams struct {
+	BodySha256 []byte
+	RepoID     int64
+	SeenAt     time.Time
+}
+
+// A body that the store judged before writes nothing.
+func (q *Queries) RecordRepositoryRename(ctx context.Context, arg RecordRepositoryRenameParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, recordRepositoryRename, arg.BodySha256, arg.RepoID, arg.SeenAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const releaseOwnerLogin = `-- name: ReleaseOwnerLogin :exec
 DELETE FROM faucet_owners WHERE lower(login) = lower($1::text) AND owner_id <> $2
 `
@@ -152,23 +200,14 @@ VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (repo_id) DO UPDATE
 SET owner_id = excluded.owner_id, owner_login = excluded.owner_login,
     full_name = excluded.full_name, seen_at = excluded.seen_at
-WHERE lower(faucet_repos.full_name) = lower($6::text)
-   -- GitHub writes from under the owner's login now, which the row lacks when
-   -- the owner was renamed after the row was first seen.
-   OR EXISTS (
-     SELECT 1 FROM faucet_owners o
-     WHERE o.owner_id = faucet_repos.owner_id
-       AND lower(o.login || '/' || split_part(faucet_repos.full_name, '/', 2)) = lower($6::text)
-   )
 `
 
 type RenameRepositoryParams struct {
-	RepoID           int64
-	OwnerID          int64
-	OwnerLogin       string
-	FullName         string
-	SeenAt           time.Time
-	PreviousFullName string
+	RepoID     int64
+	OwnerID    int64
+	OwnerLogin string
+	FullName   string
+	SeenAt     time.Time
 }
 
 func (q *Queries) RenameRepository(ctx context.Context, arg RenameRepositoryParams) error {
@@ -178,7 +217,6 @@ func (q *Queries) RenameRepository(ctx context.Context, arg RenameRepositoryPara
 		arg.OwnerLogin,
 		arg.FullName,
 		arg.SeenAt,
-		arg.PreviousFullName,
 	)
 	return err
 }

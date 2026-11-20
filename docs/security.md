@@ -36,6 +36,15 @@ An `Authorizer` answers `RepoID`, which may remember, and `RepoIDFresh`, which e
 
 The `Authorizer` decides a `repo` [target](events.md#targets). An `owner` or `all` target is for a service only: faucet refuses it to every other principal with `ErrNoAccess` and asks nobody. For a service it asks `Deps.ServiceGrants`, which `oauth.ServiceAccess` implements from the client's grants, and without it faucet refuses those targets to a service too. Like an `Authorizer`, it has a fresh form of each call, which every renewal calls and which reads the client again. An `org:` grant covers every repository of the account that held its login when the grant was set, also one made after the grant and under any later login, and `all` every repository that faucet receives deliveries from, private ones included (see [service-accounts.md](service-accounts.md#grants)).
 
+## Repository names
+
+A service's `repo:` grant names a repository, and faucet finds its ID by the name that signed deliveries gave it (see [service-accounts.md](service-accounts.md#grants)). A transfer moves a repository to another owner, and its old name can then name another repository, so a name that faucet failed to move would let the grant read a repository that it does not name. Only a Repositories delivery that renamed or transferred the repository moves its name. Faucet takes each such body once, recording its SHA-256 in the transaction that writes the names, and answers 500 to one that it could not write, so that [redelivery](redelivery.md) asks for it again. A fresh one takes its names from whatever name faucet holds, so a missed rename leaves no stale name behind. One that redelivery asked for takes them only from the name that faucet holds.
+
+GitHub signs the body of a delivery and no header, and the body holds no time that orders deliveries, so faucet cannot tell a delivery that GitHub just sent from one that someone kept, nor order two deliveries. So:
+
+- **A signed rename or transfer that faucet never took can be sent again, and faucet takes it.** GitHub shows each delivery's body and signature to whoever can read the hook's recent deliveries, for 3 days, so a hook admin can keep one. From migration `000019_repo_renames` on, faucet takes no body twice. A body that never reached faucet, one that it took before that migration, and a manual redelivery from GitHub of one that it answered 500 to each bind the names that the body gives until the next rename or transfer. Faucet logs `a rename or transfer of the repository never reached faucet` whenever a rename moves a name that it does not hold.
+- **Two renames that arrive out of order.** Faucet does not count on GitHub to send deliveries in order. When the older of two renames arrives last, and redelivery did not ask for it, it binds its names until the next rename or transfer.
+
 ## The browser login
 
 These checks keep another site, another browser and another client from finishing a user's login:

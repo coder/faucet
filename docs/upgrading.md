@@ -2,6 +2,16 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## To renames taken once (migration `000019_repo_renames`)
+
+This fixes how a host that records repositories (with `FAUCET_PUBLIC_URL`) moves a repository's name, which a `repo:` grant resolves through (see [service-accounts.md](service-accounts.md#grants)).
+
+- **A rename or transfer whose write fails is answered 500**, so GitHub records the failure and redelivery asks for it again. Every other delivery whose repository write fails goes on as before.
+- **A rename or transfer from a name that faucet does not hold now moves the repository**, and logs `a rename or transfer of the repository never reached faucet`. Before, it changed nothing and left the old name bound. One that redelivery asked for still changes nothing then.
+- **The migration** adds `faucet_repo_renames`, which keeps the SHA-256 of each rename or transfer that faucet took, so the same body never moves a name twice. A body that faucet took before the migration has no row (see [security.md](security.md#repository-names)). The down file drops the table.
+- **A rolling deploy:** an instance of the build before that is already running keeps taking renames as before, with no row of their bodies. One that starts after the migration can't (`no migration found for version 19`).
+- **A host that embeds faucet:** `Store.RenameRepository` takes a `RepositoryRename` and returns a `RenameOutcome`, and a `Store` of your own must pass the new `storetest` subtests. Give `Service.RedeliveryWants` to `redelivery.Deps.Wants` instead of `Service.RawWants`, so that redelivery asks for a failed rename again.
+
 ## To cursors per target (migration `000018_target_lines`)
 
 This came in [#78](https://github.com/coder/faucet/pull/78). A cursor used to be faucet's event ID, which counts the events of every repository, so a caller of one repository could tell from its cursors how many events, and when, other repositories received. A cursor is now a place among the events of the target that the call names, written `v2.<n>` (see [events.md](events.md#cursors)).

@@ -26,8 +26,8 @@ type rawWantKey struct {
 // wants every event that the service offers, of any repository, so that a
 // host that cannot read the interests passes no delivery that one wanted.
 //
-// It is the value that a host gives redelivery.Deps.Wants, so that a delivery
-// which failed is asked for again while an interest wants it.
+// RedeliveryWants gives it to redelivery, so that a delivery which failed is
+// asked for again while an interest wants it.
 func (s *Service) RawWants(ctx context.Context) (func(event, action string, repoID int64) bool, error) {
 	if s.raw == nil || len(s.rawOffered) == 0 {
 		return func(string, string, int64) bool { return false }, nil

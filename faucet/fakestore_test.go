@@ -42,16 +42,33 @@ func (s *fakeStore) RecordRepository(_ context.Context, repo faucet.Repository, 
 	})
 }
 
-func (s *fakeStore) RenameRepository(_ context.Context, repo faucet.Repository, from string, seenAt time.Time) error {
-	return s.writeRepository(repo, func() {
-		i := slices.IndexFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == repo.ID })
+func (s *fakeStore) RenameRepository(_ context.Context, rename faucet.RepositoryRename, seenAt time.Time) (faucet.RenameOutcome, error) {
+	var outcome faucet.RenameOutcome
+	err := s.writeRepository(rename.Repo, func() {
+		if s.renameBodies[rename.Body] {
+			outcome = faucet.RenameSeenBefore
+			return
+		}
+		if s.renameBodies == nil {
+			s.renameBodies = map[[32]byte]bool{}
+		}
+		s.renameBodies[rename.Body] = true
+		outcome = faucet.Renamed
+		i := slices.IndexFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == rename.Repo.ID })
 		switch {
 		case i < 0:
-			s.repos = append(s.repos, fakeRepo{repo: repo, seenAt: seenAt})
-		case strings.EqualFold(s.repos[i].repo.FullName, from) || strings.EqualFold(s.currentNameLocked(s.repos[i].repo), from):
-			s.repos[i] = fakeRepo{repo: repo, seenAt: seenAt}
+			s.repos = append(s.repos, fakeRepo{repo: rename.Repo, seenAt: seenAt})
+			return
+		case strings.EqualFold(s.repos[i].repo.FullName, rename.From) || strings.EqualFold(s.currentNameLocked(s.repos[i].repo), rename.From):
+		case rename.Late:
+			outcome = faucet.RenameLate
+			return
+		default:
+			outcome = faucet.RenamedFromAStaleName
 		}
+		s.repos[i] = fakeRepo{repo: rename.Repo, seenAt: seenAt}
 	})
+	return outcome, err
 }
 
 func (s *fakeStore) AddOwner(_ context.Context, owner faucet.Owner) error {

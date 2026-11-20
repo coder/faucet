@@ -3,20 +3,32 @@ INSERT INTO faucet_repos (repo_id, owner_id, owner_login, full_name, seen_at)
 VALUES (@repo_id, @owner_id, @owner_login, @full_name, @seen_at)
 ON CONFLICT (repo_id) DO NOTHING;
 
+-- name: RecordRepositoryRename :execrows
+-- A body that the store judged before writes nothing.
+INSERT INTO faucet_repo_renames (body_sha256, repo_id, seen_at)
+VALUES (@body_sha256, @repo_id, @seen_at)
+ON CONFLICT (body_sha256) DO NOTHING;
+
+-- name: LockRepositoryHolding :one
+-- holds_from says whether the row's full name is @from_full_name, as the row
+-- holds it or under the login that the row's owner holds now. GitHub writes
+-- the name from under the owner's login now, which the row lacks when the
+-- owner was renamed after the row was first seen.
+SELECT (lower(r.full_name) = lower(@from_full_name::text) OR EXISTS (
+     SELECT 1 FROM faucet_owners o
+     WHERE o.owner_id = r.owner_id
+       AND lower(o.login || '/' || split_part(r.full_name, '/', 2)) = lower(@from_full_name::text)
+   ))::boolean AS holds_from
+FROM faucet_repos r
+WHERE r.repo_id = @repo_id
+FOR UPDATE OF r;
+
 -- name: RenameRepository :exec
 INSERT INTO faucet_repos (repo_id, owner_id, owner_login, full_name, seen_at)
 VALUES (@repo_id, @owner_id, @owner_login, @full_name, @seen_at)
 ON CONFLICT (repo_id) DO UPDATE
 SET owner_id = excluded.owner_id, owner_login = excluded.owner_login,
-    full_name = excluded.full_name, seen_at = excluded.seen_at
-WHERE lower(faucet_repos.full_name) = lower(@previous_full_name::text)
-   -- GitHub writes from under the owner's login now, which the row lacks when
-   -- the owner was renamed after the row was first seen.
-   OR EXISTS (
-     SELECT 1 FROM faucet_owners o
-     WHERE o.owner_id = faucet_repos.owner_id
-       AND lower(o.login || '/' || split_part(faucet_repos.full_name, '/', 2)) = lower(@previous_full_name::text)
-   );
+    full_name = excluded.full_name, seen_at = excluded.seen_at;
 
 -- name: GetRepositoryByName :one
 -- The owner part of the name is the login of the account that holds it now,

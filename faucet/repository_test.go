@@ -1,6 +1,7 @@
 package faucet_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -11,6 +12,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/xerrors"
+
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/sloghuman"
 
 	"github.com/coder/faucet/faucet"
 	"github.com/coder/quartz"
@@ -145,19 +149,23 @@ func TestWebhookRecordsNoRepositoryUnlessTheHostAsks(t *testing.T) {
 
 // A repository keeps the names it was first seen under, so a replayed or late
 // delivery cannot move a name back to it. Only a repository event that
-// renames or transfers it from the name that faucet holds gives it new
-// names, so a replayed old rename cannot either.
+// renames or transfers it gives it new names. A late one does so only from
+// the name that faucet holds, and a replayed one never does.
 func TestWebhookRenamesARepositoryOnlyFromTheNameItHolds(t *testing.T) {
 	t.Parallel()
-	store, clock, handler := newRepositoryHarness(t)
+	store, clock, handler := newRepositoryHarness(t, func(d *faucet.Deps) {
+		d.Redelivered = func(_ context.Context, id string) (bool, error) { return strings.HasPrefix(id, "late-"), nil }
+	})
 	first := clock.Now()
 	n := 0
+	delivery := "d"
 	deliver := func(event, action, fullName, owner, changes string) {
 		t.Helper()
 		body := `{"action":"` + action + `","ref":"refs/heads/main",` + changes +
 			`"repository":{"id":5,"name":"` + fullName[strings.Index(fullName, "/")+1:] + `","full_name":"` + fullName + `","owner":{"id":9,"login":"` + owner + `"}}}`
 		n++
-		serveWebhook(handler, newRequest(http.MethodPost, []byte(body), event, fmt.Sprintf("d-%d", n)))
+		rec := serveWebhook(handler, newRequest(http.MethodPost, []byte(body), event, fmt.Sprintf("%s-%d", delivery, n)))
+		require.Less(t, rec.Code, 300, rec.Body.String())
 		clock.Advance(time.Minute)
 	}
 	renamedFrom := func(name string) string { return `"changes":{"repository":{"name":{"from":"` + name + `"}}},` }
@@ -183,14 +191,16 @@ func TestWebhookRenamesARepositoryOnlyFromTheNameItHolds(t *testing.T) {
 	secondAt := clock.Now()
 	deliver("repository", "renamed", "coder/spout", "coder", renamedFrom("tap"))
 	require.Equal(t, named("coder/spout", "coder", secondAt), store.repos)
+	delivery = "late"
 	deliver("repository", "renamed", "coder/tap", "coder", renamedFrom("faucet"))
 	require.Equal(t, named("coder/spout", "coder", secondAt), store.repos, "a redelivered older rename does not revert the newer one")
+	delivery = "d"
 
 	movedAt := clock.Now()
 	deliver("repository", "transferred", "acme/spout", "acme", movedFrom("coder"))
 	require.Equal(t, named("acme/spout", "acme", movedAt), store.repos)
 	deliver("repository", "transferred", "acme/spout", "acme", movedFrom("coder"))
-	require.Equal(t, named("acme/spout", "acme", movedAt), store.repos, "a replayed transfer finds the new name and changes nothing")
+	require.Equal(t, named("acme/spout", "acme", movedAt), store.repos, "a replayed transfer changes nothing")
 }
 
 // A delivery that faucet's redelivery asked GitHub to send again names an
@@ -291,6 +301,14 @@ func pushNaming(id, ownerID int64, fullName string) []byte {
 		id, name, fullName, ownerID, owner)
 }
 
+// staleNameWarning is the start of the line that faucet logs when a rename
+// or transfer names a name that it does not hold.
+const staleNameWarning = "a rename or transfer of the repository never reached faucet"
+
+func loggingTo(logs *bytes.Buffer) func(*faucet.Deps) {
+	return func(d *faucet.Deps) { d.Logger = slog.Make(sloghuman.Sink(logs)) }
+}
+
 func requireAcknowledged(t *testing.T, handler http.Handler, event, delivery string, body []byte) {
 	t.Helper()
 	rec := serveWebhook(handler, newRequest(http.MethodPost, body, event, delivery))
@@ -351,7 +369,8 @@ func TestATransferAfterAMissedRenameMovesTheRepository(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			store, _, handler := newRepositoryHarness(t)
+			logs := &bytes.Buffer{}
+			store, _, handler := newRepositoryHarness(t, loggingTo(logs))
 			requireAcknowledged(t, handler, "push", "d-1", pushNaming(5, 9, "coder/r"))
 			rename(store, handler)
 
@@ -359,6 +378,7 @@ func TestATransferAfterAMissedRenameMovesTheRepository(t *testing.T) {
 			requireBoundTo(t, store, "acme/s", faucet.Repository{ID: 5, OwnerID: 10, OwnerLogin: "acme", FullName: "acme/s"})
 			requireUnbound(t, store, "coder/r")
 			requireUnbound(t, store, "coder/s")
+			require.Equal(t, 1, strings.Count(logs.String(), staleNameWarning), "the operator learns that faucet missed a rename")
 		})
 	}
 }
@@ -392,7 +412,8 @@ func TestAReplayedTransferDoesNotGiveARepositoryANameBack(t *testing.T) {
 // Hello-World to Hello-World, so the test gives it another new name.
 func TestWebhookFollowsGitHubsSampleTransferAndRename(t *testing.T) {
 	t.Parallel()
-	store, _, handler := newRepositoryHarness(t)
+	logs := &bytes.Buffer{}
+	store, _, handler := newRepositoryHarness(t, loggingTo(logs))
 	requireAcknowledged(t, handler, "push", "d-1", pushNaming(186853261, 1, "octocat/Hello-World"))
 
 	requireAcknowledged(t, handler, "repository", "d-2", fixture(t, "repository_transferred"))
@@ -406,4 +427,25 @@ func TestWebhookFollowsGitHubsSampleTransferAndRename(t *testing.T) {
 	requireAcknowledged(t, handler, "repository", "d-3", renamed)
 	requireBoundTo(t, store, "octocoders/hello-faucet", faucet.Repository{ID: 186853261, OwnerID: 38302899, OwnerLogin: "Octocoders", FullName: "Octocoders/Hello-Faucet"})
 	requireUnbound(t, store, "Octocoders/Hello-World")
+	require.NotContains(t, logs.String(), staleNameWarning, "each sample moved the repository from the name that faucet held")
+}
+
+// A host that records repositories needs every rename and transfer, so
+// redelivery asks again for one that failed, although faucet stores no event
+// of it.
+func TestRedeliveryWantsEveryRenameAndTransferWhenTheHostRecordsRepositories(t *testing.T) {
+	t.Parallel()
+	for _, records := range []bool{true, false} {
+		deps := testDeps(&fakeStore{})
+		deps.RecordRepositories = records
+		deps.Redelivered = noRedeliveries
+		svc, err := faucet.New(deps)
+		require.NoError(t, err)
+		wants, err := svc.RedeliveryWants(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, records, wants("repository", "renamed", 5), "records=%v", records)
+		require.Equal(t, records, wants("repository", "transferred", 0), "records=%v", records)
+		require.False(t, wants("repository", "edited", 5))
+		require.False(t, wants("push", "", 5))
+	}
 }

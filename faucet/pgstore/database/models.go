@@ -199,6 +199,12 @@ type FaucetRepo struct {
 	SeenAt     time.Time
 }
 
+type FaucetRepoRename struct {
+	BodySha256 []byte
+	RepoID     int64
+	SeenAt     time.Time
+}
+
 type FaucetServiceClient struct {
 	ClientID   string
 	SecretHash []byte
