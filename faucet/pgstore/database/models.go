@@ -80,6 +80,14 @@ type FaucetEvent struct {
 	ReceivedAt time.Time
 	OwnerID    int64
 	RepoName   string
+	RepoSeq    int64
+	OwnerSeq   sql.NullInt64
+}
+
+type FaucetEventLine struct {
+	Kind          string
+	TargetID      int64
+	PurgedThrough int64
 }
 
 type FaucetOwner struct {
@@ -224,6 +232,7 @@ type FaucetSubscription struct {
 	EventTypes          []string
 	TargetKind          string
 	OwnerID             int64
+	Position            int64
 }
 
 type FaucetUserSession struct {

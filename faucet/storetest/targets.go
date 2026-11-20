@@ -110,17 +110,22 @@ func pollEventsReadsEveryRepositoryThatTheTargetCovers(t *testing.T, s faucet.St
 	r := newTargetRig(t, s)
 	octoRepo, octoOther, other, unowned := seedTargetEvents(r)
 
-	requirePollIDs(t, s, faucet.PollQuery{Target: faucet.OwnerTarget(ownerOcto), Limit: 10}, octoRepo, octoOther)
-	requirePollIDs(t, s, faucet.PollQuery{Target: faucet.OwnerTarget(ownerOther), Limit: 10}, other)
-	requirePollIDs(t, s, faucet.PollQuery{Target: faucet.AllTarget(), Limit: 10}, octoRepo, octoOther, other, unowned)
-	requirePollIDs(t, s, faucet.PollQuery{Target: faucet.RepoTarget(42), Limit: 10}, octoRepo, unowned)
+	requirePollIDs(t, s, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.OwnerTarget(ownerOcto)}, Limit: 10}, octoRepo, octoOther)
+	requirePollIDs(t, s, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.OwnerTarget(ownerOther)}, Limit: 10}, other)
+	requirePollIDs(t, s, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.AllTarget()}, Limit: 10}, octoRepo, octoOther, other, unowned)
+	requirePollIDs(t, s, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, Limit: 10}, octoRepo, unowned)
 
-	page := requirePollIDs(t, s, faucet.PollQuery{Target: faucet.OwnerTarget(99), Limit: 10})
-	require.Equal(t, unowned.ID, page.Next, "a quiet owner gets the head as its cursor")
-	page = requirePollIDs(t, s, faucet.PollQuery{Target: faucet.AllTarget(), Limit: 2}, octoRepo, octoOther)
-	require.Equal(t, octoOther.ID, page.Next, "a full page ends at its last event")
+	page := requirePollIDs(t, s, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.OwnerTarget(99)}, Limit: 10})
+	require.Zero(t, page.Next, "an owner with no events has head 0, whatever other owners hold")
+	page = requirePollIDs(t, s, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.OwnerTarget(ownerOcto)}, Limit: 10}, octoRepo, octoOther)
+	require.EqualValues(t, 2, page.Next, "the line of an owner counts the events of its repositories")
+	require.Equal(t, []faucet.Position{1, 2, 1, 0}, []faucet.Position{octoRepo.OwnerPosition, octoOther.OwnerPosition, other.OwnerPosition, unowned.OwnerPosition},
+		"an event is numbered on its owner's line, and one of no owner on none")
+	require.Equal(t, []faucet.Position{1, 1, 1, 2}, []faucet.Position{octoRepo.RepoPosition, octoOther.RepoPosition, other.RepoPosition, unowned.RepoPosition})
+	page = requirePollIDs(t, s, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.AllTarget()}, Limit: 2}, octoRepo, octoOther)
+	require.Equal(t, faucet.Position(octoOther.ID), page.Next, "a full page ends at its last event")
 
-	got, err := s.PollEvents(r.ctx, faucet.PollQuery{Target: faucet.OwnerTarget(ownerOcto), Limit: 10})
+	got, err := s.PollEvents(r.ctx, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.OwnerTarget(ownerOcto)}, Limit: 10})
 	require.NoError(t, err)
 	requireSameEvent(t, octoOther, got.Events[1])
 }
@@ -129,12 +134,12 @@ func pollEventsKeepsOnlyTheRepositoryNamesAsked(t *testing.T, s faucet.Store) {
 	r := newTargetRig(t, s)
 	octoRepo, octoOther, other, unowned := seedTargetEvents(r)
 
-	requirePollIDs(t, s, faucet.PollQuery{Target: faucet.OwnerTarget(ownerOcto), RepoNames: []string{"octo/other"}, Limit: 10}, octoOther)
-	requirePollIDs(t, s, faucet.PollQuery{Target: faucet.AllTarget(), RepoNames: []string{"octo/repo", "else/where"}, Limit: 10}, octoRepo, other)
-	requirePollIDs(t, s, faucet.PollQuery{Target: faucet.OwnerTarget(ownerOther), RepoNames: []string{"octo/repo"}, Limit: 10})
-	requirePollIDs(t, s, faucet.PollQuery{Target: faucet.RepoTarget(42), RepoNames: []string{"octo/repo"}, Limit: 10}, octoRepo)
-	page := requirePollIDs(t, s, faucet.PollQuery{Target: faucet.AllTarget(), RepoNames: []string{"nobody/here"}, Limit: 10})
-	require.Equal(t, unowned.ID, page.Next, "a name nobody sent gets the head as its cursor")
+	requirePollIDs(t, s, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.OwnerTarget(ownerOcto), RepoNames: []string{"octo/other"}}, Limit: 10}, octoOther)
+	requirePollIDs(t, s, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.AllTarget(), RepoNames: []string{"octo/repo", "else/where"}}, Limit: 10}, octoRepo, other)
+	requirePollIDs(t, s, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.OwnerTarget(ownerOther), RepoNames: []string{"octo/repo"}}, Limit: 10})
+	requirePollIDs(t, s, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42), RepoNames: []string{"octo/repo"}}, Limit: 10}, octoRepo)
+	page := requirePollIDs(t, s, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.AllTarget(), RepoNames: []string{"nobody/here"}}, Limit: 10})
+	require.Equal(t, faucet.Position(unowned.ID), page.Next, "a name nobody sent gets the head of the all target as its cursor")
 }
 
 func scanTargetsListsAnOwnerOrAllSubscriptionWithAnUnreadEventItCovers(t *testing.T, s faucet.Store) {

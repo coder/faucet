@@ -825,15 +825,15 @@ func (q *Queries) RawHead(ctx context.Context) (int64, error) {
 
 const rawInterests = `-- name: RawInterests :many
 WITH subs AS (
-  SELECT s.key_hash, s.principal, s.callback_url, s.event_type, s.arguments, s.repo_id, s.secret_enc, s.cursor, s.created_at, s.updated_at, s.expires_at, s.scanned_through, s.last_delivery_at, s.last_error, s.failed_since, s.previous_secret_enc, s.previous_secret_until, s.gap_through, s.gap_lease_until, s.event_types, s.target_kind, s.owner_id FROM faucet_subscriptions s
+  SELECT s.key_hash, s.principal, s.callback_url, s.event_type, s.arguments, s.repo_id, s.secret_enc, s.cursor, s.created_at, s.updated_at, s.expires_at, s.scanned_through, s.last_delivery_at, s.last_error, s.failed_since, s.previous_secret_enc, s.previous_secret_until, s.gap_through, s.gap_lease_until, s.event_types, s.target_kind, s.owner_id, s.position FROM faucet_subscriptions s
   WHERE s.target_kind = 'repo' AND s.repo_id = $1::bigint AND $1::bigint > 0
     AND s.event_type = 'github.' || $2::text
   UNION ALL
-  SELECT s.key_hash, s.principal, s.callback_url, s.event_type, s.arguments, s.repo_id, s.secret_enc, s.cursor, s.created_at, s.updated_at, s.expires_at, s.scanned_through, s.last_delivery_at, s.last_error, s.failed_since, s.previous_secret_enc, s.previous_secret_until, s.gap_through, s.gap_lease_until, s.event_types, s.target_kind, s.owner_id FROM faucet_subscriptions s
+  SELECT s.key_hash, s.principal, s.callback_url, s.event_type, s.arguments, s.repo_id, s.secret_enc, s.cursor, s.created_at, s.updated_at, s.expires_at, s.scanned_through, s.last_delivery_at, s.last_error, s.failed_since, s.previous_secret_enc, s.previous_secret_until, s.gap_through, s.gap_lease_until, s.event_types, s.target_kind, s.owner_id, s.position FROM faucet_subscriptions s
   WHERE s.target_kind = 'owner' AND s.owner_id = $3::bigint AND $3::bigint > 0
     AND s.event_type = 'github.' || $2::text
   UNION ALL
-  SELECT s.key_hash, s.principal, s.callback_url, s.event_type, s.arguments, s.repo_id, s.secret_enc, s.cursor, s.created_at, s.updated_at, s.expires_at, s.scanned_through, s.last_delivery_at, s.last_error, s.failed_since, s.previous_secret_enc, s.previous_secret_until, s.gap_through, s.gap_lease_until, s.event_types, s.target_kind, s.owner_id FROM faucet_subscriptions s
+  SELECT s.key_hash, s.principal, s.callback_url, s.event_type, s.arguments, s.repo_id, s.secret_enc, s.cursor, s.created_at, s.updated_at, s.expires_at, s.scanned_through, s.last_delivery_at, s.last_error, s.failed_since, s.previous_secret_enc, s.previous_secret_until, s.gap_through, s.gap_lease_until, s.event_types, s.target_kind, s.owner_id, s.position FROM faucet_subscriptions s
   WHERE s.target_kind = 'all' AND s.event_type = 'github.' || $2::text
 ), leases AS (
   SELECT l.id, l.key_hash, l.principal, l.event, l.actions, l.fields, l.repo_id, l.acked_through, l.created_at, l.polled_at, l.expires_at, l.target_kind, l.owner_id, l.repos FROM faucet_raw_leases l

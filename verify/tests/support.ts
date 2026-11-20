@@ -112,8 +112,12 @@ export interface CronOptions {
   send?: (secret: string) => CronCredentials;
 }
 
+// EventRow is a faucet_events row. repo_seq is the event's place on its repository's line, and owner_seq on its owner's line
+// (null when the owner is not known): the positions that a cursor of a repo or an owner target counts.
 export interface EventRow {
   id: number;
+  repo_seq: number;
+  owner_seq: number | null;
   source: string;
   delivery_id: string;
   type: string;
@@ -130,6 +134,7 @@ export interface Reply {
 }
 
 export interface WaitedEvent {
+  // id is the event's place on the line of the target that the wait named (repo_seq for a repo), not faucet_events.id.
   id: number;
   type: string;
   repo_id: number;
@@ -143,7 +148,7 @@ export interface WaitOutcome extends Reply {
   isError: boolean;
   text: string;
   events: WaitedEvent[] | null;
-  cursor: number | null;
+  cursor: string | null;
   truncated: boolean | null;
 }
 
@@ -151,7 +156,7 @@ export interface WaitOutcome extends Reply {
 export interface ToolResult {
   isError?: boolean;
   content?: { type: string; text: string }[];
-  structuredContent?: { events: WaitedEvent[]; cursor: number };
+  structuredContent?: { events: WaitedEvent[]; cursor: string };
 }
 
 export interface McpError {
@@ -197,7 +202,10 @@ export interface SubscriptionRow {
   // previous_secret_enc and previous_secret_until are null unless a rotation window runs or ended and no delivery run has cleared it.
   previous_secret_enc: string | null;
   previous_secret_until: number | null;
+  // cursor is the internal event ID that the delivery scan reads after; position is the start that the subscribe reply named,
+  // a place on the line of the subscription's target.
   cursor: number;
+  position: number;
   created_at: number;
   updated_at: number;
   expires_at: number;
@@ -658,7 +666,7 @@ export class Faucet {
       result: {
         isError?: boolean;
         content: { text: string }[];
-        structuredContent?: { events: WaitedEvent[]; cursor: number; truncated: boolean };
+        structuredContent?: { events: WaitedEvent[]; cursor: string; truncated: boolean };
       };
     };
     outcome.isError = result.isError === true;
@@ -715,7 +723,7 @@ export class Faucet {
   async rows(repoId: number): Promise<EventRow[]> {
     if (!Number.isSafeInteger(repoId)) throw new Error('repoId must be an integer');
     const query = `select coalesce(json_agg(t order by id), '[]') from (
-      select id, source, delivery_id, type, repo_id, prs, head_sha, data
+      select id, repo_seq, owner_seq, source, delivery_id, type, repo_id, prs, head_sha, data
       from faucet_events where repo_id = ${repoId}) t`;
     return JSON.parse(await this.sql(query)) as EventRow[];
   }
@@ -731,13 +739,19 @@ export class Faucet {
     return Number(await this.sql('select purged_through from faucet_purge_mark'));
   }
 
+  // repoMark reads the purge mark of a repository's line: the highest repo_seq that a purge deleted, 0 before any did.
+  async repoMark(repoId: number): Promise<number> {
+    if (!Number.isSafeInteger(repoId)) throw new Error('repoId must be an integer');
+    return Number(await this.sql(`select faucet_line_purged_through('repo', ${repoId}, 0)`));
+  }
+
   async subscriptions(marker: string): Promise<SubscriptionRow[]> {
     if (!/^[0-9a-z-]{8,}$/.test(marker)) throw new Error('marker must be 8 or more lowercase letters, digits or hyphens');
     const ms = (column: string): string => `floor(extract(epoch from ${column}) * 1000)::bigint as ${column}`;
     const query = `select coalesce(json_agg(t order by created_at, callback_url), '[]') from (
       select encode(key_hash, 'hex') as key_hash, principal, callback_url, event_type, event_types, arguments, repo_id,
         encode(secret_enc, 'hex') as secret_enc, encode(previous_secret_enc, 'hex') as previous_secret_enc, ${ms('previous_secret_until')},
-        cursor, ${ms('created_at')}, ${ms('updated_at')}, ${ms('expires_at')}
+        cursor, position, ${ms('created_at')}, ${ms('updated_at')}, ${ms('expires_at')}
       from faucet_subscriptions where position('${marker}' in callback_url) > 0) t`;
     return JSON.parse(await this.sql(query)) as SubscriptionRow[];
   }
@@ -854,11 +868,11 @@ export class Faucet {
     path: McpPath,
     clientId: string,
     secret: string,
-    args: { repo: string; types: string[]; cursor?: number; timeout?: number },
+    args: { repo: string; types: string[]; cursor?: string; timeout?: number },
   ): Promise<{ code: number; stdout: string; stderr: string }> {
     const argv = [
       '-url', `${this.baseUrl}${path}`, '-client-id', clientId, '-repo', args.repo, '-types', args.types.join(','),
-      '-cursor', String(args.cursor ?? 0), '-timeout', String(args.timeout ?? 1),
+      '-cursor', args.cursor ?? 'v2.0', '-timeout', String(args.timeout ?? 1),
     ];
     try {
       const { stdout, stderr } = await execFileAsync(this.#state.agentBinary, argv, { env: { FAUCET_CLIENT_SECRET: secret } });
@@ -875,11 +889,11 @@ export class Faucet {
   async loginAgent(
     path: McpPath,
     clientId: string,
-    args: { repo: string; types: string[]; cursor?: number; timeout?: number; refresh?: boolean },
+    args: { repo: string; types: string[]; cursor?: string; timeout?: number; refresh?: boolean },
   ): Promise<LoginAgentRun> {
     const argv = [
       '-url', `${this.baseUrl}${path}`, '-client-id', clientId, '-repo', args.repo, '-types', args.types.join(','),
-      '-cursor', String(args.cursor ?? 0), '-timeout', String(args.timeout ?? 1), ...(args.refresh === true ? ['-refresh'] : []),
+      '-cursor', args.cursor ?? 'v2.0', '-timeout', String(args.timeout ?? 1), ...(args.refresh === true ? ['-refresh'] : []),
     ];
     let code = 0;
     let stdout = '';

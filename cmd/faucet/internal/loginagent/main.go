@@ -56,7 +56,7 @@ func run() error {
 	redirectURI := flag.String("redirect-uri", "http://127.0.0.1:53682/callback", "where the login sends the browser back to")
 	repo := flag.String("repo", "", "the repository to wait on, owner/name")
 	types := flag.String("types", "", "the event types to wait for, comma separated")
-	cursor := flag.Int64("cursor", 0, "the cursor to wait after")
+	cursor := flag.String("cursor", "v2.0", "the cursor to wait after, as events/poll returns it")
 	timeout := flag.Int("timeout", 1, "how long a wait lasts, in seconds")
 	refresh := flag.Bool("refresh", false, "after the first call, refresh the token, call again and present the replaced refresh token")
 	certDir := flag.String("write-cert", "", "write cert.pem and key.pem for 127.0.0.1 and localhost to this directory, and exit")

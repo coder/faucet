@@ -417,16 +417,18 @@ func (r *deliveryRun) ranOutOfTime(ctx context.Context, logger slog.Logger) {
 // short. It moves target on, and reports whether the read is done.
 func (r *deliveryRun) enqueueWindow(ctx, readCtx context.Context, now time.Time, target *ScanTarget, args pollArguments) (bool, error) {
 	s := r.svc
-	page, err := s.store.PollEvents(readCtx, PollQuery{
-		Target:    target.Target,
-		Types:     target.EventTypes,
-		HeadSHA:   strings.ToLower(args.SHA),
-		PR:        args.PR,
-		Fields:    args.fieldFilters(func(string) []string { return target.EventTypes }),
-		RepoNames: args.repoNames(),
-		After:     target.ScannedThrough,
-		Limit:     MaxPendingDeliveries - target.Pending,
-		Through:   windowThrough(target.ScannedThrough),
+	page, err := s.store.ScanEvents(readCtx, ScanQuery{
+		EventFilter: EventFilter{
+			Target:    target.Target,
+			Types:     target.EventTypes,
+			HeadSHA:   strings.ToLower(args.SHA),
+			PR:        args.PR,
+			Fields:    args.fieldFilters(func(string) []string { return target.EventTypes }),
+			RepoNames: args.repoNames(),
+		},
+		After:   target.ScannedThrough,
+		Limit:   MaxPendingDeliveries - target.Pending,
+		Through: windowThrough(target.ScannedThrough),
 	})
 	if err != nil {
 		return false, xerrors.Errorf("read events for a subscription: %w", err)
@@ -485,7 +487,7 @@ type gapKind struct {
 	noun   string
 	claim  func(ctx context.Context, now time.Time, lease time.Duration, skip []string) (GapClaim, bool, error)
 	finish func(ctx context.Context, ref GapRef) error
-	cursor func(through int64) string
+	cursor func(GapClaim) string
 	// through names the log field of the gap's position: the purge mark of
 	// a typed gap, and the newest event that a raw subscription missed.
 	through string
@@ -496,7 +498,7 @@ type gapKind struct {
 
 func (r *deliveryRun) typedGaps() gapKind {
 	return gapKind{
-		noun: "gap", claim: r.svc.store.ClaimGap, finish: r.svc.store.FinishGap, cursor: encodeCursor, through: "purged_through",
+		noun: "gap", claim: r.svc.store.ClaimGap, finish: r.svc.store.FinishGap, cursor: func(c GapClaim) string { return encodeCursor(c.Cursor) }, through: "purged_through",
 		sent:   "a purge deleted events before the subscription read them, the gap envelope was sent",
 		failed: "a purge deleted events before the subscription read them, the gap envelope was not delivered",
 	}
@@ -540,16 +542,17 @@ func (r *deliveryRun) sendGapsOf(ctx context.Context, kind gapKind) error {
 }
 
 // sendGap tells a subscription that it missed events: one request, no retry,
-// counted and logged once. For a typed gap the cursor is the purge mark. Every
-// event that still exists lies above it, so a client that resumes from it
-// loses none of them, and every watermark that a later event carries is at or
-// above it. A request that the end of the run cut short has no result: the
-// claim keeps its lease, and a later run sends the gap again.
+// counted and logged once. For a typed gap the cursor is the purge mark of the
+// line of the subscription's target. Every event of the target that still
+// exists lies above it, so a client that resumes from it loses none of them,
+// and every watermark that a later event carries is at or above it. A
+// request that the end of the run cut short has no result: the claim keeps
+// its lease, and a later run sends the gap again.
 func (r *deliveryRun) sendGap(ctx context.Context, kind gapKind, claim GapClaim) error {
 	defer r.gate.leave(CallbackOrigin(claim.CallbackURL))
 	logger := r.svc.logger.With(slog.F("subscription", claim.Ref.Key.ID()), slog.F(kind.through, claim.Ref.Through))
 	failure := r.wh.sendEnvelope(ctx, r.svc.clock.Now(), envelopeGap, claim.Ref.Key, claim.CallbackURL, claim.sealedSecrets(),
-		gapEnvelope{Type: envelopeGap, Cursor: kind.cursor(claim.Ref.Through)})
+		gapEnvelope{Type: envelopeGap, Cursor: kind.cursor(claim)})
 	if failure != "" && ctx.Err() != nil {
 		logger.Info(ctx, "the run ended during the request, the gap envelope waits for its lease")
 		return nil

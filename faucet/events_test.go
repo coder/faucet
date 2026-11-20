@@ -736,7 +736,7 @@ func TestPollOfADeniedRepoLooksLikeOneThatDoesNotExist(t *testing.T) {
 	h.insert(repoID, "ci.run_completed", testShaA, 7)
 	h.insert(deniedRepoID, "ci.run_completed", testShaA, 7)
 
-	for _, cursor := range []json.RawMessage{cursorOf("v1.0"), nil} {
+	for _, cursor := range []json.RawMessage{cursorOf("v2.0"), nil} {
 		denied := h.pollError(pollParams("ci.run_completed", args("repo", deniedRepo), cursor))
 		missing := h.pollError(pollParams("ci.run_completed", args("repo", "octo/does-not-exist"), cursor))
 		require.EqualValues(t, codeForbidden, denied.Code)
@@ -807,7 +807,7 @@ func TestPollAccessFailures(t *testing.T) {
 				tt.mutate(d, authz)
 			})
 			h.insert(repoID, "ci.run_completed", testShaA, 7)
-			rpcErr := h.pollError(pollParams("ci.run_completed", repoArgs(), cursorOf("v1.0")))
+			rpcErr := h.pollError(pollParams("ci.run_completed", repoArgs(), cursorOf("v2.0")))
 			require.EqualValues(t, tt.wantCode, rpcErr.Code)
 			require.Equal(t, tt.wantText, rpcErr.Message)
 			require.Zero(t, h.storeReads())
@@ -846,16 +846,16 @@ func TestPollRejectsInvalidParams(t *testing.T) {
 		{"an argument the type does not take", pollParams("ci.run_completed", repoArgs("types", []string{"pr.closed"}), nil)},
 		{"empty cursor", pollParams("ci.run_completed", repoArgs(), cursorOf(""))},
 		{"cursor of another server", pollParams("ci.run_completed", repoArgs(), cursorOf("12"))},
-		{"negative cursor", pollParams("ci.run_completed", repoArgs(), cursorOf("v1.-1"))},
-		{"cursor with a sign", pollParams("ci.run_completed", repoArgs(), cursorOf("v1.+1"))},
-		{"cursor with a leading zero", pollParams("ci.run_completed", repoArgs(), cursorOf("v1.01"))},
-		{"cursor that is not a number", pollParams("ci.run_completed", repoArgs(), cursorOf("v1.abc"))},
+		{"negative cursor", pollParams("ci.run_completed", repoArgs(), cursorOf("v2.-1"))},
+		{"cursor with a sign", pollParams("ci.run_completed", repoArgs(), cursorOf("v2.+1"))},
+		{"cursor with a leading zero", pollParams("ci.run_completed", repoArgs(), cursorOf("v2.01"))},
+		{"cursor that is not a number", pollParams("ci.run_completed", repoArgs(), cursorOf("v2.abc"))},
 		{"cursor that is not text", pollParams("ci.run_completed", repoArgs(), raw(12))},
 		{"zero maxEvents", &rawParams{Name: "ci.run_completed", Arguments: raw(repoArgs()), MaxEvents: raw(0)}},
 		{"maxEvents beyond int32", &rawParams{Name: "ci.run_completed", Arguments: raw(repoArgs()), MaxEvents: json.RawMessage(tooBig)}},
 		{"negative maxEvents", &rawParams{Name: "ci.run_completed", Arguments: raw(repoArgs()), MaxEvents: raw(-1)}},
-		{"zero maxAgeMs", &rawParams{Name: "ci.run_completed", Arguments: raw(repoArgs()), Cursor: cursorOf("v1.0"), MaxAgeMs: raw(0)}},
-		{"maxAgeMs as text", &rawParams{Name: "ci.run_completed", Arguments: raw(repoArgs()), Cursor: cursorOf("v1.0"), MaxAgeMs: raw("5")}},
+		{"zero maxAgeMs", &rawParams{Name: "ci.run_completed", Arguments: raw(repoArgs()), Cursor: cursorOf("v2.0"), MaxAgeMs: raw(0)}},
+		{"maxAgeMs as text", &rawParams{Name: "ci.run_completed", Arguments: raw(repoArgs()), Cursor: cursorOf("v2.0"), MaxAgeMs: raw("5")}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -891,7 +891,7 @@ func TestPollStoreFailureIsAnInternalError(t *testing.T) {
 	h.store.err = xerrors.New("pq: password authentication failed for user \"postgres\"")
 	h.store.mu.Unlock()
 
-	for _, cursor := range []json.RawMessage{cursorOf("v1.0"), nil} {
+	for _, cursor := range []json.RawMessage{cursorOf("v2.0"), nil} {
 		rpcErr := h.pollError(pollParams("ci.run_completed", repoArgs(), cursor))
 		require.EqualValues(t, codeInternal, rpcErr.Code)
 		require.Equal(t, "could not read events, try again", rpcErr.Message)

@@ -119,7 +119,7 @@ The variable holds several keys, so a rotation loses no GitHub token of a user a
 
 A restore puts event IDs back to the backup's, and faucet can't detect it.
 
-- Cursors that clients hold can be above the newest event. Faucet returns them as they are, and events that later get an ID at or below them are never returned. Clients must drop their cursors, and subscribers must subscribe again without one.
+- Each target's positions go back too, so a cursor that a client holds can be above the newest event of its target. Faucet reads such a cursor as that newest event at the time of the read, and answers with it. That read skips the events that the target received after the restore, before the read, at or below the cursor, and says `truncated: false`. Clients must drop their cursors, and subscribers must subscribe again without one.
 - A webhook's `webhook-id` is derived from the subscription and the event ID, so a new event can reuse the ID of one delivered before it, and a receiver that deduplicates drops it. Clear the receivers' ID caches, or change `FAUCET_WEBHOOK_KEY`.
 
 ### Retention at scale

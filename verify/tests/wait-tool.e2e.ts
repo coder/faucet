@@ -40,14 +40,15 @@ describe('wait tool', () => {
     expect(Date.now() - started).toBeLessThan(15_000);
     expect(outcome.events).toHaveLength(1);
     expect(outcome.events?.[0]).toMatchObject({
-      id: row?.id,
+      id: row?.repo_seq,
       type: 'ci.run_completed',
       repo_id: repoId,
       prs: [PR],
       head_sha: run.expected.headSha,
       data: run.expected.data,
     });
-    expect(outcome.cursor).toBe(row?.id);
+    expect(row?.repo_seq, 'the first event of a new repository is the first on its line').toBe(1);
+    expect(outcome.cursor, 'the cursor stands at the event, on the line of the repository').toBe(`v2.${row?.repo_seq}`);
   });
 
   test('a wait for a family returns its events with their exact type', async ({ faucet }) => {
@@ -89,7 +90,7 @@ describe('wait tool', () => {
 
     expect(outcome.status).toBe(200);
     expect(outcome.events).toEqual([]);
-    expect(typeof outcome.cursor).toBe('number');
+    expect(outcome.cursor, 'a repository with no event is at the start of its line').toBe('v2.0');
     expect(elapsed).toBeGreaterThanOrEqual(1_800);
     expect(elapsed).toBeLessThan(10_000);
   });
@@ -98,13 +99,41 @@ describe('wait tool', () => {
     const repoId = newRepoId();
     const repo = repoOf(repoId);
     await deliverRun(faucet, repoId);
-    const first = await faucet.waitForEvents({ repo, types: allTypes, cursor: 0, timeout_s: 1 });
+    const first = await faucet.waitForEvents({ repo, types: allTypes, cursor: 'v2.0', timeout_s: 1 });
     await deliverRun(faucet, repoId);
     const second = await faucet.waitForEvents({ repo, types: allTypes, cursor: first.cursor, timeout_s: 1 });
     const rows = await faucet.rows(repoId);
 
-    expect(first.events?.map((e) => e.id)).toEqual([rows[0]?.id]);
-    expect(second.events?.map((e) => e.id)).toEqual([rows[1]?.id]);
+    expect(first.events?.map((e) => e.id)).toEqual([rows[0]?.repo_seq]);
+    expect(second.events?.map((e) => e.id)).toEqual([rows[1]?.repo_seq]);
+  });
+
+  test('a cursor above the head of the repository reads as its head, so the next event is not skipped', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const repo = repoOf(repoId);
+    await deliverRun(faucet, repoId);
+    const ahead = await faucet.waitForEvents({ repo, types: allTypes, cursor: 'v2.99999999999', timeout_s: 1 });
+    await deliverRun(faucet, repoId);
+    const resumed = await faucet.waitForEvents({ repo, types: allTypes, cursor: ahead.cursor, timeout_s: 1 });
+
+    expect(ahead.isError, ahead.text).toBe(false);
+    expect(ahead, 'the result names the head, not the cursor it was given').toMatchObject({ events: [], cursor: 'v2.1', truncated: false });
+    expect(resumed.events?.map((e) => e.id)).toEqual([2]);
+    expect(resumed).toMatchObject({ cursor: 'v2.2', truncated: false });
+  });
+
+  test('a v1 cursor of the build before is never read as a place: the wait starts at the head and says truncated', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const repo = repoOf(repoId);
+    await deliverRun(faucet, repoId);
+    await deliverRun(faucet, repoId);
+
+    const outcome = await faucet.waitForEvents({ repo, types: allTypes, cursor: 'v1.0', timeout_s: 1 });
+
+    expect(outcome.isError, outcome.text).toBe(false);
+    expect(outcome.events, 'v1.0 named the start of every event, but it is not replayed').toEqual([]);
+    expect(outcome.truncated).toBe(true);
+    expect(outcome.cursor).toBe('v2.2');
   });
 
   test('types, sha and pr narrow what a wait returns', async ({ faucet }) => {
@@ -116,15 +145,15 @@ describe('wait tool', () => {
     const [runRow, closedRow] = await faucet.rows(repoId);
 
     const ids = async (extra: Record<string, unknown>): Promise<number[]> => {
-      const outcome = await faucet.waitForEvents({ repo, cursor: 0, timeout_s: 1, ...extra });
+      const outcome = await faucet.waitForEvents({ repo, cursor: 'v2.0', timeout_s: 1, ...extra });
       return (outcome.events ?? []).map((e) => e.id);
     };
-    expect(await ids({ types: allTypes })).toEqual([runRow?.id, closedRow?.id]);
-    expect(await ids({ types: ['pr.closed'] })).toEqual([closedRow?.id]);
-    expect(await ids({ types: allTypes, sha: run.expected.headSha })).toEqual([runRow?.id, closedRow?.id]);
+    expect(await ids({ types: allTypes })).toEqual([runRow?.repo_seq, closedRow?.repo_seq]);
+    expect(await ids({ types: ['pr.closed'] })).toEqual([closedRow?.repo_seq]);
+    expect(await ids({ types: allTypes, sha: run.expected.headSha })).toEqual([runRow?.repo_seq, closedRow?.repo_seq]);
     expect(await ids({ types: allTypes, sha: 'f'.repeat(40) })).toEqual([]);
     expect(await ids({ types: allTypes, pr: 99 })).toEqual([]);
-    expect(await ids({ types: allTypes, pr: PR })).toEqual([runRow?.id, closedRow?.id]);
+    expect(await ids({ types: allTypes, pr: PR })).toEqual([runRow?.repo_seq, closedRow?.repo_seq]);
   });
 
   // GitHub decides what the person reads, and answers 404 for a repository the person cannot see, as for one that does not exist.
@@ -134,8 +163,8 @@ describe('wait tool', () => {
       const repoId = newRepoId();
       await deliverRun(started, repoId);
 
-      const hidden = await person.waitForEvents({ repo: 'verify/hidden', types: allTypes, cursor: 0 });
-      const missing = await person.waitForEvents({ repo: 'verify/never-existed', types: allTypes, cursor: 0 });
+      const hidden = await person.waitForEvents({ repo: 'verify/hidden', types: allTypes, cursor: 'v2.0' });
+      const missing = await person.waitForEvents({ repo: 'verify/never-existed', types: allTypes, cursor: 'v2.0' });
 
       for (const outcome of [hidden, missing]) {
         expect(outcome.status).toBe(200);
@@ -178,6 +207,8 @@ describe('wait tool', () => {
       [{ repo, types: [] }, 'at least one'],
       [{ repo, types: allTypes, timeout_s: 51 }, '50'],
       [{ repo, types: allTypes, sha: 'abc' }, '40'],
+      // The cursor is the string that events/poll returns; the integer of the build before is refused by the input schema.
+      [{ repo, types: allTypes, cursor: 0 }, 'cursor'],
     ];
     for (const [args, message] of cases) {
       const outcome = await faucet.waitForEvents(args);
@@ -188,7 +219,7 @@ describe('wait tool', () => {
 
   test('the app log never holds a token or the webhook secret', async ({ faucet }) => {
     const denied = `other/denied-${newRepoId()}`;
-    expect((await faucet.waitForEvents({ repo: denied, types: allTypes, cursor: 0 })).isError).toBe(true);
+    expect((await faucet.waitForEvents({ repo: denied, types: allTypes, cursor: 'v2.0' })).isError).toBe(true);
 
     await expect.poll(() => new RegExp(`wait denied\\s+repo=${denied}\\s`).test(appLog())).toBe(true);
     expect(faucet.leaksSecret(appLog())).toBe(false);

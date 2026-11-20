@@ -102,7 +102,7 @@ func runOf(repo deliveredRepo) string {
 
 // waitFor calls the wait tool for ci.run_completed with arguments, and
 // returns the repository IDs of the events and the cursor.
-func waitFor(ctx context.Context, t *testing.T, session *mcp.ClientSession, arguments map[string]any) ([]int64, int64) {
+func waitFor(ctx context.Context, t *testing.T, session *mcp.ClientSession, arguments map[string]any) ([]int64, string) {
 	t.Helper()
 	arguments = maps.Clone(arguments)
 	arguments["types"] = []string{"ci.run_completed"}
@@ -114,7 +114,7 @@ func waitFor(ctx context.Context, t *testing.T, session *mcp.ClientSession, argu
 		Events []struct {
 			RepoID int64 `json:"repo_id"`
 		} `json:"events"`
-		Cursor int64 `json:"cursor"`
+		Cursor string `json:"cursor"`
 	}
 	raw, err := json.Marshal(res.StructuredContent)
 	require.NoError(t, err)
@@ -225,7 +225,7 @@ func TestAnOrgGrantCoversTheRepositoriesOfItsOwner(t *testing.T) {
 	session, err := srv.connectService(ctx, t, "/github/mcp", "org-watcher", secret)
 	require.NoError(t, err)
 
-	repos, _ := waitFor(ctx, t, session, map[string]any{"repo": "coder/existing", "cursor": 0})
+	repos, _ := waitFor(ctx, t, session, map[string]any{"repo": "coder/existing", "cursor": "v2.0"})
 	require.Equal(t, []int64{coderExisting.id}, repos)
 
 	res, err := call(ctx, session, "octo-org/octo-repo", map[string]any{"timeout_s": 1})
@@ -320,7 +320,7 @@ func TestAnOrgGrantFollowsItsAccountAndNoOtherHolderOfItsLogin(t *testing.T) {
 	srv.postAnswered(t, "organization", "renamed-1", renamed, http.StatusAccepted)
 	srv.deliverRunOwnedBy(t, "existing-2", deliveredRepo{id: coderExisting.id, fullName: "coder-legacy/existing"}, coderID, "coder-legacy")
 	watcher := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, srv.token(t, "coder-watcher", coderSecret))
-	repos, _ := waitFor(ctx, t, watcher, map[string]any{"owner": "coder-legacy", "cursor": 0})
+	repos, _ := waitFor(ctx, t, watcher, map[string]any{"owner": "coder-legacy", "cursor": "v2.0"})
 	require.Equal(t, []int64{coderExisting.id, coderExisting.id}, repos, "the grant follows its account to the new login")
 	waitFor(ctx, t, watcher, map[string]any{"repo": "coder-legacy/existing"})
 	require.Contains(t, waitError(ctx, t, watcher, map[string]any{"owner": "coder"}), "the grant org:coder names an account that holds another login now")
@@ -331,7 +331,7 @@ func TestAnOrgGrantFollowsItsAccountAndNoOtherHolderOfItsLogin(t *testing.T) {
 	require.Contains(t, waitError(ctx, t, watcher, map[string]any{"repo": "coder/takeover"}), "no grant of this service names coder/takeover")
 	takerSecret := srv.client(t, "taker-watcher", "/github/mcp", bothScopes, "org:coder")
 	taker := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, srv.token(t, "taker-watcher", takerSecret))
-	repos, _ = waitFor(ctx, t, taker, map[string]any{"owner": "coder", "cursor": 0})
+	repos, _ = waitFor(ctx, t, taker, map[string]any{"owner": "coder", "cursor": "v2.0"})
 	require.Equal(t, []int64{takeover.id}, repos, "a grant made now names the account that holds the login now")
 
 	srv.deliverRunOf(t, "existing-1", coderExisting)
@@ -340,7 +340,7 @@ func TestAnOrgGrantFollowsItsAccountAndNoOtherHolderOfItsLogin(t *testing.T) {
 	require.Equal(t, faucet.Owner{ID: coderID, Login: "coder"}, held, "the delivery sent again by hand gives the renamed account its old login back")
 	require.Contains(t, waitError(ctx, t, taker, map[string]any{"owner": "coder"}), "the grant org:coder names an account that holds another login now")
 	require.Contains(t, waitError(ctx, t, taker, map[string]any{"repo": "coder/existing"}), "no grant of this service names coder/existing")
-	repos, _ = waitFor(ctx, t, watcher, map[string]any{"owner": "coder", "cursor": 0})
+	repos, _ = waitFor(ctx, t, watcher, map[string]any{"owner": "coder", "cursor": "v2.0"})
 	require.Equal(t, []int64{coderExisting.id, coderExisting.id}, repos, "the first grant reads its own account under either login")
 }
 
@@ -413,7 +413,7 @@ func TestARepositoryOfARenamedOrganizationIsGrantedAndRenamedUnderItsNewLogin(t 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	org := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, srv.token(t, "org-grant", orgSecret))
-	repos, _ := waitFor(ctx, t, org, map[string]any{"owner": "coder", "cursor": 0})
+	repos, _ := waitFor(ctx, t, org, map[string]any{"owner": "coder", "cursor": "v2.0"})
 	require.Equal(t, []int64{5, 5}, repos, "the org grant covers the repository of both deliveries")
 	repo := connectSubscriber(ctx, t, &testServer{Server: srv.Server, mcpPath: "/github/mcp"}, srv.token(t, "repo-grant", repoSecret))
 	waitFor(ctx, t, repo, map[string]any{"repo": "coder/faucet"})

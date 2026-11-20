@@ -48,6 +48,16 @@ An `owner` target reads only the typed events stored since faucet added owner ta
 
 Through an `owner` or `all` target, the `data` of a typed event also holds `repo_id` and `repo`, the full name that its delivery carried (an event stored before faucet recorded names has `repo_id` only). A `repo` target's data is as before. The data of a raw event is GitHub's payload, whose `repository` already names it.
 
+## Cursors
+
+A cursor is a place among the events of the target that the call names, written `v2.<n>`. Faucet numbers the events of each repository 1, 2, 3 in the order it stores them, and the events of each owner across its repositories; the events of `all` count every event. So a cursor, and every other number or flag that a reader gets (`hasMore`, `truncated`, a webhook's `cursor`, the `id` of a waited event), counts the events of its own target and says nothing about other repositories' events or about when they arrived. The `r1.` cursors of [raw events](#raw-events) are the exception: they number every repository's raw events together.
+
+- Faucet reads a cursor on the target that the call names, so pass it back with the same target. A cursor of another target, or one made by hand, is still only a place among this target's events.
+- A cursor above the target's newest event reads as the newest, so the next event is not skipped.
+- `truncated` is true when a retention purge deleted events of the target after the cursor.
+- The wait tool takes and returns the same string, and each event's `id` is its place among the target's events.
+- A `v1.<n>` cursor, which builds before [#78](https://github.com/coder/faucet/pull/78) returned, counts the events of every repository, so faucet never reads it as a place. `events/poll`, the wait tool and `events/subscribe` answer it with `truncated: true` and start at the newest event.
+
 ## The Mcp-Name header
 
 Every `events/poll`, `events/subscribe` and `events/unsubscribe` request over HTTP must carry the header `Mcp-Name` with the event name of its `params.name`, or faucet answers 400 with `HeaderMismatch`. The go-sdk client does not set it for `events/*` yet. A host that embeds faucet gets the check from `faucet.RequireEventName`.
@@ -60,7 +70,7 @@ A family also takes filters named after a field of its data, so an agent wakes o
 - "Pull requests into main to review" is `pr.activity` with `actions: ["opened", "reopened", "ready_for_review", "synchronize"]` and `base_branch: ["main"]`.
 - A field that is null passes no value, so a `conclusion` filter matches no run, job or check that has not completed.
 - `head_branch` never matches a branch of a fork, because a fork's `main` is not this repository's. It matches only events whose `from_fork` is false, so an event stored before `from_fork` existed matches none.
-- The store applies the filters before it cuts a page, so `maxEvents`, `hasMore`, the cursor and the 100 deliveries that a subscription may hold count only the events that match. It reads the `data` of the rows that the target and the cursor select, with no index of its own, and one read looks at no more than 50000 event IDs. A poll that stopped there before the newest event says `hasMore`, also when it found nothing, and its cursor goes on from there. A wait reads on through the windows without sleeping.
+- The store applies the filters before it cuts a page, so `maxEvents`, `hasMore`, the cursor and the 100 deliveries that a subscription may hold count only the events that match. It reads the `data` of the rows that the target and the cursor select, with no index of its own, and one read looks at no more than 50000 events of the target. A poll that stopped there before the newest event says `hasMore`, also when it found nothing, and its cursor goes on from there. A wait reads on through the windows without sleeping.
 
 ## What an event carries
 

@@ -36,10 +36,13 @@ type fakeStore struct {
 	err    error
 	now    func() time.Time
 	polls  []faucet.PollQuery
+	scans  []faucet.ScanQuery
 
 	cursorLookups []time.Time
 	lastID        int64
 	purgeMark     int64
+	linePurges    map[fakeLine]faucet.Position
+	lineHeads     map[fakeLine]faucet.Position
 	subs          map[faucet.SubscriptionKeyHash]faucet.Subscription
 	scanned       map[faucet.SubscriptionKeyHash]int64
 	deliveries    map[fakeDeliveryKey]*fakeDelivery
@@ -74,11 +77,28 @@ func (s *fakeStore) InsertEvent(_ context.Context, ev faucet.Event) (faucet.Even
 			return e, false, nil
 		}
 	}
+	return s.appendLocked(ev), true, nil
+}
+
+// appendLocked stores ev as the newest event, with the fields that the store
+// assigns, and returns it.
+func (s *fakeStore) appendLocked(ev faucet.Event) faucet.Event {
+	if s.lineHeads == nil {
+		s.lineHeads = map[fakeLine]faucet.Position{}
+	}
+	repo := lineOf(faucet.RepoTarget(ev.RepoID))
+	s.lineHeads[repo]++
+	ev.RepoPosition = s.lineHeads[repo]
+	if ev.OwnerID > 0 {
+		owner := lineOf(faucet.OwnerTarget(ev.OwnerID))
+		s.lineHeads[owner]++
+		ev.OwnerPosition = s.lineHeads[owner]
+	}
 	s.lastID++
 	ev.ID = s.lastID
 	ev.ReceivedAt = s.nowLocked()
 	s.events = append(s.events, ev)
-	return ev, true, nil
+	return ev
 }
 
 func (s *fakeStore) EventsAfter(_ context.Context, afterID int64, limit int32) ([]faucet.Event, error) {

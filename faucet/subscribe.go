@@ -187,7 +187,7 @@ type subscribeRequest struct {
 	canonical   json.RawMessage
 	callbackURL string
 	secret      subscriberSecret
-	cursor      *int64
+	cursor      *cursor
 	maxAge      time.Duration
 	ttl         time.Duration
 }
@@ -240,7 +240,7 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 	}
 
 	now := s.clock.Now()
-	start, truncated, err := s.subscriptionStart(ctx, now, req)
+	start, err := s.store.StartSubscription(ctx, startQuery(now, target, req))
 	if err != nil {
 		return nil, subscriptionStoreError(ctx, logger, err)
 	}
@@ -255,7 +255,8 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 		Arguments:   req.canonical,
 		Target:      target,
 		SecretEnc:   sealed,
-		Cursor:      start,
+		Cursor:      start.After,
+		Position:    start.Position,
 		ExpiresAt:   expiresAt,
 		// The window never outlasts the grant, so a previous secret cannot
 		// outlive its subscription.
@@ -271,15 +272,17 @@ func (s *Service) subscribeMethod(ctx context.Context, _ *mcp.ServerSession, p *
 	}
 	logger.Info(ctx, "subscribed",
 		slog.F("login", principal.Login), slog.F("subscription", key.ID()), slog.F("expires_at", row.ExpiresAt))
+	renewed := row.UpdatedAt.After(row.CreatedAt)
 	result := &eventsSubscribeResult{
 		ResultType:    resultComplete,
 		ID:            key.ID(),
 		RefreshBefore: row.ExpiresAt.UTC().Format(time.RFC3339),
-		Cursor:        encodeCursor(row.Cursor),
-		// A row that kept its own cursor did not restart, so nothing was skipped.
-		Truncated: truncated && row.Cursor == start,
+		Cursor:        encodeCursor(row.Position),
+		// A renewal kept its own start, so it skipped nothing. A legacy
+		// cursor is no place on the line, so the start skipped what it named.
+		Truncated: (start.Truncated || req.cursor != nil && req.cursor.legacy) && !renewed,
 	}
-	if row.UpdatedAt.After(row.CreatedAt) {
+	if renewed {
 		result.DeliveryStatus = newDeliveryStatusResult(row.Status)
 	}
 	return result, nil
@@ -374,27 +377,19 @@ func (wh *webhookState) verifyCallback(ctx context.Context, logger slog.Logger, 
 	}
 }
 
-// subscriptionStart picks where delivery begins and whether that skips events
-// the caller asked for. No cursor means now. A cursor below the oldest event
-// the store can still serve, which is the purge mark or the maxAgeMs floor, is
-// moved up to it and reported as truncated.
-func (s *Service) subscriptionStart(ctx context.Context, now time.Time, req subscribeRequest) (start int64, truncated bool, err error) {
-	if req.cursor == nil {
-		head, err := s.store.CursorAt(ctx, now)
-		return head, false, err
+// startQuery asks for the start of a subscription. No cursor means now, and
+// so does a legacy cursor. A cursor below the oldest event the store can
+// still serve, which is the purge mark or the maxAgeMs floor, is moved up to
+// it and reported as truncated.
+func startQuery(now time.Time, target Target, req subscribeRequest) StartQuery {
+	if req.cursor == nil || req.cursor.legacy {
+		return StartQuery{Target: target, Since: now}
 	}
-	var floorTime time.Time
+	q := StartQuery{Target: target, Cursor: &req.cursor.position}
 	if req.maxAge > 0 {
-		floorTime = now.Add(-req.maxAge)
+		q.Since = now.Add(-req.maxAge)
 	}
-	floor, err := s.store.CursorAt(ctx, floorTime)
-	if err != nil {
-		return 0, false, err
-	}
-	if *req.cursor < floor {
-		return floor, true, nil
-	}
-	return *req.cursor, false, nil
+	return q
 }
 
 func subscriptionStoreError(ctx context.Context, logger slog.Logger, err error) error {
@@ -434,11 +429,11 @@ func parseSubscribe(p *subscriptionParams, allowInsecureLoopback bool) (subscrib
 		if json.Unmarshal(p.fields.Cursor, &cursor) != nil {
 			return subscribeRequest{}, invalidParams("cursor must be a string")
 		}
-		id, ok := decodeCursor(cursor)
+		c, ok := decodeCursor(cursor)
 		if !ok {
 			return subscribeRequest{}, invalidParams("cursor is not one this server returned")
 		}
-		req.cursor = &id
+		req.cursor = &c
 	}
 	if req.maxAge, err = parseMaxAge(p.fields.MaxAgeMs); err != nil {
 		return subscribeRequest{}, err

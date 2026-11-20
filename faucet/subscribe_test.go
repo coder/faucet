@@ -184,13 +184,13 @@ func TestSubscribeStoresASubscriptionForAReadableRepository(t *testing.T) {
 
 	h := newWebhookHarness(t)
 	secret := newSecret(t, 32)
-	head := h.insert(repoID, "ci.run_completed", "").ID
+	head := h.insert(repoID, "ci.run_completed", "").RepoPosition
 	h.clock.Advance(time.Second)
 
 	got := h.subscribe(subscribeTo(repoArgs("pr", 7), callbackURL, secret))
 	require.Equal(t, "complete", got.ResultType)
 	require.False(t, got.Truncated)
-	require.Equal(t, fmt.Sprintf("v1.%d", head), got.Cursor, "delivery starts after the events that exist now")
+	require.Equal(t, fmt.Sprintf("v2.%d", head), got.Cursor, "delivery starts after the events that exist now")
 	require.Equal(t, h.clock.Now().Add(10*time.Minute).UTC().Format(time.RFC3339), got.RefreshBefore)
 
 	rows := h.rows()
@@ -202,7 +202,7 @@ func TestSubscribeStoresASubscriptionForAReadableRepository(t *testing.T) {
 	require.JSONEq(t, `{"repo":"octo/repo","pr":7}`, string(row.Arguments))
 	require.Equal(t, faucet.RepoTarget(repoID), row.Target, "GitHub's repository ID, not the name")
 	require.Equal(t, got.ID, row.KeyHash.ID())
-	require.Equal(t, head, row.Cursor)
+	require.Equal(t, head, row.Position)
 	require.Equal(t, 1, h.verifier.callCount())
 }
 
@@ -748,7 +748,7 @@ func TestSubscribeKeepsTheCursorOfALiveSubscriptionAndRestartsALapsedOne(t *test
 
 	h.clock.Advance(11 * time.Minute)
 	lapsed := h.subscribe(subscribeTo(repoArgs(), callbackURL, secret))
-	require.Equal(t, "v1.3", lapsed.Cursor, "after the TTL passed it is a fresh subscription that starts at now")
+	require.Equal(t, "v2.3", lapsed.Cursor, "after the TTL passed it is a fresh subscription that starts at now")
 	require.Equal(t, first.ID, lapsed.ID)
 }
 
@@ -767,31 +767,31 @@ func TestSubscribeReadsTheSuppliedCursor(t *testing.T) {
 		params.Cursor, params.MaxAgeMs = raw(cursor), maxAge
 		return h.subscribe(params)
 	}
-	got := at("v1.2", nil, "https://hooks.example.test/a")
-	require.Equal(t, subscribed{ResultType: "complete", ID: got.ID, RefreshBefore: got.RefreshBefore, Cursor: "v1.2"}, got,
+	got := at("v2.2", nil, "https://hooks.example.test/a")
+	require.Equal(t, subscribed{ResultType: "complete", ID: got.ID, RefreshBefore: got.RefreshBefore, Cursor: "v2.2"}, got,
 		"a cursor inside the stored events starts delivery after it")
 	require.Equal(t, int64(2), h.rows()[0].Cursor)
 
-	got = at("v1.1", json.RawMessage("150000"), "https://hooks.example.test/b")
-	require.Equal(t, "v1.2", got.Cursor, "maxAgeMs moves the start up to the oldest event it allows")
+	got = at("v2.1", json.RawMessage("150000"), "https://hooks.example.test/b")
+	require.Equal(t, "v2.2", got.Cursor, "maxAgeMs moves the start up to the oldest event it allows")
 	require.True(t, got.Truncated, "and says that events were skipped")
 
-	got = at("v1.999", nil, "https://hooks.example.test/c")
-	require.Equal(t, "v1.999", got.Cursor, "a cursor ahead of the head is kept, as poll keeps it")
+	got = at("v2.999", nil, "https://hooks.example.test/c")
+	require.Equal(t, "v2.4", got.Cursor, "a cursor ahead of the head starts at the head, as poll reads it")
 	require.False(t, got.Truncated)
 
-	got = at("v1.1", raw(int64(math.MaxInt64)), "https://hooks.example.test/huge")
-	require.Equal(t, "v1.1", got.Cursor, "the largest maxAgeMs is a very old floor, not a wrapped one")
+	got = at("v2.1", raw(int64(math.MaxInt64)), "https://hooks.example.test/huge")
+	require.Equal(t, "v2.1", got.Cursor, "the largest maxAgeMs is a very old floor, not a wrapped one")
 	require.False(t, got.Truncated)
 
 	h.clock.Advance(time.Minute)
 	_, err := h.store.Purge(h.ctx, h.clock.Now().Add(-2*time.Minute))
 	require.NoError(t, err)
-	got = at("v1.0", nil, "https://hooks.example.test/d")
-	require.Equal(t, "v1.3", got.Cursor, "events through the purge mark are gone, so delivery starts above it")
+	got = at("v2.0", nil, "https://hooks.example.test/d")
+	require.Equal(t, "v2.3", got.Cursor, "events through the purge mark are gone, so delivery starts above it")
 	require.True(t, got.Truncated)
 
-	for name, cursor := range map[string]string{"not ours": "page-2", "negative": "v1.-1", "padded": "v1.01", "empty": ""} {
+	for name, cursor := range map[string]string{"not ours": "page-2", "negative": "v2.-1", "padded": "v2.01", "empty": ""} {
 		params := subscribeTo(repoArgs(), callbackURL, secret)
 		params.Cursor = raw(cursor)
 		require.EqualValues(t, codeInvalidParams, h.subscribeError(params).Code, name)
@@ -1174,7 +1174,7 @@ func TestSubscribeReadsAnyJSONNumberWhoseValueIsAnInteger(t *testing.T) {
 	}
 
 	params := subscribeTo(repoArgs(), callbackURL, secret)
-	params.Cursor, params.MaxAgeMs = cursorOf("v1.0"), json.RawMessage("1e3")
+	params.Cursor, params.MaxAgeMs = cursorOf("v2.0"), json.RawMessage("1e3")
 	h.subscribe(params)
 	params.MaxAgeMs = json.RawMessage("1.5")
 	require.EqualValues(t, codeInvalidParams, h.subscribeError(params).Code)

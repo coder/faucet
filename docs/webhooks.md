@@ -50,7 +50,7 @@ Keep `FAUCET_WEBHOOK_KEY` stable. Rows sealed under another key can't be read. T
 - A subscription lives for `ttlMs`, clamped to between 30 seconds and 10 minutes (default 10 minutes). Renew before `refreshBefore`.
 - A login can hold 100 live subscriptions. The next subscribe gets `ResourceExhausted` with `data.limit` `subscriptions`.
 
-A renewal keeps the subscription's read position and ignores any `cursor` it carries. A subscribe after the subscription lapsed (it expired or was unsubscribed) starts after the `cursor` you send. A renewal also reports `deliveryStatus`: `lastDeliveryAt`, `lastError` and `failedSince`. `lastError`, and the `data.reason` of a `CallbackEndpointError`, take these values:
+A renewal keeps the subscription's read position and ignores any `cursor` it carries. A subscribe after the subscription lapsed (it expired or was unsubscribed) starts after the `cursor` you send, read among the events of the target (see [cursors](events.md#cursors)): one above the target's newest event starts at the newest, and a `v1.` cursor starts there too, with `truncated: true`. A renewal also reports `deliveryStatus`: `lastDeliveryAt`, `lastError` and `failedSince`. `lastError`, and the `data.reason` of a `CallbackEndpointError`, take these values:
 
 <!-- BEGIN generated:callback-reasons -->
 | Value | In lastError | In data.reason | Meaning |
@@ -79,13 +79,13 @@ webhook-id: msg_...
 webhook-timestamp: <unix seconds>
 webhook-signature: v1,<base64 HMAC-SHA256>
 
-{"eventId": "msg_...", "name": "ci.run_completed", "timestamp": "...", "data": {...}, "cursor": "v1.123"}
+{"eventId": "msg_...", "name": "ci.run_completed", "timestamp": "...", "data": {...}, "cursor": "v2.123"}
 ```
 
 - The signature is the Standard Webhooks HMAC over `<webhook-id>.<webhook-timestamp>.<body>`, keyed with the subscriber's secret. Verify it with any Standard Webhooks library.
 - `name` is the subscribed name, and `name` and `data` match what `events/poll` of that name returns. `timestamp` is when faucet received the event.
 - `webhook-id` (and `eventId`, which equals it) is stable for one event to one subscription, across every retry and replay, while `FAUCET_WEBHOOK_KEY` stays the same: it is an HMAC under that key. **Deduplicate on it.** After a key change, a replay of an event that the receiver already has arrives with a new ID, once (see [deploy.md](deploy.md#rotating-faucet_webhook_key)). It differs from the GitHub delivery ID that `events/poll` reports.
-- `cursor` is a safe watermark: every event of the subscription at or below it has been delivered or given up. Persist it, and pass it to `events/subscribe` if the subscription lapses.
+- `cursor` is a safe watermark: every event of the subscription at or below it has been delivered or given up. It is a place among the events of the subscription's target, as an `events/poll` cursor is (see [cursors](events.md#cursors)), so other repositories' events never move it. Persist it, and pass it to `events/subscribe` if the subscription lapses. When the lowest unsent event was purged, the watermark lies below the target's purge mark, so a resume from it reports the loss.
 - For a [raw name](events.md#raw-events), `data` is GitHub's payload, or the `fields` of it that the subscription named, and the `cursor` has the form `r1.<n>`. Faucet keeps no raw event for a subscription that does not exist, so a subscribe after a lapse answers `truncated: true` when it carries a cursor, and delivery starts with the next event.
 - The request carries no `Authorization` header and no cookies. Nothing the endpoint sends back reaches faucet's replies, logs or tables.
 
@@ -123,7 +123,7 @@ Faucet checks access only when the subscriber renews, so it sees revoked access 
 
 Faucet also sends two bodies with a top-level `type` and no `eventId` or `data`. They carry the same headers and signature. Each send gets a fresh `webhook-id` and is attempted once.
 
-- `{"type":"gap","cursor":"v1.<n>"}`: a retention purge deleted events that the subscription hadn't read yet. The check ignores the `sha`, `pr`, `repos` and field filter arguments, so a filtered subscription can get a gap for an event that its filter would have dropped. Treat it like `truncated: true` and persist the `cursor`. A gap can arrive more than once, so deduplicate gaps by `cursor` and keep the highest. A raw subscription gets a gap, with a cursor `r1.<n>`, for the events that arrived while it held 100 unsent deliveries, for an event whose payload, or the `fields` of it, or the body that carries them, is over 256 KiB, and for an event whose payload a purge dropped before its delivery ended.
+- `{"type":"gap","cursor":"v2.<n>"}`: a retention purge deleted events that the subscription hadn't read yet. The `cursor` is the highest place among the target's events that a purge deleted, so every event of the target that still exists lies above it. The check ignores the `sha`, `pr`, `repos` and field filter arguments, so a filtered subscription can get a gap for an event that its filter would have dropped. Treat it like `truncated: true` and persist the `cursor`. A gap can arrive more than once, so deduplicate gaps by `cursor` and keep the highest. A raw subscription gets a gap, with a cursor `r1.<n>`, for the events that arrived while it held 100 unsent deliveries, for an event whose payload, or the `fields` of it, or the body that carries them, is over 256 KiB, and for an event whose payload a purge dropped before its delivery ended.
 - `{"type":"terminated","error":{"code":-32024,"message":"Forbidden","data":{"reason":"Access revoked"}}}`: a renewal found that the caller can no longer read the target, so the subscription was deleted. Delivery is at most once.
 
 ## Secret rotation

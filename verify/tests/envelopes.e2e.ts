@@ -60,7 +60,8 @@ describe('control envelopes', () => {
       expect(gaps).toHaveLength(1);
       const body = expectSignedEnvelope(gaps[0]!, 'gap', subscription.id);
       expect(Object.keys(body).sort(), 'a gap body has a type and a cursor and nothing else').toEqual(['cursor', 'type']);
-      expect(body.cursor, 'the cursor is the purge mark that the purge reported').toBe(`v1.${purged.purged_through}`);
+      expect(await started.repoMark(repoId), 'the purge deleted the first two events of the repository').toBe(2);
+      expect(body.cursor, 'the cursor is the purge mark of the repository\'s line, not the global one that the purge reported').toBe('v2.2');
       const resumed = await pollFrom(started, repoId, body.cursor as string);
       expect(resumed.map((e) => e.eventId), 'resuming from the gap cursor replays the survivor').toEqual([survivor]);
 

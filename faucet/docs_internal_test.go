@@ -43,7 +43,7 @@ func TestDocsStateTheNumbersThatTheConstantsGive(t *testing.T) {
 		{"docs/browser-login.md", "can run for up to %d more seconds", []any{maxWaitSeconds}},
 		{"docs/security.md", "One login can hold %d waits open at once", []any{defaultMaxWaitsPerLogin}},
 		{"docs/security.md", "per process, and run %d `events/poll` calls at once", []any{defaultMaxPollsPerLogin}},
-		{"docs/events.md", "one read looks at no more than %d event IDs", []any{readWindow}},
+		{"docs/events.md", "one read looks at no more than %d events of the target", []any{readWindow}},
 		{"docs/security.md", "and times out after %d seconds", []any{seconds(callbackRequestTimeout)}},
 		{"docs/security.md", "declares a body over %d KiB or that has headers over %d KiB", []any{kib(maxCallbackResponseBytes), kib(maxCallbackHeaderBytes)}},
 		{"docs/events.md", "the cursor and the %d deliveries that a subscription may hold", []any{MaxPendingDeliveries}},

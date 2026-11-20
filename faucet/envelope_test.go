@@ -93,7 +93,7 @@ func TestDeliverDueSendsOneSignedGapEnvelopeThatResumesWithoutLosingEvents(t *te
 	require.Len(t, members, 2, "a gap body has a type and a cursor and nothing else")
 	var cursor string
 	require.NoError(t, json.Unmarshal(members["cursor"], &cursor))
-	require.Equal(t, "v1."+strconv.FormatInt(purged.ID, 10), cursor, "the cursor is the purge mark, the oldest position that still has events above it")
+	require.Equal(t, "v2."+strconv.FormatInt(int64(purged.RepoPosition), 10), cursor, "the cursor is the purge mark of the line, the oldest position that still has events above it")
 
 	resumed := d.poll(pollParams("ci.run_completed", repoArgs(), cursorOf(cursor)))
 	require.False(t, resumed.Truncated, "the gap cursor is a position the server can serve from")

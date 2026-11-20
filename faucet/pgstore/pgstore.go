@@ -51,7 +51,7 @@ func endedBy(ctx context.Context, err error) error {
 // order, so a reader that sees ID n has seen every lower ID that will commit.
 // The row's time is taken at the insert, under the lock, and not by the
 // column default at the start of the transaction, so a higher ID never carries
-// an earlier time and CursorAt returns a prefix of the log.
+// an earlier time and PositionAt returns a prefix of each line.
 func (s *Store) InsertEvent(ctx context.Context, ev faucet.Event) (_ faucet.Event, _ bool, err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if err := ev.Validate(); err != nil {
@@ -114,44 +114,36 @@ func (s *Store) EventsAfter(ctx context.Context, afterID int64, limit int32) (_ 
 	return events, nil
 }
 
-// PollEvents runs one statement, so the page and the head ID it reports share a
-// snapshot. The head ID is read in the same statement as the page because
-// IDs become visible in commit order: every ID at or below it that will ever
-// exist is already visible, so a cursor set to it cannot skip an event.
+// PollEvents runs one statement, so the page and the head of the line that it
+// reports share a snapshot. The head is read in the same statement as the
+// page because positions become visible in commit order: every position at or
+// below it that will ever exist is already visible, so a cursor set to it
+// cannot skip an event.
 func (s *Store) PollEvents(ctx context.Context, q faucet.PollQuery) (_ faucet.PollPage, err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if err := q.Validate(); err != nil {
 		return faucet.PollPage{}, xerrors.Errorf("validate poll query: %w", err)
 	}
-	// pq.Array encodes a nil slice as NULL, which makes the type filter match nothing.
-	types := q.Types
-	if types == nil {
-		types = []string{}
+	f, err := filterParams(q.EventFilter)
+	if err != nil {
+		return faucet.PollPage{}, err
 	}
 	through := q.Through
 	if through == 0 {
 		through = math.MaxInt64
 	}
-	filters := make([]fieldFilter, len(q.Fields))
-	for i, f := range q.Fields {
-		filters[i] = fieldFilter(f)
-	}
-	fields, err := json.Marshal(filters)
-	if err != nil {
-		return faucet.PollPage{}, xerrors.Errorf("encode field filters: %w", err)
-	}
-	rows, err := s.q.PollEvents(ctx, database.PollEventsParams{
-		TargetKind: string(q.Target.Kind()),
-		RepoID:     q.Target.RepoID(),
-		OwnerID:    q.Target.OwnerID(),
-		RepoNames:  nonNil(q.RepoNames),
-		AfterID:    q.After,
-		Types:      types,
-		HeadSha:    q.HeadSHA,
-		Pr:         q.PR,
-		Fields:     string(fields),
+	rows, err := s.q.PollLine(ctx, database.PollLineParams{
+		TargetKind: f.kind,
+		RepoID:     f.repoID,
+		OwnerID:    f.ownerID,
+		After:      int64(q.After),
+		Through:    int64(through),
+		RepoNames:  f.repoNames,
+		Types:      f.types,
+		HeadSha:    f.headSHA,
+		Pr:         f.pr,
+		Fields:     f.fields,
 		RowLimit:   q.Limit,
-		Through:    through,
 	})
 	if err != nil {
 		return faucet.PollPage{}, xerrors.Errorf("poll events: %w", err)
@@ -159,17 +151,99 @@ func (s *Store) PollEvents(ctx context.Context, q faucet.PollQuery) (_ faucet.Po
 	if len(rows) == 0 {
 		return faucet.PollPage{}, xerrors.New("poll events: statement returned no head row")
 	}
-
-	page := faucet.PollPage{Next: max(min(rows[0].MaxID, through), q.After), PurgedThrough: rows[0].PurgedThrough}
+	page := faucet.PollPage{Next: faucet.Position(min(rows[0].Head, int64(through))), PurgedThrough: faucet.Position(rows[0].PurgedThrough)}
 	for _, row := range rows {
 		if row.ID.Valid {
-			page.Events = append(page.Events, pollRowToEvent(row))
+			page.Events = append(page.Events, eventOf(database.ScanEventsRow(row)))
+		}
+	}
+	if len(page.Events) == int(q.Limit) {
+		page.Next = q.Target.PositionOf(page.Events[len(page.Events)-1])
+	}
+	return page, nil
+}
+
+// ScanEvents runs one statement, so the page and the head ID it reports share
+// a snapshot. The head ID is read in the same statement as the page because
+// IDs become visible in commit order: every ID at or below it that will ever
+// exist is already visible, so a read position set to it cannot skip an
+// event.
+func (s *Store) ScanEvents(ctx context.Context, q faucet.ScanQuery) (_ faucet.ScanPage, err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	if err := q.Validate(); err != nil {
+		return faucet.ScanPage{}, xerrors.Errorf("validate scan query: %w", err)
+	}
+	f, err := filterParams(q.EventFilter)
+	if err != nil {
+		return faucet.ScanPage{}, err
+	}
+	through := q.Through
+	if through == 0 {
+		through = math.MaxInt64
+	}
+	rows, err := s.q.ScanEvents(ctx, database.ScanEventsParams{
+		TargetKind: f.kind,
+		RepoID:     f.repoID,
+		OwnerID:    f.ownerID,
+		RepoNames:  f.repoNames,
+		AfterID:    q.After,
+		Types:      f.types,
+		HeadSha:    f.headSHA,
+		Pr:         f.pr,
+		Fields:     f.fields,
+		RowLimit:   q.Limit,
+		Through:    through,
+	})
+	if err != nil {
+		return faucet.ScanPage{}, xerrors.Errorf("scan events: %w", err)
+	}
+	if len(rows) == 0 {
+		return faucet.ScanPage{}, xerrors.New("scan events: statement returned no head row")
+	}
+
+	page := faucet.ScanPage{Next: max(min(rows[0].Head, through), q.After), PurgedThrough: rows[0].PurgedThrough}
+	for _, row := range rows {
+		if row.ID.Valid {
+			page.Events = append(page.Events, eventOf(row))
 		}
 	}
 	if len(page.Events) == int(q.Limit) {
 		page.Next = page.Events[len(page.Events)-1].ID
 	}
 	return page, nil
+}
+
+// readFilter is a faucet.EventFilter as the read statements take it.
+type readFilter struct {
+	kind            string
+	repoID, ownerID int64
+	repoNames       []string
+	types           []string
+	headSHA         string
+	pr              int32
+	fields          string
+}
+
+func filterParams(f faucet.EventFilter) (readFilter, error) {
+	filters := make([]fieldFilter, len(f.Fields))
+	for i, field := range f.Fields {
+		filters[i] = fieldFilter(field)
+	}
+	fields, err := json.Marshal(filters)
+	if err != nil {
+		return readFilter{}, xerrors.Errorf("encode field filters: %w", err)
+	}
+	return readFilter{
+		kind:      string(f.Target.Kind()),
+		repoID:    f.Target.RepoID(),
+		ownerID:   f.Target.OwnerID(),
+		repoNames: nonNil(f.RepoNames),
+		// lib/pq sends a nil slice as NULL, which makes the type filter match nothing.
+		types:   nonNil(f.Types),
+		headSHA: f.HeadSHA,
+		pr:      f.PR,
+		fields:  string(fields),
+	}, nil
 }
 
 // fieldFilter is the JSON of a faucet.FieldFilter that PollEvents reads with
@@ -180,17 +254,38 @@ type fieldFilter struct {
 	Types  []string `json:"types"`
 }
 
-func (s *Store) CursorAt(ctx context.Context, t time.Time) (_ int64, err error) {
+func (s *Store) PositionAt(ctx context.Context, target faucet.Target, t time.Time) (_ faucet.Position, err error) {
 	defer func() { err = endedBy(ctx, err) }()
-	id, err := s.q.CursorAt(ctx, t)
+	p, err := s.q.PositionAt(ctx, database.PositionAtParams{TargetKind: string(target.Kind()), RepoID: target.RepoID(), OwnerID: target.OwnerID(), Before: t})
 	if err != nil {
-		return 0, xerrors.Errorf("select cursor: %w", err)
+		return 0, xerrors.Errorf("select position: %w", err)
 	}
-	return id, nil
+	return faucet.Position(p), nil
 }
 
-// Purge deletes the old events and raises the mark in one transaction. The
-// mark is the highest ID the same statement deleted, so it is exact whatever
+func (s *Store) StartSubscription(ctx context.Context, q faucet.StartQuery) (_ faucet.Start, err error) {
+	defer func() { err = endedBy(ctx, err) }()
+	if err := q.Validate(); err != nil {
+		return faucet.Start{}, xerrors.Errorf("validate start: %w", err)
+	}
+	var cursor sql.NullInt64
+	if q.Cursor != nil {
+		cursor = sql.NullInt64{Int64: int64(*q.Cursor), Valid: true}
+	}
+	row, err := s.q.StartSubscription(ctx, database.StartSubscriptionParams{
+		TargetKind: string(q.Target.Kind()), RepoID: q.Target.RepoID(), OwnerID: q.Target.OwnerID(),
+		Since:  sql.NullTime{Time: q.Since, Valid: !q.Since.IsZero()},
+		Cursor: cursor,
+	})
+	if err != nil {
+		return faucet.Start{}, xerrors.Errorf("select start: %w", err)
+	}
+	return faucet.Start{Position: faucet.Position(row.Position), After: row.After, Truncated: row.Truncated}, nil
+}
+
+// Purge deletes the old events and raises the mark in one transaction. A
+// trigger of the delete raises the purge marks of the lines. The mark is the
+// highest ID the same statement deleted, so it is exact whatever
 // inserts run alongside: an insert that the statement's snapshot cannot see is
 // not deleted and gets an ID above every ID the snapshot can see. Purge does
 // not take eventsLockKey, so an insert of a new delivery does not wait for a
@@ -284,6 +379,7 @@ func (s *Store) upsertSubscriptionChecked(ctx context.Context, sub faucet.Subscr
 		OwnerID:             sub.Target.OwnerID(),
 		SecretEnc:           sub.SecretEnc,
 		Cursor:              sub.Cursor,
+		Position:            int64(sub.Position),
 		Now:                 now,
 		ExpiresAt:           sub.ExpiresAt,
 		PreviousSecretUntil: sql.NullTime{Time: now.Add(sub.RotationGrace), Valid: sub.RotationGrace > 0},
@@ -372,6 +468,7 @@ func toSubscription(row database.FaucetSubscription) (faucet.Subscription, error
 		PreviousSecretEnc:   row.PreviousSecretEnc,
 		PreviousSecretUntil: row.PreviousSecretUntil.Time,
 		Cursor:              row.Cursor,
+		Position:            faucet.Position(row.Position),
 		CreatedAt:           row.CreatedAt,
 		UpdatedAt:           row.UpdatedAt,
 		ExpiresAt:           row.ExpiresAt,
@@ -383,35 +480,39 @@ func toSubscription(row database.FaucetSubscription) (faucet.Subscription, error
 	}, nil
 }
 
-func pollRowToEvent(row database.PollEventsRow) faucet.Event {
+func eventOf(row database.ScanEventsRow) faucet.Event {
 	return faucet.Event{
-		ID:         row.ID.Int64,
-		Source:     row.Source.String,
-		DeliveryID: row.DeliveryID.String,
-		Type:       row.Type.String,
-		RepoID:     row.RepoID.Int64,
-		OwnerID:    row.OwnerID.Int64,
-		RepoName:   row.RepoName.String,
-		PRs:        row.Prs,
-		HeadSHA:    row.HeadSha.String,
-		Data:       row.Data,
-		ReceivedAt: row.ReceivedAt.Time,
+		ID:            row.ID.Int64,
+		Source:        row.Source.String,
+		DeliveryID:    row.DeliveryID.String,
+		Type:          row.Type.String,
+		RepoID:        row.RepoID.Int64,
+		OwnerID:       row.OwnerID.Int64,
+		RepoName:      row.RepoName.String,
+		PRs:           row.Prs,
+		HeadSHA:       row.HeadSha.String,
+		Data:          row.Data,
+		ReceivedAt:    row.ReceivedAt.Time,
+		RepoPosition:  faucet.Position(row.RepoSeq.Int64),
+		OwnerPosition: faucet.Position(row.OwnerSeq.Int64),
 	}
 }
 
 func toEvent(row database.FaucetEvent) faucet.Event {
 	return faucet.Event{
-		ID:         row.ID,
-		Source:     row.Source,
-		DeliveryID: row.DeliveryID,
-		Type:       row.Type,
-		RepoID:     row.RepoID,
-		OwnerID:    row.OwnerID,
-		RepoName:   row.RepoName,
-		PRs:        row.Prs,
-		HeadSHA:    row.HeadSha.String,
-		Data:       row.Data,
-		ReceivedAt: row.ReceivedAt,
+		ID:            row.ID,
+		Source:        row.Source,
+		DeliveryID:    row.DeliveryID,
+		Type:          row.Type,
+		RepoID:        row.RepoID,
+		OwnerID:       row.OwnerID,
+		RepoName:      row.RepoName,
+		PRs:           row.Prs,
+		HeadSHA:       row.HeadSha.String,
+		Data:          row.Data,
+		ReceivedAt:    row.ReceivedAt,
+		RepoPosition:  faucet.Position(row.RepoSeq),
+		OwnerPosition: faucet.Position(row.OwnerSeq.Int64),
 	}
 }
 

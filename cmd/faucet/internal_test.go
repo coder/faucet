@@ -72,12 +72,14 @@ func (s *stubStore) PollEvents(_ context.Context, q faucet.PollQuery) (faucet.Po
 	s.polls++
 	page := faucet.PollPage{Events: s.events, Next: max(q.After, 7)}
 	if len(s.events) > 0 {
-		page.Next = s.events[len(s.events)-1].ID
+		page.Next = q.Target.PositionOf(s.events[len(s.events)-1])
 	}
 	return page, nil
 }
 
-func (*stubStore) CursorAt(context.Context, time.Time) (int64, error) { return 7, nil }
+func (*stubStore) PositionAt(context.Context, faucet.Target, time.Time) (faucet.Position, error) {
+	return 7, nil
+}
 
 func (s *stubStore) pollCount() int {
 	s.mu.Lock()
@@ -193,7 +195,7 @@ type testServerConfig struct {
 func newTestServer(t *testing.T, configure ...func(*testServerConfig)) *testServer {
 	t.Helper()
 	store := &stubStore{events: []faucet.Event{{
-		ID: 8, Source: "github", DeliveryID: "d", Type: "ci.run_completed", RepoID: 42,
+		ID: 8, RepoPosition: 8, Source: "github", DeliveryID: "d", Type: "ci.run_completed", RepoID: 42,
 		PRs: []int32{3}, HeadSHA: strings.Repeat("a", 40), Data: json.RawMessage(`{"conclusion":"success"}`),
 		ReceivedAt: time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC),
 	}}}
@@ -316,7 +318,7 @@ func (s *testServer) connect(ctx context.Context, t *testing.T, token string) *m
 }
 
 func call(ctx context.Context, session *mcp.ClientSession, repo string, extra map[string]any) (*mcp.CallToolResult, error) {
-	arguments := map[string]any{"repo": repo, "types": []string{"ci.run_completed"}, "cursor": 0}
+	arguments := map[string]any{"repo": repo, "types": []string{"ci.run_completed"}, "cursor": "v2.0"}
 	for k, v := range extra {
 		arguments[k] = v
 	}
@@ -419,7 +421,7 @@ func TestMCPToolWaitsForAllowedRepoOverHTTP(t *testing.T) {
 			text := toolText(t, res)
 			require.Contains(t, text, `"type":"ci.run_completed"`)
 			require.Contains(t, text, `"repo_id":42`)
-			require.Contains(t, text, `"cursor":8`)
+			require.Contains(t, text, `"cursor":"v2.8"`)
 			requireNoTokenPiece(t, text+srv.logs.String(), []string{token})
 		})
 	}

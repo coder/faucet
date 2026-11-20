@@ -414,13 +414,13 @@ func claimDeliveryReturnsTheDeliveryWithItsEventSecretAndWatermark(t *testing.T,
 	require.Equal(t, r.sub.CallbackURL, first.CallbackURL)
 	require.Equal(t, r.sub.SecretEnc, first.SecretEnc)
 	require.Equal(t, faucet.RepoTarget(42), first.Target)
-	require.Equal(t, r.events[0].ID-1, first.Watermark)
+	require.Equal(t, r.events[0].RepoPosition-1, first.Watermark)
 	require.NotNil(t, first.Event)
 	requireSameEvent(t, r.events[0], *first.Event)
 
 	second := r.mustClaim(r.now)
 	require.Equal(t, r.events[1].ID, second.Ref.EventID)
-	require.Equal(t, r.events[0].ID-1, second.Watermark, "the first event is unsent, so the watermark stays below it")
+	require.Equal(t, r.events[0].RepoPosition-1, second.Watermark, "the first event is unsent, so the watermark stays below it")
 
 	_, ok := r.claim(r.now)
 	require.False(t, ok, "both deliveries are held")
@@ -685,23 +685,23 @@ func watermarkStaysBelowTheLowestUnsentEvent(t *testing.T, s faucet.Store) {
 
 	second := r.mustClaim(r.now)
 	require.Equal(t, r.events[1].ID, second.Ref.EventID)
-	require.Equal(t, r.events[0].ID-1, second.Watermark, "an earlier event is still unsent")
+	require.Equal(t, r.events[0].RepoPosition-1, second.Watermark, "an earlier event is still unsent")
 	r.finish(second.Ref, r.now, faucet.Finish{Kind: faucet.FinishDelivered})
 
 	third := r.mustClaim(r.now)
 	require.Equal(t, r.events[2].ID, third.Ref.EventID)
-	require.Equal(t, r.events[0].ID-1, third.Watermark)
+	require.Equal(t, r.events[0].RepoPosition-1, third.Watermark)
 	r.finish(third.Ref, r.now, faucet.Finish{Kind: faucet.FinishDelivered})
 
 	again := r.mustClaim(r.now.Add(11 * time.Minute))
-	require.Equal(t, r.events[0].ID-1, again.Watermark, "the lowest unsent event is the one that waits")
+	require.Equal(t, r.events[0].RepoPosition-1, again.Watermark, "the lowest unsent event is the one that waits")
 	require.EqualValues(t, 2, again.Ref.Attempt)
 	r.finish(again.Ref, r.now.Add(11*time.Minute), faucet.Finish{Kind: faucet.FinishDelivered})
 
 	next := r.addEvent()
 	r.enqueue(next)
 	last := r.mustClaim(r.now.Add(11 * time.Minute))
-	require.Equal(t, next.ID-1, last.Watermark, "with nothing older unsent, the watermark reaches the event before this one")
+	require.Equal(t, next.RepoPosition-1, last.Watermark, "with nothing older unsent, the watermark reaches the event before this one")
 }
 
 func expireDeliveriesLeavesLiveSubscriptionsAndHeldClaims(t *testing.T, s faucet.Store) {

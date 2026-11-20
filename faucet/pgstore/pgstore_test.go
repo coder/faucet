@@ -165,8 +165,8 @@ func TestRawStoreOverBinaryParameters(t *testing.T) {
 	})
 }
 
-// CursorAt(t) is the highest ID received before t, which is only a prefix of
-// the log if a later ID never carries an earlier time. A time taken when the
+// PositionAt(t) is the highest position received before t, which is only a
+// prefix of the line if a later ID never carries an earlier time. A time taken when the
 // transaction starts breaks that for an insert that then waits for the lock.
 func TestInsertEventIsStampedWhenItIsWrittenNotWhenItsTransactionStarts(t *testing.T) {
 	t.Parallel()
@@ -220,7 +220,7 @@ func TestMigrateLeavesHostMigrationsTableAlone(t *testing.T) {
 	require.EqualValues(t, 400, hostVersion)
 	var faucetVersion int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM `+pq.QuoteIdentifier(pgstore.MigrationsTable)).Scan(&faucetVersion))
-	require.EqualValues(t, 17, faucetVersion)
+	require.EqualValues(t, 18, faucetVersion)
 }
 
 // The raw events migration adds tables of its own and one index. A down
@@ -233,10 +233,11 @@ func TestTheRawEventsMigrationGoesDownAndUpAroundTheEventLog(t *testing.T) {
 	store := pgstore.New(db)
 	ctx := context.Background()
 	// The owner targets migration adds columns to the raw tables, so it goes
-	// down before them and up after them.
+	// down before them and up after them, and the target lines migration
+	// reads the owner of an event, so it goes down first and up last.
 	migrate := func(direction string) {
 		t.Helper()
-		files := []string{"000014_owner_targets", "000012_raw_events"}
+		files := []string{"000018_target_lines", "000014_owner_targets", "000012_raw_events"}
 		if direction == "up" {
 			slices.Reverse(files)
 		}
@@ -379,7 +380,7 @@ func TestTheOwnerTargetsMigrationGoesDownToRepositoryRowsAndUpAgain(t *testing.T
 	require.Len(t, targets, 1)
 	require.Equal(t, repo.KeyHash, targets[0].KeyHash)
 	require.Equal(t, faucet.RepoTarget(42), targets[0].Target, "a row from before the up is a repo target")
-	page, err := store.PollEvents(ctx, faucet.PollQuery{Target: faucet.AllTarget(), Limit: 10})
+	page, err := store.PollEvents(ctx, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.AllTarget()}, Limit: 10})
 	require.NoError(t, err)
 	require.Len(t, page.Events, 1)
 	require.Equal(t, ev.ID, page.Events[0].ID)

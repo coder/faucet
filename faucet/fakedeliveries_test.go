@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"slices"
 	"time"
 
@@ -61,14 +62,6 @@ func (s *fakeStore) pendingLocked(key faucet.SubscriptionKeyHash) int32 {
 	return n
 }
 
-func (s *fakeStore) headLocked() int64 {
-	head := s.purgeMark
-	for _, e := range s.events {
-		head = max(head, e.ID)
-	}
-	return head
-}
-
 func (s *fakeStore) ScanTargets(ctx context.Context, now time.Time, maxPending, limit int32, skipPrincipals ...string) ([]faucet.ScanTarget, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -81,7 +74,7 @@ func (s *fakeStore) ScanTargets(ctx context.Context, now time.Time, maxPending, 
 	if maxPending <= 0 || limit <= 0 {
 		return nil, xerrors.New("max pending and limit must be positive")
 	}
-	head := s.headLocked()
+	head := int64(s.headLocked(faucet.AllTarget()))
 	var targets []faucet.ScanTarget
 	for key, sub := range s.subs {
 		pending := s.pendingLocked(key)
@@ -169,10 +162,19 @@ func (s *fakeStore) ClaimDelivery(ctx context.Context, now time.Time, lease time
 	bestRow.attempts++
 	bestRow.leaseUntil = now.Add(lease)
 	sub := s.subs[best.key]
-	watermark := best.eventID
+	// The lowest unsent event of the target now, or one that a purge
+	// deleted, which may have been of it.
+	watermark, lowest := s.purgedThroughLocked(sub.Target), int64(math.MaxInt64)
 	for k := range s.deliveries {
-		if k.key == best.key {
-			watermark = min(watermark, k.eventID)
+		if k.key != best.key || k.eventID > lowest {
+			continue
+		}
+		i := slices.IndexFunc(s.events, func(e faucet.Event) bool { return e.ID == k.eventID })
+		switch {
+		case i < 0:
+			watermark, lowest = s.purgedThroughLocked(sub.Target), k.eventID
+		case sub.Target.Covers(s.events[i].RepoID, s.events[i].OwnerID):
+			watermark, lowest = sub.Target.PositionOf(s.events[i]), k.eventID
 		}
 	}
 	claim := faucet.DeliveryClaim{
@@ -185,7 +187,7 @@ func (s *fakeStore) ClaimDelivery(ctx context.Context, now time.Time, lease time
 		PreviousSecretEnc:   slices.Clone(sub.PreviousSecretEnc),
 		PreviousSecretUntil: sub.PreviousSecretUntil,
 		Target:              sub.Target,
-		Watermark:           watermark - 1,
+		Watermark:           max(watermark-1, 0),
 	}
 	for _, e := range s.events {
 		if e.ID == best.eventID {
@@ -220,6 +222,7 @@ func (s *fakeStore) ClaimGap(ctx context.Context, now time.Time, lease time.Dura
 	gap.leaseUntil = now.Add(lease)
 	return faucet.GapClaim{
 		Ref:         faucet.GapRef{Key: best, Incarnation: sub.CreatedAt, Through: gap.through},
+		Cursor:      s.purgedThroughLocked(sub.Target),
 		CallbackURL: sub.CallbackURL, SecretEnc: slices.Clone(sub.SecretEnc),
 		PreviousSecretEnc: slices.Clone(sub.PreviousSecretEnc), PreviousSecretUntil: sub.PreviousSecretUntil,
 	}, true, nil
@@ -371,10 +374,9 @@ func (s *fakeStore) appendRunEvents(n int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for range n {
-		s.lastID++
-		s.events = append(s.events, faucet.Event{
-			ID: s.lastID, Source: "github", DeliveryID: fmt.Sprintf("history-%d", s.lastID), Type: "ci.run_completed",
-			RepoID: repoID, Data: json.RawMessage(sampleData["ci.run_completed"]), ReceivedAt: s.nowLocked(),
+		s.appendLocked(faucet.Event{
+			Source: "github", DeliveryID: fmt.Sprintf("history-%d", s.lastID+1), Type: "ci.run_completed",
+			RepoID: repoID, Data: json.RawMessage(sampleData["ci.run_completed"]),
 		})
 	}
 }

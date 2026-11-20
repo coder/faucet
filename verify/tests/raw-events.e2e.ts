@@ -138,8 +138,10 @@ describe('raw GitHub events', () => {
       expect(other.truncated, 'other arguments are another lease').toBe(true);
       expect(other.cursor).toMatch(POLL_CURSOR);
       expect(other.cursor).not.toBe(opened.cursor);
-      const typed = await started.mcp('events/poll', { name: PUSH, arguments: { repo: repoOf(repoId) }, cursor: 'v1.0' });
-      expect(typed.error?.code).toBe(-32602);
+      for (const cursor of ['v2.0', 'v1.0']) {
+        const typed = await started.mcp('events/poll', { name: PUSH, arguments: { repo: repoOf(repoId) }, cursor });
+        expect(typed.error?.code, cursor).toBe(-32602);
+      }
     });
   });
 });

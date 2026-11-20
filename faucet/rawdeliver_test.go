@@ -544,7 +544,7 @@ func TestDeliverDueSendsTypedAndRawDeliveriesInOneRun(t *testing.T) {
 	require.Len(t, typed, 1)
 	require.Len(t, raw, 1)
 	require.Equal(t, "ci.run_completed", typed[0].body(t).Name)
-	require.Regexp(t, `^v1\.\d+$`, typed[0].body(t).Cursor)
+	require.Regexp(t, `^v2\.\d+$`, typed[0].body(t).Cursor)
 	require.Equal(t, "github.push", raw[0].body(t).Name)
 	require.Regexp(t, `^r1\.\d+$`, raw[0].body(t).Cursor)
 }

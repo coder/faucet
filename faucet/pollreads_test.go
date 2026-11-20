@@ -18,20 +18,20 @@ const (
 )
 
 // requireBoundedReads checks that every read of events looked at no more than
-// one window of event IDs.
+// one window of positions of the target's line.
 func requireBoundedReads(t *testing.T, queries []faucet.PollQuery) {
 	t.Helper()
 	require.NotEmpty(t, queries)
 	for _, q := range queries {
 		require.Positive(t, q.Through, "a read from %d has no upper bound", q.After)
-		require.LessOrEqual(t, q.Through-q.After, int64(readWindow), "a read from %d looks at too many IDs", q.After)
+		require.LessOrEqual(t, q.Through-q.After, int64(readWindow), "a read from %d looks at too many positions", q.After)
 	}
 }
 
 // A poll from an old cursor with a filter that matches nothing must not be one
-// statement over the whole history. Each poll reads a window of event IDs and
-// says hasMore while it stops short of the head, and the cursor carries the
-// read on to the event.
+// statement over the whole history. Each poll reads a window of the target's
+// positions and says hasMore while it stops short of the head, and the cursor
+// carries the read on to the event.
 func TestAPollReadsTheHistoryAWindowAtATime(t *testing.T) {
 	t.Parallel()
 
@@ -39,7 +39,7 @@ func TestAPollReadsTheHistoryAWindowAtATime(t *testing.T) {
 	h.store.appendRunEvents(120_000)
 	want := h.insert(repoID, "ci.run_completed", testShaA)
 
-	params := pollParams("ci.run_completed", repoArgs("sha", testShaA), cursorOf("v1.0"))
+	params := pollParams("ci.run_completed", repoArgs("sha", testShaA), cursorOf("v2.0"))
 	var got []string
 	for range 10 {
 		page := h.poll(params)
@@ -63,8 +63,8 @@ func TestAWaitReadsTheHistoryAWindowAtATime(t *testing.T) {
 	h.store.appendRunEvents(120_000)
 	want := h.insert(repoID, "ci.run_completed", testShaA)
 
-	res := h.call(repoArgs("types", []string{"ci.run_completed"}, "sha", testShaA, "cursor", 0, "timeout_s", 1)).success(t)
-	require.Equal(t, []int64{want.ID}, res.ids())
+	res := h.call(repoArgs("types", []string{"ci.run_completed"}, "sha", testShaA, "cursor", "v2.0", "timeout_s", 1)).success(t)
+	require.Equal(t, positionsOf(want), res.ids())
 	requireBoundedReads(t, h.store.pollQueries())
 }
 
@@ -106,7 +106,7 @@ func TestOneLoginCanRunOnlyAFewPollsAtOnce(t *testing.T) {
 	h := newWebhookHarness(t, func(d *faucet.Deps) { store.Store = d.Store; d.Store = store })
 	t.Cleanup(func() { close(store.release) })
 	// The SDK writes to the params of a call, so each call gets its own.
-	slow := func() *rawParams { return pollParams("ci.run_completed", repoArgs("sha", testShaA), cursorOf("v1.0")) }
+	slow := func() *rawParams { return pollParams("ci.run_completed", repoArgs("sha", testShaA), cursorOf("v2.0")) }
 
 	done := make(chan error, pollLimit)
 	for range pollLimit {
@@ -119,7 +119,7 @@ func TestOneLoginCanRunOnlyAFewPollsAtOnce(t *testing.T) {
 
 	requireRefusedPoll(t, h.pollError(slow()))
 	h.as("hubot")
-	h.poll(pollParams("ci.run_completed", repoArgs(), cursorOf("v1.0")))
+	h.poll(pollParams("ci.run_completed", repoArgs(), cursorOf("v2.0")))
 
 	store.release <- struct{}{}
 	require.NoError(t, <-done, "a poll that ends gives its place back")

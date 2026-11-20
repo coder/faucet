@@ -143,9 +143,22 @@ type waitResult struct {
 		Data       json.RawMessage `json:"data"`
 		ReceivedAt time.Time       `json:"received_at"`
 	} `json:"events"`
-	Cursor    int64 `json:"cursor"`
-	Truncated bool  `json:"truncated"`
+	Cursor    string `json:"cursor"`
+	Truncated bool   `json:"truncated"`
 }
+
+// positionsOf are the places of the events on the lines of their
+// repositories, which a wait of a repository returns as their ids.
+func positionsOf(events ...faucet.Event) []int64 {
+	positions := make([]int64, len(events))
+	for i, ev := range events {
+		positions[i] = int64(ev.RepoPosition)
+	}
+	return positions
+}
+
+// cursorOn is the cursor that stands at ev on the line of its repository.
+func cursorOn(ev faucet.Event) string { return fmt.Sprintf("v2.%d", ev.RepoPosition) }
 
 func (r waitResult) ids() []int64 {
 	ids := make([]int64, len(r.Events))
@@ -310,9 +323,9 @@ func TestWaitReturnsEventsForAnAllowedRepo(t *testing.T) {
 	ev := h.insert(repoID, "ci.run_completed", testShaA, 7, 9)
 	noPRs := h.insert(repoID, "pr.closed", "")
 
-	res := h.call(args("repo", testRepo, "types", allTypes, "cursor", 0)).success(t)
-	require.Equal(t, []int64{ev.ID, noPRs.ID}, res.ids())
-	require.Equal(t, noPRs.ID, res.Cursor)
+	res := h.call(args("repo", testRepo, "types", allTypes, "cursor", "v2.0")).success(t)
+	require.Equal(t, positionsOf(ev, noPRs), res.ids())
+	require.Equal(t, cursorOn(noPRs), res.Cursor)
 
 	got := res.Events[0]
 	require.Equal(t, "ci.run_completed", got.Type)
@@ -338,22 +351,22 @@ func TestWaitReportsEventsThatAPurgeDeleted(t *testing.T) {
 		e = append(e, h.insert(repoID, "ci.run_completed", testShaA, 7))
 	}
 	h.clock.Advance(time.Minute).MustWait(h.ctx)
-	wait := func(cursor int64) waitResult {
+	wait := func(cursor string) waitResult {
 		return h.call(args("repo", testRepo, "types", allTypes, "cursor", cursor)).success(t)
 	}
-	require.False(t, wait(0).Truncated, "nothing is purged yet")
+	require.False(t, wait("v2.0").Truncated, "nothing is purged yet")
 
 	purged, err := h.svc.Purge(h.ctx, e[2].ReceivedAt)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, purged.Deleted)
 
-	for _, cursor := range []int64{0, e[0].ID} {
+	for _, cursor := range []string{"v2.0", cursorOn(e[0])} {
 		lost := wait(cursor)
-		require.Equal(t, []int64{e[2].ID}, lost.ids(), "cursor %d: the event the purge kept is still returned", cursor)
-		require.True(t, lost.Truncated, "cursor %d: the purge deleted events after the cursor", cursor)
+		require.Equal(t, positionsOf(e[2]), lost.ids(), "cursor %s: the event the purge kept is still returned", cursor)
+		require.True(t, lost.Truncated, "cursor %s: the purge deleted events after the cursor", cursor)
 	}
-	atMark := wait(e[1].ID)
-	require.Equal(t, []int64{e[2].ID}, atMark.ids())
+	atMark := wait(cursorOn(e[1]))
+	require.Equal(t, positionsOf(e[2]), atMark.ids())
 	require.False(t, atMark.Truncated, "a cursor at the purge mark has missed nothing")
 	h.requireNoLeak()
 }
@@ -368,12 +381,12 @@ func TestWaitAfterAPurgeOfEverythingReportsTheGapOnce(t *testing.T) {
 	_, err := h.svc.Purge(h.ctx, h.clock.Now())
 	require.NoError(t, err)
 
-	out := h.callAsync(h.ctx, args("repo", testRepo, "types", allTypes, "cursor", 0, "timeout_s", 2))
+	out := h.callAsync(h.ctx, args("repo", testRepo, "types", allTypes, "cursor", "v2.0", "timeout_s", 2))
 	h.step(2 * time.Second)
 	first := h.await(out).success(t)
 	require.Empty(t, first.Events)
 	require.True(t, first.Truncated)
-	require.Equal(t, last.ID, first.Cursor, "the cursor moves to the mark, so the gap is reported once")
+	require.Equal(t, cursorOn(last), first.Cursor, "the cursor moves to the mark, so the gap is reported once")
 
 	out = h.callAsync(h.ctx, args("repo", testRepo, "types", allTypes, "cursor", first.Cursor, "timeout_s", 2))
 	h.step(2 * time.Second)
@@ -405,19 +418,15 @@ func TestWaitFiltersEvents(t *testing.T) {
 		{"sha", args("repo", testRepo, "types", allTypes, "sha", testShaA), []faucet.Event{e[0], e[3]}},
 		{"upper case sha", args("repo", testRepo, "types", allTypes, "sha", strings.ToUpper(testShaB)), []faucet.Event{e[2]}},
 		{"pr", args("repo", testRepo, "types", allTypes, "pr", 9), []faucet.Event{e[2], e[3]}},
-		{"cursor", args("repo", testRepo, "types", allTypes, "cursor", e[1].ID), []faucet.Event{e[2], e[3]}},
-		{"everything", args("repo", testRepo, "types", []string{"ci.run_completed"}, "sha", testShaA, "pr", 7, "cursor", 0), []faucet.Event{e[0]}},
+		{"cursor", args("repo", testRepo, "types", allTypes, "cursor", cursorOn(e[1])), []faucet.Event{e[2], e[3]}},
+		{"everything", args("repo", testRepo, "types", []string{"ci.run_completed"}, "sha", testShaA, "pr", 7, "cursor", "v2.0"), []faucet.Event{e[0]}},
 	}
 	for _, tt := range tests {
 		if _, ok := tt.args["cursor"]; !ok {
-			tt.args["cursor"] = 0
+			tt.args["cursor"] = "v2.0"
 		}
 		res := h.call(tt.args).success(t)
-		want := make([]int64, len(tt.want))
-		for i, ev := range tt.want {
-			want[i] = ev.ID
-		}
-		require.Equal(t, want, res.ids(), tt.name)
+		require.Equal(t, positionsOf(tt.want...), res.ids(), tt.name)
 	}
 }
 
@@ -429,7 +438,7 @@ func TestWaitAcceptsEveryCatalogTypeAndTheLimits(t *testing.T) {
 		h.insert(repoID, typ, "")
 	}
 	for _, timeout := range []int{1, 50} {
-		res := h.call(args("repo", testRepo, "types", allTypes, "cursor", 0, "timeout_s", timeout)).success(t)
+		res := h.call(args("repo", testRepo, "types", allTypes, "cursor", "v2.0", "timeout_s", timeout)).success(t)
 		require.Len(t, res.Events, len(allTypes))
 	}
 }
@@ -438,14 +447,14 @@ func TestWaitCursorOfNothingMatchingIsTheHead(t *testing.T) {
 	t.Parallel()
 
 	h := newWaitHarness(t)
-	h.insert(repoID, "pr.closed", "")
-	last := h.insert(otherRepoID, "ci.run_completed", testShaA)
+	head := h.insert(repoID, "pr.closed", "")
+	h.insert(otherRepoID, "ci.run_completed", testShaA)
 
-	out := h.callAsync(h.ctx, args("repo", testRepo, "types", []string{"ci.run_completed"}, "cursor", 0, "timeout_s", 2))
+	out := h.callAsync(h.ctx, args("repo", testRepo, "types", []string{"ci.run_completed"}, "cursor", "v2.0", "timeout_s", 2))
 	h.step(2 * time.Second)
 	res := h.await(out).success(t)
 	require.Empty(t, res.Events)
-	require.Equal(t, last.ID, res.Cursor, "the cursor skips events of other repositories")
+	require.Equal(t, cursorOn(head), res.Cursor, "the cursor is the head of the repository's line, which other repositories' events do not move")
 }
 
 func TestWaitStartsAtTheHeadWithoutACursor(t *testing.T) {
@@ -460,16 +469,16 @@ func TestWaitStartsAtTheHeadWithoutACursor(t *testing.T) {
 	h.step(2*time.Second, func() { fresh = h.insert(repoID, "ci.run_completed", testShaB) })
 
 	res := h.await(out).success(t)
-	require.Equal(t, []int64{fresh.ID}, res.ids(), "the event from before the call is not returned")
+	require.Equal(t, positionsOf(fresh), res.ids(), "the event from before the call is not returned")
 	require.Greater(t, fresh.ID, old.ID)
-	require.Equal(t, fresh.ID, res.Cursor)
+	require.Equal(t, cursorOn(fresh), res.Cursor)
 }
 
 func TestWaitReturnsAnEventThatArrivesWhileWaiting(t *testing.T) {
 	t.Parallel()
 
 	h := newWaitHarness(t)
-	out := h.callAsync(h.ctx, args("repo", testRepo, "types", []string{"ci.run_completed"}, "sha", testShaA, "cursor", 0))
+	out := h.callAsync(h.ctx, args("repo", testRepo, "types", []string{"ci.run_completed"}, "sha", testShaA, "cursor", "v2.0"))
 
 	h.step(2*time.Second, func() {
 		h.insert(repoID, "ci.run_completed", testShaB)
@@ -479,8 +488,8 @@ func TestWaitReturnsAnEventThatArrivesWhileWaiting(t *testing.T) {
 	h.step(2*time.Second, func() { want = h.insert(repoID, "ci.run_completed", testShaA) })
 
 	res := h.await(out).success(t)
-	require.Equal(t, []int64{want.ID}, res.ids())
-	require.Equal(t, want.ID, res.Cursor)
+	require.Equal(t, positionsOf(want), res.ids())
+	require.Equal(t, cursorOn(want), res.Cursor)
 	require.Len(t, h.store.pollQueries(), 3, "one poll at the start and one every 2 seconds")
 }
 
@@ -492,8 +501,8 @@ func TestWaitGivenCursorWinsOverShaLookback(t *testing.T) {
 	second := h.insert(repoID, "ci.run_completed", testShaA)
 	h.clock.Advance(time.Hour).MustWait(h.ctx)
 
-	res := h.call(args("repo", testRepo, "types", allTypes, "sha", testShaA, "cursor", first.ID)).success(t)
-	require.Equal(t, []int64{second.ID}, res.ids(), "an hour-old event after the cursor is returned despite the 10 minute lookback")
+	res := h.call(args("repo", testRepo, "types", allTypes, "sha", testShaA, "cursor", cursorOn(first))).success(t)
+	require.Equal(t, positionsOf(second), res.ids(), "an hour-old event after the cursor is returned despite the 10 minute lookback")
 	require.Empty(t, h.store.lookups(), "a given cursor needs no lookup")
 }
 
@@ -507,7 +516,7 @@ func TestWaitShaLooksBackTenMinutes(t *testing.T) {
 	h.clock.Advance(5 * time.Minute).MustWait(h.ctx)
 
 	res := h.call(args("repo", testRepo, "types", allTypes, "sha", testShaA)).success(t)
-	require.Equal(t, []int64{recent.ID}, res.ids(), "the event from 11 minutes ago is outside the lookback, the one from 5 is inside")
+	require.Equal(t, positionsOf(recent), res.ids(), "the event from 11 minutes ago is outside the lookback, the one from 5 is inside")
 
 	out := h.callAsync(h.ctx, args("repo", testRepo, "types", allTypes, "timeout_s", 2))
 	h.step(2 * time.Second)
@@ -518,10 +527,11 @@ func TestWaitDeadline(t *testing.T) {
 	t.Parallel()
 
 	h := newWaitHarness(t)
+	head := h.insert(repoID, "pr.closed", "")
+	h.clock.Advance(time.Second).MustWait(h.ctx)
 	h.insert(otherRepoID, "ci.run_completed", testShaA)
-	head := h.insert(otherRepoID, "pr.closed", "")
 
-	out := h.callAsync(h.ctx, args("repo", testRepo, "types", allTypes, "timeout_s", 5))
+	out := h.callAsync(h.ctx, args("repo", testRepo, "types", []string{"ci.run_completed"}, "timeout_s", 5))
 	h.step(2 * time.Second)
 	h.step(2 * time.Second)
 	h.step(time.Second)
@@ -529,13 +539,12 @@ func TestWaitDeadline(t *testing.T) {
 	res := h.await(out).success(t)
 	require.NotNil(t, res.Events)
 	require.Empty(t, res.Events)
-	require.Equal(t, head.ID, res.Cursor)
+	require.Equal(t, cursorOn(head), res.Cursor, "another repository's event does not move the repository's head")
 
 	queries := h.store.pollQueries()
 	require.Len(t, queries, 4)
-	require.Zero(t, queries[0].After)
-	for _, q := range queries[1:] {
-		require.Equal(t, head.ID, q.After, "each poll resumes from the cursor of the one before")
+	for _, q := range queries {
+		require.Equal(t, head.RepoPosition, q.After, "each poll resumes from the cursor of the one before")
 	}
 }
 
@@ -552,7 +561,7 @@ func TestWaitTimeout(t *testing.T) {
 		"explicit 7 seconds":    {args("timeout_s", 7), 7},
 	} {
 		h := newWaitHarness(t)
-		a := args("repo", testRepo, "types", allTypes, "cursor", 0)
+		a := args("repo", testRepo, "types", allTypes, "cursor", "v2.0")
 		for k, v := range tt.extra {
 			a[k] = v
 		}
@@ -581,7 +590,7 @@ func TestWaitCursorResumesWhereTheLastWaitStopped(t *testing.T) {
 
 	missed := h.insert(repoID, "pr.closed", "")
 	res := h.call(args("repo", testRepo, "types", allTypes, "cursor", idle.Cursor)).success(t)
-	require.Equal(t, []int64{missed.ID}, res.ids())
+	require.Equal(t, positionsOf(missed), res.ids())
 }
 
 func TestWaitStopsWhenTheCallerCancels(t *testing.T) {
@@ -653,8 +662,8 @@ func TestWaitDeniesWithoutRevealingWhetherARepoExists(t *testing.T) {
 	h.insert(otherRepoID, "ci.run_completed", testShaA)
 	h.authz.repos = map[string]int64{testRepo: repoID}
 
-	exists := h.call(args("repo", otherRepo, "types", allTypes, "cursor", 0)).failure(t)
-	missing := h.call(args("repo", "octo/never-heard-of-it", "types", allTypes, "cursor", 0)).failure(t)
+	exists := h.call(args("repo", otherRepo, "types", allTypes, "cursor", "v2.0")).failure(t)
+	missing := h.call(args("repo", "octo/never-heard-of-it", "types", allTypes, "cursor", "v2.0")).failure(t)
 	require.Equal(t, exists, missing, "a repo the caller cannot see and one that does not exist look the same")
 	require.Contains(t, exists, "not found or not accessible")
 
@@ -670,7 +679,7 @@ func TestWaitDeniedResultHasNoEvents(t *testing.T) {
 	h.insert(otherRepoID, "ci.run_completed", testShaA)
 	h.authz.repos = map[string]int64{}
 
-	out := h.call(args("repo", otherRepo, "types", allTypes, "cursor", 0))
+	out := h.call(args("repo", otherRepo, "types", allTypes, "cursor", "v2.0"))
 	require.NotEmpty(t, out.failure(t))
 	require.Nil(t, out.result.StructuredContent)
 }
@@ -689,7 +698,7 @@ func TestWaitDeniesWhenTheAuthorizerFails(t *testing.T) {
 		h.insert(repoID, "ci.run_completed", testShaA)
 		h.authz.err = tt.err
 
-		msg := h.call(args("repo", testRepo, "types", allTypes, "cursor", 0)).failure(t)
+		msg := h.call(args("repo", testRepo, "types", allTypes, "cursor", "v2.0")).failure(t)
 		require.Contains(t, msg, tt.want, name)
 		require.NotContains(t, msg, "10.1.2.3", name)
 		require.Empty(t, h.store.pollQueries(), name)
@@ -701,7 +710,7 @@ func TestWaitDeniesAnAuthorizerThatReturnsNoRepoID(t *testing.T) {
 
 	h := newWaitHarness(t)
 	h.authz.repos = map[string]int64{testRepo: 0}
-	msg := h.call(args("repo", testRepo, "types", allTypes, "cursor", 0)).failure(t)
+	msg := h.call(args("repo", testRepo, "types", allTypes, "cursor", "v2.0")).failure(t)
 	require.Contains(t, msg, "could not verify repository access")
 	require.Empty(t, h.store.pollQueries())
 }
@@ -714,7 +723,7 @@ func TestWaitDeniesWithoutAPrincipal(t *testing.T) {
 			return faucet.Principal{}, xerrors.New("no session cookie for u-123")
 		}
 	})
-	msg := h.call(args("repo", testRepo, "types", allTypes, "cursor", 0)).failure(t)
+	msg := h.call(args("repo", testRepo, "types", allTypes, "cursor", "v2.0")).failure(t)
 	require.Contains(t, msg, "authentication required")
 	require.NotContains(t, msg, "u-123")
 	require.Zero(t, h.authz.callCount())
@@ -732,7 +741,7 @@ func TestWaitHidesStoreErrors(t *testing.T) {
 	require.NotContains(t, msg, "faucet_admin")
 	require.Contains(t, h.logs.String(), "faucet_admin", "the operator still sees the cause in the log")
 
-	msg = h.call(args("repo", testRepo, "types", allTypes, "cursor", 0)).failure(t)
+	msg = h.call(args("repo", testRepo, "types", allTypes, "cursor", "v2.0")).failure(t)
 	require.Contains(t, msg, "could not read events")
 }
 
@@ -757,19 +766,19 @@ func TestWaitWithTheRealAuthorizer(t *testing.T) {
 	ev := h.insert(repoID, "ci.run_completed", testShaA)
 	h.insert(otherRepoID, "ci.run_completed", testShaA)
 
-	res := h.call(args("repo", testRepo, "types", allTypes, "cursor", 0)).success(t)
-	require.Equal(t, []int64{ev.ID}, res.ids())
+	res := h.call(args("repo", testRepo, "types", allTypes, "cursor", "v2.0")).success(t)
+	require.Equal(t, positionsOf(ev), res.ids())
 	require.Equal(t, "Bearer "+testToken, <-stub.tokens)
 
 	var denials []string
 	for _, repo := range []string{"octo/hidden", "octo/forbidden"} {
-		denials = append(denials, h.call(args("repo", repo, "types", allTypes, "cursor", 0)).failure(t))
+		denials = append(denials, h.call(args("repo", repo, "types", allTypes, "cursor", "v2.0")).failure(t))
 	}
 	require.Equal(t, denials[0], denials[1])
 	require.Contains(t, denials[0], "not found or not accessible")
 	h.requireNoLeak(denials...)
 
-	msg := h.call(args("repo", "octo/broken", "types", allTypes, "cursor", 0)).failure(t)
+	msg := h.call(args("repo", "octo/broken", "types", allTypes, "cursor", "v2.0")).failure(t)
 	require.Contains(t, msg, "could not verify repository access")
 	h.requireNoLeak(msg)
 	require.Len(t, h.store.pollQueries(), 1, "only the allowed call read events")
@@ -783,7 +792,7 @@ func TestWaitRefusesAShaWhenNoTypeCarriesAHeadCommit(t *testing.T) {
 	require.Contains(t, failure, "carry no head commit")
 
 	h.insert(repoID, "ci.run_completed", testShaA, 7)
-	res := h.call(args("repo", testRepo, "types", []string{"pr.comment_created", "ci.run_completed"}, "sha", testShaA, "cursor", 0, "timeout_s", 1)).success(t)
+	res := h.call(args("repo", testRepo, "types", []string{"pr.comment_created", "ci.run_completed"}, "sha", testShaA, "cursor", "v2.0", "timeout_s", 1)).success(t)
 	require.Len(t, res.Events, 1, "a sha with a type that has a head commit is still a filter")
 }
 
@@ -795,7 +804,7 @@ func TestWaitRefusesAPRWhenNoTypeNamesAPullRequest(t *testing.T) {
 	require.Contains(t, failure, "names no pull request")
 
 	h.insert(repoID, "ci.run_completed", testShaA, 7)
-	res := h.call(args("repo", testRepo, "types", []string{"ci.jobs", "ci.run_completed"}, "pr", 7, "cursor", 0, "timeout_s", 1)).success(t)
+	res := h.call(args("repo", testRepo, "types", []string{"ci.jobs", "ci.run_completed"}, "pr", 7, "cursor", "v2.0", "timeout_s", 1)).success(t)
 	require.Len(t, res.Events, 1, "a pr with a type that names pull requests is still a filter")
 }
 
@@ -844,7 +853,7 @@ func TestAnAccessDenialThatSaysWhyReachesTheCaller(t *testing.T) {
 	why := xerrors.Errorf("faucet has seen no delivery from %s yet: %w", testRepo, faucet.ErrNoAccess)
 	wait := newWaitHarness(t)
 	wait.authz.err = why
-	require.Equal(t, why.Error(), wait.call(args("repo", testRepo, "types", allTypes, "cursor", 0)).failure(t))
+	require.Equal(t, why.Error(), wait.call(args("repo", testRepo, "types", allTypes, "cursor", "v2.0")).failure(t))
 
 	events := newEventsHarness(t)
 	events.authz.err = why
@@ -854,7 +863,7 @@ func TestAnAccessDenialThatSaysWhyReachesTheCaller(t *testing.T) {
 
 	plain := newWaitHarness(t)
 	plain.authz.err = faucet.ErrNoAccess
-	require.Equal(t, faucet.ErrNoAccess.Error(), plain.call(args("repo", testRepo, "types", allTypes, "cursor", 0)).failure(t))
+	require.Equal(t, faucet.ErrNoAccess.Error(), plain.call(args("repo", testRepo, "types", allTypes, "cursor", "v2.0")).failure(t))
 }
 
 // logLines returns the lines of logs that hold message, as the human sink
@@ -877,7 +886,7 @@ func TestAnAccessDenialIsLoggedOnOneLine(t *testing.T) {
 
 	denied := newWaitHarness(t)
 	denied.authz.err = xerrors.Errorf("faucet has seen no delivery from %s yet: %w", testRepo, faucet.ErrNoAccess)
-	denied.call(args("repo", testRepo, "types", allTypes, "cursor", 0)).failure(t)
+	denied.call(args("repo", testRepo, "types", allTypes, "cursor", "v2.0")).failure(t)
 	logs := denied.logs.String()
 	lines := logLines(logs, "wait denied")
 	require.Len(t, lines, 1, logs)
@@ -888,7 +897,7 @@ func TestAnAccessDenialIsLoggedOnOneLine(t *testing.T) {
 
 	failing := newWaitHarness(t)
 	failing.authz.err = xerrors.New("GitHub took too long")
-	failing.call(args("repo", testRepo, "types", allTypes, "cursor", 0)).failure(t)
+	failing.call(args("repo", testRepo, "types", allTypes, "cursor", "v2.0")).failure(t)
 	lines = logLines(failing.logs.String(), "could not verify repository access")
 	require.Len(t, lines, 1)
 	require.Contains(t, lines[0], "[warn]")

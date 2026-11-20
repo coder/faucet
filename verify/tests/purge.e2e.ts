@@ -132,12 +132,15 @@ describe('purge', () => {
 
   test('an events/poll from before the purge says events were lost, one from after does not', async ({ cron }) => {
     const repoId = newRepoId();
+    const untouchedId = newRepoId();
     const before = (await poll(cron, repoId)).cursor;
     await store(cron, repoId, 40);
     const survivor = await store(cron, repoId);
+    const kept = await store(cron, untouchedId);
     await purge(cron);
 
     const lost = await poll(cron, repoId, before);
+    const untouched = await poll(cron, untouchedId, before);
     const resumed = await poll(cron, repoId, lost.cursor);
     const later = await store(cron, repoId);
     const next = await poll(cron, repoId, lost.cursor);
@@ -147,26 +150,30 @@ describe('purge', () => {
     expect(resumed).toMatchObject({ events: [], truncated: false });
     expect(next.events.map((e) => e.eventId)).toEqual([later]);
     expect(next.truncated).toBe(false);
+    expect(untouched, 'the purge deleted no event of that repository, so its reader learns nothing of it').toMatchObject({ truncated: false });
+    expect(untouched.events.map((e) => e.eventId)).toEqual([kept]);
   });
 
-  test('a wait from before the purge says events were lost, and a cursor at the mark does not', async ({ cron }) => {
+  test('a wait from before the purge says events were lost, and a cursor at the mark of the repository does not', async ({ cron }) => {
     const repoId = newRepoId();
     const repo = repoOf(repoId);
     const args = { repo, types: [RUN], timeout_s: 1 };
     const before = await cron.waitForEvents(args);
     await store(cron, repoId, 40);
     const survivor = await store(cron, repoId);
-    const { purged_through: mark } = await purge(cron);
+    await purge(cron);
+    const mark = await cron.repoMark(repoId);
 
     const lost = await cron.waitForEvents({ ...args, cursor: before.cursor });
-    const belowMark = await cron.waitForEvents({ ...args, cursor: mark - 1 });
-    const atMark = await cron.waitForEvents({ ...args, cursor: mark });
+    const belowMark = await cron.waitForEvents({ ...args, cursor: `v2.${mark - 1}` });
+    const atMark = await cron.waitForEvents({ ...args, cursor: `v2.${mark}` });
     const rows = await cron.rows(repoId);
 
-    expect(before.truncated).toBe(false);
+    expect(before).toMatchObject({ cursor: 'v2.0', truncated: false });
+    expect(mark, 'the purge deleted the first event of the repository').toBe(1);
     for (const outcome of [lost, belowMark, atMark]) {
       expect(outcome.isError).toBe(false);
-      expect(outcome.events?.map((e) => e.id)).toEqual([rows[0]?.id]);
+      expect(outcome.events?.map((e) => e.id)).toEqual([rows[0]?.repo_seq]);
     }
     expect(rows.map((r) => r.delivery_id)).toEqual([survivor]);
     expect([lost.truncated, belowMark.truncated, atMark.truncated]).toEqual([true, true, false]);
@@ -179,15 +186,17 @@ describe('purge', () => {
       const before = await empty.waitForEvents(args);
       await store(empty, repoId, 40);
       await store(empty, repoId, 41);
-      const { purged_through: mark } = await purge(empty);
+      const { purged_through: globalMark } = await purge(empty);
+      const mark = `v2.${await empty.repoMark(repoId)}`;
 
       const lost = await empty.waitForEvents({ ...args, cursor: before.cursor });
       const resumed = await empty.waitForEvents({ ...args, cursor: lost.cursor });
       const fresh = await empty.waitForEvents(args);
 
       expect(await empty.rows(repoId)).toEqual([]);
-      expect(before).toMatchObject({ cursor: 0, truncated: false });
-      expect(mark).toBeGreaterThan(0);
+      expect(before).toMatchObject({ cursor: 'v2.0', truncated: false });
+      expect(globalMark).toBeGreaterThan(0);
+      expect(mark, 'the purge deleted both events of the repository').toBe('v2.2');
       expect(lost).toMatchObject({ events: [], cursor: mark, truncated: true });
       expect(resumed).toMatchObject({ events: [], cursor: mark, truncated: false });
       expect(fresh).toMatchObject({ events: [], cursor: mark, truncated: false });

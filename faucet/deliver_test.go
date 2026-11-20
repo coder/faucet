@@ -73,7 +73,7 @@ func TestDeliverDueSendsSignedMatchingEventsOnly(t *testing.T) {
 			body := g.body(t)
 			require.Equal(t, id, body.EventID, "eventId is the webhook-id, and not the GitHub delivery ID that events/poll shows")
 			require.Equal(t, "ci.run_completed", body.Name)
-			require.Regexp(t, `^v1\.\d+$`, body.Cursor)
+			require.Regexp(t, `^v2\.\d+$`, body.Cursor)
 			prs, ok := body.Data["prs"].([]any)
 			require.True(t, ok, "data carries the pull requests, as events/poll shows them")
 			require.Len(t, prs, 1)
@@ -126,7 +126,7 @@ func TestDeliverDueGivesAReplayOfAnEventTheMessageIDItHadBefore(t *testing.T) {
 	require.Nil(t, d.unsubscribe(ep.args, d.rcv.url(ep.path)))
 	d.advance(time.Second)
 	again := subscribeTo(ep.args, d.rcv.url(ep.path), ep.secret)
-	again.Cursor = cursorOf(fmt.Sprintf("v1.%d", ev.ID-1))
+	again.Cursor = cursorOf(fmt.Sprintf("v2.%d", ev.RepoPosition-1))
 	d.subscribe(again)
 	d.advance(time.Second)
 	require.Equal(t, 1, d.deliverDue().Delivered, "a subscribe from an older cursor sends the event again")
@@ -160,7 +160,7 @@ func TestDeliverDueBodyCursorIsTheWatermark(t *testing.T) {
 	d.deliverDue()
 	requests := d.rcv.requests("/hook")
 	require.Len(t, requests, 2)
-	require.Equal(t, fmt.Sprintf("v1.%d", first.ID-1), requests[1].body(t).Cursor,
+	require.Equal(t, fmt.Sprintf("v2.%d", first.RepoPosition-1), requests[1].body(t).Cursor,
 		"the second event is sent while the first is unsent, so its watermark stays below the first")
 
 	d.advance(15 * time.Second)
@@ -168,13 +168,13 @@ func TestDeliverDueBodyCursorIsTheWatermark(t *testing.T) {
 	requests = d.rcv.requests("/hook")
 	require.Len(t, requests, 3)
 	require.Equal(t, requests[0].messageID(), requests[2].messageID())
-	require.Equal(t, fmt.Sprintf("v1.%d", first.ID-1), requests[2].body(t).Cursor, "the oldest unsent event carries the watermark below itself")
+	require.Equal(t, fmt.Sprintf("v2.%d", first.RepoPosition-1), requests[2].body(t).Cursor, "the oldest unsent event carries the watermark below itself")
 
 	third := d.newRunEvent(3)
 	d.deliverDue()
 	requests = d.rcv.requests("/hook")
 	require.Len(t, requests, 4)
-	require.Equal(t, fmt.Sprintf("v1.%d", third.ID-1), requests[3].body(t).Cursor,
+	require.Equal(t, fmt.Sprintf("v2.%d", third.RepoPosition-1), requests[3].body(t).Cursor,
 		"with every earlier event delivered, the watermark reaches the event before this one")
 	require.Equal(t, second.ID+1, third.ID)
 }
@@ -1071,7 +1071,7 @@ func TestDeliverDueAnAttemptOfAnOlderSubscriptionDoesNotEndTheNewOnesDelivery(t 
 	d.advance(time.Second)
 	require.Nil(t, d.unsubscribe(ep.args, d.rcv.url(ep.path)))
 	again := subscribeTo(ep.args, d.rcv.url(ep.path), ep.secret)
-	again.Cursor = raw("v1.0")
+	again.Cursor = raw("v2.0")
 	d.subscribe(again)
 	newer := d.runDeliverDue()
 	awaitRequest()

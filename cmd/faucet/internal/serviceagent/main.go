@@ -35,7 +35,7 @@ func run() error {
 	clientID := flag.String("client-id", "", "the client ID")
 	repo := flag.String("repo", "", "the repository to wait on, owner/name")
 	types := flag.String("types", "", "the event types to wait for, comma separated")
-	cursor := flag.Int64("cursor", 0, "the cursor to wait after")
+	cursor := flag.String("cursor", "v2.0", "the cursor to wait after, as events/poll returns it")
 	timeout := flag.Int("timeout", 1, "how long the wait lasts, in seconds")
 	flag.Parse()
 	secret := os.Getenv(envSecret)
