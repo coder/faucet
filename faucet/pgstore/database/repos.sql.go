@@ -57,7 +57,7 @@ func (q *Queries) GetOwnerByLogin(ctx context.Context, login string) (FaucetOwne
 
 const getRepositoryByName = `-- name: GetRepositoryByName :one
 SELECT r.repo_id, r.owner_id, o.login AS owner_login, (o.login || '/' || split_part(r.full_name, '/', 2))::text AS full_name,
-       (r.candidate_full_name IS NOT NULL)::boolean AS quarantined
+       (r.quarantined_at IS NOT NULL)::boolean AS quarantined
 FROM faucet_owners o
 JOIN faucet_repos r ON r.owner_id = o.owner_id
 WHERE lower(o.login) = lower($1::text) AND lower(split_part(r.full_name, '/', 2)) = lower($2::text)
@@ -80,8 +80,8 @@ type GetRepositoryByNameRow struct {
 
 // The owner part of the name is the login of the account that holds it now,
 // and the name part is the one that the row was first seen or renamed under.
-// A row with a candidate resolves no name, so the caller refuses it rather
-// than take an older row that held the name.
+// A quarantined row resolves no name, so the caller refuses it rather than
+// take an older row that held the name.
 func (q *Queries) GetRepositoryByName(ctx context.Context, arg GetRepositoryByNameParams) (GetRepositoryByNameRow, error) {
 	row := q.db.QueryRowContext(ctx, getRepositoryByName, arg.OwnerLogin, arg.Name)
 	var i GetRepositoryByNameRow
@@ -96,17 +96,12 @@ func (q *Queries) GetRepositoryByName(ctx context.Context, arg GetRepositoryByNa
 }
 
 const lockRepositoryHolding = `-- name: LockRepositoryHolding :one
-SELECT COALESCE(
-     lower(r.full_name) = lower($1::text)
-  OR lower(r.candidate_full_name) = lower($1::text)
-  OR EXISTS (
+SELECT (lower(r.full_name) = lower($1::text) OR EXISTS (
      SELECT 1 FROM faucet_owners o
-     WHERE (o.owner_id = r.owner_id
-            AND lower(o.login || '/' || split_part(r.full_name, '/', 2)) = lower($1::text))
-        OR (o.owner_id = r.candidate_owner_id
-            AND lower(o.login || '/' || split_part(r.candidate_full_name, '/', 2)) = lower($1::text))
-   ), false)::boolean AS holds_from,
-   (r.candidate_full_name IS NOT NULL)::boolean AS quarantined
+     WHERE o.owner_id = r.owner_id
+       AND lower(o.login || '/' || split_part(r.full_name, '/', 2)) = lower($1::text)
+   ))::boolean AS holds_from,
+   (r.quarantined_at IS NOT NULL)::boolean AS quarantined
 FROM faucet_repos r
 WHERE r.repo_id = $2
 FOR UPDATE OF r
@@ -122,10 +117,10 @@ type LockRepositoryHoldingRow struct {
 	Quarantined bool
 }
 
-// holds_from says whether @from_full_name is the row's full name or its
-// candidate's, as the row holds it or under the login that its owner holds
-// now. GitHub writes the name from under the owner's login now, which the
-// row lacks when the owner was renamed after the row was first seen.
+// holds_from says whether the row's full name is @from_full_name, as the row
+// holds it or under the login that the row's owner holds now. GitHub writes
+// the name from under the owner's login now, which the row lacks when the
+// owner was renamed after the row was first seen.
 func (q *Queries) LockRepositoryHolding(ctx context.Context, arg LockRepositoryHoldingParams) (LockRepositoryHoldingRow, error) {
 	row := q.db.QueryRowContext(ctx, lockRepositoryHolding, arg.FromFullName, arg.RepoID)
 	var i LockRepositoryHoldingRow
@@ -135,18 +130,17 @@ func (q *Queries) LockRepositoryHolding(ctx context.Context, arg LockRepositoryH
 
 const quarantineRepository = `-- name: QuarantineRepository :exec
 UPDATE faucet_repos
-SET candidate_owner_id = $1, candidate_full_name = $2
-WHERE repo_id = $3
+SET quarantined_at = COALESCE(quarantined_at, $1)
+WHERE repo_id = $2
 `
 
 type QuarantineRepositoryParams struct {
-	OwnerID  sql.NullInt64
-	FullName sql.NullString
-	RepoID   int64
+	SeenAt sql.NullTime
+	RepoID int64
 }
 
 func (q *Queries) QuarantineRepository(ctx context.Context, arg QuarantineRepositoryParams) error {
-	_, err := q.db.ExecContext(ctx, quarantineRepository, arg.OwnerID, arg.FullName, arg.RepoID)
+	_, err := q.db.ExecContext(ctx, quarantineRepository, arg.SeenAt, arg.RepoID)
 	return err
 }
 
@@ -234,7 +228,7 @@ VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (repo_id) DO UPDATE
 SET owner_id = excluded.owner_id, owner_login = excluded.owner_login,
     full_name = excluded.full_name, seen_at = excluded.seen_at,
-    candidate_owner_id = NULL, candidate_full_name = NULL
+    quarantined_at = NULL
 `
 
 type RenameRepositoryParams struct {

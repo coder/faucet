@@ -93,7 +93,7 @@ const (
 	// RenameQuarantined means the store held another name: a rename before
 	// this one never reached it, or this one is an old body sent again, and
 	// the store cannot tell which. The repository resolves no name until a
-	// fresh rename from the name that the store held or from this one's.
+	// fresh rename from the name that the store holds.
 	RenameQuarantined
 	// RenameLate means the rename was late and the store held another name,
 	// which a newer rename can have given, so it changed nothing.
@@ -142,7 +142,7 @@ func (s *Service) recordRepository(ctx context.Context, logger slog.Logger, even
 		return xerrors.Errorf("rename the repository: %w", err)
 	}
 	if outcome == RenameQuarantined {
-		logger.Warn(ctx, "a rename or transfer of the repository never reached faucet, or an old one came again, so the repository resolves no name until its next rename",
+		logger.Warn(ctx, "a rename or transfer of the repository never reached faucet, or an old one came again, so the repository resolves no name",
 			slog.F("repo_id", rename.Repo.ID), slog.F("from", rename.From), slog.F("full_name", rename.Repo.FullName))
 	}
 	return nil

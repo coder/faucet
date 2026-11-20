@@ -69,7 +69,7 @@ func (s *Store) RenameRepository(ctx context.Context, rename faucet.RepositoryRe
 		}
 	case faucet.RenameQuarantined:
 		if err := q.QuarantineRepository(ctx, database.QuarantineRepositoryParams{
-			RepoID: repo.ID, OwnerID: sql.NullInt64{Int64: repo.OwnerID, Valid: true}, FullName: sql.NullString{String: repo.FullName, Valid: true},
+			RepoID: repo.ID, SeenAt: sql.NullTime{Time: seenAt, Valid: true},
 		}); err != nil {
 			return 0, xerrors.Errorf("quarantine repository: %w", err)
 		}

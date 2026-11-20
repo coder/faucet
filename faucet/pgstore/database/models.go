@@ -192,13 +192,12 @@ type FaucetRefreshToken struct {
 }
 
 type FaucetRepo struct {
-	RepoID            int64
-	OwnerID           int64
-	OwnerLogin        string
-	FullName          string
-	SeenAt            time.Time
-	CandidateOwnerID  sql.NullInt64
-	CandidateFullName sql.NullString
+	RepoID        int64
+	OwnerID       int64
+	OwnerLogin    string
+	FullName      string
+	SeenAt        time.Time
+	QuarantinedAt sql.NullTime
 }
 
 type FaucetRepoRename struct {

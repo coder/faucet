@@ -28,9 +28,9 @@ func (s *fakeStore) nowLocked() time.Time {
 type fakeRepo struct {
 	repo   faucet.Repository
 	seenAt time.Time
-	// candidate is the names of a rename from a name that repo did not hold.
-	// A row with one resolves no name.
-	candidate *faucet.Repository
+	// quarantined is set by a rename from a name that repo did not hold. A
+	// quarantined row resolves no name.
+	quarantined bool
 }
 
 type fakeRepoOwner struct {
@@ -58,20 +58,18 @@ func (s *fakeStore) RenameRepository(_ context.Context, rename faucet.Repository
 		s.renameBodies[rename.Body] = true
 		outcome = faucet.Renamed
 		i := slices.IndexFunc(s.repos, func(r fakeRepo) bool { return r.repo.ID == rename.Repo.ID })
-		held := i >= 0 && (s.holdsLocked(s.repos[i].repo, rename.From) ||
-			s.repos[i].candidate != nil && s.holdsLocked(*s.repos[i].candidate, rename.From))
+		held := i >= 0 && s.holdsLocked(s.repos[i].repo, rename.From)
 		switch {
 		case i < 0:
 			s.repos = append(s.repos, fakeRepo{repo: rename.Repo, seenAt: seenAt})
 			return
-		case rename.Late && (s.repos[i].candidate != nil || !held):
+		case rename.Late && (s.repos[i].quarantined || !held):
 			outcome = faucet.RenameLate
 			return
 		case held:
 		default:
 			outcome = faucet.RenameQuarantined
-			candidate := rename.Repo
-			s.repos[i].candidate = &candidate
+			s.repos[i].quarantined = true
 			return
 		}
 		s.repos[i] = fakeRepo{repo: rename.Repo, seenAt: seenAt}
@@ -167,7 +165,7 @@ func (s *fakeStore) RepositoryByName(_ context.Context, fullName string) (faucet
 			found = &s.repos[i]
 		}
 	}
-	if found == nil || found.candidate != nil {
+	if found == nil || found.quarantined {
 		return faucet.Repository{}, faucet.ErrUnknownRepository
 	}
 	_, held, _ := strings.Cut(found.repo.FullName, "/")
