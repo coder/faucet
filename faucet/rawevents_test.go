@@ -9,7 +9,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
+	"github.com/coder/superblink-events/faucet"
 )
 
 // rawNames are the raw event names in events/list order: the GitHub webhook

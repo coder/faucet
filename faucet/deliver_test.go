@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/faucet"
+	"github.com/coder/superblink-events/faucet"
 )
 
 var messageIDShape = regexp.MustCompile(`^msg_[A-Za-z0-9_-]{22}$`)

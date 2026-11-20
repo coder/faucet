@@ -8,8 +8,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/pgstore"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/pgstore"
 )
 
 func postgresStore(t *testing.T) faucet.Store { return pgstore.New(postgresDB(t)) }

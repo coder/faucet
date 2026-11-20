@@ -9,9 +9,9 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/redelivery"
-	"github.com/coder/faucet/faucet/storetest"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/redelivery"
+	"github.com/coder/superblink-events/faucet/storetest"
 )
 
 type fakeRedeliveryState int

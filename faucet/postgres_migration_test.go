@@ -11,8 +11,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/pgstore"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/pgstore"
 )
 
 const before000009UpsertSubscription = `INSERT INTO faucet_subscriptions (key_hash, principal, callback_url, event_type, arguments, repo_id, secret_enc, cursor, scanned_through, created_at, updated_at, expires_at)

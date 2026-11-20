@@ -20,9 +20,9 @@ import (
 
 	"cdr.dev/slog/v3"
 	"cdr.dev/slog/v3/sloggers/sloghuman"
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/oauth"
 	"github.com/coder/quartz"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/oauth"
 )
 
 const issuer = "https://faucet.example.com"

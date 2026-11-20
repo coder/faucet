@@ -12,7 +12,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet/oauth"
+	"github.com/coder/superblink-events/faucet/oauth"
 )
 
 // trustRuleSubtests is the contract of the trust rules of oauth.Store, one

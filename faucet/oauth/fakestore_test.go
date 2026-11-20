@@ -14,8 +14,8 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/faucet/oauth"
-	"github.com/coder/faucet/faucet/storetest"
+	"github.com/coder/superblink-events/faucet/oauth"
+	"github.com/coder/superblink-events/faucet/storetest"
 )
 
 type fakeStore struct {

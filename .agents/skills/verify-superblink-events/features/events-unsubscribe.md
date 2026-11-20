@@ -4,7 +4,7 @@ An agent ends a webhook subscription through `events/unsubscribe` on `POST /gith
 
 ## Sub-features
 
-- With webhook mode off the call is the error -32026 (see [events/list](events-list.md)). With it on, a token that faucet minted and a matching `Mcp-Name` header are required, as for subscribe. Its params are read by exact member name too.
+- With webhook mode off the call is the error -32026 (see [events/list](events-list.md)). With it on, a token that Superblink Events minted and a matching `Mcp-Name` header are required, as for subscribe. Its params are read by exact member name too.
 - `params` are `name`, `arguments` (as for subscribe) and `delivery` with a `url`. The `secret` is not needed. The parameters are checked as for subscribe: an unknown event is -32023, a `delivery.mode` other than `webhook` is -32026, and a bad URL or arguments is -32602.
 - A match is deleted and the result is `resultType` `complete`.
 - A call that matches nothing is the error -32023 with `data` `{"kind": "subscription"}` and the message `no such subscription`. That covers a second call, a key nobody subscribed, a subscription that has expired (a lapsed row counts as absent), and a key that only another principal subscribed. The three replies are the same, so one principal cannot tell that another holds a subscription. The other principal's row is not touched.
@@ -14,7 +14,7 @@ An agent ends a webhook subscription through `events/unsubscribe` on `POST /gith
 
 ## How to get to it (user POV)
 
-An agent that stops caring about a pull request sends `events/unsubscribe` with the `name`, `arguments` and `delivery.url` it subscribed with. The test plays the agent through `faucet.mcp` and `unsubscribe` in `tests/subscriptions.ts`, as the faucet's service, and the second principal through `faucet.as('other')`.
+An agent that stops caring about a pull request sends `events/unsubscribe` with the `name`, `arguments` and `delivery.url` it subscribed with. The test plays the agent through `faucet.mcp` and `unsubscribe` in `tests/subscriptions.ts`, as the Superblink Events server's service, and the second principal through `faucet.as('other')`.
 
 ## Driving it with e2e
 

@@ -18,9 +18,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"cdr.dev/slog/v3"
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/internal/githubapi"
-	"github.com/coder/faucet/faucet/oauth"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/internal/githubapi"
+	"github.com/coder/superblink-events/faucet/oauth"
 )
 
 // accessAnswer is the answer of an access check, with the repositories that

@@ -533,7 +533,7 @@ function waitForFaucetOrAbort(children, signal) {
     signal.addEventListener('abort', () => resolveOutcome({ aborted: true }), { once: true });
     for (const child of children) {
       child.once('error', (err) => resolveOutcome({ error: err.message }));
-      child.once('exit', (code, sig) => resolveOutcome({ error: `faucet exited early (${sig ?? code})` }));
+      child.once('exit', (code, sig) => resolveOutcome({ error: `a Superblink Events server exited early (${sig ?? code})` }));
     }
   });
 }
@@ -547,10 +547,10 @@ async function waitUntilHealthy(port, child, signal) {
     } catch (err) {
       if (signal.aborted) throw err;
     }
-    if (Date.now() > deadline) throw new Error(`the cron faucet did not answer /healthz within ${HEALTHY_MS} ms`);
+    if (Date.now() > deadline) throw new Error(`the cron Superblink Events server did not answer /healthz within ${HEALTHY_MS} ms`);
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   }
-  throw new Error('the cron faucet exited before it answered /healthz');
+  throw new Error('the cron Superblink Events server exited before it answered /healthz');
 }
 
 async function createDatabase(psql, dir, name) {
@@ -579,7 +579,7 @@ async function runStack({ port }, abort) {
   } catch (err) {
     if (err.code === 'EEXIST') {
       const advice = existsSync(join(dir, 'pgdata'))
-        ? `stop its app.mjs, faucet and Postgres, then delete ${dir} (Cleanup in the verify-faucet skill)`
+        ? `stop its app.mjs, both Superblink Events servers and Postgres, then delete ${dir} (Cleanup in the verify-superblink-events skill)`
         : `it has no pgdata, so there is no Postgres to stop; delete ${dir}`;
       throw new Error(`${dir} exists, so an earlier run was killed; ${advice}`);
     }

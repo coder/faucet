@@ -1,6 +1,6 @@
 # Webhook delivery
 
-An agent that subscribed with `events/subscribe` gets the matching GitHub events as Standard Webhooks signed `POST`s at its callback URL. Faucet sends nothing by itself. `GET /cron/deliver` (Vercel Cron, or any scheduler with the cron secret) queues the events that live subscriptions have not read yet, and sends the deliveries that are due through the guarded client of the [handshake](webhook-handshake.md). It needs webhook mode. A webhook can wait up to one scheduler period, and a retry one more.
+An agent that subscribed with `events/subscribe` gets the matching GitHub events as Standard Webhooks signed `POST`s at its callback URL. Superblink Events sends nothing by itself. `GET /cron/deliver` (Vercel Cron, or any scheduler with the cron secret) queues the events that live subscriptions have not read yet, and sends the deliveries that are due through the guarded client of the [handshake](webhook-handshake.md). It needs webhook mode. A webhook can wait up to one scheduler period, and a retry one more.
 
 ## Sub-features
 
@@ -23,11 +23,11 @@ An agent that runs a receiver subscribes with `events/subscribe`, verifies the s
 
 ## Driving it with e2e
 
-`tests/delivery.e2e.ts` (matching events, the event names, concurrent runs, secret hygiene), `tests/delivery-retry.e2e.ts` (retries, the five attempts, 410 and 413, a 401, a redirect, expiry, a crashed run, unsubscribe), and the deliver cases of `tests/cron-auth.e2e.ts`. `tests/delivery.ts` holds what they share: `withDeliveryFaucet(faucet, fn)` starts a faucet in `handshake` mode on the build with `-tags faucet_e2e`, so it reaches the receiver on `127.0.0.1`. `endpoint(receiver, behavior)` registers a secret and makes a callback URL with a token in its query. `paramsFor(repoId, at, args?)` builds the subscribe params. `storeRun(started, repoId, runId)` posts a signed `workflow_run` event, and `deliverDue(started)` calls `GET /cron/deliver` and returns its counts, which `counts({...})` builds. `eventRequests(receiver, at)` are the requests for events without the verification request, and `expectSigned(request, subscriptionId)` checks one and returns its body.
+`tests/delivery.e2e.ts` (matching events, the event names, concurrent runs, secret hygiene), `tests/delivery-retry.e2e.ts` (retries, the five attempts, 410 and 413, a 401, a redirect, expiry, a crashed run, unsubscribe), and the deliver cases of `tests/cron-auth.e2e.ts`. `tests/delivery.ts` holds what they share: `withDeliveryFaucet(faucet, fn)` starts a Superblink Events server in `handshake` mode on the build with `-tags faucet_e2e`, so it reaches the receiver on `127.0.0.1`. `endpoint(receiver, behavior)` registers a secret and makes a callback URL with a token in its query. `paramsFor(repoId, at, args?)` builds the subscribe params. `storeRun(started, repoId, runId)` posts a signed `workflow_run` event, and `deliverDue(started)` calls `GET /cron/deliver` and returns its counts, which `counts({...})` builds. `eventRequests(receiver, at)` are the requests for events without the verification request, and `expectSigned(request, subscriptionId)` checks one and returns its body.
 
-The receiver answers events by the behavior in the URL (the list is in `app.mjs`): `ok` (200 when the signature is valid, else 401), `gone` (410), `toolarge` (413), `fail500`, `fail-once` (500, then 200), `gone-once`, `toolarge-once` and `redirect-events` (302). It answers a verification request like `echo`, so the handshake passes for each of them. Every answer body is `ENDPOINT_SAYS` from `runstate.mjs`. `receiver.requests(id)` holds the headers, the body and its own `signature` verdict, which it computes with Node crypto and no code of faucet.
+The receiver answers events by the behavior in the URL (the list is in `app.mjs`): `ok` (200 when the signature is valid, else 401), `gone` (410), `toolarge` (413), `fail500`, `fail-once` (500, then 200), `gone-once`, `toolarge-once` and `redirect-events` (302). It answers a verification request like `echo`, so the handshake passes for each of them. Every answer body is `ENDPOINT_SAYS` from `runstate.mjs`. `receiver.requests(id)` holds the headers, the body and its own `signature` verdict, which it computes with Node crypto and no code of Superblink Events.
 
-On the faucet that a test started: `started.deliveries()` reads `faucet_deliveries`, `started.makeDeliveriesDue()` moves every `next_attempt_at` into the past and ends the leases, and `started.leaseDeliveries(seconds, attempts)` plays a run that claimed the deliveries and died. Not reachable from a browser: use `run_tests {files: ["tests/delivery.e2e.ts", "tests/delivery-retry.e2e.ts"]}`, or `npx e2e run tests/delivery.e2e.ts tests/delivery-retry.e2e.ts` in `verify/`.
+On the Superblink Events server that a test started: `started.deliveries()` reads `faucet_deliveries`, `started.makeDeliveriesDue()` moves every `next_attempt_at` into the past and ends the leases, and `started.leaseDeliveries(seconds, attempts)` plays a run that claimed the deliveries and died. Not reachable from a browser: use `run_tests {files: ["tests/delivery.e2e.ts", "tests/delivery-retry.e2e.ts"]}`, or `npx e2e run tests/delivery.e2e.ts tests/delivery-retry.e2e.ts` in `verify/`.
 
 ## Proof
 
@@ -35,7 +35,7 @@ The receiver's `signature` is `valid` for every event request, so the HMAC was m
 
 ## Charters
 
-No charter. Every check needs the cron secret, the receiver's records, the queue table or the log of a faucet that the test started, and a browser session reaches none of them.
+No charter. Every check needs the cron secret, the receiver's records, the queue table or the log of a Superblink Events server that the test started, and a browser session reaches none of them.
 
 ## Gotchas
 
@@ -47,4 +47,4 @@ No charter. Every check needs the cron secret, the receiver's records, the queue
 - A redirect on an event is the category `http_4xx`, like any answer in 3xx or 4xx that is not 410 or 413. The test only checks that it is a category and that the target is never requested.
 - A renewal reports `deliveryStatus` only when the subscription existed. The first subscribe does not.
 - Pinned by no test, and what docs/webhooks.md says: a renewal of a live subscription keeps the row's `cursor` and read position and ignores the `cursor` it sends, so an event that was given up is not replayed. A subscribe deletes the login's expired rows first, and a deleted one (`events/unsubscribe`, or expiry) starts again at the cursor it sends, or at the head when it sends none. So a late renewal replays only with the cursor, and the events of the gap are not delivered without it.
-- Each test starts its own faucet and database, so the table-wide reads (`deliveries()`) see only that test's rows.
+- Each test starts its own Superblink Events server and database, so the table-wide reads (`deliveries()`) see only that test's rows.

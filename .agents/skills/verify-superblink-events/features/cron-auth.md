@@ -4,7 +4,7 @@ Vercel Cron calls `GET /cron/purge`, `GET /cron/deliver` and `GET /cron/redelive
 
 ## Sub-features
 
-- Without `CRON_SECRET` in the faucet's environment every route answers 503 with the body `cron is not configured` and runs nothing, whatever the request holds.
+- Without `CRON_SECRET` in the Superblink Events server's environment every route answers 503 with the body `cron is not configured` and runs nothing, whatever the request holds.
 - With it, a request without `Authorization: Bearer <secret>` is 401 with `WWW-Authenticate: Bearer` and the body `unauthorized`. One body covers every refusal: no header, a wrong secret (also one of the right length), the right secret in another scheme or with no scheme, one character short, or only in the query string. A refused request runs nothing and asks GitHub for nothing.
 - With the right secret, `/cron/deliver` answers 503 with the body `delivery is not configured` when webhook mode is off, and runs nothing. With webhook mode on, a refused request sends no webhook and queues none.
 - With the right secret but without the hook settings, `/cron/redeliver` answers 503 with `redelivery is not configured`.
@@ -19,7 +19,7 @@ An operator sets `CRON_SECRET` in Vercel (production only) and schedules the two
 
 ## Driving it with e2e
 
-`tests/cron-auth.e2e.ts`. `app.mjs` starts a second faucet, the cron faucet, with `CRON_SECRET` and no hook settings, on its own database, because a purge moves the purge mark of the whole table. The tests reach it through the `cron` fixture, and `faucet.cronJob(job, opts)` sends the request: `opts.send` says what it carries as a function of the secret, so no test names the secret. The main faucet has no `CRON_SECRET`, which is the 503 case, and it has webhook mode on. The cron faucet has `CRON_SECRET` and no webhook mode, so it answers `/cron/deliver` 503 `delivery is not configured`. A test that needs `/cron/deliver` to run starts a faucet with `withDeliveryFaucet` (see [webhook delivery](delivery.md)). Not reachable from a browser with a secret, so there is no live lane: use `run_tests {files: ["tests/cron-auth.e2e.ts"]}`.
+`tests/cron-auth.e2e.ts`. `app.mjs` starts a second Superblink Events server, the cron Superblink Events server, with `CRON_SECRET` and no hook settings, on its own database, because a purge moves the purge mark of the whole table. The tests reach it through the `cron` fixture, and `faucet.cronJob(job, opts)` sends the request: `opts.send` says what it carries as a function of the secret, so no test names the secret. The main Superblink Events server has no `CRON_SECRET`, which is the 503 case, and it has webhook mode on. The cron Superblink Events server has `CRON_SECRET` and no webhook mode, so it answers `/cron/deliver` 503 `delivery is not configured`. A test that needs `/cron/deliver` to run starts a Superblink Events server with `withDeliveryFaucet` (see [webhook delivery](delivery.md)). Not reachable from a browser with a secret, so there is no live lane: use `run_tests {files: ["tests/cron-auth.e2e.ts"]}`.
 
 ## Proof
 
@@ -32,4 +32,4 @@ No charter. Every check needs the cron secret or a backdated row, and a browser 
 ## Gotchas
 
 - The 503 for missing webhook mode comes after the secret check, so a caller without the secret gets 401 and learns nothing about the configuration.
-- The routes are mounted outside the bearer middleware of `/github/mcp`. A faucet token is not a cron secret, and the cron secret is not a faucet token.
+- The routes are mounted outside the bearer middleware of `/github/mcp`. A Superblink Events token is not a cron secret, and the cron secret is not a Superblink Events token.

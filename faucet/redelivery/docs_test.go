@@ -10,7 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet/redelivery"
+	"github.com/coder/superblink-events/faucet/redelivery"
 )
 
 // docs/redelivery.md promises numbers about redelivery. They come from the constants

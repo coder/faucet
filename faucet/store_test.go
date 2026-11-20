@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
+	"github.com/coder/superblink-events/faucet"
 )
 
 func TestEventValidateRejectsNUL(t *testing.T) {

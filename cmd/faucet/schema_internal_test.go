@@ -11,8 +11,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/cmd/faucet/internal/dbconn"
-	"github.com/coder/faucet/faucet/pgstore"
+	"github.com/coder/superblink-events/cmd/faucet/internal/dbconn"
+	"github.com/coder/superblink-events/faucet/pgstore"
 )
 
 const testDatabaseURLEnv = "FAUCET_TEST_DATABASE_URL"

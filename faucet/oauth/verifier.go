@@ -7,8 +7,8 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/faucet"
 	"github.com/coder/quartz"
+	"github.com/coder/superblink-events/faucet"
 )
 
 // SubjectResolver returns the principal of a live subject, holding scopes or

@@ -6,7 +6,7 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/faucet"
+	"github.com/coder/superblink-events/faucet"
 )
 
 // SubjectKind says what an access token was issued to.

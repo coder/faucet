@@ -11,9 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/oauth"
 	"github.com/coder/quartz"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/oauth"
 )
 
 const resource = "https://faucet.example.com/github/mcp"

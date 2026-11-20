@@ -11,8 +11,8 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/pgstore/database"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/pgstore/database"
 )
 
 // eventsLockKey is the FNV-1a 64-bit hash of "faucet_events", read as an int64.

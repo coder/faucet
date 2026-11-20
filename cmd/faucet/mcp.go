@@ -13,8 +13,8 @@ import (
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog/v3"
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/oauth"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/oauth"
 )
 
 const (

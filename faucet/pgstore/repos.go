@@ -8,8 +8,8 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/pgstore/database"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/pgstore/database"
 )
 
 // RecordRepository implements faucet.Store. A row of the same ID makes it

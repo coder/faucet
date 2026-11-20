@@ -10,7 +10,7 @@ const fixtureCron = `package main
 import (
 	"net/http"
 
-	"github.com/coder/faucet/faucet"
+	"github.com/coder/superblink-events/faucet"
 	"github.com/go-chi/chi/v5"
 )
 

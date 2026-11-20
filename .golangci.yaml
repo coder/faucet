@@ -45,7 +45,7 @@ linters:
       threshold: 412
     exhaustruct:
       include:
-        - github.com/coder/faucet/faucet/pgstore/database\.[^G][^e][^t]\w+Params
+        - github.com/coder/superblink-events/faucet/pgstore/database\.[^G][^e][^t]\w+Params
     gocognit:
       min-complexity: 300
     goconst:

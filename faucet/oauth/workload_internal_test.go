@@ -29,8 +29,8 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
 	"github.com/coder/quartz"
+	"github.com/coder/superblink-events/faucet"
 )
 
 const (

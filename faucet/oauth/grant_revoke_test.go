@@ -11,7 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet/oauth"
+	"github.com/coder/superblink-events/faucet/oauth"
 )
 
 // revoke sends form to the revocation endpoint with authorization as the

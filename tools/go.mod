@@ -1,4 +1,4 @@
-module github.com/coder/faucet/tools
+module github.com/coder/superblink-events/tools
 
 go 1.26.10
 

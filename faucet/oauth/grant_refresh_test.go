@@ -11,8 +11,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/oauth"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/oauth"
 )
 
 // A refresh token comes again within 30 seconds of its first use when

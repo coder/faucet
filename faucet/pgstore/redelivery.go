@@ -8,8 +8,8 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/faucet/pgstore/database"
-	"github.com/coder/faucet/faucet/redelivery"
+	"github.com/coder/superblink-events/faucet/pgstore/database"
+	"github.com/coder/superblink-events/faucet/redelivery"
 )
 
 var _ redelivery.Store = (*Store)(nil)

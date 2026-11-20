@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
 
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/oauth"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/oauth"
 )
 
 // go-sdk v1.8.0 detects how a client authenticates: its first token request

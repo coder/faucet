@@ -11,10 +11,10 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"cdr.dev/slog/v3"
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/oauth"
-	"github.com/coder/faucet/faucet/redelivery"
 	"github.com/coder/quartz"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/oauth"
+	"github.com/coder/superblink-events/faucet/redelivery"
 )
 
 // cronTimeout keeps a run inside the server's write deadline.

@@ -1,6 +1,6 @@
-# Deploying and operating faucet
+# Deploying and operating Superblink Events
 
-Faucet is one Go binary plus Postgres 13 or newer. This repository deploys to Vercel with Neon Postgres, and most of this page is about that setup. The [database](#database) and [backups](#restoring-from-a-backup) notes apply anywhere.
+Superblink Events is one Go binary plus Postgres 13 or newer. This repository deploys to Vercel with Neon Postgres, and most of this page is about that setup. The [database](#database) and [backups](#restoring-from-a-backup) notes apply anywhere.
 
 ## Database
 
@@ -65,14 +65,14 @@ A change to a rule changes the file and the project together: merge the file, th
 
 | Rule | Matches | Per IP | Why |
 | --- | --- | --- | --- |
-| Rate limit MCP | `/github/mcp` and `/mcp` | 120 requests a minute, then 429 | Every caller reaches these before faucet checks its token, and each well-formed faucet access token (`fct_`) costs a database lookup, which anyone can make. Faucet's own limits per login hold per process, and Vercel runs many processes. An agent sends a few requests a minute, and a wait holds one for up to 50 seconds. |
-| Rate limit consent form | `POST /oauth/authorize` | 10 requests a minute, then 429 | Each post that carries a valid form stores a login request for 10 minutes, and a script can send faucet's `Origin` and keep the cookie, so faucet bounds the rows only by time (see [security.md](security.md#the-browser-login)). A person presses Continue once per login. `GET /oauth/authorize` stores nothing and is left out. |
+| Rate limit MCP | `/github/mcp` and `/mcp` | 120 requests a minute, then 429 | Every caller reaches these before Superblink Events checks its token, and each well-formed Superblink Events access token (`fct_`) costs a database lookup, which anyone can make. Superblink Events' own limits per login hold per process, and Vercel runs many processes. An agent sends a few requests a minute, and a wait holds one for up to 50 seconds. |
+| Rate limit consent form | `POST /oauth/authorize` | 10 requests a minute, then 429 | Each post that carries a valid form stores a login request for 10 minutes, and a script can send Superblink Events' `Origin` and keep the cookie, so Superblink Events bounds the rows only by time (see [security.md](security.md#the-browser-login)). A person presses Continue once per login. `GET /oauth/authorize` stores nothing and is left out. |
 
 Vercel counts each region apart, so traffic spread over regions can pass a limit, and callers behind one address share it. Leave `/webhook/github` without a rule. GitHub sends bursts from a few addresses and does not resend a failed delivery, so one that got 429 is lost unless [redelivery](redelivery.md) asks for it again.
 
 ### The public URL
 
-Every caller logs in at faucet's public URL, so the server refuses to start without one. With `FAUCET_PUBLIC_URL` unset, a production deployment takes `https://` and `VERCEL_PROJECT_PRODUCTION_URL`, which Vercel sets to the shortest custom domain of the project's production deployment, or its `vercel.app` domain, and logs the URL once at start. A preview or a development deployment never derives the URL, because a preview must not take the issuer of production, so it exits at start without `FAUCET_PUBLIC_URL`, and so does a process without `VERCEL`. **Set `FAUCET_PUBLIC_URL` to pin the URL.** Without it, adding a custom domain shorter than the current one changes the URL at the next deploy. Faucet's issuer and its endpoint's URL change with it, so every browser session and access token ends, and every service client made for the old URL gets `invalid_client` until an operator makes a new one.
+Every caller logs in at Superblink Events' public URL, so the server refuses to start without one. With `FAUCET_PUBLIC_URL` unset, a production deployment takes `https://` and `VERCEL_PROJECT_PRODUCTION_URL`, which Vercel sets to the shortest custom domain of the project's production deployment, or its `vercel.app` domain, and logs the URL once at start. A preview or a development deployment never derives the URL, because a preview must not take the issuer of production, so it exits at start without `FAUCET_PUBLIC_URL`, and so does a process without `VERCEL`. **Set `FAUCET_PUBLIC_URL` to pin the URL.** Without it, adding a custom domain shorter than the current one changes the URL at the next deploy. Superblink Events' issuer and its endpoint's URL change with it, so every browser session and access token ends, and every service client made for the old URL gets `invalid_client` until an operator makes a new one.
 
 ## Scheduled routes
 
@@ -93,7 +93,7 @@ Each `/cron/*` route answers 200 with a JSON object, and the result type in the 
 **Don't roll back past the newest migration.** A build that doesn't embed the migration that production is at can't start (`no migration found for version N`), so Vercel Instant Rollback to it serves nothing. Recover in one of two ways:
 
 - Redeploy a build that embeds the migration.
-- Roll back, then at once apply the migration's `.down.sql` from `faucet/pgstore/migrations/` with golang-migrate against the `faucet_schema_migrations` table. In that order, because production migrates at start: an instance of the newer build that starts after the down migration applies it again. Between the two steps the older build cannot start, so faucet serves nothing. Read the down file first: some drop state. For example, `000007_gap_pending` drops gaps that are owed but not yet sent.
+- Roll back, then at once apply the migration's `.down.sql` from `faucet/pgstore/migrations/` with golang-migrate against the `faucet_schema_migrations` table. In that order, because production migrates at start: an instance of the newer build that starts after the down migration applies it again. Between the two steps the older build cannot start, so Superblink Events serves nothing. Read the down file first: some drop state. For example, `000007_gap_pending` drops gaps that are owed but not yet sent.
 
 ### Rotate the database credentials
 
@@ -117,11 +117,11 @@ The variable holds several keys, so a rotation loses no GitHub token of a user a
 
 ### Restoring from a backup
 
-A restore puts event IDs back to the backup's, and faucet can't detect it.
+A restore puts event IDs back to the backup's, and Superblink Events can't detect it.
 
-- Each target's positions go back too, so a cursor that a client holds can be above the newest event of its target. Faucet reads such a cursor as that newest event at the time of the read, and answers with it. That read skips the events that the target received after the restore, before the read, at or below the cursor, and says `truncated: false`. Clients must drop their cursors, and subscribers must subscribe again without one.
+- Each target's positions go back too, so a cursor that a client holds can be above the newest event of its target. Superblink Events reads such a cursor as that newest event at the time of the read, and answers with it. That read skips the events that the target received after the restore, before the read, at or below the cursor, and says `truncated: false`. Clients must drop their cursors, and subscribers must subscribe again without one.
 - A webhook's `webhook-id` is derived from the subscription and the event ID, so a new event can reuse the ID of one delivered before it, and a receiver that deduplicates drops it. Clear the receivers' ID caches, or change `FAUCET_WEBHOOK_KEY`.
 
 ### Retention at scale
 
-`/cron/purge` scans the event table without an index on `received_at`, about 0.3 seconds per million rows per scan, and stops after 25 seconds. Around 40 million rows, every purge would roll back. No deployment is near that, so faucet doesn't add the index yet.
+`/cron/purge` scans the event table without an index on `received_at`, about 0.3 seconds per million rows per scan, and stops after 25 seconds. Around 40 million rows, every purge would roll back. No deployment is near that, so Superblink Events doesn't add the index yet.

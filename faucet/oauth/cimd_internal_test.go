@@ -15,8 +15,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
 	"github.com/coder/quartz"
+	"github.com/coder/superblink-events/faucet"
 )
 
 // documentServer serves client ID metadata documents over TLS on loopback

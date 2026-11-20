@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
+	"github.com/coder/superblink-events/faucet"
 )
 
 // rawPurgeSubtests are the contract cases of the purge, of what interests want, and of the event log next to raw events.

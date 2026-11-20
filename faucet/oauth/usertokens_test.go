@@ -12,11 +12,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"cdr.dev/slog/v3"
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/internal/githubapi"
-	"github.com/coder/faucet/faucet/internal/pgtest"
-	"github.com/coder/faucet/faucet/oauth"
-	"github.com/coder/faucet/faucet/pgstore"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/internal/githubapi"
+	"github.com/coder/superblink-events/faucet/internal/pgtest"
+	"github.com/coder/superblink-events/faucet/oauth"
+	"github.com/coder/superblink-events/faucet/pgstore"
 )
 
 // usertokensStores are the stores that the tests of a GitHub refresh run

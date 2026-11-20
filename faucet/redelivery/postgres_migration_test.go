@@ -11,10 +11,10 @@ import (
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet/internal/pgtest"
-	"github.com/coder/faucet/faucet/pgstore"
-	"github.com/coder/faucet/faucet/redelivery"
 	"github.com/coder/quartz"
+	"github.com/coder/superblink-events/faucet/internal/pgtest"
+	"github.com/coder/superblink-events/faucet/pgstore"
+	"github.com/coder/superblink-events/faucet/redelivery"
 )
 
 const (

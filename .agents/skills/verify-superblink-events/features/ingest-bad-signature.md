@@ -1,6 +1,6 @@
 # Bad signature
 
-A delivery whose HMAC-SHA256 signature does not match the webhook secret is refused before faucet reads any header.
+A delivery whose HMAC-SHA256 signature does not match the webhook secret is refused before Superblink Events reads any header.
 
 ## Sub-features
 

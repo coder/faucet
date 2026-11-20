@@ -7,12 +7,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>faucet pictures</title>
+<title>Superblink Events pictures</title>
 <style>
   /*
     Colours and type follow the Coder Kit product design system (the
     coder-brand skill's kit/coder-kit.css): zinc neutrals, one accent (the link
-    blue) for faucet itself, Geist and Geist Mono. The hsl values are the Kit's
+    blue) for Superblink Events itself, Geist and Geist Mono. The hsl values are the Kit's
     role tokens, except --edge, zinc-500, which keeps borders and lifelines at
     3:1 against their card in both schemes. fonts/ holds Geist under the SIL
     Open Font License, so every host renders the same glyphs.
@@ -47,13 +47,15 @@
   .route { font-family: "Geist Mono", monospace; font-weight: 600; }
   .title { font-size: 30px; font-weight: 600; }
   .big { font-size: 40px; font-weight: 600; }
+  .name { font-size: 32px; font-weight: 600; }
+  .small { font-size: 20px; }
   .accent { fill: var(--accent); }
   .muted { fill: var(--muted); }
   .mid { text-anchor: middle; }
   .halo { font-size: 20px; paint-order: stroke; stroke: var(--card); stroke-width: 8px; stroke-linejoin: round; }
   .box { stroke-width: 2.5; }
   .plain { fill: var(--card); stroke: var(--edge); }
-  .faucet { fill: var(--card); stroke: var(--accent); stroke-width: 3; }
+  .self { fill: var(--card); stroke: var(--accent); stroke-width: 3; }
   .port { fill: var(--bg); stroke: var(--accent); stroke-width: 2; }
   .agent { fill: var(--card); stroke: var(--edge); }
   .agent-port { fill: var(--bg); stroke: var(--edge); stroke-width: 2; }
@@ -72,16 +74,16 @@
 <body>
 
 <div data-picture="map">
-<svg width="960" height="636" viewBox="0 0 960 636" role="img" aria-label="How faucet connects GitHub, Postgres, a scheduler and agents">
+<svg width="960" height="636" viewBox="0 0 960 636" role="img" aria-label="How Superblink Events connects GitHub, Postgres, a scheduler and agents">
   <defs>
     <marker id="map-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="4.5" markerHeight="4.5" orient="auto-start-reverse">
       <path class="head" d="M0,0 L10,5 L0,10 z"/>
     </marker>
   </defs>
 
-  <!-- faucet and its routes -->
-  <rect class="faucet" x="324" y="24" width="328" height="588" rx="18"/>
-  <text class="big mid accent" x="488" y="76">faucet</text>
+  <!-- Superblink Events and its routes -->
+  <rect class="self" x="324" y="24" width="328" height="588" rx="18"/>
+  <text class="name mid accent" x="488" y="72">Superblink Events</text>
 
   <rect class="port" x="340" y="96" width="296" height="76" rx="10"/>
   <text class="route" x="354" y="128">POST /webhook/github</text>
@@ -139,7 +141,7 @@
 </div>
 
 <div data-picture="ways">
-<svg width="960" height="552" viewBox="0 0 960 552" role="img" aria-label="Three ways for an agent to get events from faucet: wait, poll and subscribe">
+<svg width="960" height="552" viewBox="0 0 960 552" role="img" aria-label="Three ways for an agent to get events from Superblink Events: wait, poll and subscribe">
   <defs>
     <marker id="ways-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="4.5" markerHeight="4.5" orient="auto-start-reverse">
       <path class="head" d="M0,0 L10,5 L0,10 z"/>
@@ -151,18 +153,19 @@
     <rect class="card" width="296" height="520" rx="16"/>
     <text class="big" x="18" y="56">Wait</text>
     <text class="mono" x="18" y="90">wait_for_github_events</text>
-    <rect class="box agent" x="10" y="112" width="96" height="44" rx="8"/>
-    <text class="mid" x="58" y="142">agent</text>
-    <rect class="box faucet" x="190" y="112" width="96" height="44" rx="8"/>
-    <text class="mid accent" x="238" y="142">faucet</text>
-    <path class="lifeline" d="M58,160 V500 M238,160 V500"/>
-    <rect class="busy" x="230" y="212" width="16" height="232"/>
-    <path class="wire" d="M58,212 H228" marker-end="url(#ways-head)"/>
-    <text class="mid halo" x="148" y="200">one tool call</text>
-    <text class="mid halo" x="144" y="336">waits up to 50 s</text>
-    <path class="wire" d="M230,444 H60" marker-end="url(#ways-head)"/>
-    <text class="mid halo" x="144" y="432">first match</text>
-    <text class="mid halo" x="144" y="472">with a cursor</text>
+    <rect class="box agent" x="10" y="104" width="80" height="68" rx="8"/>
+    <text class="mid" x="50" y="145">agent</text>
+    <rect class="box self" x="166" y="104" width="120" height="68" rx="8"/>
+    <text class="mid small accent" x="226" y="133">Superblink</text>
+    <text class="mid small accent" x="226" y="159">Events</text>
+    <path class="lifeline" d="M50,176 V500 M226,176 V500"/>
+    <rect class="busy" x="218" y="212" width="16" height="232"/>
+    <path class="wire" d="M50,212 H216" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="138" y="200">one tool call</text>
+    <text class="mid halo" x="138" y="336">waits up to 50 s</text>
+    <path class="wire" d="M226,444 H52" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="138" y="432">first match</text>
+    <text class="mid halo" x="138" y="472">with a cursor</text>
   </g>
 
   <!-- Poll -->
@@ -170,22 +173,23 @@
     <rect class="card" width="296" height="520" rx="16"/>
     <text class="big" x="18" y="56">Poll</text>
     <text class="mono" x="18" y="90">events/poll</text>
-    <rect class="box agent" x="10" y="112" width="96" height="44" rx="8"/>
-    <text class="mid" x="58" y="142">agent</text>
-    <rect class="box faucet" x="190" y="112" width="96" height="44" rx="8"/>
-    <text class="mid accent" x="238" y="142">faucet</text>
-    <path class="lifeline" d="M58,160 V500 M238,160 V500"/>
-    <path class="wire" d="M58,212 H236" marker-end="url(#ways-head)"/>
-    <text class="mid halo" x="148" y="200">cursor</text>
-    <path class="wire" d="M238,272 H60" marker-end="url(#ways-head)"/>
-    <text class="mid halo" x="148" y="260">events, cursor</text>
+    <rect class="box agent" x="10" y="104" width="80" height="68" rx="8"/>
+    <text class="mid" x="50" y="145">agent</text>
+    <rect class="box self" x="166" y="104" width="120" height="68" rx="8"/>
+    <text class="mid small accent" x="226" y="133">Superblink</text>
+    <text class="mid small accent" x="226" y="159">Events</text>
+    <path class="lifeline" d="M50,176 V500 M226,176 V500"/>
+    <path class="wire" d="M50,212 H224" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="138" y="200">cursor</text>
+    <path class="wire" d="M226,272 H52" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="138" y="260">events, cursor</text>
     <rect class="frame" x="12" y="304" width="272" height="188" rx="10"/>
     <path class="tab" d="M12,314 A10,10 0 0 1 22,304 H142 V328 L128,342 H12 Z"/>
     <text x="22" y="331">call again</text>
-    <path class="wire" d="M58,396 H236" marker-end="url(#ways-head)"/>
-    <text class="mid halo" x="148" y="384">cursor</text>
-    <path class="wire" d="M238,456 H60" marker-end="url(#ways-head)"/>
-    <text class="mid halo" x="148" y="444">events, cursor</text>
+    <path class="wire" d="M50,396 H224" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="138" y="384">cursor</text>
+    <path class="wire" d="M226,456 H52" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="138" y="444">events, cursor</text>
   </g>
 
   <!-- Subscribe -->
@@ -193,22 +197,23 @@
     <rect class="card" width="296" height="520" rx="16"/>
     <text class="big" x="18" y="56">Subscribe</text>
     <text class="mono" x="18" y="90">events/subscribe</text>
-    <rect class="box agent" x="10" y="112" width="96" height="44" rx="8"/>
-    <text class="mid" x="58" y="142">agent</text>
-    <rect class="box faucet" x="190" y="112" width="96" height="44" rx="8"/>
-    <text class="mid accent" x="238" y="142">faucet</text>
-    <path class="lifeline" d="M58,160 V500 M238,160 V500"/>
-    <path class="wire" d="M58,212 H236" marker-end="url(#ways-head)"/>
-    <text class="mid halo" x="148" y="200">subscribe once</text>
+    <rect class="box agent" x="10" y="104" width="80" height="68" rx="8"/>
+    <text class="mid" x="50" y="145">agent</text>
+    <rect class="box self" x="166" y="104" width="120" height="68" rx="8"/>
+    <text class="mid small accent" x="226" y="133">Superblink</text>
+    <text class="mid small accent" x="226" y="159">Events</text>
+    <path class="lifeline" d="M50,176 V500 M226,176 V500"/>
+    <path class="wire" d="M50,212 H224" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="138" y="200">subscribe once</text>
     <rect class="frame" x="12" y="244" width="272" height="160" rx="10"/>
     <path class="tab" d="M12,254 A10,10 0 0 1 22,244 H142 V268 L128,282 H12 Z"/>
     <text x="22" y="271">each event</text>
-    <path class="wire" d="M238,336 H60" marker-end="url(#ways-head)"/>
-    <text class="mid halo" x="148" y="324">signed POST</text>
-    <text class="mid halo" x="148" y="364">to your URL</text>
-    <path class="wire" d="M58,444 H236" marker-end="url(#ways-head)"/>
-    <text class="mid halo" x="148" y="432">renew</text>
-    <text class="mid halo" x="148" y="472">within 10 min</text>
+    <path class="wire" d="M226,336 H52" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="138" y="324">signed POST</text>
+    <text class="mid halo" x="138" y="364">to your URL</text>
+    <path class="wire" d="M50,444 H224" marker-end="url(#ways-head)"/>
+    <text class="mid halo" x="138" y="432">renew</text>
+    <text class="mid halo" x="138" y="472">within 10 min</text>
   </g>
 
 </svg>

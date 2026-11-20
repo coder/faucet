@@ -7,8 +7,8 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/faucet/oauth"
-	"github.com/coder/faucet/faucet/pgstore/database"
+	"github.com/coder/superblink-events/faucet/oauth"
+	"github.com/coder/superblink-events/faucet/pgstore/database"
 )
 
 var _ oauth.AccessCheckStore = (*Store)(nil)

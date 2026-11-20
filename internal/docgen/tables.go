@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/coder/faucet/faucet"
+	"github.com/coder/superblink-events/faucet"
 )
 
 // tables renders each generated block by name.
@@ -90,15 +90,15 @@ var settings = []setting{
 	{"FAUCET_HOOK_ID", "for redelivery", "Numeric ID of the GitHub webhook to watch for failed deliveries."},
 	{"FAUCET_HOOK_ORG", "for an org hook", "The organization that owns the hook. Set this or `FAUCET_HOOK_REPO`, not both."},
 	{"FAUCET_HOOK_REPO", "for a repo hook", "The repository that owns the hook, as `owner/name`."},
-	{"FAUCET_PUBLIC_URL", "yes", "Faucet's public URL, such as `https://faucet.example.com`, or `http` on a loopback host such as `http://localhost:8080`, with no path or trailing slash. Faucet's login server lives there, and every caller logs in there: service clients (see [docs/service-accounts.md](docs/service-accounts.md)) and the browser login. The server refuses to start without it, except on Vercel production, where an unset one is `https://` and `VERCEL_PROJECT_PRODUCTION_URL`. Set it there anyway to pin it: a shorter custom domain added later changes that URL, which ends every browser session and access token (see [docs/deploy.md](docs/deploy.md#the-public-url))."},
-	{"FAUCET_GITHUB_APP_CLIENT_ID", "for the browser login", "The client ID of faucet's GitHub App. With the secret and the token key it turns on the browser login of coding agents (see [docs/browser-login.md](docs/browser-login.md))."},
-	{"FAUCET_GITHUB_APP_CLIENT_SECRET", "for the browser login", "A client secret of faucet's GitHub App."},
+	{"FAUCET_PUBLIC_URL", "yes", "Superblink Events' public URL, such as `https://superblink-events.example.com`, or `http` on a loopback host such as `http://localhost:8080`, with no path or trailing slash. Superblink Events' login server lives there, and every caller logs in there: service clients (see [docs/service-accounts.md](docs/service-accounts.md)) and the browser login. The server refuses to start without it, except on Vercel production, where an unset one is `https://` and `VERCEL_PROJECT_PRODUCTION_URL`. Set it there anyway to pin it: a shorter custom domain added later changes that URL, which ends every browser session and access token (see [docs/deploy.md](docs/deploy.md#the-public-url))."},
+	{"FAUCET_GITHUB_APP_CLIENT_ID", "for the browser login", "The client ID of Superblink Events' GitHub App. With the secret and the token key it turns on the browser login of coding agents (see [docs/browser-login.md](docs/browser-login.md))."},
+	{"FAUCET_GITHUB_APP_CLIENT_SECRET", "for the browser login", "A client secret of Superblink Events' GitHub App."},
 	{"FAUCET_TOKEN_KEY", "for the browser login", "The keys that seal the GitHub tokens of users at rest: one or more `<key_id>:<32 random bytes, base64>`, comma-separated. The first seals, every one opens (see [rotating the key](docs/browser-login.md#rotate-the-token-key))."},
 	{"FAUCET_GITHUB_URL", "no", "GitHub's web host, which serves the App's login page. Default `{defaultGitHubURL}`."},
-	{"FAUCET_RAW_EVENTS", "for raw events", "Comma-separated GitHub events, such as `push,release,issues`, that faucet offers raw as `github.<event>` (see [docs/events.md](docs/events.md#raw-events)). Unset offers none. The server refuses to start on an event whose payload GitHub shows only to people with more than read access."},
+	{"FAUCET_RAW_EVENTS", "for raw events", "Comma-separated GitHub events, such as `push,release,issues`, that Superblink Events offers raw as `github.<event>` (see [docs/events.md](docs/events.md#raw-events)). Unset offers none. The server refuses to start on an event whose payload GitHub shows only to people with more than read access."},
 	{"VERCEL", "set by Vercel", "Marks a Vercel deployment. There the server never migrates without `VERCEL_ENV`."},
 	{"VERCEL_ENV", "set by Vercel", "When set, the server migrates only if it is `production`, and otherwise starts only on a current schema."},
-	{"VERCEL_PROJECT_PRODUCTION_URL", "set by Vercel", "The host of the project's production deployment: its shortest custom domain, or its `vercel.app` domain. Vercel sets it in every environment, and only in production does faucet take it for an unset `FAUCET_PUBLIC_URL`."},
+	{"VERCEL_PROJECT_PRODUCTION_URL", "set by Vercel", "The host of the project's production deployment: its shortest custom domain, or its `vercel.app` domain. Vercel sets it in every environment, and only in production does Superblink Events take it for an unset `FAUCET_PUBLIC_URL`."},
 }
 
 func settingsTable(s source) ([]string, error) {

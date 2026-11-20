@@ -1,6 +1,6 @@
 # Ping
 
-GitHub sends a `ping` event when a webhook is created. faucet answers it so the webhook shows as healthy.
+GitHub sends a `ping` event when a webhook is created. Superblink Events answers it so the webhook shows as healthy.
 
 ## Sub-features
 

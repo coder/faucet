@@ -9,7 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet/oauth"
+	"github.com/coder/superblink-events/faucet/oauth"
 )
 
 // loginBack starts a login of c in b, presses Continue, lets GitHub answer,

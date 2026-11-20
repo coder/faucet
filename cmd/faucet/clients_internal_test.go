@@ -15,10 +15,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/cmd/faucet/internal/dbconn"
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/oauth"
-	"github.com/coder/faucet/faucet/pgstore"
+	"github.com/coder/superblink-events/cmd/faucet/internal/dbconn"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/oauth"
+	"github.com/coder/superblink-events/faucet/pgstore"
 )
 
 // newClientsDatabase is a migrated scratch database and the environment that

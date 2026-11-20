@@ -14,7 +14,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet/redelivery"
+	"github.com/coder/superblink-events/faucet/redelivery"
 )
 
 const testHookToken = "ghp_hook0123456789abcdefghijklmnopqrstuvwx"

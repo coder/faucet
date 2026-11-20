@@ -8,8 +8,8 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/faucet/faucet"
 	"github.com/coder/quartz"
+	"github.com/coder/superblink-events/faucet"
 )
 
 const (

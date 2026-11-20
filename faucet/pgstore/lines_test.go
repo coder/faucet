@@ -10,8 +10,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/faucet/faucet"
-	"github.com/coder/faucet/faucet/pgstore"
+	"github.com/coder/superblink-events/faucet"
+	"github.com/coder/superblink-events/faucet/pgstore"
 )
 
 // The statements of the build before the target lines migration, which keeps
