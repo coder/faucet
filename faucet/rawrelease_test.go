@@ -1,6 +1,7 @@
 package faucet_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -57,6 +58,7 @@ func draftReleases(t *testing.T) map[string][]byte {
 		"unpublished":       draftRelease(t, "unpublished", nil),
 		"without draft":     draftRelease(t, "edited", func(r map[string]any) { delete(r, "draft") }),
 		"draft not boolean": draftRelease(t, "edited", func(r map[string]any) { r["draft"] = "false" }),
+		"Draft false after": bytes.Replace(draftRelease(t, "edited", nil), []byte(`"draft":true`), []byte(`"draft":true,"Draft":false`), 1),
 	}
 }
 

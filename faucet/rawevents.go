@@ -440,11 +440,13 @@ func (d rawDocument) readersSee(event string) bool {
 		return true
 	}
 	members, _ := d.root.object()
-	var release struct {
-		Draft *bool `json:"draft"`
+	release, ok := members["release"]
+	if !ok {
+		return false
 	}
-	v := members["release"]
-	return v != nil && json.Unmarshal(v.raw, &release) == nil && release.Draft != nil && !*release.Draft
+	fields, _ := release.object()
+	draft, ok := fields["draft"]
+	return ok && string(draft.raw) == "false"
 }
 
 // project copies each selected value as the payload's own bytes, because a
