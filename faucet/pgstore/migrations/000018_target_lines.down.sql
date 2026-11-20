@@ -7,7 +7,6 @@ DROP TRIGGER faucet_events_mark_purged ON faucet_events;
 DROP FUNCTION faucet_events_mark_purged();
 DROP TRIGGER faucet_events_number ON faucet_events;
 DROP FUNCTION faucet_events_number();
-DROP FUNCTION faucet_line_head(text, bigint, bigint);
 DROP FUNCTION faucet_line_purged_through(text, bigint, bigint);
 DROP TABLE faucet_event_lines;
 

@@ -44,30 +44,28 @@ LANGUAGE sql STABLE AS $$
   END
 $$;
 
--- The head of a line is its newest position, which a purge may have deleted.
-CREATE FUNCTION faucet_line_head(kind text, repo_id bigint, owner_id bigint) RETURNS bigint
-LANGUAGE sql STABLE AS $$
-  SELECT GREATEST(
-    CASE $1
-      WHEN 'repo' THEN (SELECT max(e.repo_seq) FROM faucet_events e WHERE e.repo_id = $2)
-      WHEN 'owner' THEN (SELECT max(e.owner_seq) FROM faucet_events e WHERE e.owner_id = $3 AND e.owner_id > 0)
-      ELSE (SELECT max(e.id) FROM faucet_events e)
-    END,
-    faucet_line_purged_through($1, $2, $3),
-    0
-  )
-$$;
-
 -- Triggers number an event and raise the purge marks, so that an instance of
 -- the build before this migration, which inserts and purges during a rolling
 -- deploy, keeps the lines whole. Every insert holds the lock of pgstore's
 -- eventsLockKey, so the events of a line are numbered in the order they
 -- commit. A row trigger sees the rows that its statement inserted before, so
 -- a statement that inserts many rows numbers each.
+-- The head of a line is the higher of its newest position and its purge
+-- mark, which a purge of every event of the line leaves. EXECUTE plans each
+-- lookup with the table as it is now: a plan cached while the table was small
+-- reads every row, and a statement that inserts many rows would pay that for
+-- each of them.
 CREATE FUNCTION faucet_events_number() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  newest bigint;
 BEGIN
-  NEW.repo_seq := faucet_line_head('repo', NEW.repo_id, 0) + 1;
-  NEW.owner_seq := CASE WHEN NEW.owner_id > 0 THEN faucet_line_head('owner', 0, NEW.owner_id) + 1 END;
+  EXECUTE 'SELECT max(repo_seq) FROM faucet_events WHERE repo_id = $1' INTO newest USING NEW.repo_id;
+  NEW.repo_seq := GREATEST(newest, faucet_line_purged_through('repo', NEW.repo_id, 0), 0) + 1;
+  NEW.owner_seq := NULL;
+  IF NEW.owner_id > 0 THEN
+    EXECUTE 'SELECT max(owner_seq) FROM faucet_events WHERE owner_id = $1 AND owner_id > 0' INTO newest USING NEW.owner_id;
+    NEW.owner_seq := GREATEST(newest, faucet_line_purged_through('owner', 0, NEW.owner_id), 0) + 1;
+  END IF;
   RETURN NEW;
 END
 $$;

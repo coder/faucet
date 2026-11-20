@@ -70,11 +70,23 @@ ORDER BY page.id;
 -- A read of the line of one target by position: repo_seq on
 -- faucet_events_repo_line for a repository, owner_seq on
 -- faucet_events_owner_line for an owner, and the ID on the primary key for
--- all. The positions of a line rise with the ID, so the page is in ID order.
--- The head and the purge mark are the line's, read in the same snapshot.
+-- all. A page is in the order of its line, which is the order of its IDs,
+-- so the index of the line also gives the order and the read stops at the
+-- limit.
+-- The head and the purge mark are the line's, read in the same snapshot. The
+-- head is the higher of the newest position and the purge mark, which a
+-- purge of every event of the line leaves.
 WITH line AS (
   SELECT
-    faucet_line_head(sqlc.arg(target_kind)::text, sqlc.arg(repo_id)::bigint, sqlc.arg(owner_id)::bigint)::bigint AS head,
+    GREATEST(
+      CASE sqlc.arg(target_kind)::text
+        WHEN 'repo' THEN (SELECT MAX(h.repo_seq) FROM faucet_events h WHERE h.repo_id = sqlc.arg(repo_id)::bigint)
+        WHEN 'owner' THEN (SELECT MAX(h.owner_seq) FROM faucet_events h WHERE h.owner_id = sqlc.arg(owner_id)::bigint AND h.owner_id > 0)
+        ELSE (SELECT MAX(h.id) FROM faucet_events h)
+      END,
+      faucet_line_purged_through(sqlc.arg(target_kind)::text, sqlc.arg(repo_id)::bigint, sqlc.arg(owner_id)::bigint),
+      0
+    )::bigint AS head,
     faucet_line_purged_through(sqlc.arg(target_kind)::text, sqlc.arg(repo_id)::bigint, sqlc.arg(owner_id)::bigint)::bigint AS purged_through
 ), page AS (
   SELECT e.* FROM faucet_events e
@@ -94,7 +106,7 @@ WITH line AS (
       SELECT 1 FROM jsonb_to_recordset(sqlc.arg(fields)::text::jsonb) AS f(field text, matches text[], types text[])
       WHERE e.type = ANY(f.types) AND NOT COALESCE(e.data ->> f.field = ANY(f.matches), false)
     )
-  ORDER BY e.id
+  ORDER BY CASE sqlc.arg(target_kind)::text WHEN 'repo' THEN e.repo_seq WHEN 'owner' THEN e.owner_seq ELSE e.id END
   LIMIT sqlc.arg(row_limit)
 )
 SELECT
@@ -123,7 +135,16 @@ SELECT GREATEST(
 -- of the line, so an event of the target above that head commits with a
 -- higher ID.
 WITH line AS (
-  SELECT faucet_line_head(sqlc.arg(target_kind)::text, sqlc.arg(repo_id)::bigint, sqlc.arg(owner_id)::bigint)::bigint AS head
+  SELECT
+    GREATEST(
+      CASE sqlc.arg(target_kind)::text
+        WHEN 'repo' THEN (SELECT MAX(h.repo_seq) FROM faucet_events h WHERE h.repo_id = sqlc.arg(repo_id)::bigint)
+        WHEN 'owner' THEN (SELECT MAX(h.owner_seq) FROM faucet_events h WHERE h.owner_id = sqlc.arg(owner_id)::bigint AND h.owner_id > 0)
+        ELSE (SELECT MAX(h.id) FROM faucet_events h)
+      END,
+      faucet_line_purged_through(sqlc.arg(target_kind)::text, sqlc.arg(repo_id)::bigint, sqlc.arg(owner_id)::bigint),
+      0
+    )::bigint AS head
 ), log AS (
   SELECT
     GREATEST(COALESCE(MAX(id), 0), (SELECT purged_through FROM faucet_purge_mark))::bigint AS head,
