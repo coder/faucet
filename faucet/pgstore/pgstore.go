@@ -263,16 +263,23 @@ func (s *Store) PositionAt(ctx context.Context, target faucet.Target, t time.Tim
 	return faucet.Position(p), nil
 }
 
-func (s *Store) StartAfter(ctx context.Context, target faucet.Target, p faucet.Position) (_ int64, _ faucet.Position, err error) {
+func (s *Store) StartSubscription(ctx context.Context, q faucet.StartQuery) (_ faucet.Start, err error) {
 	defer func() { err = endedBy(ctx, err) }()
-	if p < 0 {
-		return 0, 0, xerrors.Errorf("position must not be negative, got %d", p)
+	if err := q.Validate(); err != nil {
+		return faucet.Start{}, xerrors.Errorf("validate start: %w", err)
 	}
-	row, err := s.q.StartAfter(ctx, database.StartAfterParams{TargetKind: string(target.Kind()), RepoID: target.RepoID(), OwnerID: target.OwnerID(), Position: int64(p)})
+	params := database.StartSubscriptionParams{
+		TargetKind: string(q.Target.Kind()), RepoID: q.Target.RepoID(), OwnerID: q.Target.OwnerID(),
+		Since: sql.NullTime{Time: q.Since, Valid: !q.Since.IsZero()},
+	}
+	if q.Cursor != nil {
+		params.Cursor = sql.NullInt64{Int64: int64(*q.Cursor), Valid: true}
+	}
+	row, err := s.q.StartSubscription(ctx, params)
 	if err != nil {
-		return 0, 0, xerrors.Errorf("select start: %w", err)
+		return faucet.Start{}, xerrors.Errorf("select start: %w", err)
 	}
-	return row.After, faucet.Position(row.Start), nil
+	return faucet.Start{Position: faucet.Position(row.Position), After: row.After, Truncated: row.Truncated}, nil
 }
 
 // Purge deletes the old events and raises the mark in one transaction. A

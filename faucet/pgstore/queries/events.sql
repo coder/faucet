@@ -129,11 +129,16 @@ SELECT GREATEST(
   0
 )::bigint AS position;
 
--- name: StartAfter :one
--- next is the ID of the target's first event above the position, on its
--- line's index. The highest event ID is read in the same snapshot as the head
--- of the line, so an event of the target above that head commits with a
--- higher ID.
+-- name: StartSubscription :one
+-- One statement, so one snapshot: a purge that commits alongside it either
+-- raised the purge mark that floor reads, or commits after it and leaves after
+-- below the new purge mark of faucet_purge_mark, where the delivery scan
+-- reports a gap. floor reads the receive times only when since is given,
+-- on the line's index from its head down to since; with no since it is the
+-- line's purge mark alone. next is the ID of the target's first event above
+-- the start, on its line's index. The highest event ID is read in the same
+-- snapshot as the head of the line, so an event of the target above that head
+-- commits with a higher ID.
 WITH line AS (
   SELECT
     GREATEST(
@@ -144,7 +149,24 @@ WITH line AS (
       END,
       faucet_line_purged_through(sqlc.arg(target_kind)::text, sqlc.arg(repo_id)::bigint, sqlc.arg(owner_id)::bigint),
       0
-    )::bigint AS head
+    )::bigint AS head,
+    GREATEST(
+      CASE WHEN sqlc.narg(since)::timestamptz IS NOT NULL THEN
+        CASE sqlc.arg(target_kind)::text
+          WHEN 'repo' THEN (SELECT MAX(e.repo_seq) FROM faucet_events e WHERE e.repo_id = sqlc.arg(repo_id)::bigint AND e.received_at < sqlc.narg(since)::timestamptz)
+          WHEN 'owner' THEN (SELECT MAX(e.owner_seq) FROM faucet_events e WHERE e.owner_id = sqlc.arg(owner_id)::bigint AND e.owner_id > 0 AND e.received_at < sqlc.narg(since)::timestamptz)
+          ELSE (SELECT MAX(e.id) FROM faucet_events e WHERE e.received_at < sqlc.narg(since)::timestamptz)
+        END
+      END,
+      faucet_line_purged_through(sqlc.arg(target_kind)::text, sqlc.arg(repo_id)::bigint, sqlc.arg(owner_id)::bigint),
+      0
+    )::bigint AS floor
+), start AS (
+  SELECT
+    LEAST(GREATEST(COALESCE(sqlc.narg(cursor)::bigint, 0), line.floor), line.head)::bigint AS position,
+    COALESCE(sqlc.narg(cursor)::bigint < line.floor, false)::boolean AS truncated,
+    line.head
+  FROM line
 ), log AS (
   SELECT
     GREATEST(COALESCE(MAX(id), 0), (SELECT purged_through FROM faucet_purge_mark))::bigint AS head,
@@ -154,22 +176,23 @@ WITH line AS (
   SELECT CASE sqlc.arg(target_kind)::text
     WHEN 'repo' THEN (
       SELECT e.id FROM faucet_events e
-      WHERE e.repo_id = sqlc.arg(repo_id)::bigint AND e.repo_seq > sqlc.arg(position)::bigint
+      WHERE e.repo_id = sqlc.arg(repo_id)::bigint AND e.repo_seq > (SELECT position FROM start)
       ORDER BY e.repo_seq LIMIT 1)
     WHEN 'owner' THEN (
       SELECT e.id FROM faucet_events e
-      WHERE e.owner_id = sqlc.arg(owner_id)::bigint AND e.owner_id > 0 AND e.owner_seq > sqlc.arg(position)::bigint
+      WHERE e.owner_id = sqlc.arg(owner_id)::bigint AND e.owner_id > 0 AND e.owner_seq > (SELECT position FROM start)
       ORDER BY e.owner_seq LIMIT 1)
-    ELSE (SELECT MIN(e.id) FROM faucet_events e WHERE e.id > sqlc.arg(position)::bigint)
+    ELSE (SELECT MIN(e.id) FROM faucet_events e WHERE e.id > (SELECT position FROM start))
   END AS id
 )
 SELECT
-  LEAST(sqlc.arg(position)::bigint, line.head)::bigint AS start,
+  start.position,
+  start.truncated,
   (CASE
-    WHEN sqlc.arg(position)::bigint >= line.head OR next.id IS NULL THEN log.head
+    WHEN start.position >= start.head OR next.id IS NULL THEN log.head
     ELSE GREATEST(next.id - 1, log.purged_through)
   END)::bigint AS after
-FROM line, log, next;
+FROM start, log, next;
 
 -- name: LockPurgeMark :exec
 SELECT purged_through FROM faucet_purge_mark FOR UPDATE;

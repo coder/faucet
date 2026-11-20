@@ -577,8 +577,8 @@ func TestASubscribeThatAPurgeOvertakesStillReportsTheLoss(t *testing.T) {
 }
 
 // purgeOvertakes is a store that, once armed, purges the events received
-// before a time right after events/subscribe has read where a subscription
-// starts, as a purge that commits between two of its reads would.
+// before a time right after events/subscribe has worked out where the
+// subscription starts and before it stores the subscription.
 type purgeOvertakes struct {
 	faucet.Store
 	before time.Time
@@ -587,13 +587,13 @@ type purgeOvertakes struct {
 
 func (s *purgeOvertakes) arm(before time.Time) { s.before = before }
 
-func (s *purgeOvertakes) PositionAt(ctx context.Context, target faucet.Target, t time.Time) (faucet.Position, error) {
-	p, err := s.Store.PositionAt(ctx, target, t)
+func (s *purgeOvertakes) StartSubscription(ctx context.Context, q faucet.StartQuery) (faucet.Start, error) {
+	start, err := s.Store.StartSubscription(ctx, q)
 	if err == nil && !s.before.IsZero() && !s.fired {
 		s.fired = true
 		if _, err := s.Purge(ctx, s.before); err != nil {
-			return 0, err
+			return faucet.Start{}, err
 		}
 	}
-	return p, err
+	return start, err
 }

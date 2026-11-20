@@ -157,6 +157,43 @@ func validateRead(f EventFilter, after, through int64, limit int32) error {
 	return nil
 }
 
+// StartQuery is where a subscription of Target asks to start.
+type StartQuery struct {
+	Target Target
+	// Cursor is the position that delivery starts after. Nil starts at Since.
+	Cursor *Position
+	// Since, when not zero, is the oldest receive time that the subscription
+	// reads: a start below the position of the line at Since moves up to it.
+	// Zero sets no time floor, so the store reads nothing but the purge mark.
+	Since time.Time
+}
+
+// Validate checks the fields a caller supplies to Store.StartSubscription.
+func (q StartQuery) Validate() error {
+	if q.Cursor != nil && *q.Cursor < 0 {
+		return xerrors.New("cursor must not be negative")
+	}
+	return nil
+}
+
+// Start is where Store.StartSubscription starts a subscription.
+type Start struct {
+	// Position is the position on the line of the Target that delivery
+	// starts after: the Cursor, moved up to the line's purge mark and to its
+	// position at Since, and down to its head. With no Cursor, it is the
+	// position at Since, which is never below the purge mark.
+	Position Position
+	// After is the event ID to store as Subscription.Cursor: the events of
+	// the Target above After are the events above Position. It is never below
+	// the purge mark of the all target, and when Position is the head it is
+	// the highest event ID, so a subscription of a quiet target does not read
+	// the other targets' events, or a purge of them, as a gap.
+	After int64
+	// Truncated is true when Position is above the Cursor because the line's
+	// purge mark or its position at Since is.
+	Truncated bool
+}
+
 // FieldFilter narrows the events of some types by one member of their data.
 type FieldFilter struct {
 	// Field names a string or boolean member of the data, for example
@@ -276,14 +313,11 @@ type Store interface {
 	// only if InsertEvent stamps ReceivedAt in ID order: an event must never
 	// carry an earlier time than a lower ID.
 	PositionAt(ctx context.Context, target Target, t time.Time) (Position, error)
-	// StartAfter returns where a subscription of target that starts after
-	// position p reads from: start is p, or the head of the line when p lies
-	// above it, and after is the event ID to store as Subscription.Cursor, so
-	// that the events of target above after are those above start. after is
-	// never below the purge mark, and when start is the head it is the
-	// highest event ID, so a subscription of a quiet target does not read the
-	// other targets' events or a purge of them as a gap.
-	StartAfter(ctx context.Context, target Target, p Position) (after int64, start Position, err error)
+	// StartSubscription works out where a subscription of q.Target starts,
+	// from one snapshot, so that a purge that commits alongside it is either
+	// in Start.Truncated or below Start.After, where the delivery scan reports
+	// it as a gap.
+	StartSubscription(ctx context.Context, q StartQuery) (Start, error)
 	// Purge deletes the events received before the given time and raises the
 	// purge mark to the highest ID it deleted, and the purge mark of every line
 	// that lost events to the highest position it lost, in one transaction. A

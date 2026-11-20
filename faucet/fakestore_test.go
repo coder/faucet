@@ -333,25 +333,42 @@ func (s *fakeStore) PositionAt(_ context.Context, target faucet.Target, t time.T
 	return p, nil
 }
 
-func (s *fakeStore) StartAfter(_ context.Context, target faucet.Target, p faucet.Position) (int64, faucet.Position, error) {
+func (s *fakeStore) StartSubscription(_ context.Context, q faucet.StartQuery) (faucet.Start, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.err != nil {
-		return 0, 0, s.err
+		return faucet.Start{}, s.err
 	}
-	if p < 0 {
-		return 0, 0, xerrors.New("position must not be negative")
+	if err := q.Validate(); err != nil {
+		return faucet.Start{}, err
 	}
-	head := s.headLocked(target)
-	if p >= head {
-		return int64(s.headLocked(faucet.AllTarget())), head, nil
-	}
-	for _, e := range s.events {
-		if target.Covers(e.RepoID, e.OwnerID) && target.PositionOf(e) > p {
-			return max(e.ID-1, s.purgeMark), p, nil
+	target := q.Target
+	floor := s.purgedThroughLocked(target)
+	if !q.Since.IsZero() {
+		for _, e := range s.events {
+			if target.Covers(e.RepoID, e.OwnerID) && e.ReceivedAt.Before(q.Since) {
+				floor = max(floor, target.PositionOf(e))
+			}
 		}
 	}
-	return int64(s.headLocked(faucet.AllTarget())), p, nil
+	var start faucet.Start
+	start.Position = floor
+	if q.Cursor != nil {
+		start.Position = max(*q.Cursor, floor)
+		start.Truncated = *q.Cursor < floor
+	}
+	head := s.headLocked(target)
+	start.Position = min(start.Position, head)
+	start.After = int64(s.headLocked(faucet.AllTarget()))
+	if start.Position < head {
+		for _, e := range s.events {
+			if target.Covers(e.RepoID, e.OwnerID) && target.PositionOf(e) > start.Position {
+				start.After = max(e.ID-1, s.purgeMark)
+				break
+			}
+		}
+	}
+	return start, nil
 }
 
 func (s *fakeStore) Purge(_ context.Context, before time.Time) (faucet.PurgeResult, error) {

@@ -664,70 +664,96 @@ func (q *Queries) ScanEvents(ctx context.Context, arg ScanEventsParams) ([]ScanE
 	return items, nil
 }
 
-const startAfter = `-- name: StartAfter :one
+const startSubscription = `-- name: StartSubscription :one
 WITH line AS (
   SELECT
     GREATEST(
-      CASE $2::text
-        WHEN 'repo' THEN (SELECT MAX(h.repo_seq) FROM faucet_events h WHERE h.repo_id = $3::bigint)
-        WHEN 'owner' THEN (SELECT MAX(h.owner_seq) FROM faucet_events h WHERE h.owner_id = $4::bigint AND h.owner_id > 0)
+      CASE $1::text
+        WHEN 'repo' THEN (SELECT MAX(h.repo_seq) FROM faucet_events h WHERE h.repo_id = $2::bigint)
+        WHEN 'owner' THEN (SELECT MAX(h.owner_seq) FROM faucet_events h WHERE h.owner_id = $3::bigint AND h.owner_id > 0)
         ELSE (SELECT MAX(h.id) FROM faucet_events h)
       END,
-      faucet_line_purged_through($2::text, $3::bigint, $4::bigint),
+      faucet_line_purged_through($1::text, $2::bigint, $3::bigint),
       0
-    )::bigint AS head
+    )::bigint AS head,
+    GREATEST(
+      CASE WHEN $4::timestamptz IS NOT NULL THEN
+        CASE $1::text
+          WHEN 'repo' THEN (SELECT MAX(e.repo_seq) FROM faucet_events e WHERE e.repo_id = $2::bigint AND e.received_at < $4::timestamptz)
+          WHEN 'owner' THEN (SELECT MAX(e.owner_seq) FROM faucet_events e WHERE e.owner_id = $3::bigint AND e.owner_id > 0 AND e.received_at < $4::timestamptz)
+          ELSE (SELECT MAX(e.id) FROM faucet_events e WHERE e.received_at < $4::timestamptz)
+        END
+      END,
+      faucet_line_purged_through($1::text, $2::bigint, $3::bigint),
+      0
+    )::bigint AS floor
+), start AS (
+  SELECT
+    LEAST(GREATEST(COALESCE($5::bigint, 0), line.floor), line.head)::bigint AS position,
+    COALESCE($5::bigint < line.floor, false)::boolean AS truncated,
+    line.head
+  FROM line
 ), log AS (
   SELECT
     GREATEST(COALESCE(MAX(id), 0), (SELECT purged_through FROM faucet_purge_mark))::bigint AS head,
     (SELECT purged_through FROM faucet_purge_mark)::bigint AS purged_through
   FROM faucet_events
 ), next AS (
-  SELECT CASE $2::text
+  SELECT CASE $1::text
     WHEN 'repo' THEN (
       SELECT e.id FROM faucet_events e
-      WHERE e.repo_id = $3::bigint AND e.repo_seq > $1::bigint
+      WHERE e.repo_id = $2::bigint AND e.repo_seq > (SELECT position FROM start)
       ORDER BY e.repo_seq LIMIT 1)
     WHEN 'owner' THEN (
       SELECT e.id FROM faucet_events e
-      WHERE e.owner_id = $4::bigint AND e.owner_id > 0 AND e.owner_seq > $1::bigint
+      WHERE e.owner_id = $3::bigint AND e.owner_id > 0 AND e.owner_seq > (SELECT position FROM start)
       ORDER BY e.owner_seq LIMIT 1)
-    ELSE (SELECT MIN(e.id) FROM faucet_events e WHERE e.id > $1::bigint)
+    ELSE (SELECT MIN(e.id) FROM faucet_events e WHERE e.id > (SELECT position FROM start))
   END AS id
 )
 SELECT
-  LEAST($1::bigint, line.head)::bigint AS start,
+  start.position,
+  start.truncated,
   (CASE
-    WHEN $1::bigint >= line.head OR next.id IS NULL THEN log.head
+    WHEN start.position >= start.head OR next.id IS NULL THEN log.head
     ELSE GREATEST(next.id - 1, log.purged_through)
   END)::bigint AS after
-FROM line, log, next
+FROM start, log, next
 `
 
-type StartAfterParams struct {
-	Position   int64
+type StartSubscriptionParams struct {
 	TargetKind string
 	RepoID     int64
 	OwnerID    int64
+	Since      sql.NullTime
+	Cursor     sql.NullInt64
 }
 
-type StartAfterRow struct {
-	Start int64
-	After int64
+type StartSubscriptionRow struct {
+	Position  int64
+	Truncated bool
+	After     int64
 }
 
-// next is the ID of the target's first event above the position, on its
-// line's index. The highest event ID is read in the same snapshot as the head
-// of the line, so an event of the target above that head commits with a
-// higher ID.
-func (q *Queries) StartAfter(ctx context.Context, arg StartAfterParams) (StartAfterRow, error) {
-	row := q.db.QueryRowContext(ctx, startAfter,
-		arg.Position,
+// One statement, so one snapshot: a purge that commits alongside it either
+// raised the purge mark that floor reads, or commits after it and leaves after
+// below the new purge mark of faucet_purge_mark, where the delivery scan
+// reports a gap. floor reads the receive times only when since is given,
+// on the line's index from its head down to since; with no since it is the
+// line's purge mark alone. next is the ID of the target's first event above
+// the start, on its line's index. The highest event ID is read in the same
+// snapshot as the head of the line, so an event of the target above that head
+// commits with a higher ID.
+func (q *Queries) StartSubscription(ctx context.Context, arg StartSubscriptionParams) (StartSubscriptionRow, error) {
+	row := q.db.QueryRowContext(ctx, startSubscription,
 		arg.TargetKind,
 		arg.RepoID,
 		arg.OwnerID,
+		arg.Since,
+		arg.Cursor,
 	)
-	var i StartAfterRow
-	err := row.Scan(&i.Start, &i.After)
+	var i StartSubscriptionRow
+	err := row.Scan(&i.Position, &i.Truncated, &i.After)
 	return i, err
 }
 

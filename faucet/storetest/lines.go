@@ -14,7 +14,8 @@ import (
 var lineSubtests = []subtest{
 	{"APurgeOrTheEventsOfOtherTargetsChangeNoAnswerOfALine", aPurgeOrTheEventsOfOtherTargetsChangeNoAnswerOfALine},
 	{"PurgeRaisesTheMarkOfEveryLineThatLostEvents", purgeRaisesTheMarkOfEveryLineThatLostEvents},
-	{"StartAfterReadsTheEventsAboveThePositionOnTheTargetsLine", startAfterReadsTheEventsAboveThePositionOnTheTargetsLine},
+	{"StartSubscriptionReadsTheEventsAboveTheCursorOnTheTargetsLine", startSubscriptionReadsTheEventsAboveTheCursorOnTheTargetsLine},
+	{"StartSubscriptionMovesACursorBelowTheFloorUpAsTruncated", startSubscriptionMovesACursorBelowTheFloorUpAsTruncated},
 	{"ClaimDeliveryGivesTheWatermarkOnTheTargetsLine", claimDeliveryGivesTheWatermarkOnTheTargetsLine},
 	{"ClaimGapCarriesThePurgeMarkOfTheTargetsLine", claimGapCarriesThePurgeMarkOfTheTargetsLine},
 	{"UpsertSubscriptionKeepsThePositionOfALiveRow", upsertSubscriptionKeepsThePositionOfALiveRow},
@@ -62,6 +63,20 @@ func (r *lineRig) others(n int) {
 	}
 }
 
+func (r *lineRig) start(q faucet.StartQuery) faucet.Start {
+	r.t.Helper()
+	start, err := r.s.StartSubscription(r.ctx, q)
+	require.NoError(r.t, err)
+	return start
+}
+
+func (r *lineRig) scan(target faucet.Target, after int64) faucet.ScanPage {
+	r.t.Helper()
+	page, err := r.s.ScanEvents(r.ctx, faucet.ScanQuery{EventFilter: faucet.EventFilter{Target: target}, After: after, Limit: 100})
+	require.NoError(r.t, err)
+	return page
+}
+
 func (r *lineRig) poll(target faucet.Target, after faucet.Position) faucet.PollPage {
 	r.t.Helper()
 	page, err := r.s.PollEvents(r.ctx, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: target}, After: after, Limit: 100})
@@ -80,9 +95,8 @@ func (r *lineRig) answers(target faucet.Target, until time.Time) []any {
 			ids[i] = fmt.Sprintf("%s@%d", ev.DeliveryID, target.PositionOf(ev))
 		}
 		got = append(got, ids, page.Next, page.PurgedThrough)
-		_, start, err := r.s.StartAfter(r.ctx, target, after)
-		require.NoError(r.t, err)
-		got = append(got, start)
+		start := r.start(faucet.StartQuery{Target: target, Cursor: &after})
+		got = append(got, start.Position, start.Truncated)
 	}
 	for _, at := range []time.Time{{}, until} {
 		p, err := r.s.PositionAt(r.ctx, target, at)
@@ -146,13 +160,12 @@ func purgeRaisesTheMarkOfEveryLineThatLostEvents(t *testing.T, s faucet.Store) {
 	require.Equal(t, kept.OwnerPosition+1, next.OwnerPosition)
 }
 
-func startAfterReadsTheEventsAboveThePositionOnTheTargetsLine(t *testing.T, s faucet.Store) {
+func startSubscriptionReadsTheEventsAboveTheCursorOnTheTargetsLine(t *testing.T, s faucet.Store) {
 	r := newLineRig(t, s)
 	repo := faucet.RepoTarget(42)
-	empty, start, err := s.StartAfter(r.ctx, repo, 5)
-	require.NoError(t, err)
-	require.Zero(t, start, "an empty line starts at its head, 0")
-	require.Zero(t, empty)
+	five := faucet.Position(5)
+	empty := r.start(faucet.StartQuery{Target: repo, Cursor: &five})
+	require.Equal(t, faucet.Start{}, empty, "an empty line starts at its head, 0")
 
 	r.others(2)
 	var own []faucet.Event
@@ -160,17 +173,11 @@ func startAfterReadsTheEventsAboveThePositionOnTheTargetsLine(t *testing.T, s fa
 		own = append(own, r.own())
 		r.others(2)
 	}
-	scanFrom := func(after int64) []faucet.Event {
-		t.Helper()
-		page, err := s.ScanEvents(r.ctx, faucet.ScanQuery{EventFilter: faucet.EventFilter{Target: repo}, After: after, Limit: 100})
-		require.NoError(t, err)
-		return page.Events
-	}
 	for p := faucet.Position(0); p < 3; p++ {
-		after, start, err := s.StartAfter(r.ctx, repo, p)
-		require.NoError(t, err)
-		require.Equal(t, p, start)
-		got := scanFrom(after)
+		start := r.start(faucet.StartQuery{Target: repo, Cursor: &p})
+		require.Equal(t, p, start.Position)
+		require.False(t, start.Truncated)
+		got := r.scan(repo, start.After).Events
 		require.Len(t, got, len(own)-int(p), "position %d", p)
 		for i, ev := range got {
 			requireSameEvent(t, own[int(p)+i], ev)
@@ -178,26 +185,61 @@ func startAfterReadsTheEventsAboveThePositionOnTheTargetsLine(t *testing.T, s fa
 	}
 	head := own[2].RepoPosition
 	for _, p := range []faucet.Position{head, head + 10} {
-		after, start, err := s.StartAfter(r.ctx, repo, p)
-		require.NoError(t, err)
-		require.Equal(t, head, start, "position %d: a start above the head is the head", p)
-		page, err := s.ScanEvents(r.ctx, faucet.ScanQuery{EventFilter: faucet.EventFilter{Target: faucet.AllTarget()}, After: after, Limit: 100})
-		require.NoError(t, err)
+		start := r.start(faucet.StartQuery{Target: repo, Cursor: &p})
+		require.Equal(t, head, start.Position, "position %d: a start above the head is the head", p)
+		require.False(t, start.Truncated, "position %d", p)
+		page := r.scan(faucet.AllTarget(), start.After)
 		require.Empty(t, page.Events, "position %d: a start at the head reads past every event", p)
-		require.Equal(t, after, page.Next)
+		require.Equal(t, start.After, page.Next)
 	}
+	now := r.start(faucet.StartQuery{Target: repo, Since: time.Now().Add(time.Hour)})
+	require.Equal(t, head, now.Position, "with no cursor, the start is the position at Since")
+	require.False(t, now.Truncated)
+	between := r.start(faucet.StartQuery{Target: repo, Since: own[1].ReceivedAt})
+	require.Equal(t, own[0].RepoPosition, between.Position, "the newest position received before Since")
+	require.Len(t, r.scan(repo, between.After).Events, 2)
+}
 
-	_, err = s.Purge(r.ctx, own[1].ReceivedAt)
+// startSubscriptionMovesACursorBelowTheFloorUpAsTruncated: the floor is the
+// line's purge mark, and with Since, its position at Since. A start is never
+// below the purge mark of the all target, so a subscription that lost nothing
+// gets no gap.
+func startSubscriptionMovesACursorBelowTheFloorUpAsTruncated(t *testing.T, s faucet.Store) {
+	r := newLineRig(t, s)
+	repo := faucet.RepoTarget(42)
+	var own []faucet.Event
+	for range 4 {
+		own = append(own, r.own())
+		r.others(2)
+	}
+	_, err := s.Purge(r.ctx, own[1].ReceivedAt)
 	require.NoError(t, err)
-	mark, err := s.PositionAt(r.ctx, repo, time.Time{})
-	require.NoError(t, err)
-	require.Equal(t, own[0].RepoPosition, mark)
-	after, _, err := s.StartAfter(r.ctx, repo, mark)
-	require.NoError(t, err)
-	page, err := s.ScanEvents(r.ctx, faucet.ScanQuery{EventFilter: faucet.EventFilter{Target: repo}, After: after, Limit: 100})
-	require.NoError(t, err)
-	require.GreaterOrEqual(t, after, page.PurgedThrough, "a start is never below the purge mark, so a subscription that lost nothing gets no gap")
-	require.Len(t, page.Events, 2)
+	mark := own[0].RepoPosition
+
+	zero := faucet.Position(0)
+	below := r.start(faucet.StartQuery{Target: repo, Cursor: &zero})
+	require.Equal(t, mark, below.Position, "a cursor below the line's purge mark starts at the mark")
+	require.True(t, below.Truncated, "and reports that the target lost events above the cursor")
+	page := r.scan(repo, below.After)
+	require.GreaterOrEqual(t, below.After, page.PurgedThrough)
+	require.Len(t, page.Events, 3)
+
+	at := r.start(faucet.StartQuery{Target: repo, Cursor: &mark})
+	require.Equal(t, faucet.Start{Position: mark, After: below.After}, at, "a cursor at the mark lost nothing")
+
+	floor := r.start(faucet.StartQuery{Target: repo, Cursor: &mark, Since: own[2].ReceivedAt})
+	require.Equal(t, own[1].RepoPosition, floor.Position, "a cursor below the position at Since starts there")
+	require.True(t, floor.Truncated)
+	require.Len(t, r.scan(repo, floor.After).Events, 2)
+
+	above := own[2].RepoPosition
+	kept := r.start(faucet.StartQuery{Target: repo, Cursor: &above, Since: own[2].ReceivedAt})
+	require.Equal(t, above, kept.Position, "a cursor above the floor stays")
+	require.False(t, kept.Truncated)
+
+	negative := faucet.Position(-1)
+	_, err = s.StartSubscription(r.ctx, faucet.StartQuery{Target: repo, Cursor: &negative})
+	require.Error(t, err)
 }
 
 func claimDeliveryGivesTheWatermarkOnTheTargetsLine(t *testing.T, s faucet.Store) {
