@@ -15,7 +15,8 @@ import (
 var repositorySubtests = []subtest{
 	{"RecordRepositoryKeepsTheNamesAnIDWasFirstSeenUnder", recordRepositoryKeepsTheNamesAnIDWasFirstSeenUnder},
 	{"RenameRepositoryMovesANameAndANewRepositoryCanTakeTheOldOne", renameRepositoryMovesANameAndANewRepositoryCanTakeTheOldOne},
-	{"ARenameFromANameTheRowDoesNotHoldReplacesItUnlessLate", aRenameFromANameTheRowDoesNotHoldReplacesItUnlessLate},
+	{"ARenameFromANameTheRowDoesNotHoldQuarantinesItUnlessLate", aRenameFromANameTheRowDoesNotHoldQuarantinesItUnlessLate},
+	{"AKeptOldRenameGivesNoNameBack", aKeptOldRenameGivesNoNameBack},
 	{"RenameRepositoryJudgesEachBodyOnce", renameRepositoryJudgesEachBodyOnce},
 	{"RenameRepositoryOfAnUnknownIDRecordsIt", renameRepositoryOfAnUnknownIDRecordsIt},
 	{"RepositoryByNameIgnoresCaseAndTakesTheLatestHolderOfAName", repositoryByNameIgnoresCaseAndTakesTheLatestHolderOfAName},
@@ -112,24 +113,52 @@ func renameRepositoryMovesANameAndANewRepositoryCanTakeTheOldOne(t *testing.T, s
 
 // A rename that never reached the store, or whose write failed, leaves the
 // row with the name from before it. A fresh rename or transfer after it names
-// the name that it moved the repository from, which the row does not hold,
-// and replaces the stale name, so that no grant of a name from before the
-// transfer resolves to the repository after it. When redelivery brings the
-// missed rename late, its from names a name that the row no longer holds, so
-// it changes nothing, and it is not judged again when it comes fresh.
-func aRenameFromANameTheRowDoesNotHoldReplacesItUnlessLate(t *testing.T, s faucet.Store) {
+// the name that it moved the repository from, which the row does not hold.
+// The store cannot tell such a rename from an old one that someone kept and
+// sent again, so it takes neither name: the row resolves no name until a
+// fresh rename from either of them (RenameQuarantined). When redelivery
+// brings the missed rename late, it changes nothing, and it is not judged
+// again when it comes fresh.
+func aRenameFromANameTheRowDoesNotHoldQuarantinesItUnlessLate(t *testing.T, s faucet.Store) {
 	recordDelivered(t, s, repositoryNamed(1, "coder/r"), repositoryTime)
 	missed := renameOf(repositoryNamed(1, "coder/s"), "coder/r", repositoryTime.Add(time.Minute))
 	moved := faucet.Repository{ID: 1, OwnerID: 8, OwnerLogin: "acme", FullName: "acme/s"}
-	require.Equal(t, faucet.RenamedFromAStaleName, renameDelivered(t, s, moved, "coder/s", repositoryTime.Add(2*time.Minute)))
-	requireRepositoryNamed(t, s, "acme/s", moved)
-	requireUnknownName(t, s, "coder/r")
-	requireUnknownName(t, s, "coder/s")
+	require.Equal(t, faucet.RenameQuarantined, renameDelivered(t, s, moved, "coder/s", repositoryTime.Add(2*time.Minute)))
+	for _, name := range []string{"coder/r", "coder/s", "acme/s"} {
+		requireUnknownName(t, s, name)
+	}
 
 	require.Equal(t, faucet.RenameLate, renameAs(t, s, late(missed), repositoryTime.Add(3*time.Minute)))
 	require.Equal(t, faucet.RenameSeenBefore, renameAs(t, s, missed, repositoryTime.Add(4*time.Minute)))
-	requireRepositoryNamed(t, s, "acme/s", moved)
-	requireUnknownName(t, s, "coder/s")
+	recordDelivered(t, s, moved, repositoryTime.Add(5*time.Minute))
+	requireUnknownName(t, s, "acme/s")
+	requireUnknownName(t, s, "coder/r")
+
+	// The next fresh rename from the name that the quarantine kept names
+	// the repository again.
+	next := faucet.Repository{ID: 1, OwnerID: 8, OwnerLogin: "acme", FullName: "acme/t"}
+	require.Equal(t, faucet.Renamed, renameDelivered(t, s, next, "acme/s", repositoryTime.Add(6*time.Minute)))
+	requireRepositoryNamed(t, s, "acme/t", next)
+	requireUnknownName(t, s, "coder/r")
+}
+
+// A kept body that the store never judged, such as one signed before the
+// store kept bodies, can come again fresh. When its from is not the name
+// that the row holds, it gives the repository no name back: the name that
+// the row held stops resolving, and the body's name does not start.
+func aKeptOldRenameGivesNoNameBack(t *testing.T, s faucet.Store) {
+	atNew := faucet.Repository{ID: 1, OwnerID: 20, OwnerLogin: "new", FullName: "new/r"}
+	recordDelivered(t, s, atNew, repositoryTime)
+	kept := renameOf(faucet.Repository{ID: 1, OwnerID: 10, OwnerLogin: "old", FullName: "old/r"}, "old/q", repositoryTime)
+	require.Equal(t, faucet.RenameQuarantined, renameAs(t, s, kept, repositoryTime.Add(time.Minute)))
+	requireUnknownName(t, s, "old/r")
+	requireUnknownName(t, s, "new/r")
+
+	// GitHub's next rename names the name that the row held before.
+	next := faucet.Repository{ID: 1, OwnerID: 20, OwnerLogin: "new", FullName: "new/s"}
+	require.Equal(t, faucet.Renamed, renameDelivered(t, s, next, "new/r", repositoryTime.Add(2*time.Minute)))
+	requireRepositoryNamed(t, s, "new/s", next)
+	requireUnknownName(t, s, "old/r")
 }
 
 // GitHub signs only the body of a delivery, so a body that the store judged

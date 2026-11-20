@@ -385,7 +385,7 @@ type Store interface {
 	// rename.Repo at seenAt (Renamed). GitHub writes From under the owner's
 	// login at the time, which the row lacks when the owner was renamed after
 	// it was seen. Any other name is stale or newer: a rename that is not Late
-	// replaces it (RenamedFromAStaleName), so that a missed rename leaves no
+	// replaces it (RenameQuarantined), so that a missed rename leaves no
 	// old name bound to the repository, and a Late one changes nothing
 	// (RenameLate). It calls rename.Repo.Validate.
 	RenameRepository(ctx context.Context, rename RepositoryRename, seenAt time.Time) (RenameOutcome, error)

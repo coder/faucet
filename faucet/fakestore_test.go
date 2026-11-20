@@ -64,7 +64,7 @@ func (s *fakeStore) RenameRepository(_ context.Context, rename faucet.Repository
 			outcome = faucet.RenameLate
 			return
 		default:
-			outcome = faucet.RenamedFromAStaleName
+			outcome = faucet.RenameQuarantined
 		}
 		s.repos[i] = fakeRepo{repo: rename.Repo, seenAt: seenAt}
 	})

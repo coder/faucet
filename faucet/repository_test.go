@@ -356,7 +356,7 @@ func TestWebhookFailsARenameOrTransferThatItCouldNotRecord(t *testing.T) {
 // the name that it moved the repository from, which the store does not hold.
 // It must still move the repository, so that a grant of the name from before
 // the transfer gives no access to the repository after it.
-func TestATransferAfterAMissedRenameMovesTheRepository(t *testing.T) {
+func TestATransferAfterAMissedRenameUnbindsTheRepositoryUntilTheNextRename(t *testing.T) {
 	t.Parallel()
 	transfer := lifecycleBody("transferred", "acme/s", 10, transferredFromOrg("coder"))
 	for name, rename := range map[string]func(*fakeStore, http.Handler){
@@ -375,12 +375,32 @@ func TestATransferAfterAMissedRenameMovesTheRepository(t *testing.T) {
 			rename(store, handler)
 
 			requireAcknowledged(t, handler, "repository", "d-3", transfer)
-			requireBoundTo(t, store, "acme/s", faucet.Repository{ID: 5, OwnerID: 10, OwnerLogin: "acme", FullName: "acme/s"})
-			requireUnbound(t, store, "coder/r")
-			requireUnbound(t, store, "coder/s")
+			for _, name := range []string{"coder/r", "coder/s", "acme/s"} {
+				requireUnbound(t, store, name)
+			}
 			require.Equal(t, 1, strings.Count(logs.String(), staleNameWarning), "the operator learns that faucet missed a rename")
+
+			requireAcknowledged(t, handler, "push", "d-4", pushNaming(5, 10, "acme/s"))
+			requireUnbound(t, store, "acme/s")
+			requireAcknowledged(t, handler, "repository", "d-5", lifecycleBody("renamed", "acme/t", 10, renamedFromName("s")))
+			requireBoundTo(t, store, "acme/t", faucet.Repository{ID: 5, OwnerID: 10, OwnerLogin: "acme", FullName: "acme/t"})
+			requireUnbound(t, store, "coder/r")
 		})
 	}
+}
+
+// A body that faucet never judged, such as one signed before faucet kept
+// bodies, can be sent again under a new delivery GUID by whoever kept it.
+// When its from is not the name that faucet holds, it binds neither name.
+func TestAKeptOldRenameDoesNotGiveARepositoryANameBack(t *testing.T) {
+	t.Parallel()
+	store, _, handler := newRepositoryHarness(t)
+	requireAcknowledged(t, handler, "push", "d-1", pushNaming(5, 20, "new/r"))
+
+	kept := lifecycleBody("renamed", "old/r", 10, renamedFromName("q"))
+	requireAcknowledged(t, handler, "repository", "d-2", kept)
+	requireUnbound(t, store, "old/r")
+	requireUnbound(t, store, "new/r")
 }
 
 // GitHub signs the body of a delivery and nothing else, so whoever kept the

@@ -90,10 +90,10 @@ const (
 	// Renamed means the repository took the rename's names: the store held
 	// the name that it renamed the repository from, or no row of it.
 	Renamed RenameOutcome = iota + 1
-	// RenamedFromAStaleName means the store held another name, so a rename
+	// RenameQuarantined means the store held another name, so a rename
 	// or transfer before this one never reached it, and the rename replaced
 	// that stale name.
-	RenamedFromAStaleName
+	RenameQuarantined
 	// RenameLate means the rename was late and the store held another name,
 	// which a newer rename can have given, so it changed nothing.
 	RenameLate
@@ -140,7 +140,7 @@ func (s *Service) recordRepository(ctx context.Context, logger slog.Logger, even
 	if err != nil {
 		return xerrors.Errorf("rename the repository: %w", err)
 	}
-	if outcome == RenamedFromAStaleName {
+	if outcome == RenameQuarantined {
 		logger.Warn(ctx, "a rename or transfer of the repository never reached faucet, so its stale name was replaced",
 			slog.F("repo_id", rename.Repo.ID), slog.F("from", rename.From), slog.F("full_name", rename.Repo.FullName))
 	}

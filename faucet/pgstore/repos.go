@@ -58,7 +58,7 @@ func (s *Store) RenameRepository(ctx context.Context, rename faucet.RepositoryRe
 	case !holdsFrom && rename.Late:
 		outcome = faucet.RenameLate
 	case !holdsFrom:
-		outcome = faucet.RenamedFromAStaleName
+		outcome = faucet.RenameQuarantined
 	}
 	if outcome != faucet.RenameLate {
 		if err := q.RenameRepository(ctx, database.RenameRepositoryParams{
