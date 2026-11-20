@@ -335,11 +335,10 @@ type Store interface {
 	// UpsertSubscription stores sub and returns the stored row. It calls
 	// sub.Validate(now). A row with the same KeyHash that expires after now is
 	// live: the call replaces its Target, SecretEnc and ExpiresAt and keeps its
-	// CreatedAt, Cursor and Position. When the Target changes, Position
-	// becomes the position of the new target's line at Cursor, as the
-	// migration counts the position of a row that names none: the newest
-	// position at or below Cursor, raised to the line's purge mark unless
-	// Cursor is below the purge mark of the all target. When the new SecretEnc differs from the row's, the
+	// CreatedAt, Cursor and Position, except that a changed Target gets the
+	// position of its own line at Cursor: the newest position at or below
+	// Cursor, raised to the line's purge mark unless Cursor is below the
+	// purge mark of the all target. When the new SecretEnc differs from the row's, the
 	// row's becomes PreviousSecretEnc until now plus RotationGrace (and a
 	// previous secret from an earlier rotation is dropped). When it is equal,
 	// the previous secret and its end stay as they were. A row that has

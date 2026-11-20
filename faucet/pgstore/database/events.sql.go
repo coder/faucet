@@ -736,14 +736,13 @@ type StartSubscriptionRow struct {
 }
 
 // One statement, so one snapshot: a purge that commits alongside it either
-// raised the purge mark that floor reads, or commits after it and leaves after
-// below the new purge mark of faucet_purge_mark, where the delivery scan
-// reports a gap. floor reads the receive times only when since is given,
-// on the line's index from its head down to since; with no since it is the
-// line's purge mark alone. next is the ID of the target's first event above
+// raised the purge mark that floor reads, or leaves after below the new
+// purge mark of faucet_purge_mark, where the delivery scan reports a gap.
+// floor reads receive times only when since is given; with no since it is
+// the line's purge mark. next is the ID of the target's first event above
 // the start, on its line's index. The highest event ID is read in the same
-// snapshot as the head of the line, so an event of the target above that head
-// commits with a higher ID.
+// snapshot as the head of the line, so an event of the target above that
+// head commits with a higher ID.
 func (q *Queries) StartSubscription(ctx context.Context, arg StartSubscriptionParams) (StartSubscriptionRow, error) {
 	row := q.db.QueryRowContext(ctx, startSubscription,
 		arg.TargetKind,
