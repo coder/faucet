@@ -268,14 +268,15 @@ func (s *Store) StartSubscription(ctx context.Context, q faucet.StartQuery) (_ f
 	if err := q.Validate(); err != nil {
 		return faucet.Start{}, xerrors.Errorf("validate start: %w", err)
 	}
-	params := database.StartSubscriptionParams{
-		TargetKind: string(q.Target.Kind()), RepoID: q.Target.RepoID(), OwnerID: q.Target.OwnerID(),
-		Since: sql.NullTime{Time: q.Since, Valid: !q.Since.IsZero()},
-	}
+	var cursor sql.NullInt64
 	if q.Cursor != nil {
-		params.Cursor = sql.NullInt64{Int64: int64(*q.Cursor), Valid: true}
+		cursor = sql.NullInt64{Int64: int64(*q.Cursor), Valid: true}
 	}
-	row, err := s.q.StartSubscription(ctx, params)
+	row, err := s.q.StartSubscription(ctx, database.StartSubscriptionParams{
+		TargetKind: string(q.Target.Kind()), RepoID: q.Target.RepoID(), OwnerID: q.Target.OwnerID(),
+		Since:  sql.NullTime{Time: q.Since, Valid: !q.Since.IsZero()},
+		Cursor: cursor,
+	})
 	if err != nil {
 		return faucet.Start{}, xerrors.Errorf("select start: %w", err)
 	}
