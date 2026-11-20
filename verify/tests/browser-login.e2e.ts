@@ -119,7 +119,7 @@ describe('browser login', () => {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ token: refresh, client_id: clientId }).toString(),
       });
-      const call = await started.waitForEvents({ repo: `verify/r${repoId}`, types: ['ci.run_completed'], cursor: 0, timeout_s: 1 }, access);
+      const call = await started.waitForEvents({ repo: `verify/r${repoId}`, types: ['ci.run_completed'], cursor: 'v2.0', timeout_s: 1 }, access);
       const ended = await started.sql(`select ended_at is not null from faucet_user_sessions where client_id = '${clientId}'`);
       // The purge deletes a login request, and a connection that nothing names, a day after; the test moves both back a day.
       await started.sql(`update faucet_connections set updated_at = updated_at - interval '1 day 1 minute';

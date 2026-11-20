@@ -7,8 +7,8 @@ describe('events subscribe with a wrongly typed parameter', () => {
     const secret = newSecret();
     const cases: [string, Params, string | undefined][] = [
       ['a cursor that is a number', { cursor: 5 }, undefined],
-      ['maxAgeMs as text', { cursor: 'v1.0', maxAgeMs: 'a minute' }, undefined],
-      ['maxAgeMs as a fraction', { cursor: 'v1.0', maxAgeMs: 1.5 }, undefined],
+      ['maxAgeMs as text', { cursor: 'v2.0', maxAgeMs: 'a minute' }, undefined],
+      ['maxAgeMs as a fraction', { cursor: 'v2.0', maxAgeMs: 1.5 }, undefined],
       ['a name that is a number', { name: 5 }, '5'],
     ];
 

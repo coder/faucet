@@ -44,9 +44,11 @@ describe('owner targets', () => {
       const named = (await eventRequests(receiver, one)).map((request) => expectSigned(request, narrowed.id));
       expect(named.map((body) => body.data.run_id), 'repos keeps the repository it names, ignoring case').toEqual([9102]);
 
-      const waited = await started.waitForEvents({ owner: 'verify', types: [EVENT], cursor: 0, timeout_s: 1 }, token);
+      const waited = await started.waitForEvents({ owner: 'verify', types: [EVENT], cursor: 'v2.0', timeout_s: 1 }, token);
       expect(waited.isError, waited.text).toBe(false);
       expect(waited.events?.map((event) => event.repo_id)).toEqual([known, known, fresh]);
+      const ownerLine = [...(await started.rows(known)), ...(await started.rows(fresh))].map((row) => row.owner_seq);
+      expect(waited.events?.map((event) => event.id), 'an event of an owner target is named by its place on the owner\'s line').toEqual(ownerLine);
 
       const list = await started.clients(['list']);
       expect(list.stdout, 'the grant names the account that held the login').toMatch(/^org-watcher\s+\S+\/github\/mcp\s+events:read,events:subscribe\s+org:verify#1\s/m);
@@ -70,7 +72,7 @@ describe('owner targets', () => {
         expect(refused.error?.code, refused.body).toBe(-32024);
         expect(refused.error?.message).toContain(SERVICE_ONLY);
 
-        const waited = await person.waitForEvents({ ...target, types: [EVENT], cursor: 0, timeout_s: 1 });
+        const waited = await person.waitForEvents({ ...target, types: [EVENT], cursor: 'v2.0', timeout_s: 1 });
         expect(waited.isError, waited.text).toBe(true);
         expect(waited.text).toContain(SERVICE_ONLY);
       }

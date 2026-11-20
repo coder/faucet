@@ -97,7 +97,7 @@ describe('events subscribe', () => {
     expect(reply.result).toMatchObject({ resultType: 'complete', truncated: false });
     expect(reply.result?.id).toMatch(/^sub_[0-9a-f]{16}$/);
     expect(reply.result?.refreshBefore).toMatch(UTC_SECONDS);
-    expect(reply.result?.cursor).toMatch(/^v1\.\d+$/);
+    expect(reply.result?.cursor, 'the start is the newest event of the repository, the first on its line').toBe('v2.1');
     expect(rows).toHaveLength(1);
     expect(row).toMatchObject({
       principal: faucet.login,
@@ -111,8 +111,8 @@ describe('events subscribe', () => {
     expect(row?.created_at).toBe(row?.updated_at);
     expect(row?.created_at).toBeGreaterThanOrEqual(sentAt);
     expect(row?.created_at).toBeLessThanOrEqual(repliedAt);
-    expect(reply.result?.cursor).toBe(`v1.${row?.cursor}`);
-    expect(row?.cursor).toBeGreaterThanOrEqual(newestBefore);
+    expect(row?.position, 'the row keeps the start that the reply names').toBe(1);
+    expect(row?.cursor, 'the scan reads after an internal event ID').toBeGreaterThanOrEqual(newestBefore);
     expect(row?.cursor).toBeLessThanOrEqual(newestAfter);
   });
 
@@ -122,17 +122,30 @@ describe('events subscribe', () => {
     const polled = await faucet.mcp<PollResult>('events/poll', { name: EVENT, arguments: { repo: repoOf(repoId) } });
     const earlier = polled.result?.cursor ?? '';
     await deliverRun(faucet, repoId);
-    const newest = await newestEventId(faucet);
 
     const atHead = await subscribed(faucet, subscribeParams(repoId, marker));
     const replayed = await subscribed(faucet, subscribeParams(repoId, marker, { cursor: earlier, delivery: delivery(marker, { url: callbackUrl(marker, '/replay') }) }));
     const rows = await faucet.subscriptions(marker);
 
-    expect(earlier).toMatch(/^v1\.\d+$/);
-    expect(Number(earlier.slice('v1.'.length))).toBeLessThan(newest);
-    expect(Number(atHead.cursor.slice('v1.'.length))).toBeGreaterThanOrEqual(newest);
+    expect(earlier, 'the poll of a repository with no event is at the start of its line').toBe('v2.0');
+    expect(atHead.cursor).toBe('v2.1');
     expect(replayed).toMatchObject({ cursor: earlier, truncated: false });
-    expect(rows.map((r) => `v1.${r.cursor}`)).toEqual([atHead.cursor, earlier]);
+    expect(rows.map((r) => `v2.${r.position}`)).toEqual([atHead.cursor, earlier]);
+  });
+
+  test('a cursor above the head starts at the head, and a v1 cursor of the build before starts there too with truncated', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const marker = newMarker();
+    await deliverRun(faucet, repoId);
+    await deliverRun(faucet, repoId);
+
+    const ahead = await subscribed(faucet, subscribeParams(repoId, marker, { cursor: 'v2.99999999999' }));
+    const legacy = await subscribed(faucet, subscribeParams(repoId, marker, { cursor: 'v1.0', delivery: delivery(marker, { url: callbackUrl(marker, '/legacy') }) }));
+    const rows = await faucet.subscriptions(marker);
+
+    expect(ahead).toMatchObject({ cursor: 'v2.2', truncated: false });
+    expect(legacy, 'v1.0 named the start of every event, but it is not replayed').toMatchObject({ cursor: 'v2.2', truncated: true });
+    expect(rows.map((r) => r.position)).toEqual([2, 2]);
   });
 
   test('the delivery mode may be left out or be webhook, and both name the same subscription', async ({ faucet }) => {
@@ -324,6 +337,7 @@ describe('events subscribe', () => {
     expect(third.id).toBe(first.id);
     expect(again.cursor).toBe(first.cursor);
     expect(row?.cursor).toBe(before?.cursor);
+    expect(row?.position).toBe(before?.position);
     expect(row?.created_at).toBe(before?.created_at);
     expect(row?.updated_at).toBeGreaterThan(before!.updated_at);
     expect(row?.expires_at).toBeGreaterThan(before!.expires_at);
@@ -494,7 +508,7 @@ describe('events subscribe', () => {
       ['actions on an exact type', { arguments: { repo, actions: ['completed'] } }, -32602, 'inputSchema'],
       ['an action of another family', { name: 'pr.activity', arguments: { repo, actions: ['completed'] } }, -32602, 'inputSchema'],
       ['a cursor the server never returned', { cursor: 'abc' }, -32602, 'cursor'],
-      ['maxAgeMs 0', { cursor: 'v1.0', maxAgeMs: 0 }, -32602, 'maxAgeMs'],
+      ['maxAgeMs 0', { cursor: 'v2.0', maxAgeMs: 0 }, -32602, 'maxAgeMs'],
       ['ttlMs as text', { ttlMs: 'ten minutes' }, -32602, 'ttlMs'],
       ['ttlMs as a fraction', { ttlMs: 1.5 }, -32602, 'ttlMs'],
     ];

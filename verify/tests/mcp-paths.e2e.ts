@@ -7,7 +7,7 @@ const run = samples['workflow_run.completed'];
 
 interface ToolResult {
   isError?: boolean;
-  structuredContent?: { events: { type: string; repo_id: number }[]; cursor: number };
+  structuredContent?: { events: { type: string; repo_id: number }[]; cursor: string };
 }
 
 describe('mcp paths', () => {

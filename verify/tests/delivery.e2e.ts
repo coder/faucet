@@ -113,7 +113,7 @@ describe('webhook delivery', () => {
         expect(body.timestamp).toBe(same!.timestamp);
         expect(body.data).toEqual(same!.data);
         expect([before, first, second, other], 'eventId is not a GitHub delivery ID').not.toContain(body.eventId);
-        expect(body.cursor).toMatch(/^v1\.\d+$/);
+        expect(body.cursor).toMatch(/^v2\.\d+$/);
       }
 
       for (const { title, at, runs, id } of narrowed) {
@@ -126,7 +126,7 @@ describe('webhook delivery', () => {
       expect(await eventRequests(receiver, elsewhere)).toHaveLength(1);
       const aloneBody = expectSigned(alone!, otherSubscription.id);
       const [row] = await started.rows(otherRepoId);
-      expect(aloneBody.cursor, 'the cursor is the position before the only event that is unsent').toBe(`v1.${row!.id - 1}`);
+      expect(aloneBody.cursor, 'the cursor is the position before the only event that is unsent').toBe(`v2.${row!.repo_seq - 1}`);
       const replayed = await pollFrom(started, otherRepoId, aloneBody.cursor);
       expect(replayed.map((e) => e.eventId), 'events/poll from that cursor returns the event').toEqual([other]);
       expect(replayed[0]!.data).toEqual(aloneBody.data);

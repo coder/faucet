@@ -168,7 +168,7 @@ describe('events list', () => {
   });
 
   test('a cursor on events/list is an invalid params error', async ({ faucet }) => {
-    const reply = await faucet.mcp('events/list', { cursor: 'v1.0' });
+    const reply = await faucet.mcp('events/list', { cursor: 'v2.0' });
 
     expect(reply.status).toBe(400);
     expect(reply.result).toBeNull();

@@ -204,7 +204,7 @@ describe('field filters', () => {
       ['ci.runs', { head_branch: 'main' }],
     ] as const) {
       const label = `${name} ${JSON.stringify(args)}`;
-      const polledReply = await poll(faucet, name, { repo, ...args }, { cursor: 'v1.0' });
+      const polledReply = await poll(faucet, name, { repo, ...args }, { cursor: 'v2.0' });
       expect(polledReply.error?.code, label).toBe(-32602);
       const subscribedReply = await subscribe(faucet, subscribeParams(repoId, marker, { name, arguments: { repo, ...args } }));
       expect(subscribedReply.error?.code, label).toBe(-32602);
@@ -221,7 +221,7 @@ describe('field filters', () => {
 
     const failures = await faucet.waitForEvents({ repo, types: ['ci.runs'], ...USE_CASES['CI failed on main']!.args, cursor: idle.cursor, timeout_s: 5 });
     expect(failures.isError).toBe(false);
-    expect(failures.events?.map((e) => e.id)).toEqual([first!.id, second!.id]);
+    expect(failures.events?.map((e) => e.id)).toEqual([first!.repo_seq, second!.repo_seq]);
 
     const mixed = await faucet.waitForEvents({ repo, types: ['ci.runs', 'pr.activity'], conclusion: ['failure'], cursor: idle.cursor, timeout_s: 5 });
     expect(mixed.events?.map((e) => `${e.type} ${String(e.data.conclusion)}`), 'pr.activity has no conclusion, so it stays whole').toEqual([

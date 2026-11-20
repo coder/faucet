@@ -161,16 +161,16 @@ describe('webhook delivery, failures and retries', () => {
       await storeRun(started, repoId, 9903);
       expect(await deliverDue(started)).toEqual(counts({ enqueued: 1, claimed: 1, sent: 1, delivered: 1 }));
 
-      const [first, , third] = (await started.rows(repoId)).map((row) => row.id) as [number, number, number];
+      const [first, , third] = (await started.rows(repoId)).map((row) => row.repo_seq) as [number, number, number];
       const cursors = (await eventRequests(receiver, at)).map((request) => {
         const body = expectSigned(request, subscription.id);
         return [body.data.run_id, body.cursor];
       });
       expect(cursors, 'event 1 failed and was retried, so the cursor of event 2 and of its own retry is behind event 1').toEqual([
-        [9901, `v1.${first - 1}`],
-        [9902, `v1.${first - 1}`],
-        [9901, `v1.${first - 1}`],
-        [9903, `v1.${third - 1}`],
+        [9901, `v2.${first - 1}`],
+        [9902, `v2.${first - 1}`],
+        [9901, `v2.${first - 1}`],
+        [9903, `v2.${third - 1}`],
       ]);
     });
   });

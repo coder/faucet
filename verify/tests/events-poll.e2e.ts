@@ -93,9 +93,35 @@ describe('events poll', () => {
 
     for (const result of [missing, nulled, resumed]) {
       expect(result).toMatchObject({ resultType: 'complete', events: [], truncated: false, hasMore: false, nextPollMs: 5000 });
-      expect(typeof result.cursor).toBe('string');
-      expect(result.cursor).not.toBe('');
+      expect(result.cursor, 'the head of the repository\'s line, which counts its one event').toBe('v2.1');
     }
+  });
+
+  test('a cursor above the head of the repository reads as its head, so the next event is not skipped', async ({ faucet }) => {
+    const repoId = newRepoId();
+    await deliverSample(faucet, run, repoId);
+
+    const ahead = await pollRepo(faucet, RUN, repoId, { cursor: 'v2.99999999999' });
+    const next = await deliverSample(faucet, run, repoId);
+    const resumed = await pollRepo(faucet, RUN, repoId, { cursor: ahead.cursor });
+
+    expect(ahead, 'the result names the head, not the cursor it was given').toMatchObject({ events: [], cursor: 'v2.1', truncated: false, hasMore: false });
+    expect(ids(resumed)).toEqual([next]);
+    expect(resumed).toMatchObject({ cursor: 'v2.2', truncated: false });
+  });
+
+  test('a v1 cursor of the build before is never read as a place: the poll starts at the head and says truncated', async ({ faucet }) => {
+    const repoId = newRepoId();
+    await deliverSample(faucet, run, repoId);
+    await deliverSample(faucet, run, repoId);
+
+    const legacy = await pollRepo(faucet, RUN, repoId, { cursor: 'v1.0' });
+    const next = await deliverSample(faucet, run, repoId);
+    const resumed = await pollRepo(faucet, RUN, repoId, { cursor: legacy.cursor });
+
+    expect(legacy, 'v1.0 named the start of every event, but it is not replayed').toMatchObject({ events: [], cursor: 'v2.2', truncated: true, hasMore: false });
+    expect(ids(resumed)).toEqual([next]);
+    expect(resumed.truncated).toBe(false);
   });
 
   test('a delivered event is returned once, with its delivery id, name, timestamp and data', async ({ faucet }) => {
@@ -252,10 +278,10 @@ describe('events poll', () => {
 
     expect(ids(second)).toEqual([a]);
     expect(ids(idle)).toEqual([]);
-    expect(typeof idle.cursor).toBe('string');
-    expect(idle.cursor).not.toBe('');
+    expect([first, second.cursor, idle.cursor], 'the event of the other repository does not move the cursor').toEqual(['v2.0', 'v2.1', 'v2.1']);
     expect(ids(third)).toEqual([b, c]);
     expect(ids(fourth)).toEqual([]);
+    expect([third.cursor, fourth.cursor]).toEqual(['v2.3', 'v2.3']);
     expect(rows.map((r) => r.delivery_id)).toEqual([a, b, c]);
   });
 
@@ -337,8 +363,8 @@ describe('events poll', () => {
       ['a short sha', { repo, sha: 'abc' }, {}, 'sha'],
       ['pr 0', { repo, pr: 0 }, {}, 'pr'],
       ['a cursor the server never returned', { repo }, { cursor: 'abc' }, 'cursor'],
-      ['maxEvents 0', { repo }, { cursor: 'v1.0', maxEvents: 0 }, 'maxEvents'],
-      ['maxAgeMs 0', { repo }, { cursor: 'v1.0', maxAgeMs: 0 }, 'maxAgeMs'],
+      ['maxEvents 0', { repo }, { cursor: 'v2.0', maxEvents: 0 }, 'maxEvents'],
+      ['maxAgeMs 0', { repo }, { cursor: 'v2.0', maxAgeMs: 0 }, 'maxAgeMs'],
     ];
     for (const [label, args, extra, message] of cases) {
       const reply = await poll(faucet, RUN, args, extra);
@@ -452,6 +478,20 @@ describe('events poll', () => {
     expect(generous.truncated).toBe(false);
     expect(ids(bounded)).toEqual([recent]);
     expect(bounded.truncated).toBe(true);
+  });
+
+  test('maxAgeMs counts only the events of the polled repository, so an old event of another one does not set truncated', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const otherId = newRepoId();
+    const cursor = await startCursor(faucet, repoId);
+    const mine = await deliverSample(faucet, run, repoId);
+    const theirs = await deliverSample(faucet, run, otherId);
+    await faucet.backdate(theirs, 1);
+
+    const result = await pollRepo(faucet, RUN, repoId, { cursor, maxAgeMs: 3_600_000 });
+
+    expect(ids(result)).toEqual([mine]);
+    expect(result.truncated).toBe(false);
   });
 
   test('replies and the app log never hold a token or the webhook secret', async ({ faucet }) => {

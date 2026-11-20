@@ -8,7 +8,7 @@ import { describe, expect, newDeliveryId, newRepoId, test } from './support';
 interface WaitResult {
   isError?: boolean;
   content?: { type: string; text: string }[];
-  structuredContent?: { events: { type: string; repo_id: number }[]; cursor: number };
+  structuredContent?: { events: { type: string; repo_id: number }[]; cursor: string };
 }
 
 function waited(stdout: string): WaitResult {
@@ -81,7 +81,7 @@ describe('service accounts', () => {
       try {
         const result = (await client.callTool({
           name: 'wait_for_github_events',
-          arguments: { repo, types: ['ci.run_completed'], cursor: 0, timeout_s: 1 },
+          arguments: { repo, types: ['ci.run_completed'], cursor: 'v2.0', timeout_s: 1 },
         })) as WaitResult;
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
         expect(result.structuredContent?.events).toEqual([expect.objectContaining({ type: 'ci.run_completed', repo_id: repoId })]);
@@ -119,7 +119,7 @@ describe('service accounts', () => {
       try {
         const result = (await client.callTool({
           name: 'wait_for_github_events',
-          arguments: { repo, types: ['ci.run_completed'], cursor: 0, timeout_s: 1 },
+          arguments: { repo, types: ['ci.run_completed'], cursor: 'v2.0', timeout_s: 1 },
         })) as WaitResult;
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
         expect(result.structuredContent?.events).toEqual([expect.objectContaining({ type: 'ci.run_completed', repo_id: repoId })]);
