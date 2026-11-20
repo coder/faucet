@@ -1,6 +1,6 @@
 # Oversize body
 
-GitHub caps a webhook payload at 25 MiB. faucet refuses a larger body with 413.
+GitHub caps a webhook payload at 25 MiB. Superblink Events refuses a larger body with 413.
 
 ## Sub-features
 

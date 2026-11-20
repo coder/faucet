@@ -579,7 +579,7 @@ async function runStack({ port }, abort) {
   } catch (err) {
     if (err.code === 'EEXIST') {
       const advice = existsSync(join(dir, 'pgdata'))
-        ? `stop its app.mjs, faucet and Postgres, then delete ${dir} (Cleanup in the verify-faucet skill)`
+        ? `stop its app.mjs, Superblink Events and Postgres, then delete ${dir} (Cleanup in the verify-superblink-events skill)`
         : `it has no pgdata, so there is no Postgres to stop; delete ${dir}`;
       throw new Error(`${dir} exists, so an earlier run was killed; ${advice}`);
     }

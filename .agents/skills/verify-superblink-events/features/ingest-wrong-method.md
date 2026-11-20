@@ -27,4 +27,4 @@ method-matrix|http|fuzzer|Request /webhook/github and /healthz with every HTTP m
 
 ## Gotchas
 
-- The 405 comes from the router, before the webhook handler. At PR 2 it has an empty body and `Allow: POST`, also for `HEAD` and `OPTIONS`. The tests pin the status only, because that reply is the router's, not faucet's.
+- The 405 comes from the router, before the webhook handler. At PR 2 it has an empty body and `Allow: POST`, also for `HEAD` and `OPTIONS`. The tests pin the status only, because that reply is the router's, not Superblink Events'.

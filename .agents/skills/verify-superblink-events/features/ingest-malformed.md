@@ -29,5 +29,5 @@ malformed-shapes|http|fuzzer|Send signed deliveries of handled events with wrong
 
 ## Gotchas
 
-- Only handled event names are parsed. A malformed body on an event faucet ignores is 202 (see Ignored events).
+- Only handled event names are parsed. A malformed body on an event Superblink Events ignores is 202 (see Ignored events).
 - The 400 body names the cause, for example the missing field. That is intended for a failed delivery in GitHub's UI.

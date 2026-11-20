@@ -1,6 +1,6 @@
 # Control envelopes
 
-Faucet POSTs two signed bodies with a top-level `type` to a subscription's callback URL, besides the event deliveries (SEP-3415, "Non-event webhook bodies"). Each goes once, with one attempt and no retry.
+Superblink Events POSTs two signed bodies with a top-level `type` to a subscription's callback URL, besides the event deliveries (SEP-3415, "Non-event webhook bodies"). Each goes once, with one attempt and no retry.
 
 ## Sub-features
 
@@ -14,7 +14,7 @@ An agent that subscribes and then goes quiet through a purge learns that it miss
 
 ## Driving it with e2e
 
-`tests/envelopes.e2e.ts`, on a faucet that the test starts with `withDeliveryFaucet`, so that the purge deletes no other test's events. A gap test subscribes, stores two events and ages them with `faucet.backdate(deliveryId, 40)`, runs `cronJob('purge')`, stores a fresh event, then runs `cronJob('deliver')`. A terminated test runs on a delivery faucet with the browser login and subscribes as the person (`started.as('person')`), whose access the stub decides, then calls `receiver.revoke(repoId)` and renews with the same params. `envelopeRequests(receiver, at, type)` returns the envelopes of one type, and `expectSignedEnvelope` checks what each owes the receiver.
+`tests/envelopes.e2e.ts`, on a Superblink Events server that the test starts with `withDeliveryFaucet`, so that the purge deletes no other test's events. A gap test subscribes, stores two events and ages them with `faucet.backdate(deliveryId, 40)`, runs `cronJob('purge')`, stores a fresh event, then runs `cronJob('deliver')`. A terminated test runs on a delivery Superblink Events server with the browser login and subscribes as the person (`started.as('person')`), whose access the stub decides, then calls `receiver.revoke(repoId)` and renews with the same params. `envelopeRequests(receiver, at, type)` returns the envelopes of one type, and `expectSignedEnvelope` checks what each owes the receiver.
 
 ## Proof
 
@@ -26,7 +26,7 @@ No charter. Every check needs the receiver's records, the cron secret and a purg
 
 ## Gotchas
 
-- A purge deletes the old events of the whole table, so a test that purges runs on its own faucet (`withDeliveryFaucet`). Events must be stored after the subscription, or the subscription starts above them.
+- A purge deletes the old events of the whole table, so a test that purges runs on its own Superblink Events server (`withDeliveryFaucet`). Events must be stored after the subscription, or the subscription starts above them.
 - The receiver answers an envelope like an event: the behavior `ok` needs a valid signature and answers 200, `fail500` answers 500.
 - `Service.Terminations()` has no route. The e2e test checks the log line for a failed `terminated`, and the Go test checks the counter.
 - A GitHub rate limit (429, or 403 with no quota left, `Retry-After` or a message that names the limit) is a failed check and ends nothing, while any other 403 is no access. The stub cannot make GitHub's limiter answer, so only the Go tests (`TestTokenAuthorizerRepoID`, `TestRenewalDuringAGitHubRateLimit...`) pin it.

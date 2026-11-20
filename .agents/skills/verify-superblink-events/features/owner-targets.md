@@ -5,7 +5,7 @@ A service agent reads the events of every repository of one owner, or of every r
 ## Sub-features
 
 - `-grant` takes `repo:<owner>/<name>`, `org:<login>` or `all`. `faucet clients create` binds an `org:` grant to the account that holds the login, and `faucet clients list` shows it as `org:<login>#<account ID>`. Before any delivery from the owner or a repository of it, the command refuses the grant with `faucet has received no webhook delivery from <login> or a repository of it`. An `org:` grant covers an `owner` target of whatever login its account holds now, ignoring case, and a `repo` target of any repository of that account, matched by owner ID. `all` covers every target. A service whose grants do not cover a target gets -32024.
-- faucet finds the owner's ID through the repositories that signed deliveries named. For an `all` grant, before any delivery from a repository of the owner, an `owner` target is -32024 with `faucet has received no webhook delivery from a repository of <owner> yet`. After one, the target also covers a repository of the owner that has never sent a delivery.
+- Superblink Events finds the owner's ID through the repositories that signed deliveries named. For an `all` grant, before any delivery from a repository of the owner, an `owner` target is -32024 with `faucet has received no webhook delivery from a repository of <owner> yet`. After one, the target also covers a repository of the owner that has never sent a delivery.
 - `faucet_subscriptions` stores the target as `target_kind` (`repo`, `owner` or `all`), `owner_id` (the owner's GitHub ID) and `repo_id` (0 for `owner` and `all`).
 - One `owner` subscription gets the events of every repository of the owner that arrive after it, once each, and no event of another owner. `repos` keeps the repositories it names, matched ignoring case against the full name that each delivery carried.
 - The wait tool and `events/poll` read `owner` and `all` targets as they read `repo`.
@@ -15,11 +15,11 @@ A service agent reads the events of every repository of one owner, or of every r
 
 ## How to get to it (user POV)
 
-An operator runs `faucet clients create -grant org:<login> <client-id>` and gives the service the endpoint URL, the client ID and the secret. The service logs in with client credentials and calls `events/subscribe` with `{"owner": "<login>"}`. faucet then delivers the events of every repository of that owner to its callback URL.
+An operator runs `faucet clients create -grant org:<login> <client-id>` and gives the service the endpoint URL, the client ID and the secret. The service logs in with client credentials and calls `events/subscribe` with `{"owner": "<login>"}`. Superblink Events then delivers the events of every repository of that owner to its callback URL.
 
 ## Driving it with e2e
 
-`tests/owner-targets.e2e.ts`, with the helpers of `tests/services.ts` and `tests/delivery.ts`. The subscription case runs on a delivery faucet (`withDeliveryFaucet(faucet, fn)`) and the receiver. It tries to make a client with `-grant org:verify`, which is refused while no repository of `verify` has sent a delivery, delivers a run of one repository (owner `verify`, ID 1), makes the client, then subscribes once with `{"owner": "verify"}` and once with `repos` naming a second repository that has never sent a delivery. It delivers a run of each repository and one of another owner, runs `/cron/deliver`, and waits with the same target. The refusals of the person run on a delivery faucet with the browser login (`withDeliveryFaucet(faucet, fn, { browserLogin: true })`), and the grant refusals on a faucet of their own (`withFaucet(...)`).
+`tests/owner-targets.e2e.ts`, with the helpers of `tests/services.ts` and `tests/delivery.ts`. The subscription case runs on a delivery Superblink Events server (`withDeliveryFaucet(faucet, fn)`) and the receiver. It tries to make a client with `-grant org:verify`, which is refused while no repository of `verify` has sent a delivery, delivers a run of one repository (owner `verify`, ID 1), makes the client, then subscribes once with `{"owner": "verify"}` and once with `repos` naming a second repository that has never sent a delivery. It delivers a run of each repository and one of another owner, runs `/cron/deliver`, and waits with the same target. The refusals of the person run on a delivery Superblink Events server with the browser login (`withDeliveryFaucet(faucet, fn, { browserLogin: true })`), and the grant refusals on a Superblink Events server of their own (`withFaucet(...)`).
 
 ## Proof
 
@@ -34,6 +34,6 @@ owner-target-identity|http|skeptic|Rename and transfer repositories and owners t
 
 ## Gotchas
 
-- `deliverRun` gives every `verify/r<id>` repository the owner `verify` with ID 1, so a test that reads an `owner` target runs on a faucet of its own, which has its own database. On the main faucet, the events of owner `verify` that other tests deliver would reach it.
+- `deliverRun` gives every `verify/r<id>` repository the owner `verify` with ID 1, so a test that reads an `owner` target runs on a Superblink Events server of its own, which has its own database. On the main Superblink Events server, the events of owner `verify` that other tests deliver would reach it.
 - An event stores its owner only when the payload names `repository.owner.id`, which the samples of `tests/payloads.ts` lack. `deliverRun` of `tests/services.ts` sends the repository in full.
 - A subscription starts at the newest stored event, so the run delivered to make the owner known is not sent.
