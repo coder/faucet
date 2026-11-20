@@ -145,6 +145,7 @@ func insertEventValidatesInput(t *testing.T, s faucet.Store) {
 		"empty type":        func(ev *faucet.Event) { ev.Type = "" },
 		"empty source":      func(ev *faucet.Event) { ev.Source = "" },
 		"zero repo ID":      func(ev *faucet.Event) { ev.RepoID = 0 },
+		"negative repo ID":  func(ev *faucet.Event) { ev.RepoID = -1 },
 		"nil data":          func(ev *faucet.Event) { ev.Data = nil },
 		"empty data":        func(ev *faucet.Event) { ev.Data = json.RawMessage{} },
 		"invalid JSON data": func(ev *faucet.Event) { ev.Data = json.RawMessage(`{"a":`) },

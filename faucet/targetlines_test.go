@@ -383,7 +383,7 @@ func (w *lineWorld) wait(step string, cursor any) any {
 	return out["cursor"]
 }
 
-func (w *lineWorld) subscribe(step, cursor string) {
+func (w *lineWorld) subscribe(step, cursor string) subscribed {
 	w.t.Helper()
 	p := subscribeTo(w.reader.args, w.d.rcv.url(linePath), w.secret)
 	if cursor != "" {
@@ -392,10 +392,11 @@ func (w *lineWorld) subscribe(step, cursor string) {
 	res, err := w.d.call(methodSubscribe, p)
 	if err != nil {
 		w.note(step, "error "+err.Error())
-		return
+		return subscribed{}
 	}
 	got := decode[subscribed](w.t, res)
 	w.note(step, fmt.Sprintf("cursor %s truncated %t", got.Cursor, got.Truncated))
+	return got
 }
 
 // deliver runs a delivery and notes the bodies that the endpoint received in
@@ -542,4 +543,57 @@ func TestACursorAboveTheHeadReadsOnFromTheHead(t *testing.T) {
 
 	next := h.insert(repoID, "ci.run_completed", "")
 	require.Equal(t, []string{next.DeliveryID}, h.poll(pollParams("ci.run_completed", repoArgs(), cursorOf(got.Cursor))).eventIDs())
+}
+
+// TestASubscribeThatAPurgeOvertakesStillReportsTheLoss: a purge that commits
+// while events/subscribe works out where the subscription starts deletes
+// events of the target above the cursor. The caller must hear of that loss,
+// from the reply or from a gap envelope.
+func TestASubscribeThatAPurgeOvertakesStillReportsTheLoss(t *testing.T) {
+	t.Parallel()
+	for storeName, newStore := range map[string]lineStore{"postgres": postgresLines, "fake": fakeLines} {
+		t.Run(storeName, func(t *testing.T) {
+			t.Parallel()
+			overtaken := &purgeOvertakes{}
+			w := newLineWorld(t, repoLineReader(), func(t *testing.T, repo ownedRepo) (faucet.Store, func(n int)) {
+				s, bulk := newStore(t, repo)
+				overtaken.Store = s
+				return overtaken, bulk
+			}, true)
+			start := w.poll("the head", "").Cursor
+			w.own()
+			w.other(2)
+			w.own()
+			overtaken.arm(clearInstant())
+
+			sub := w.subscribe("a subscribe that a purge overtakes", start)
+			require.True(t, overtaken.fired, "the purge committed while the subscribe ran")
+			w.own()
+			got := w.deliver("the first run")
+			require.True(t, sub.Truncated || strings.Contains(got, `"type":"gap"`),
+				"the target lost two events above the cursor, so the reply says truncated or a gap envelope follows: truncated %t, %s", sub.Truncated, got)
+		})
+	}
+}
+
+// purgeOvertakes is a store that, once armed, purges the events received
+// before a time right after events/subscribe has read where a subscription
+// starts, as a purge that commits between two of its reads would.
+type purgeOvertakes struct {
+	faucet.Store
+	before time.Time
+	fired  bool
+}
+
+func (s *purgeOvertakes) arm(before time.Time) { s.before = before }
+
+func (s *purgeOvertakes) PositionAt(ctx context.Context, target faucet.Target, t time.Time) (faucet.Position, error) {
+	p, err := s.Store.PositionAt(ctx, target, t)
+	if err == nil && !s.before.IsZero() && !s.fired {
+		s.fired = true
+		if _, err := s.Purge(ctx, s.before); err != nil {
+			return 0, err
+		}
+	}
+	return p, err
 }

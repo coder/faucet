@@ -18,6 +18,8 @@ var lineSubtests = []subtest{
 	{"ClaimDeliveryGivesTheWatermarkOnTheTargetsLine", claimDeliveryGivesTheWatermarkOnTheTargetsLine},
 	{"ClaimGapCarriesThePurgeMarkOfTheTargetsLine", claimGapCarriesThePurgeMarkOfTheTargetsLine},
 	{"UpsertSubscriptionKeepsThePositionOfALiveRow", upsertSubscriptionKeepsThePositionOfALiveRow},
+	{"UpsertSubscriptionThatMovesTheTargetCountsThePositionOnTheNewLine", upsertSubscriptionThatMovesTheTargetCountsThePositionOnTheNewLine},
+	{"ClaimDeliveryWatermarkCountsOnlyTheEventsOfTheCurrentTarget", claimDeliveryWatermarkCountsOnlyTheEventsOfTheCurrentTarget},
 }
 
 // lineRig stores events of the line under test, repository 42 of owner 7,
@@ -265,4 +267,67 @@ func upsertSubscriptionKeepsThePositionOfALiveRow(t *testing.T, s faucet.Store) 
 	sub.Position = -1
 	_, err = s.UpsertSubscription(ctx, sub, subscriptionBase.Add(2*time.Hour), 10)
 	require.Error(t, err)
+}
+
+// upsertSubscriptionThatMovesTheTargetCountsThePositionOnTheNewLine: a
+// renewal whose repository or owner ID changed keeps the subscription's
+// cursor, an event ID, and names the position on the new target's line at
+// that cursor, which a resubscribe can read on from.
+func upsertSubscriptionThatMovesTheTargetCountsThePositionOnTheNewLine(t *testing.T, s faucet.Store) {
+	r := newLineRig(t, s)
+	r.own()
+	r.insert(77, 9)
+	r.own()
+	at := r.own()
+	r.insert(77, 9)
+	sub := subscriptionAt(1, subscriptionBase.Add(time.Hour))
+	sub.Cursor, sub.Position = at.ID, at.RepoPosition
+	stored, err := s.UpsertSubscription(r.ctx, sub, subscriptionBase, 10)
+	require.NoError(t, err)
+	require.Equal(t, at.RepoPosition, stored.Position)
+
+	for _, tt := range []struct {
+		target faucet.Target
+		want   faucet.Position
+	}{
+		{faucet.RepoTarget(77), 1},
+		{faucet.RepoTarget(77), 1},
+		{faucet.OwnerTarget(9), 1},
+		{faucet.OwnerTarget(7), at.OwnerPosition},
+		{faucet.RepoTarget(78), 0},
+	} {
+		moved := sub
+		moved.Target, moved.Position = tt.target, 99
+		got, err := s.UpsertSubscription(r.ctx, moved, subscriptionBase.Add(time.Minute), 10)
+		require.NoError(t, err)
+		require.Equal(t, at.ID, got.Cursor, "a renewal keeps the cursor")
+		require.Equal(t, tt.want, got.Position, "%s %d %d: the position of the new line at the cursor", tt.target.Kind(), tt.target.RepoID(), tt.target.OwnerID())
+	}
+}
+
+// claimDeliveryWatermarkCountsOnlyTheEventsOfTheCurrentTarget: after a
+// renewal moved the subscription to another repository, a delivery of the
+// old repository's event that is still queued does not hold the watermark of
+// the new line down.
+func claimDeliveryWatermarkCountsOnlyTheEventsOfTheCurrentTarget(t *testing.T, s faucet.Store) {
+	r := newRig(t, s, 0)
+	lr := newLineRig(t, s)
+	lr.insert(77, 9)
+	old := r.addEvent()
+	r.enqueue(old)
+	moved := r.sub
+	moved.Target = faucet.RepoTarget(77)
+	_, err := s.UpsertSubscription(r.ctx, moved, r.now, 10)
+	require.NoError(t, err)
+	first := lr.insert(77, 9)
+	second := lr.insert(77, 9)
+	r.enqueue(first, second)
+
+	watermarks := map[int64]faucet.Position{}
+	for range 3 {
+		claim := r.mustClaim(r.now)
+		watermarks[claim.Ref.EventID] = claim.Watermark
+	}
+	require.Equal(t, first.RepoPosition-1, watermarks[first.ID], "below the new line's lowest unsent event")
+	require.Equal(t, first.RepoPosition-1, watermarks[second.ID], "below the new line's lowest unsent event")
 }

@@ -174,3 +174,28 @@ func TestTheTargetLinesMigrationNumbersTheEventsAndSubscriptionsThatExist(t *tes
 	require.Equal(t, []int64{0, 0, 2, 2}, positions,
 		"cursors 0 and below the purge mark start before every event that the migration numbered, c is the second event of repository 42, and d, of another repository, lies after it")
 }
+
+// TestAPurgeOfAnEventWithNoValidRepositoryIDStillRuns: the build before
+// target lines stored an event of a negative repository ID, which no line
+// can have. Its purge must not fail the purge of every other event.
+func TestAPurgeOfAnEventWithNoValidRepositoryIDStillRuns(t *testing.T) {
+	t.Parallel()
+	db := newDatabase(t, testDatabaseURL(t))
+	store := pgstore.New(db)
+	ctx := context.Background()
+	_, err := db.ExecContext(ctx, insertBeforeLines, "bad", -5, 0)
+	require.NoError(t, err)
+	kept, inserted, err := store.InsertEvent(ctx, faucet.Event{
+		Source: "github", DeliveryID: "kept", Type: "ci.run_completed", RepoID: 42, OwnerID: 7, Data: json.RawMessage(`{}`),
+	})
+	require.NoError(t, err)
+	require.True(t, inserted)
+
+	res, err := store.Purge(ctx, kept.ReceivedAt)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, res.Deleted)
+	page, err := store.PollEvents(ctx, faucet.PollQuery{EventFilter: faucet.EventFilter{Target: faucet.RepoTarget(42)}, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, page.Events, 1)
+	require.Zero(t, page.PurgedThrough, "the line of repository 42 lost nothing")
+}
