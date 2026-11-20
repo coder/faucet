@@ -53,8 +53,8 @@ type loginGitHub struct {
 	// users are the access tokens that GitHub takes, and refresh the
 	// refresh tokens.
 	users, refresh map[string]bool
-	// userStatus, when not zero, answers every GET /user.
-	userStatus int
+	// userStatus answers GET /user for the access tokens that it holds.
+	userStatus map[string]int
 	// issued are the tokens of each trade, in order.
 	issued []loginGitHubTokens
 	// deny makes the user refuse at GitHub.
@@ -70,7 +70,7 @@ type loginGitHubTokens struct{ access, refresh string }
 
 func newLoginGitHub(t *testing.T) *loginGitHub {
 	t.Helper()
-	g := &loginGitHub{codes: map[string]loginGitHubCode{}, users: map[string]bool{}, refresh: map[string]bool{}}
+	g := &loginGitHub{codes: map[string]loginGitHubCode{}, users: map[string]bool{}, refresh: map[string]bool{}, userStatus: map[string]int{}}
 	g.Server = httptest.NewServer(http.HandlerFunc(g.serve))
 	t.Cleanup(g.Close)
 	return g
@@ -118,11 +118,12 @@ func (g *loginGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		g.answerPair(w)
 	case "/user":
-		if g.userStatus != 0 {
-			w.WriteHeader(g.userStatus)
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if status, ok := g.userStatus[token]; ok {
+			w.WriteHeader(status)
 			return
 		}
-		if !g.users[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")] {
+		if !g.users[token] {
 			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
 			return
 		}

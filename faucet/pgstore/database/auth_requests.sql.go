@@ -205,6 +205,25 @@ func (q *Queries) ExpireAuthRequest(ctx context.Context, id string) error {
 	return err
 }
 
+const expireConnectionCodes = `-- name: ExpireConnectionCodes :exec
+UPDATE faucet_auth_requests
+SET state = 'expired', code_hash = NULL, connection_id = NULL
+WHERE connection_id = $1::text AND state = 'approved' AND id <> $2::text
+`
+
+type ExpireConnectionCodesParams struct {
+	ConnectionID string
+	ID           string
+}
+
+// ExpireConnectionCodes moves the approved requests of a connection, but
+// the one with id, to expired without their codes, so that no client
+// redeems them.
+func (q *Queries) ExpireConnectionCodes(ctx context.Context, arg ExpireConnectionCodesParams) error {
+	_, err := q.db.ExecContext(ctx, expireConnectionCodes, arg.ConnectionID, arg.ID)
+	return err
+}
+
 const getAuthRequestByCode = `-- name: GetAuthRequestByCode :one
 SELECT id, state, client_id, client_name, redirect_uri, client_state, resource, scopes, code_challenge,
   browser_hash, github_state_hash, code_hash, connection_id, created_at, expires_at

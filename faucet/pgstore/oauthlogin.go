@@ -71,10 +71,12 @@ func (s *Store) AuthRequestByGitHubState(ctx context.Context, githubState oauth.
 }
 
 // ApproveAuthRequest implements oauth.LoginStore in one transaction. The
-// upsert of the connection goes first and waits for a RefreshConnection that
-// holds the row. When the request is not there to approve, the rollback
-// undoes the upsert.
-func (s *Store) ApproveAuthRequest(ctx context.Context, a oauth.Approval) (err error) {
+// lock of the connection goes first, waits for a RefreshConnection that
+// holds the row, and holds the row while alive runs. When the lock finds no
+// row, alive does not run and the sessions of the connection end: it has
+// none, unless another login stored it since. When the request is not there
+// to approve, the rollback undoes every change.
+func (s *Store) ApproveAuthRequest(ctx context.Context, a oauth.Approval, alive func(current oauth.Connection) bool) (err error) {
 	defer func() { err = endedBy(ctx, err) }()
 	if err := a.Validate(); err != nil {
 		return xerrors.Errorf("validate approval: %w", err)
@@ -87,6 +89,14 @@ func (s *Store) ApproveAuthRequest(ctx context.Context, a oauth.Approval) (err e
 	q := s.q.WithTx(tx)
 
 	c := a.Connection
+	keep := false
+	row, err := q.LockConnection(ctx, c.ID)
+	switch {
+	case err == nil:
+		keep = alive(connectionOf(row))
+	case !xerrors.Is(err, sql.ErrNoRows):
+		return xerrors.Errorf("lock connection: %w", err)
+	}
 	if err := q.UpsertConnection(ctx, database.UpsertConnectionParams{
 		ID:               c.ID,
 		Provider:         c.Provider,
@@ -114,6 +124,16 @@ func (s *Store) ApproveAuthRequest(ctx context.Context, a oauth.Approval) (err e
 		return xerrors.Errorf("approve authorization request: %w", err)
 	case n == 0:
 		return oauth.ErrUnknownAuthRequest
+	}
+	if !keep {
+		// The codes go first: a redemption that holds one commits its
+		// session before the sessions end.
+		if err := q.ExpireConnectionCodes(ctx, database.ExpireConnectionCodesParams{ConnectionID: c.ID, ID: a.RequestID}); err != nil {
+			return xerrors.Errorf("expire the codes of the connection: %w", err)
+		}
+		if err := q.EndConnectionSessions(ctx, database.EndConnectionSessionsParams{Now: a.Now, ConnectionID: c.ID}); err != nil {
+			return xerrors.Errorf("end the sessions of the connection: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return xerrors.Errorf("commit: %w", err)

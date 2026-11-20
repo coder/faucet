@@ -344,7 +344,7 @@ func (h *grantHarness) approveFor(id string, userID int64, login string) grantLo
 	require.NoError(h.t, h.store.ApproveAuthRequest(ctx, oauth.Approval{
 		RequestID: id, GitHubState: state, Connection: h.connection(userID), Code: oauth.HashToken(l.code),
 		Now: now, ExpiresAt: now.Add(60 * time.Second),
-	}))
+	}, func(oauth.Connection) bool { return true }))
 	return l
 }
 

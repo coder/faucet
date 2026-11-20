@@ -41,6 +41,14 @@ WHERE id = @id
   AND github_state_hash = @github_state_hash::bytea
   AND expires_at > @now::timestamptz;
 
+-- name: ExpireConnectionCodes :exec
+-- ExpireConnectionCodes moves the approved requests of a connection, but
+-- the one with id, to expired without their codes, so that no client
+-- redeems them.
+UPDATE faucet_auth_requests
+SET state = 'expired', code_hash = NULL, connection_id = NULL
+WHERE connection_id = @connection_id::text AND state = 'approved' AND id <> @id::text;
+
 -- name: ExchangeCode :one
 -- ExchangeCode redeems the code, makes the session from the request's row
 -- and issues the session's first refresh token and first access token, in

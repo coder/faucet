@@ -419,6 +419,9 @@ func (s *Server) callbackLogin(r *http.Request, state string) (AuthRequest, stri
 // approve trades GitHub's code for the user's tokens, keeps them sealed in
 // the user's connection, and moves the request to approved with a new code
 // for the client, which it returns. A failure leaves the request pending.
+// The user's other sessions stay only when GitHub still takes the pair that
+// the new one replaces, so that the new pair serves no session of an
+// authorization that the user revoked at GitHub.
 func (s *Server) approve(ctx context.Context, request AuthRequest, state, githubCode, g string) (string, *refusal) {
 	if githubCode == "" {
 		return "", githubFailure(http.StatusBadRequest, xerrors.New("GitHub sent the browser back with neither a code nor an error"))
@@ -452,6 +455,12 @@ func (s *Server) approve(ctx context.Context, request AuthRequest, state, github
 	err = s.store.ApproveAuthRequest(ctx, Approval{
 		RequestID: request.ID, GitHubState: HashToken(state), Connection: connection,
 		Code: HashToken(code), Now: now, ExpiresAt: now.Add(codeLifetime),
+	}, func(current Connection) bool {
+		err := s.access.tokens.authorized(ctx, current)
+		if err != nil {
+			s.logger.Info(ctx, "GitHub did not take the tokens that a login replaces, the sessions of the connection end", slog.F("connection_id", current.ID), slog.Error(err))
+		}
+		return err == nil
 	})
 	switch {
 	case xerrors.Is(err, ErrUnknownAuthRequest):
