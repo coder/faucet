@@ -56,7 +56,7 @@ A cursor is a place among the events of the target that the call names, written 
 - A cursor above the target's newest event reads as the newest, so the next event is not skipped.
 - `truncated` is true when a retention purge deleted events of the target after the cursor.
 - The wait tool takes and returns the same string, and each event's `id` is its place among the target's events.
-- A `v1.<n>` cursor, which builds before [#NN](https://github.com/coder/faucet/pull/NN) returned, counts the events of every repository, so faucet never reads it as a place. `events/poll`, the wait tool and `events/subscribe` answer it with `truncated: true` and start at the newest event.
+- A `v1.<n>` cursor, which builds before [#78](https://github.com/coder/faucet/pull/78) returned, counts the events of every repository, so faucet never reads it as a place. `events/poll`, the wait tool and `events/subscribe` answer it with `truncated: true` and start at the newest event.
 
 ## The Mcp-Name header
 

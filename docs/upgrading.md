@@ -4,7 +4,7 @@ The server applies every schema change at start (on Vercel, in production only, 
 
 ## To cursors per target (migration `000018_target_lines`)
 
-This came in [#NN](https://github.com/coder/faucet/pull/NN). A cursor used to be faucet's event ID, which counts the events of every repository, so a caller of one repository could tell from its cursors how many events, and when, other repositories received. A cursor is now a place among the events of the target that the call names, written `v2.<n>` (see [events.md](events.md#cursors)).
+This came in [#78](https://github.com/coder/faucet/pull/78). A cursor used to be faucet's event ID, which counts the events of every repository, so a caller of one repository could tell from its cursors how many events, and when, other repositories received. A cursor is now a place among the events of the target that the call names, written `v2.<n>` (see [events.md](events.md#cursors)).
 
 - **A `v1.` cursor restarts once.** `events/poll`, the wait tool and `events/subscribe` answer it with `truncated: true` and start at the newest event of the target, never with an error. A client loses at most the events between its stored cursor and the upgrade, and hears so. Webhook bodies and gap envelopes carry `v2.` cursors from the first run of this build.
 - **The wait tool's `cursor` is a string**, in its input and its result, the same string that `events/poll` returns, and each event's `id` is its place among the target's events. The input schema refuses the old integer cursor, and the error names `cursor`. A client that stores the integer must store the string instead.
