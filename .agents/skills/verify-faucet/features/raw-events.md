@@ -8,6 +8,7 @@ faucet stores a GitHub event that has no typed family only while a live interest
 - A refused event (`repository_advisory`, the secret scanning and Dependabot alerts, `member`, `deploy_key` and the others of the `raw-events` table in `docs/events.md`) in `FAUCET_RAW_EVENTS` makes the server exit 1 with `FAUCET_RAW_EVENTS: <event> is refused: ...`. A name that faucet cannot offer raw, such as `pull_request`, exits 1 too. `tests/startup.e2e.ts` covers both.
 - `events/list` offers the raw names of `FAUCET_RAW_EVENTS` after the fifteen typed ones, in rising order. Each takes `repo` (a service also `owner` or `all`, see [Owner targets](owner-targets.md)), and optionally `actions` (the payload's top-level `action`) and `fields` (paths of payload members, for example `repository.id`).
 - A signed delivery of such an event is 202 `ignored` with no row while no interest of its repository wants it. With one it is 200 `stored`, and the same delivery ID again is 200 `duplicate`.
+- A `release` delivery whose `release.draft` is not `false` is 202 `ignored` with no row, whatever its action and whoever wants it, because GitHub shows a draft only to people with push access. A published release is stored as usual.
 - `events/poll` with a raw name and no cursor opens a poll lease and returns no events and a cursor `r1.<position>.<lease>`. A later poll with that cursor returns the events that arrived since, with GitHub's delivery ID as `eventId` and the payload as `data`. The next cursor acknowledges them, and the same cursor returns them again.
 - A lease belongs to one poller: another login, other arguments or another target with the same cursor open a new lease and say `truncated`. A lease lives one hour after each poll.
 - With `fields`, a poller gets only those members, and faucet stores only the members that some interest asked for.
@@ -22,7 +23,7 @@ An agent that wants pushes, releases or issues of a repository polls or subscrib
 
 ## Driving it with e2e
 
-`tests/raw-events.e2e.ts` sends signed `push` deliveries. The subscribe case runs on a delivery faucet (`withDeliveryFaucet`) with the receiver. The poll, fields and purge cases each run on a faucet of their own (`withFaucet`), so that the purge counts only their rows. `tests/events-list.e2e.ts` checks the raw descriptors.
+`tests/raw-events.e2e.ts` sends signed `push` deliveries, and draft and published `release` deliveries to a lease of `github.release`. The subscribe case runs on a delivery faucet (`withDeliveryFaucet`) with the receiver. The poll, fields and purge cases each run on a faucet of their own (`withFaucet`), so that the purge counts only their rows. `tests/events-list.e2e.ts` checks the raw descriptors.
 
 ## Proof
 

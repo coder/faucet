@@ -7,14 +7,15 @@ import (
 )
 
 // serveRawWebhook answers a verified delivery that no typed family stores. It
-// stores the delivery when a live interest of its raw event name wants it,
-// and ignores it otherwise.
+// stores the delivery when every reader of its repository may see it and a
+// live interest of its raw event name wants it, and ignores it otherwise.
 func (s *Service) serveRawWebhook(w http.ResponseWriter, r *http.Request, logger slog.Logger, eventName, deliveryID string, body []byte) {
 	entry, ok := s.rawEntry(rawNamePrefix + eventName)
 	var doc rawDocument
 	if ok {
 		doc, ok = parseRawDocument(body)
 	}
+	ok = ok && doc.readersSee(entry.event)
 	var d RawDelivery
 	if ok {
 		d, ok = doc.envelope(deliveryID, entry.event)
