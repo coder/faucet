@@ -356,7 +356,7 @@ func TestWebhookFailsARenameOrTransferThatItCouldNotRecord(t *testing.T) {
 // the name that it moved the repository from, which the store does not hold.
 // It must still move the repository, so that a grant of the name from before
 // the transfer gives no access to the repository after it.
-func TestATransferAfterAMissedRenameUnbindsTheRepositoryUntilTheNextRename(t *testing.T) {
+func TestATransferAfterAMissedRenameUnbindsTheRepository(t *testing.T) {
 	t.Parallel()
 	transfer := lifecycleBody("transferred", "acme/s", 10, transferredFromOrg("coder"))
 	for name, rename := range map[string]func(*fakeStore, http.Handler){
@@ -383,8 +383,9 @@ func TestATransferAfterAMissedRenameUnbindsTheRepositoryUntilTheNextRename(t *te
 			requireAcknowledged(t, handler, "push", "d-4", pushNaming(5, 10, "acme/s"))
 			requireUnbound(t, store, "acme/s")
 			requireAcknowledged(t, handler, "repository", "d-5", lifecycleBody("renamed", "acme/t", 10, renamedFromName("s")))
-			requireBoundTo(t, store, "acme/t", faucet.Repository{ID: 5, OwnerID: 10, OwnerLogin: "acme", FullName: "acme/t"})
-			requireUnbound(t, store, "coder/r")
+			for _, name := range []string{"coder/r", "acme/s", "acme/t"} {
+				requireUnbound(t, store, name)
+			}
 		})
 	}
 }
@@ -401,6 +402,17 @@ func TestAKeptOldRenameDoesNotGiveARepositoryANameBack(t *testing.T) {
 	requireAcknowledged(t, handler, "repository", "d-2", kept)
 	requireUnbound(t, store, "old/r")
 	requireUnbound(t, store, "new/r")
+
+	// A second kept body that renamed the repository from the first one's
+	// name binds nothing either.
+	requireAcknowledged(t, handler, "repository", "d-3", lifecycleBody("renamed", "old/s", 10, renamedFromName("r")))
+	for _, name := range []string{"old/r", "old/s", "new/r"} {
+		requireUnbound(t, store, name)
+	}
+
+	// GitHub's next rename names the name that faucet held.
+	requireAcknowledged(t, handler, "repository", "d-4", lifecycleBody("renamed", "new/t", 20, renamedFromName("r")))
+	requireBoundTo(t, store, "new/t", faucet.Repository{ID: 5, OwnerID: 20, OwnerLogin: "new", FullName: "new/t"})
 }
 
 // GitHub signs the body of a delivery and nothing else, so whoever kept the
