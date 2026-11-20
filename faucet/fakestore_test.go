@@ -287,6 +287,26 @@ func (s *fakeStore) purgedThroughLocked(t faucet.Target) faucet.Position {
 	return s.linePurges[lineOf(t)]
 }
 
+// positionThroughLocked is the position of t's line at event ID through, as
+// faucet_line_position reads it: the newest position still stored at or below
+// through, raised to the line's purge mark unless through is below the purge
+// mark of the all target.
+func (s *fakeStore) positionThroughLocked(t faucet.Target, through int64) faucet.Position {
+	if t.Kind() == faucet.TargetAll {
+		return faucet.Position(through)
+	}
+	var p faucet.Position
+	if through >= s.purgeMark {
+		p = s.purgedThroughLocked(t)
+	}
+	for _, e := range s.events {
+		if e.ID <= through && t.Covers(e.RepoID, e.OwnerID) {
+			p = max(p, t.PositionOf(e))
+		}
+	}
+	return p
+}
+
 // headLocked is the newest position of t's line, which a purge may have
 // deleted.
 func (s *fakeStore) headLocked(t faucet.Target) faucet.Position {
@@ -472,6 +492,9 @@ func (s *fakeStore) upsertSubscriptionLocked(sub faucet.Subscription, now time.T
 	sub.RotationGrace = 0
 	if row, ok := s.subs[sub.KeyHash]; ok {
 		sub.CreatedAt, sub.Cursor, sub.Position, sub.Status = row.CreatedAt, row.Cursor, row.Position, row.Status
+		if sub.Target != row.Target {
+			sub.Position = s.positionThroughLocked(sub.Target, row.Cursor)
+		}
 		switch {
 		case bytes.Equal(row.SecretEnc, sub.SecretEnc):
 			sub.PreviousSecretEnc, sub.PreviousSecretUntil = row.PreviousSecretEnc, row.PreviousSecretUntil

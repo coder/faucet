@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"slices"
 	"time"
 
@@ -161,16 +162,19 @@ func (s *fakeStore) ClaimDelivery(ctx context.Context, now time.Time, lease time
 	bestRow.attempts++
 	bestRow.leaseUntil = now.Add(lease)
 	sub := s.subs[best.key]
-	lowest := best.eventID
+	// The lowest unsent event of the target now, or one that a purge
+	// deleted, which may have been of it.
+	watermark, lowest := s.purgedThroughLocked(sub.Target), int64(math.MaxInt64)
 	for k := range s.deliveries {
-		if k.key == best.key {
-			lowest = min(lowest, k.eventID)
+		if k.key != best.key || k.eventID > lowest {
+			continue
 		}
-	}
-	watermark := s.purgedThroughLocked(sub.Target)
-	for _, e := range s.events {
-		if e.ID == lowest && sub.Target.Covers(e.RepoID, e.OwnerID) {
-			watermark = sub.Target.PositionOf(e)
+		i := slices.IndexFunc(s.events, func(e faucet.Event) bool { return e.ID == k.eventID })
+		switch {
+		case i < 0:
+			watermark, lowest = s.purgedThroughLocked(sub.Target), k.eventID
+		case sub.Target.Covers(s.events[i].RepoID, s.events[i].OwnerID):
+			watermark, lowest = sub.Target.PositionOf(s.events[i]), k.eventID
 		}
 	}
 	claim := faucet.DeliveryClaim{

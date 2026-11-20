@@ -139,10 +139,12 @@ type DeliveryClaim struct {
 	// Target is what the subscription is granted now.
 	Target Target
 	// Watermark is the position on the line of Target below the
-	// subscription's lowest unsent event: every event of the subscription at
-	// or below it has been delivered or given up. When a purge deleted that
-	// event, or it is not on the line, it is the line's purge mark less one,
-	// so a resume from it reports the loss.
+	// subscription's lowest unsent event of Target: every event of the
+	// subscription at or below it has been delivered or given up. Unsent
+	// events of a target that a renewal moved the subscription from do not
+	// count. When a purge deleted the lowest unsent event, which may have been
+	// of Target, or no unsent event is of Target, it is the line's purge mark
+	// less one, so a resume from it reports the loss.
 	Watermark Position
 	// Event is nil when a purge deleted the event.
 	Event *Event

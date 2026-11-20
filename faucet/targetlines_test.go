@@ -597,3 +597,38 @@ func (s *purgeOvertakes) StartSubscription(ctx context.Context, q faucet.StartQu
 	}
 	return start, err
 }
+
+// TestARenewalThatMovesTheTargetAnswersOnTheNewLine: the owner login of a
+// subscription names another account ID at its renewal. The reply's cursor
+// is on the new account's line, so a resubscribe with it neither replays nor
+// skips the new account's events.
+func TestARenewalThatMovesTheTargetAnswersOnTheNewLine(t *testing.T) {
+	t.Parallel()
+	for storeName, newStore := range map[string]lineStore{"postgres": postgresLines, "fake": fakeLines} {
+		t.Run(storeName, func(t *testing.T) {
+			t.Parallel()
+			grants := &fakeGrants{owners: map[string]int64{"coder": ownerID}}
+			reader := ownerLineReader(t)
+			reader.caller = []func(*faucet.Deps){asCaller(newServicePrincipal(t), grants)}
+			w := newLineWorld(t, reader, newStore, false)
+			moved := ownedRepo{id: 5001, ownerID: 4242, fullName: "coder/moved"}
+			w.own()
+			w.own()
+			for i := range 3 {
+				w.insert(fmt.Sprintf("moved-%d", i), moved, sampleData["ci.run_completed"])
+			}
+			first := w.subscribe("a subscribe", "")
+			require.Equal(t, "v2.2", first.Cursor, "the head of the line of account %d", ownerID)
+
+			grants.mu.Lock()
+			grants.owners["coder"] = moved.ownerID
+			grants.mu.Unlock()
+			renewed := w.subscribe("a renewal", "")
+			require.Equal(t, "v2.3", renewed.Cursor, "the position of the line of account %d at the subscription's start", moved.ownerID)
+
+			w.insert("moved-next", moved, sampleData["ci.run_completed"])
+			got := w.deliver("the run after the renewal")
+			require.Contains(t, got, `"cursor":"v2.3"`, "the envelope's cursor is on the new line too")
+		})
+	}
+}

@@ -67,14 +67,23 @@ WITH due AS (
 SELECT
   c.key_hash, c.event_id, c.message_id, c.attempts, c.enqueued_at,
   s.created_at AS incarnation, s.event_type, s.callback_url, s.secret_enc, s.previous_secret_enc, s.previous_secret_until, s.target_kind, s.repo_id, s.owner_id,
+  -- The watermark is below the lowest unsent event of the subscription's
+  -- target now: a renewal may have moved it to another repository or owner,
+  -- whose line the old target's events are not on. A delivery whose event a
+  -- purge deleted may have been of the target, so it counts, as the line's
+  -- purge mark.
   (COALESCE(
-    (SELECT CASE s.target_kind
-        WHEN 'repo' THEN CASE WHEN w.repo_id = s.repo_id THEN w.repo_seq END
-        WHEN 'owner' THEN CASE WHEN w.owner_id = s.owner_id THEN w.owner_seq END
-        ELSE w.id
-      END
-      FROM faucet_events w
-      WHERE w.id = (SELECT COALESCE(MIN(p.event_id), c.event_id) FROM faucet_deliveries p WHERE p.key_hash = c.key_hash)),
+    (SELECT CASE s.target_kind WHEN 'repo' THEN w.repo_seq WHEN 'owner' THEN w.owner_seq ELSE w.id END
+      FROM faucet_deliveries p
+      LEFT JOIN faucet_events w ON w.id = p.event_id
+      WHERE p.key_hash = c.key_hash
+        AND (w.id IS NULL OR CASE s.target_kind
+          WHEN 'repo' THEN w.repo_id = s.repo_id
+          WHEN 'owner' THEN w.owner_id = s.owner_id AND w.owner_id > 0
+          ELSE true
+        END)
+      ORDER BY p.event_id
+      LIMIT 1),
     faucet_line_purged_through(s.target_kind, s.repo_id, s.owner_id)
   ) - 1)::bigint AS watermark,
   e.id AS stored_event_id, e.source, e.delivery_id, e.type, e.repo_id AS event_repo_id, e.owner_id AS event_owner_id, e.repo_name, e.prs, e.head_sha, COALESCE(e.data, 'null'::jsonb)::jsonb AS data, e.received_at, e.repo_seq, e.owner_seq

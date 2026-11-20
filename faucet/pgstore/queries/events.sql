@@ -280,6 +280,13 @@ ON CONFLICT (key_hash) DO UPDATE SET
     ELSE sqlc.narg(previous_secret_until)::timestamptz
   END,
   secret_enc = EXCLUDED.secret_enc,
+  -- A renewal that moves the subscription to another repository or owner
+  -- keeps its cursor, so its position is the new line's at that cursor.
+  position = CASE
+    WHEN (faucet_subscriptions.target_kind, faucet_subscriptions.repo_id, faucet_subscriptions.owner_id)
+      = (EXCLUDED.target_kind, EXCLUDED.repo_id, EXCLUDED.owner_id) THEN faucet_subscriptions.position
+    ELSE faucet_line_position(EXCLUDED.target_kind, EXCLUDED.repo_id, EXCLUDED.owner_id, faucet_subscriptions.cursor)
+  END,
   updated_at = EXCLUDED.updated_at,
   expires_at = EXCLUDED.expires_at
 RETURNING *;
