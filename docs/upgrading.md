@@ -2,6 +2,10 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## To the module path `github.com/coder/superblink-events`
+
+This came in [#81](https://github.com/coder/superblink-events/pull/81). It needs no migration, and the server, its settings and its routes do not change. A host that embeds Superblink Events imports `github.com/coder/superblink-events/faucet` and the packages under it instead of `github.com/coder/faucet/...`. The package names stay the same.
+
 ## To cursors per target (migration `000018_target_lines`)
 
 This came in [#78](https://github.com/coder/superblink-events/pull/78). A cursor used to be Superblink Events' event ID, which counts the events of every repository, so a caller of one repository could tell from its cursors how many events, and when, other repositories received. A cursor is now a place among the events of the target that the call names, written `v2.<n>` (see [events.md](events.md#cursors)).
