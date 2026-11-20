@@ -266,3 +266,144 @@ func TestADeliveryWritesTheLoginOfAnAccountOnlyWhenItChanged(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, faucet.Owner{ID: 7, Login: "Acme"}, got)
 }
+
+// lifecycleBody is the body of a repository event that renamed or
+// transferred repository 5 to fullName, which the account ownerID holds.
+func lifecycleBody(action, fullName string, ownerID int64, changes string) []byte {
+	owner, name, _ := strings.Cut(fullName, "/")
+	return fmt.Appendf(nil, `{"action":%q,"changes":%s,"repository":{"id":5,"name":%q,"full_name":%q,"owner":{"id":%d,"login":%q}}}`,
+		action, changes, name, fullName, ownerID, owner)
+}
+
+func renamedFromName(name string) string {
+	return fmt.Sprintf(`{"repository":{"name":{"from":%q}}}`, name)
+}
+
+func transferredFromOrg(login string) string {
+	return fmt.Sprintf(`{"owner":{"from":{"organization":{"login":%q}}}}`, login)
+}
+
+// pushNaming is the body of a push to the repository id, as a delivery that
+// faucet ignores names it.
+func pushNaming(id, ownerID int64, fullName string) []byte {
+	owner, name, _ := strings.Cut(fullName, "/")
+	return fmt.Appendf(nil, `{"ref":"refs/heads/main","repository":{"id":%d,"name":%q,"full_name":%q,"owner":{"id":%d,"login":%q}}}`,
+		id, name, fullName, ownerID, owner)
+}
+
+func requireAcknowledged(t *testing.T, handler http.Handler, event, delivery string, body []byte) {
+	t.Helper()
+	rec := serveWebhook(handler, newRequest(http.MethodPost, body, event, delivery))
+	require.Less(t, rec.Code, 300, "%s: %s", delivery, rec.Body.String())
+}
+
+func requireBoundTo(t *testing.T, store *fakeStore, fullName string, want faucet.Repository) {
+	t.Helper()
+	got, err := store.RepositoryByName(context.Background(), fullName)
+	require.NoError(t, err, fullName)
+	require.Equal(t, want, got, fullName)
+}
+
+func requireUnbound(t *testing.T, store *fakeStore, fullName string) {
+	t.Helper()
+	_, err := store.RepositoryByName(context.Background(), fullName)
+	require.ErrorIs(t, err, faucet.ErrUnknownRepository, fullName)
+}
+
+// A rename or transfer that faucet could not record is not acknowledged, so
+// GitHub records a failed delivery and faucet's redelivery can ask for it
+// again. Until then the store holds the name from before it.
+func TestWebhookFailsARenameOrTransferThatItCouldNotRecord(t *testing.T) {
+	t.Parallel()
+	for name, body := range map[string][]byte{
+		"Renamed":     lifecycleBody("renamed", "coder/s", 9, renamedFromName("r")),
+		"Transferred": lifecycleBody("transferred", "acme/r", 10, transferredFromOrg("coder")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store, _, handler := newRepositoryHarness(t)
+			requireAcknowledged(t, handler, "push", "d-1", pushNaming(5, 9, "coder/r"))
+
+			store.repoErr = xerrors.New("connection to db-host-canary refused")
+			rec := serveWebhook(handler, newRequest(http.MethodPost, body, "repository", "d-2"))
+			require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+			store.repoErr = nil
+			requireBoundTo(t, store, "coder/r", faucet.Repository{ID: 5, OwnerID: 9, OwnerLogin: "coder", FullName: "coder/r"})
+		})
+	}
+}
+
+// A rename that never reached faucet, or that faucet could not record,
+// leaves the store with the name from before it. The transfer after it names
+// the name that it moved the repository from, which the store does not hold.
+// It must still move the repository, so that a grant of the name from before
+// the transfer gives no access to the repository after it.
+func TestATransferAfterAMissedRenameMovesTheRepository(t *testing.T) {
+	t.Parallel()
+	transfer := lifecycleBody("transferred", "acme/s", 10, transferredFromOrg("coder"))
+	for name, rename := range map[string]func(*fakeStore, http.Handler){
+		"Lost": func(*fakeStore, http.Handler) {},
+		"WriteFailed": func(store *fakeStore, handler http.Handler) {
+			store.repoErr = xerrors.New("connection to db-host-canary refused")
+			serveWebhook(handler, newRequest(http.MethodPost, lifecycleBody("renamed", "coder/s", 9, renamedFromName("r")), "repository", "d-2"))
+			store.repoErr = nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store, _, handler := newRepositoryHarness(t)
+			requireAcknowledged(t, handler, "push", "d-1", pushNaming(5, 9, "coder/r"))
+			rename(store, handler)
+
+			requireAcknowledged(t, handler, "repository", "d-3", transfer)
+			requireBoundTo(t, store, "acme/s", faucet.Repository{ID: 5, OwnerID: 10, OwnerLogin: "acme", FullName: "acme/s"})
+			requireUnbound(t, store, "coder/r")
+			requireUnbound(t, store, "coder/s")
+		})
+	}
+}
+
+// GitHub signs the body of a delivery and nothing else, so whoever kept the
+// body of a transfer can send it again under any delivery GUID. Once faucet
+// has applied the transfer, that body changes nothing, even after the
+// repository returns to the name that the transfer moved it from.
+func TestAReplayedTransferDoesNotGiveARepositoryANameBack(t *testing.T) {
+	t.Parallel()
+	store, _, handler := newRepositoryHarness(t)
+	atNew := faucet.Repository{ID: 5, OwnerID: 20, OwnerLogin: "new", FullName: "new/r"}
+	requireAcknowledged(t, handler, "push", "d-1", pushNaming(5, 20, "new/r"))
+
+	away := lifecycleBody("transferred", "old/r", 10, transferredFromOrg("new"))
+	requireAcknowledged(t, handler, "repository", "d-2", away)
+	requireBoundTo(t, store, "old/r", faucet.Repository{ID: 5, OwnerID: 10, OwnerLogin: "old", FullName: "old/r"})
+	requireAcknowledged(t, handler, "repository", "d-3", lifecycleBody("transferred", "new/r", 20, transferredFromOrg("old")))
+	requireBoundTo(t, store, "new/r", atNew)
+
+	for _, delivery := range []string{"d-4", "d-2"} {
+		serveWebhook(handler, newRequest(http.MethodPost, away, "repository", delivery))
+		requireBoundTo(t, store, "new/r", atNew)
+		requireUnbound(t, store, "old/r")
+	}
+}
+
+// GitHub's published samples of a transfer and a rename, from
+// github.com/octokit/webhooks payload-examples at commit bc5f6fd, move the
+// repository from the names that they say it had. The sample rename renames
+// Hello-World to Hello-World, so the test gives it another new name.
+func TestWebhookFollowsGitHubsSampleTransferAndRename(t *testing.T) {
+	t.Parallel()
+	store, _, handler := newRepositoryHarness(t)
+	requireAcknowledged(t, handler, "push", "d-1", pushNaming(186853261, 1, "octocat/Hello-World"))
+
+	requireAcknowledged(t, handler, "repository", "d-2", fixture(t, "repository_transferred"))
+	requireBoundTo(t, store, "Octocoders/Hello-World", faucet.Repository{ID: 186853261, OwnerID: 38302899, OwnerLogin: "Octocoders", FullName: "Octocoders/Hello-World"})
+	requireUnbound(t, store, "octocat/Hello-World")
+
+	renamed := mutate(t, "repository_renamed", func(doc map[string]any) {
+		repo := doc["repository"].(map[string]any)
+		repo["name"], repo["full_name"] = "Hello-Faucet", "Octocoders/Hello-Faucet"
+	})
+	requireAcknowledged(t, handler, "repository", "d-3", renamed)
+	requireBoundTo(t, store, "octocoders/hello-faucet", faucet.Repository{ID: 186853261, OwnerID: 38302899, OwnerLogin: "Octocoders", FullName: "Octocoders/Hello-Faucet"})
+	requireUnbound(t, store, "Octocoders/Hello-World")
+}
