@@ -2,6 +2,16 @@
 
 The server applies every schema change at start (on Vercel, in production only, see [deploy.md](deploy.md#previews-are-off-on-purpose)). This page lists what else an upgrade asks of you.
 
+## To cursors per target (migration `000018_target_lines`)
+
+This came in [#NN](https://github.com/coder/faucet/pull/NN). A cursor used to be faucet's event ID, which counts the events of every repository, so a caller of one repository could tell from its cursors how many events, and when, other repositories received. A cursor is now a place among the events of the target that the call names, written `v2.<n>` (see [events.md](events.md#cursors)).
+
+- **A `v1.` cursor restarts once.** `events/poll`, the wait tool and `events/subscribe` answer it with `truncated: true` and start at the newest event of the target, never with an error. A client loses at most the events between its stored cursor and the upgrade, and hears so. Webhook bodies and gap envelopes carry `v2.` cursors from the first run of this build.
+- **The wait tool's `cursor` is a string**, in its input and its result, the same string that `events/poll` returns, and each event's `id` is its place among the target's events. The input schema refuses the old integer cursor, and the error names `cursor`. A client that stores the integer must store the string instead.
+- **The migration** numbers every row of `faucet_events` per repository and per owner and builds two unique indexes, while it holds the lock of the migration and a lock on the table, so webhook deliveries wait for it. Its time grows with the rows that the retention keeps. It also adds `faucet_event_lines`, the purge mark of each target, and the start position of every subscription. The down file drops all of them.
+- **A rolling deploy:** an instance of the build before keeps working. Triggers number the events that it stores and raise the purge marks of what it purges, and a subscription that it stores gets the position of its cursor. Its answers and webhooks still carry `v1.` cursors, so a client that reaches both builds during the deploy may restart once with `truncated: true`.
+- **A host that embeds faucet:** a `faucet.Store` of your own must number each target's events (`Event.RepoPosition`, `Event.OwnerPosition`), serve `PollEvents` by position and `ScanEvents` by event ID, replace `CursorAt` with `PositionAt` and implement `StartAfter`, keep `Subscription.Position`, and return the watermark and gap cursor as positions. It must pass the new `storetest.Run` subtests.
+
 ## GitHub tokens are refused
 
 This came in [#76](https://github.com/coder/faucet/pull/76). It needs no migration. **Turn on the [browser login](browser-login.md) in production before you deploy it**: from this release a person has no other way in, and a caller that sends a GitHub token gets 401.
