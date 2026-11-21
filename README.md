@@ -41,7 +41,7 @@ An agent asks for events by name, of one `repo` (a service also of an `owner` or
 | `pr.review_threads` | `pull_request_review_thread` | none |
 <!-- END generated:events -->
 
-The operator can also offer other GitHub events of a repository, such as `push`, `release` and `issues`, raw as `github.<event>`, by listing them in `FAUCET_RAW_EVENTS`. Faucet stores one only while a subscription or a poller wants it (see [raw events](docs/events.md#raw-events)).
+The operator can also offer other GitHub events of a repository, such as `push`, `release` and `issues`, raw as `github.<event>`, by listing them in `FAUCET_RAW_EVENTS`. Faucet stores one only while a subscription or a poller wants it, and never a draft release (see [raw events](docs/events.md#raw-events)).
 
 A caller of `/github/mcp` proves who it is in one of three ways, each of which gets it a token that faucet mints, and faucet returns events only for repositories that the caller may read (see [docs/security.md](docs/security.md)):
 

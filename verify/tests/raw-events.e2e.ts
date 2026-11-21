@@ -1,4 +1,5 @@
 import { counts, deliverDue, endpoint, eventRequests, expectSigned, paramsFor, withDeliveryFaucet } from './delivery';
+import { recorded } from './payloads';
 import { repoOf, subscribed } from './subscriptions';
 import { describe, expect, newDeliveryId, newRepoId, test, type Faucet } from './support';
 
@@ -109,6 +110,27 @@ describe('raw GitHub events', () => {
       expect(await stored(started, sent.delivery), 'the delivery ID stays, the payload is gone').toEqual({ rows: 1, withBody: 0 });
       expect((await push(started, repoId, sent.delivery)).body, 'a redelivery of a cleared event').toBe('duplicate\n');
     });
+  });
+
+  test('a lease of github.release never gets a draft release, and gets a published one', async ({ faucet }) => {
+    const repoId = newRepoId();
+    const params = { name: 'github.release', arguments: { repo: repoOf(repoId) } };
+    const opened = await faucet.mcp<PollResult>('events/poll', params);
+    expect(opened.result?.cursor).toMatch(POLL_CURSOR);
+
+    const published = recorded('release_published', repoId) as { release: Record<string, unknown> };
+    for (const action of ['created', 'edited', 'deleted']) {
+      const draft = { ...published, action, release: { ...published.release, draft: true, published_at: null } };
+      const sent = await faucet.deliver({ event: 'release', delivery: newDeliveryId(), body: JSON.stringify(draft) });
+      expect(sent.status, action).toBe(202);
+      expect(sent.body, action).toBe('ignored\n');
+    }
+
+    const delivery = newDeliveryId();
+    expect((await faucet.deliver({ event: 'release', delivery, body: JSON.stringify(published) })).body).toBe('stored\n');
+    const page = await faucet.mcp<PollResult>('events/poll', { ...params, cursor: opened.result?.cursor });
+    expect(page.result?.events.map((event) => event.eventId), 'only the published release').toEqual([delivery]);
+    expect(page.result?.events[0]?.data).toEqual(published);
   });
 
   test('a poll with fields gets only those members of the payload', async ({ faucet }) => {

@@ -65,7 +65,7 @@ var rawEvents = []rawEvent{
 	{"public", "A private repository that was made public."},
 	{"push", "Pushes of commits or tags to a repository, and branches and tags that a push deleted."},
 	{"registry_package", "Registry packages in GitHub Packages that were published or updated."},
-	{"release", "Releases that were created, published, edited, deleted or changed in another way."},
+	{"release", "Releases that were created, published, edited, deleted or changed in another way. A draft release is left out, because GitHub shows it only to people with push access."},
 	{"repository", "Changes to a repository itself, for example one that was renamed, archived, transferred or made public."},
 	{"repository_import", "Imports of a repository into GitHub that succeeded, were canceled or failed."},
 	{"star", "Stars that were added to or removed from a repository."},
@@ -429,6 +429,24 @@ func (d rawDocument) envelope(deliveryID, event string) (delivery RawDelivery, o
 		delivery.RepoName = ""
 	}
 	return delivery, true
+}
+
+// readersSee reports whether everyone who can read the repository may see
+// what a delivery of event carries. GitHub shows a draft release only to
+// people with push access, and faucet checks only read access, so a release
+// passes only when its payload says that it is no draft.
+func (d rawDocument) readersSee(event string) bool {
+	if event != "release" {
+		return true
+	}
+	members, _ := d.root.object()
+	release, ok := members["release"]
+	if !ok {
+		return false
+	}
+	fields, _ := release.object()
+	draft, ok := fields["draft"]
+	return ok && string(draft.raw) == "false"
 }
 
 // project copies each selected value as the payload's own bytes, because a
